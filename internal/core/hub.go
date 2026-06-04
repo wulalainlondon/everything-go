@@ -1,0 +1,298 @@
+// Package core is the Go connection layer: WebSocket termination, the client
+// registry, envelope routing, and session management. It is written against the
+// executor.Executor interface and knows nothing about how turns are actually
+// run — that is the seam that lets the same core back configs 2 and 3.
+package core
+
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"log"
+	"os"
+	"strings"
+	"sync"
+
+	"github.com/pion/webrtc/v4"
+
+	"everything-go/internal/executor"
+	"everything-go/internal/fcm"
+	"everything-go/internal/feed"
+	"everything-go/internal/governance"
+	"everything-go/internal/inbox"
+	"everything-go/internal/protocol"
+	"everything-go/internal/runtime"
+	"everything-go/internal/search"
+	"everything-go/internal/session"
+)
+
+// Config carries the connection-identity fields surfaced in hello_ack so the
+// app can label the bridge and respect its filesystem jail.
+type Config struct {
+	InstanceName string
+	InstanceID   string
+	RootDir      string
+	DataDir      string
+	LanIP        string
+}
+
+// Hub owns the set of connected clients and the session registry, and acts as
+// the executor.Sink (Emit broadcasts an event to connected clients, or buffers
+// it when none are connected so a reconnecting client can recover it).
+type Hub struct {
+	registry *session.Registry
+	exec     executor.Executor
+	shells   *runtime.ShellManager
+	pairing  *governance.Pairing
+	perms    *governance.PermissionManager
+	offline  *governance.OfflineBuffer
+	search   *search.Index
+	fcm      *fcm.Notifier
+	feed     *feed.Store
+	inbox    *inbox.Store
+	cfg      Config
+	gen      string // per-boot generation id
+
+	iceServers []webrtc.ICEServer // STUN/TURN for WebRTC answers (default: Google STUN)
+
+	mu      sync.RWMutex
+	clients map[*Client]struct{}
+
+	// latestByDevice maps device_id → its newest client. A single device keeps
+	// exactly one live client; a new connection from the same device evicts the
+	// old one (the mobile half-disconnect "storm" otherwise piles up zombies).
+	// This also restores parity with Python's ws_ref-rebind (latest socket wins).
+	latestMu       sync.Mutex
+	latestByDevice map[string]*Client
+
+	turnMu   sync.Mutex
+	turnText map[string]*strings.Builder // session_id -> assistant text this turn
+
+	storm *stormGuards // dedupe/throttle/semaphore for heavy handlers
+
+	// restart, if set, actually restarts the bridge (wired in main to a
+	// self-re-exec). nil → restart_bridge answers "not configured", mirroring
+	// Python's gate on an unset restart-trigger path.
+	restart func()
+}
+
+func NewHub(reg *session.Registry, cfg Config, pairing *governance.Pairing) *Hub {
+	h := &Hub{
+		registry:       reg,
+		pairing:        pairing,
+		offline:        governance.NewOfflineBuffer(),
+		cfg:            cfg,
+		gen:            randomID(),
+		clients:        make(map[*Client]struct{}),
+		latestByDevice: make(map[string]*Client),
+		turnText:       make(map[string]*strings.Builder),
+		iceServers:     stunServers,
+		storm:          newStormGuards(),
+	}
+	// Shell output is broadcast to connected clients via the Hub sink.
+	h.shells = runtime.NewShellManager(h.Emit)
+	// Permission gate for high-risk ops (kill_process / shell_input); broadcasts
+	// permission_request/result via the hub. Mode from BRIDGE_PERMISSION_MODE
+	// (default enforce, mirroring Python prod).
+	h.perms = governance.NewPermissionManager(h.Emit, os.Getenv("BRIDGE_PERMISSION_MODE"))
+	return h
+}
+
+// SetExecutor wires the backend after construction (the executor needs the Hub
+// as its Sink, so the Hub is built first).
+func (h *Hub) SetExecutor(e executor.Executor) { h.exec = e }
+
+// authValid mirrors bridge_v2.py:_is_auth_token_valid. BRIDGE_AUTH_TOKEN (a
+// manual override) takes priority; otherwise, if the bridge is claimed, only the
+// paired token is accepted; an unclaimed bridge accepts everyone. provided is
+// expected pre-trimmed.
+func (h *Hub) authValid(provided string) bool {
+	if expected := strings.TrimSpace(os.Getenv("BRIDGE_AUTH_TOKEN")); expected != "" {
+		return provided != "" && provided == expected
+	}
+	if h.pairing.IsLocked() {
+		return h.pairing.LockedTo(provided)
+	}
+	return true
+}
+
+// SetSearch wires the search index (nil disables the search command family).
+func (h *Hub) SetSearch(s *search.Index) { h.search = s }
+
+// SetFCM wires the push notifier (nil disables push).
+func (h *Hub) SetFCM(n *fcm.Notifier) { h.fcm = n }
+
+// SetFeed wires the feed store (nil → feed commands answer empty/no-op).
+func (h *Hub) SetFeed(f *feed.Store) { h.feed = f }
+
+// SetInbox wires the file-push inbox (nil → push_file/get_inbox answer empty/no-op).
+func (h *Hub) SetInbox(i *inbox.Store) { h.inbox = i }
+
+// SetRestart wires the bridge-restart action (nil → restart_bridge is a no-op
+// that answers "not configured"). main wires this to a self-re-exec.
+func (h *Hub) SetRestart(fn func()) { h.restart = fn }
+
+// connectedDeviceIDs returns the distinct device ids currently connected, except
+// `exclude`. Used to target a file push at every device but the sender.
+func (h *Hub) connectedDeviceIDs(exclude string) []string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	seen := map[string]bool{}
+	out := []string{}
+	for c := range h.clients {
+		d := c.deviceID
+		if d == "" || d == exclude || seen[d] {
+			continue
+		}
+		seen[d] = true
+		out = append(out, d)
+	}
+	return out
+}
+
+// Emit implements executor.Sink. With clients connected it marshals the event
+// once and delivers it to every client. With none connected it buffers the
+// event for replay on the next reconnect (the offline-recovery path). Safe for
+// concurrent use.
+func (h *Hub) Emit(event any) {
+	logOutbound(event)
+
+	// The Hub is the single point every executor event flows through, so it is
+	// where session lifecycle state is driven: a terminal event ends the turn
+	// (releasing the per-session queue). State is never mutated by the backends.
+	h.driveTurnState(event)
+
+	// Accumulate assistant text per turn so a push notification can carry a
+	// summary when the turn completes (mirrors the Python notify_fcm payload).
+	h.accumulateTurn(event)
+
+	h.mu.RLock()
+	n := len(h.clients)
+	h.mu.RUnlock()
+
+	if n == 0 {
+		h.offline.Append(event)
+	} else {
+		data, err := json.Marshal(event)
+		if err != nil {
+			log.Printf("emit marshal error: %v", err)
+			return
+		}
+		h.mu.RLock()
+		for c := range h.clients {
+			c.enqueue(data)
+		}
+		h.mu.RUnlock()
+	}
+
+	// Persist on the events that change durable session state: a new resume id
+	// (session_uuid) or a completed turn (done) — mirrors the Python bridge's
+	// persist-on-turn-complete trigger.
+	switch event.(type) {
+	case protocol.SessionUUID, protocol.Done:
+		go h.registry.Persist()
+	}
+}
+
+// replayOffline flushes buffered events to a single reconnecting client, in
+// order. Mirrors bridge/offline_replay.py (called after sessions_list).
+func (h *Hub) replayOffline(c *Client) {
+	events := h.offline.Drain()
+	for _, e := range events {
+		c.enqueueEvent(e)
+	}
+	if len(events) > 0 {
+		log.Printf("client %s: replayed %d offline events", c.clientID, len(events))
+	}
+}
+
+// driveTurnState advances the session state machine off the executor's terminal
+// events. done/stopped/error end the in-flight turn, which releases the
+// session's turn worker to run the next queued message. Idempotent per turn.
+func (h *Hub) driveTurnState(event any) {
+	var sessionID string
+	switch e := event.(type) {
+	case protocol.Done:
+		sessionID = e.SessionID
+	case protocol.Stopped:
+		sessionID = e.SessionID
+	case protocol.Error:
+		sessionID = e.SessionID
+	default:
+		return
+	}
+	if sessionID == "" {
+		return
+	}
+	if s, ok := h.registry.Get(sessionID); ok {
+		s.EndTurn()
+	}
+}
+
+// accumulateTurn tracks assistant text_chunks per session and, on the turn's
+// done event, fires a task-done push with the accumulated summary. stopped
+// clears the buffer without notifying.
+func (h *Hub) accumulateTurn(event any) {
+	switch e := event.(type) {
+	case protocol.TextChunk:
+		h.turnMu.Lock()
+		b := h.turnText[e.SessionID]
+		if b == nil {
+			b = &strings.Builder{}
+			h.turnText[e.SessionID] = b
+		}
+		b.WriteString(e.Content)
+		h.turnMu.Unlock()
+	case protocol.Done:
+		h.turnMu.Lock()
+		b := h.turnText[e.SessionID]
+		delete(h.turnText, e.SessionID)
+		h.turnMu.Unlock()
+		if h.fcm == nil || b == nil || b.Len() == 0 {
+			return
+		}
+		name := e.SessionID
+		if s, ok := h.registry.Get(e.SessionID); ok {
+			if n := s.Name(); n != "" {
+				name = n
+			}
+		}
+		text := b.String()
+		go h.fcm.NotifyTaskDone(name, text, e.SessionID)
+	case protocol.Stopped:
+		h.turnMu.Lock()
+		delete(h.turnText, e.SessionID)
+		h.turnMu.Unlock()
+	}
+}
+
+func (h *Hub) addClient(c *Client) {
+	h.mu.Lock()
+	h.clients[c] = struct{}{}
+	h.mu.Unlock()
+}
+
+func (h *Hub) removeClient(c *Client) {
+	h.mu.Lock()
+	delete(h.clients, c)
+	h.mu.Unlock()
+	// Drop the latest-device pointer only if it still points at this client (a
+	// newer client may have already replaced it).
+	if c.deviceID != "" {
+		h.latestMu.Lock()
+		if h.latestByDevice[c.deviceID] == c {
+			delete(h.latestByDevice, c.deviceID)
+		}
+		h.latestMu.Unlock()
+	}
+}
+
+func marshalEvent(event any) ([]byte, error) {
+	return json.Marshal(event)
+}
+
+func randomID() string {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
