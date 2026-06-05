@@ -23,6 +23,7 @@ import (
 	"everything-go/internal/core"
 	"everything-go/internal/executor"
 	"everything-go/internal/executor/goexec"
+	"everything-go/internal/executor/remote"
 	"everything-go/internal/fcm"
 	"everything-go/internal/feed"
 	"everything-go/internal/governance"
@@ -38,6 +39,8 @@ func main() {
 	claudeBin := flag.String("claude-bin", "claude", "path to the claude CLI binary")
 	codexBin := flag.String("codex-bin", "codex", "path to the codex CLI binary")
 	ollamaHost := flag.String("ollama-host", "http://localhost:11434", "Ollama base URL")
+	remoteWSURL := flag.String("remote-ws-url", "", "remote backend WebSocket URL for backend=remote-ws")
+	remoteWSToken := flag.String("remote-ws-token", "", "bearer token for remote backend WebSocket")
 	dataDir := flag.String("data-dir", ".", "directory for everything-go's own persisted state")
 	instanceName := flag.String("instance-name", "everything-go", "human label shown in the app")
 	rootDir := flag.String("root-dir", "", "filesystem jail root (\"\" = no jail)")
@@ -65,14 +68,19 @@ func main() {
 
 	switch *execName {
 	case "go":
-		claude := goexec.NewClaude(hub, *claudeBin)
-		codex := goexec.NewCodex(hub, *codexBin)
-		ollama := goexec.NewOllama(hub, *ollamaHost, "")
-		hub.SetExecutor(executor.NewMux(map[string]executor.Executor{
+		terminal := executor.NewTerminalSink(hub)
+		claude := goexec.NewClaude(terminal, *claudeBin)
+		codex := goexec.NewCodex(terminal, *codexBin)
+		ollama := goexec.NewOllama(terminal, *ollamaHost, "")
+		backends := map[string]executor.Executor{
 			"claude": claude,
 			"codex":  codex,
 			"ollama": ollama,
-		}, claude))
+		}
+		if *remoteWSURL != "" {
+			backends["remote-ws"] = remote.NewWS(terminal, *remoteWSURL, *remoteWSToken)
+		}
+		hub.SetExecutor(executor.NewReliableMux(backends, claude, terminal))
 	case "python":
 		log.Fatal("--executor=python not yet implemented (config 3 comes after config 2 is proven)")
 	default:

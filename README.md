@@ -53,6 +53,19 @@ P2 validation; enable them only when testing the network-presence layer:
 ./everything-go --port 8767 --executor go --tunnel
 ```
 
+### Remote WebSocket Backend
+
+`remote-ws` lets the Go connection core talk to a model worker over a backend
+WebSocket while preserving the same app-facing bridge protocol:
+
+```bash
+go run ./examples/remote_ws_echo
+./everything-go --port 8767 --executor go --remote-ws-url ws://127.0.0.1:9001/backend
+```
+
+Create or switch a session to backend `remote-ws`. The backend-facing protocol
+is documented in [`docs/REMOTE_WS_PROTOCOL.md`](docs/REMOTE_WS_PROTOCOL.md).
+
 ## Parity matrix (vs Python bridge)
 
 This project is in a **core-hardening phase**. Phase 1 (core hardening) is done:
