@@ -7,6 +7,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"sync"
 	"time"
@@ -70,7 +72,7 @@ func (o *Ollama) runTurn(ctx context.Context, s *session.Session, reqID string, 
 	body, _ := json.Marshal(map[string]any{"model": model, "messages": hist, "stream": true})
 	req, err := http.NewRequestWithContext(ctx, "POST", o.host+"/api/chat", bytes.NewReader(body))
 	if err != nil {
-		o.fail(s, err)
+		o.fail(s, reqID, err)
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -80,10 +82,22 @@ func (o *Ollama) runTurn(ctx context.Context, s *session.Session, reqID string, 
 		if ctx.Err() != nil {
 			return // stopped
 		}
-		o.fail(s, err)
+		o.fail(s, reqID, err)
 		return
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		msg := string(body)
+		var parsed struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(body, &parsed) == nil && parsed.Error != "" {
+			msg = parsed.Error
+		}
+		o.fail(s, reqID, fmt.Errorf("ollama HTTP %d: %s", resp.StatusCode, msg))
+		return
+	}
 
 	full := ""
 	sc := bufio.NewScanner(resp.Body)
@@ -109,6 +123,10 @@ func (o *Ollama) runTurn(ctx context.Context, s *session.Session, reqID string, 
 			break
 		}
 	}
+	if err := sc.Err(); err != nil {
+		o.fail(s, reqID, err)
+		return
+	}
 
 	o.mu.Lock()
 	o.histories[s.ID] = capHistory(append(o.histories[s.ID], ollamaMsg{Role: "assistant", Content: full}))
@@ -117,8 +135,14 @@ func (o *Ollama) runTurn(ctx context.Context, s *session.Session, reqID string, 
 	o.sink.Emit(protocol.NewDone(s.ID, reqID))
 }
 
-func (o *Ollama) fail(s *session.Session, err error) {
-	o.sink.Emit(protocol.NewError(s.ID, "", "Ollama error: "+err.Error()))
+func (o *Ollama) fail(s *session.Session, reqID string, err error) {
+	o.sink.Emit(protocol.Error{
+		Type:      "error",
+		SessionID: s.ID,
+		RequestID: reqID,
+		Code:      "ollama_error",
+		Message:   "Ollama error: " + err.Error(),
+	})
 }
 
 func (o *Ollama) Stop(ctx context.Context, s *session.Session) error {

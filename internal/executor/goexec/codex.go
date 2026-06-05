@@ -32,11 +32,10 @@ type codexState struct {
 	turnDone      chan struct{}
 	stopping      bool
 	reqID         string
-	toolOutputs   map[string]string
 }
 
 func newCodexState() *codexState {
-	return &codexState{toolOutputs: make(map[string]string)}
+	return &codexState{}
 }
 
 // finish completes the in-flight turn exactly once. errStr=="" means success;
@@ -59,6 +58,7 @@ func (st *codexState) finish(errStr string) {
 // Codex implements executor.Executor over the codex app-server.
 type Codex struct {
 	sink     executor.Sink
+	tools    *toolEmitter
 	codexBin string
 	rpc      *rpcPlumber
 
@@ -77,6 +77,7 @@ func NewCodex(sink executor.Sink, codexBin string) *Codex {
 	}
 	return &Codex{
 		sink:            sink,
+		tools:           newToolEmitter(sink),
 		codexBin:        codexBin,
 		rpc:             newRPCPlumber("codex"),
 		states:          make(map[string]*codexState),
@@ -258,8 +259,7 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 			d = p.Text
 		}
 		if d != "" {
-			acc := c.accumulate(st, itemID, d)
-			c.sink.Emit(protocol.NewToolResult(s.ID, reqID, itemID, acc))
+			c.tools.Delta(s.ID, reqID, itemID, d)
 		}
 
 	case "item/started":
@@ -269,10 +269,7 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 		if command == "" {
 			command = rawToString(p.Item.Command)
 		}
-		st.mu.Lock()
-		st.toolOutputs[itemID] = ""
-		st.mu.Unlock()
-		c.sink.Emit(protocol.NewToolStart(s.ID, reqID, itemID, name, command))
+		c.tools.Start(s.ID, reqID, itemID, name, command)
 
 	case "item/completed":
 		itemID := firstNonEmpty(p.ItemID, p.Item.ID, "codex_item")
@@ -281,12 +278,9 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 			output = rawToString(p.Item.Output)
 		}
 		if output != "" {
-			c.sink.Emit(protocol.NewToolResult(s.ID, reqID, itemID, output))
+			c.tools.Result(s.ID, reqID, itemID, output)
 		}
-		c.sink.Emit(protocol.NewToolEnd(s.ID, reqID, itemID))
-		st.mu.Lock()
-		delete(st.toolOutputs, itemID)
-		st.mu.Unlock()
+		c.tools.End(s.ID, reqID, itemID)
 
 	case "turn/plan/updated":
 		// Codex update_plan → normalized todo panel. Full replace; step→content.
@@ -310,13 +304,6 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 			st.finish(msg)
 		}
 	}
-}
-
-func (c *Codex) accumulate(st *codexState, itemID, delta string) string {
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	st.toolOutputs[itemID] += delta
-	return st.toolOutputs[itemID]
 }
 
 func (c *Codex) handleServerRequest(id int, method string) {
@@ -481,8 +468,8 @@ func (c *Codex) Clear(ctx context.Context, s *session.Session) error {
 	st.mu.Lock()
 	threadID := st.threadID
 	st.threadID = ""
-	st.toolOutputs = make(map[string]string)
 	st.mu.Unlock()
+	c.tools.ResetSession(s.ID)
 	if threadID != "" {
 		_, _ = c.rpcCall("thread/archive", map[string]any{"threadId": threadID}, 5*time.Second)
 		c.mu.Lock()

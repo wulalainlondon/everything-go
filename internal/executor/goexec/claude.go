@@ -40,14 +40,14 @@ type proc struct {
 	cancel context.CancelFunc
 	reqID  string // request_id of the in-flight turn, stamped onto events
 
-	// Todo/plan panel state, touched only by this proc's readStdout goroutine.
-	todo           *todoStore
-	todoSuppressed map[string]bool // tool_use_ids whose start/result are swallowed
+	// Tool/todo presentation state, touched only by this proc's readStdout goroutine.
+	tools *toolNormalizer
 }
 
 // Claude implements executor.Executor over the local `claude` CLI.
 type Claude struct {
 	sink        executor.Sink
+	tools       *toolEmitter
 	claudeBin   string
 	projectsDir string
 
@@ -70,6 +70,7 @@ func NewClaude(sink executor.Sink, claudeBin string) *Claude {
 	}
 	c := &Claude{
 		sink: sink, claudeBin: claudeBin, projectsDir: projectsDir,
+		tools:   newToolEmitter(sink),
 		procs:   make(map[string]*proc),
 		pending: make(map[string]*pendingInteraction),
 	}
@@ -249,8 +250,7 @@ func (c *Claude) spawn(s *session.Session) (*proc, error) {
 	log.Printf("[%s] spawned claude pid=%d cwd=%s resume=%s", s.ID, cmd.Process.Pid, snap.Cwd, snap.ResumeID)
 	p := &proc{
 		cmd: cmd, stdin: newBufWriteCloser(stdinPipe), cancel: cancel,
-		todo:           newTodoStore(),
-		todoSuppressed: map[string]bool{},
+		tools: newToolNormalizer(c.sink, c),
 	}
 
 	go c.readStdout(s, p, stdoutPipe)
@@ -317,54 +317,20 @@ func (c *Claude) readStdout(s *session.Session, p *proc, stdout interface{ Read(
 						c.sink.Emit(protocol.NewTextChunk(s.ID, reqID, b.Text))
 					}
 				case "tool_use":
-					// Task/plan tools → normalized todo_update panel, not a tool card.
-					// Suppress the tool_start (and later its result/end) so they don't
-					// clutter the stream. TaskCreate's server id resolves from its result.
-					if todoTools[b.Name] {
-						changed := false
-						switch b.Name {
-						case "TodoWrite":
-							changed = p.todo.applyTodoWrite(b.Input)
-						case "TaskCreate":
-							changed = p.todo.noteCreate(b.ID, b.Input)
-						case "TaskUpdate":
-							changed = p.todo.applyUpdate(b.Input)
-						default: // TaskDelete
-							changed = p.todo.applyDelete(b.Input)
-						}
-						if b.ID != "" {
-							p.todoSuppressed[b.ID] = true
-						}
-						if changed {
-							c.sink.Emit(protocol.NewTodoUpdate(s.ID, reqID, p.todo.asList()))
-						}
+					if p.tools.HandleClaudeToolUse(s.ID, reqID, b.ID, b.Name, b.Input) {
 						continue
 					}
 					command := extractCommand(b.Input)
-					// AskUserQuestion pauses the turn: the CLI waits on stdin for a
-					// tool_result. Surface it as a user_input_request and register it
-					// so the eventual answer can be written back. The CLI emits no
-					// `result` meanwhile, so the turn correctly stays Streaming.
-					if b.Name == "AskUserQuestion" {
-						c.registerInteraction(s, b.ID, b.Name, b.Input)
-					}
-					c.sink.Emit(protocol.NewToolStart(s.ID, reqID, b.ID, b.Name, command))
+					p.tools.HandleClaudeVisibleToolUse(s, b.ID, b.Name, b.Input)
+					c.tools.Start(s.ID, reqID, b.ID, b.Name, command)
 				}
 			}
 		case "tool_result":
 			output := flattenToolOutput(evt.Content)
-			// Swallow results for normalized task/todo tools. For TaskCreate this is
-			// where the server-assigned id (#N) arrives — resolve it so later
-			// TaskUpdate(taskId) matches, then re-emit the snapshot.
-			if p.todoSuppressed[evt.ToolUseID] {
-				delete(p.todoSuppressed, evt.ToolUseID)
-				if p.todo.resolveCreate(evt.ToolUseID, output) {
-					c.sink.Emit(protocol.NewTodoUpdate(s.ID, reqID, p.todo.asList()))
-				}
+			if p.tools.HandleClaudeToolResult(s.ID, reqID, evt.ToolUseID, output) {
 				continue
 			}
-			c.sink.Emit(protocol.NewToolResult(s.ID, reqID, evt.ToolUseID, output))
-			c.sink.Emit(protocol.NewToolEnd(s.ID, reqID, evt.ToolUseID))
+			c.tools.ResultEnd(s.ID, reqID, evt.ToolUseID, output)
 		case "result":
 			if evt.SessionID != "" && evt.SessionID != s.ResumeID() {
 				s.SetResumeID(evt.SessionID)

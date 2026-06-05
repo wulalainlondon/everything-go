@@ -62,10 +62,10 @@ func (c *Claude) registerMCPInteraction(sessionID string, input json.RawMessage)
 	return payload, ch
 }
 
-// registerInteraction converts an AskUserQuestion tool_use into a
+// RegisterUserInputRequest converts an AskUserQuestion tool_use into a
 // user_input_request, stores it, and broadcasts it. Keyed by a fresh request_id
 // (the app answers with that id; the tool_use_id is accepted as an alias).
-func (c *Claude) registerInteraction(s *session.Session, toolUseID, agent string, input json.RawMessage) {
+func (c *Claude) RegisterUserInputRequest(s *session.Session, toolUseID, agent string, input json.RawMessage) {
 	questions := normalizeQuestions(input)
 	payload := protocol.UserInputRequestPayload{
 		RequestID:       "ui_" + randHex(12),
@@ -85,6 +85,10 @@ func (c *Claude) registerInteraction(s *session.Session, toolUseID, agent string
 
 	c.sink.Emit(protocol.NewUserInputRequest(payload))
 	log.Printf("[%s] AskUserQuestion → user_input_request %s (%d question(s))", s.ID, payload.RequestID, len(questions))
+}
+
+func (c *Claude) registerInteraction(s *session.Session, toolUseID, agent string, input json.RawMessage) {
+	c.RegisterUserInputRequest(s, toolUseID, agent, input)
 }
 
 // RespondUserInput writes the app's answer back into the paused session's stdin

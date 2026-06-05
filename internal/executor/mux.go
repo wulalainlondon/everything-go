@@ -15,10 +15,15 @@ import (
 type Mux struct {
 	byBackend map[string]Executor
 	def       Executor
+	terminal  *TerminalSink
 }
 
 func NewMux(byBackend map[string]Executor, def Executor) *Mux {
 	return &Mux{byBackend: byBackend, def: def}
+}
+
+func NewReliableMux(byBackend map[string]Executor, def Executor, terminal *TerminalSink) *Mux {
+	return &Mux{byBackend: byBackend, def: def, terminal: terminal}
 }
 
 func (m *Mux) pick(s *session.Session) Executor {
@@ -29,7 +34,11 @@ func (m *Mux) pick(s *session.Session) Executor {
 }
 
 func (m *Mux) Send(ctx context.Context, s *session.Session, reqID, content string, images []protocol.InboundImage, files []protocol.InboundFile) error {
-	return m.pick(s).Send(ctx, s, reqID, content, images, files)
+	e := m.pick(s)
+	if m.terminal == nil {
+		return e.Send(ctx, s, reqID, content, images, files)
+	}
+	return sendReliable(ctx, e, m.terminal, s, reqID, content, images, files)
 }
 func (m *Mux) Stop(ctx context.Context, s *session.Session) error  { return m.pick(s).Stop(ctx, s) }
 func (m *Mux) Clear(ctx context.Context, s *session.Session) error { return m.pick(s).Clear(ctx, s) }

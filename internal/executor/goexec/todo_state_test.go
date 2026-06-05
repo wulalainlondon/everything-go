@@ -118,7 +118,7 @@ func TestClaudeStreamTodoSuppression(t *testing.T) {
 	c := NewClaude(sink, "claude")
 	reg := session.NewRegistry()
 	s := reg.Create("s1", "n", "/tmp", "claude", "", "", "")
-	p := &proc{reqID: "r1", todo: newTodoStore(), todoSuppressed: map[string]bool{}}
+	p := &proc{reqID: "r1", tools: newToolNormalizer(sink, c)}
 
 	lines := strings.Join([]string{
 		`{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu1","name":"TaskCreate","input":{"subject":"Build it"}}]}}`,
