@@ -22,6 +22,8 @@ type savedEntry struct {
 	Model      string  `json:"model"`
 	Sandbox    string  `json:"sandbox"`
 	CreatedAt  float64 `json:"created_at"`
+	Pinned     bool    `json:"pinned,omitempty"`
+	Hidden     bool    `json:"hidden,omitempty"`
 }
 
 const (
@@ -63,6 +65,7 @@ func (st *Store) Save(sessions []*Session) error {
 			Name: snap.Name, ResumeID: snap.ResumeID, ClaudeUUID: snap.ResumeID,
 			LastUsed: now, Cwd: snap.Cwd, Backend: snap.Backend, Model: snap.Model,
 			Sandbox: snap.Sandbox, CreatedAt: snap.CreatedAt,
+			Pinned: snap.Pinned, Hidden: snap.Hidden,
 		}
 	}
 

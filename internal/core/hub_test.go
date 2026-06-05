@@ -168,6 +168,95 @@ func TestPhase5ReadStubsReturnEmptyArrays(t *testing.T) {
 	}
 }
 
+func TestNewSessionBroadcastsSessionsList(t *testing.T) {
+	h, _ := newTestHub(t)
+	c := newTestClient(h)
+
+	route(h, c, `{"type":"new_session","session_id":"s1","name":"Fresh","backend":"claude"}`)
+	waitForType(t, c, "session_created")
+	ev := waitForType(t, c, "sessions_list")
+	sessions, _ := ev["sessions"].([]any)
+	if len(sessions) != 1 {
+		t.Fatalf("new_session should broadcast one-session sessions_list, got %d", len(sessions))
+	}
+	ss, _ := sessions[0].(map[string]any)
+	if ss["id"] != "s1" {
+		t.Fatalf("sessions_list id = %v, want s1", ss["id"])
+	}
+}
+
+func TestRequestHistoryMissingSessionReturnsEmptySnapshot(t *testing.T) {
+	h, _ := newTestHub(t)
+	c := newTestClient(h)
+
+	route(h, c, `{"type":"request_history","session_id":"missing","mode":"snapshot"}`)
+	ev := waitForType(t, c, "history_snapshot")
+	if ev["session_id"] != "missing" {
+		t.Fatalf("session_id = %v, want missing", ev["session_id"])
+	}
+	msgs, ok := ev["messages"].([]any)
+	if !ok || len(msgs) != 0 {
+		t.Fatalf("missing session history should be empty array, got %#v", ev["messages"])
+	}
+}
+
+func TestRenameSessionBroadcastsToAllClients(t *testing.T) {
+	h, _ := newTestHub(t)
+	c1 := newTestClient(h)
+	c2 := newTestClient(h)
+
+	route(h, c1, `{"type":"new_session","session_id":"s1","name":"Old","backend":"claude"}`)
+	waitForType(t, c1, "session_created")
+
+	route(h, c1, `{"type":"rename_session","session_id":"s1","name":"New"}`)
+	for _, c := range []*Client{c1, c2} {
+		ev := waitForType(t, c, "session_renamed")
+		if ev["session_id"] != "s1" || ev["name"] != "New" {
+			t.Fatalf("bad rename event: %v", ev)
+		}
+	}
+}
+
+func TestSetSessionMetaBroadcastsAndUpdatesSummaries(t *testing.T) {
+	h, _ := newTestHub(t)
+	c1 := newTestClient(h)
+	c2 := newTestClient(h)
+
+	route(h, c1, `{"type":"new_session","session_id":"s1","name":"One","backend":"claude"}`)
+	waitForType(t, c1, "session_created")
+
+	route(h, c1, `{"type":"set_session_meta","session_id":"s1","pinned":true,"hidden":true}`)
+	for _, c := range []*Client{c1, c2} {
+		ev := waitForType(t, c, "session_meta_updated")
+		if ev["session_id"] != "s1" || ev["pinned"] != true || ev["hidden"] != true {
+			t.Fatalf("bad meta event: %v", ev)
+		}
+	}
+
+	route(h, c1, `{"type":"request_sessions_list"}`)
+	ev := waitForType(t, c1, "sessions_list")
+	sessions, _ := ev["sessions"].([]any)
+	if len(sessions) != 1 {
+		t.Fatalf("sessions_list len = %d, want 1", len(sessions))
+	}
+	ss, _ := sessions[0].(map[string]any)
+	if ss["pinned"] != true || ss["hidden"] != true {
+		t.Fatalf("sessions_list should include updated meta, got %v", ss)
+	}
+}
+
+func TestSetSessionMetaIgnoresUnknownSession(t *testing.T) {
+	h, _ := newTestHub(t)
+	c := newTestClient(h)
+
+	route(h, c, `{"type":"set_session_meta","session_id":"missing","hidden":true}`)
+	select {
+	case data := <-c.send:
+		t.Fatalf("unknown session meta should be silent, got %s", string(data))
+	case <-time.After(80 * time.Millisecond):
+	}
+}
+
 // A full turn: session_created, then the streamed events, then done — and the
 // session returns to Idle (the Hub drives EndTurn off the done event).
 func TestMessageStreamsAndEndsTurn(t *testing.T) {

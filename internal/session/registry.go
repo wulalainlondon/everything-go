@@ -37,6 +37,8 @@ type Session struct {
 	sandbox  string
 	effort   string
 	resumeID string // AI-runtime conversation handle (Claude UUID / Codex thread id)
+	pinned   bool
+	hidden   bool
 
 	lastActivity float64
 	contextUsed  int
@@ -69,6 +71,8 @@ type Snapshot struct {
 	LastActivity float64
 	ContextUsed  int
 	ContextMax   int
+	Pinned       bool
+	Hidden       bool
 	Streaming    bool
 	State        State
 }
@@ -88,6 +92,7 @@ func (s *Session) snapshotLocked() Snapshot {
 		Model: s.model, Sandbox: s.sandbox, Effort: s.effort, ResumeID: s.resumeID,
 		CreatedAt: s.CreatedAt, LastActivity: s.lastActivity,
 		ContextUsed: s.contextUsed, ContextMax: s.contextMax,
+		Pinned: s.pinned, Hidden: s.hidden,
 		Streaming: s.state == Streaming || s.state == Stopping,
 		State:     s.state,
 	}
@@ -120,6 +125,18 @@ func (s *Session) SetName(name string) {
 func (s *Session) SetEffort(effort string) {
 	s.mu.Lock()
 	s.effort = effort
+	s.mu.Unlock()
+}
+
+// SetMeta applies optional frontend-visible session metadata.
+func (s *Session) SetMeta(pinned, hidden *bool) {
+	s.mu.Lock()
+	if pinned != nil {
+		s.pinned = *pinned
+	}
+	if hidden != nil {
+		s.hidden = *hidden
+	}
 	s.mu.Unlock()
 }
 
@@ -175,6 +192,7 @@ func (r *Registry) AttachStore(store *Store) {
 			ID: id, CreatedAt: created,
 			name: e.Name, cwd: e.Cwd, backend: e.Backend,
 			model: e.Model, sandbox: e.Sandbox, resumeID: resume,
+			pinned: e.Pinned, hidden: e.Hidden,
 			lastActivity: float64(e.LastUsed),
 			state:        Idle,
 		}

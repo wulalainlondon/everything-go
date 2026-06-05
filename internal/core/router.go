@@ -91,6 +91,7 @@ func (h *Hub) route(ctx context.Context, c *Client, in protocol.Inbound) {
 			Model: snap.Model, Sandbox: snap.Sandbox,
 		})
 		go h.registry.Persist()
+		h.Emit(protocol.NewSessionsList(h.sessionSummaries()))
 
 	case "message":
 		s, ok := h.registry.Get(in.SessionID)
@@ -139,6 +140,11 @@ func (h *Hub) route(ctx context.Context, c *Client, in protocol.Inbound) {
 	case "request_history":
 		s, ok := h.registry.Get(in.SessionID)
 		if !ok {
+			c.enqueueEvent(protocol.HistorySnapshot{
+				Type: "history_snapshot", SessionID: in.SessionID,
+				Messages: []map[string]any{}, SourceCount: 0,
+				HasMoreBefore: false, KnownIDFound: true,
+			})
 			return
 		}
 		go h.sendHistory(c, s, in)
@@ -149,15 +155,19 @@ func (h *Hub) route(ctx context.Context, c *Client, in protocol.Inbound) {
 	case "rename_session":
 		if s, ok := h.registry.Get(in.SessionID); ok {
 			s.SetName(in.Name)
-			c.enqueueEvent(protocol.NewSessionRenamed(s.ID, in.Name))
+			h.Emit(protocol.NewSessionRenamed(s.ID, in.Name))
 			go h.registry.Persist()
 		}
 
 	case "set_session_meta":
-		c.enqueueEvent(protocol.SessionMetaUpdated{
-			Type: "session_meta_updated", SessionID: in.SessionID,
-			Pinned: in.Pinned, Hidden: in.Hidden,
-		})
+		if s, ok := h.registry.Get(in.SessionID); ok {
+			s.SetMeta(in.Pinned, in.Hidden)
+			h.Emit(protocol.SessionMetaUpdated{
+				Type: "session_meta_updated", SessionID: in.SessionID,
+				Pinned: in.Pinned, Hidden: in.Hidden,
+			})
+			go h.registry.Persist()
+		}
 
 	case "set_effort":
 		// Stored on the session; applied as --effort on the next claude spawn.
@@ -495,6 +505,7 @@ func (h *Hub) sessionSummaries() []protocol.SessionSummary {
 			ID: snap.ID, Name: snap.Name, IsStreaming: snap.Streaming,
 			CreatedAt: snap.CreatedAt, LastActivity: snap.LastActivity,
 			Cwd: snap.Cwd, Model: snap.Model, Backend: snap.Backend,
+			Sandbox: snap.Sandbox, Pinned: snap.Pinned, Hidden: snap.Hidden,
 		})
 	}
 	return out

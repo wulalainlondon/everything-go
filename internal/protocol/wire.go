@@ -193,6 +193,9 @@ type SessionSummary struct {
 	Cwd          string  `json:"cwd,omitempty"`
 	Model        string  `json:"model,omitempty"`
 	Backend      string  `json:"backend,omitempty"`
+	Sandbox      string  `json:"sandbox,omitempty"`
+	Pinned       bool    `json:"pinned"`
+	Hidden       bool    `json:"hidden"`
 }
 
 type SessionsList struct {
