@@ -4,8 +4,15 @@ import (
 	"database/sql"
 	"log"
 	"os"
+	"sort"
 	"time"
 )
+
+type ingestJob struct {
+	src   source
+	path  string
+	mtime time.Time
+}
 
 // ingestFile brings one file's messages into the index incrementally. It honors
 // the stored byte offset, detects rotation/truncation via head signature + size,
@@ -138,21 +145,72 @@ func (idx *Index) ingestFile(src source, path string) (extracted int, err error)
 	return len(msgs), nil
 }
 
-// ingestAll scans every source's files once. Returns total messages added.
-func (idx *Index) ingestAll() int {
-	total := 0
+// discoverJobs scans all configured sources and sorts newest files first. Recent
+// conversations become searchable before older archives during a cold ingest.
+func (idx *Index) discoverJobs() []ingestJob {
+	var jobs []ingestJob
 	for _, src := range idx.sources {
 		if !src.enabled() {
 			continue
 		}
 		for _, path := range src.discover() {
-			n, err := idx.ingestFile(src, path)
+			info, err := os.Stat(path)
 			if err != nil {
-				log.Printf("[search] ingest %s: %v", path, err)
 				continue
 			}
+			jobs = append(jobs, ingestJob{src: src, path: path, mtime: info.ModTime()})
+		}
+	}
+	sort.SliceStable(jobs, func(i, j int) bool {
+		return jobs[i].mtime.After(jobs[j].mtime)
+	})
+	return jobs
+}
+
+// ingestBatch processes a bounded slice of work. It returns the remaining jobs
+// and the number of messages added in this batch.
+func (idx *Index) ingestBatch(jobs []ingestJob, maxFiles int, maxDuration time.Duration) ([]ingestJob, int) {
+	if maxFiles <= 0 {
+		maxFiles = 1
+	}
+	deadline := time.Now().Add(maxDuration)
+	total := 0
+	done := 0
+	for done < len(jobs) && done < maxFiles {
+		job := jobs[done]
+		idx.setProgress(func(p *ingestProgress) {
+			p.currentFile = job.path
+			p.currentSource = job.src.name()
+		})
+
+		n, err := idx.ingestFile(job.src, job.path)
+		if err != nil {
+			log.Printf("[search] ingest %s: %v", job.path, err)
+			idx.setProgress(func(p *ingestProgress) {
+				p.lastError = err.Error()
+			})
+		} else {
 			total += n
 		}
+		done++
+		idx.setProgress(func(p *ingestProgress) {
+			p.filesDone++
+		})
+		if done >= maxFiles || time.Now().After(deadline) {
+			break
+		}
+	}
+	return jobs[done:], total
+}
+
+// ingestAll scans every source's files once. Returns total messages added.
+func (idx *Index) ingestAll() int {
+	jobs := idx.discoverJobs()
+	total := 0
+	for len(jobs) > 0 {
+		var added int
+		jobs, added = idx.ingestBatch(jobs, len(jobs), 24*time.Hour)
+		total += added
 	}
 	return total
 }

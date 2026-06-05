@@ -358,10 +358,33 @@ func (idx *Index) Health() HealthResponse {
 		h.DBSizeMB = float64(info.Size()) / (1024 * 1024)
 	}
 	h.Ready = idx.isReady()
-	if h.Ready {
-		h.IngestProgress["status"] = "ready"
-	} else {
-		h.IngestProgress["status"] = "ingesting"
+	p := idx.snapshotProgress()
+	status := p.status
+	if status == "" {
+		if h.Ready {
+			status = "ready"
+		} else {
+			status = "ingesting"
+		}
+	}
+	h.IngestProgress["status"] = status
+	h.IngestProgress["files_total"] = p.filesTotal
+	h.IngestProgress["files_done"] = p.filesDone
+	h.IngestProgress["last_added"] = p.lastAdded
+	if p.currentFile != "" {
+		h.IngestProgress["current_file"] = p.currentFile
+	}
+	if p.currentSource != "" {
+		h.IngestProgress["current_source"] = p.currentSource
+	}
+	if p.lastError != "" {
+		h.IngestProgress["last_error"] = p.lastError
+	}
+	if !p.cycleStarted.IsZero() {
+		h.IngestProgress["cycle_started_at"] = p.cycleStarted.Format(time.RFC3339)
+	}
+	if !p.cycleDone.IsZero() {
+		h.IngestProgress["cycle_done_at"] = p.cycleDone.Format(time.RFC3339)
 	}
 	return h
 }
