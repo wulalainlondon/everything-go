@@ -18,12 +18,15 @@ jobs:
           go-version-file: go.mod
 
       - name: Import macOS signing certificate
-        if: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 != '' }}
         env:
           MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
           MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
           MACOS_KEYCHAIN_PASSWORD: ${{ secrets.MACOS_KEYCHAIN_PASSWORD }}
         run: |
+          if [ -z "${MACOS_CERTIFICATE_P12_BASE64:-}" ]; then
+            echo "macOS signing certificate not configured; app bundles will use ad-hoc signing"
+            exit 0
+          fi
           keychain="$RUNNER_TEMP/everything-go-signing.keychain-db"
           cert="$RUNNER_TEMP/everything-go-cert.p12"
           printf '%s' "$MACOS_CERTIFICATE_P12_BASE64" | base64 --decode > "$cert" 2>/dev/null \
@@ -48,22 +51,26 @@ jobs:
 
       - name: Package macOS app bundles
         env:
-          EVERYTHING_GO_CODESIGN_IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENTITY || '-' }}
+          MACOS_CODESIGN_IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENTITY }}
         run: |
           chmod +x scripts/package_macos_app.sh
           version="${GITHUB_REF_NAME#v}"
-          EVERYTHING_GO_VERSION="$version" \
+          sign_identity="${MACOS_CODESIGN_IDENTITY:-"-"}"
+          EVERYTHING_GO_CODESIGN_IDENTITY="$sign_identity" EVERYTHING_GO_VERSION="$version" \
             scripts/package_macos_app.sh dist/everything-go-darwin-arm64 arm64 dist/everything-go-darwin-arm64.app.zip
-          EVERYTHING_GO_VERSION="$version" \
+          EVERYTHING_GO_CODESIGN_IDENTITY="$sign_identity" EVERYTHING_GO_VERSION="$version" \
             scripts/package_macos_app.sh dist/everything-go-darwin-amd64 amd64 dist/everything-go-darwin-amd64.app.zip
 
       - name: Notarize macOS app bundles
-        if: ${{ secrets.APPSTORE_CONNECT_API_KEY_ID != '' }}
         env:
           APPSTORE_CONNECT_API_KEY_ID: ${{ secrets.APPSTORE_CONNECT_API_KEY_ID }}
           APPSTORE_CONNECT_API_ISSUER_ID: ${{ secrets.APPSTORE_CONNECT_API_ISSUER_ID }}
           APPSTORE_CONNECT_API_KEY_P8_BASE64: ${{ secrets.APPSTORE_CONNECT_API_KEY_P8_BASE64 }}
         run: |
+          if [ -z "${APPSTORE_CONNECT_API_KEY_ID:-}" ]; then
+            echo "App Store Connect API key not configured; skipping notarization"
+            exit 0
+          fi
           chmod +x scripts/notarize_macos_app_zip.sh
           scripts/notarize_macos_app_zip.sh dist/everything-go-darwin-arm64.app.zip
           scripts/notarize_macos_app_zip.sh dist/everything-go-darwin-amd64.app.zip
