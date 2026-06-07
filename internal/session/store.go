@@ -115,6 +115,9 @@ func (st *Store) Save(sessions []*Session) error {
 
 	cutoff := now - pruneAfterDays*24*3600
 	for k, obj := range raw {
+		if currentIDs[k] {
+			continue
+		}
 		if rawInt64(obj, "last_used") <= cutoff {
 			delete(raw, k)
 			delete(st.knownIDs, k)

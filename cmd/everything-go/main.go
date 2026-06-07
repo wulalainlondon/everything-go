@@ -11,13 +11,16 @@ package main
 import (
 	"context"
 	_ "embed"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -51,6 +54,8 @@ func main() {
 	sessionStore := flag.String("session-store", os.Getenv("EVERYTHING_GO_SESSION_STORE"), "canonical saved_sessions.json path (empty = DATA_DIR/everything_go_sessions.json)")
 	instanceName := flag.String("instance-name", "everything-go", "human label shown in the app")
 	rootDir := flag.String("root-dir", "", "filesystem jail root (\"\" = no jail)")
+	permissionCheck := flag.Bool("permission-check", false, "check filesystem permissions needed by the resident bridge and exit")
+	permissionCheckPaths := flag.String("permission-check-paths", "", "additional filesystem paths to check, separated by ':' on Unix or ';' on Windows")
 	serviceAccount := flag.String("service-account", "", "path to Firebase serviceAccountKey.json for FCM push (empty = disabled)")
 	discovery := flag.Bool("discovery", false, "enable the LAN UDP discovery beacon")
 	noDiscovery := flag.Bool("no-discovery", false, "deprecated: discovery is disabled by default")
@@ -63,6 +68,14 @@ func main() {
 	sessionStorePath := *sessionStore
 	if sessionStorePath == "" {
 		sessionStorePath = filepath.Join(*dataDir, "everything_go_sessions.json")
+	}
+	if *permissionCheck {
+		if err := runPermissionCheck(*dataDir, sessionStorePath, *permissionCheckPaths); err != nil {
+			fmt.Fprintf(os.Stderr, "permission check failed: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Fprintln(os.Stdout, "permission check passed")
+		return
 	}
 
 	reg := session.NewRegistry()
@@ -152,6 +165,7 @@ func main() {
 	// Network presence services (P3 discovery + P4 tunnel). They are opt-in so
 	// the fixed-endpoint P2 path stays deterministic and easy to debug.
 	ctx := context.Background()
+	hub.StartNativeWatcher(ctx)
 	if *discovery && !*noDiscovery {
 		go netsvc.NewBeacon(*port, *discoveryPort, cfg.InstanceID).Run(ctx)
 	}
@@ -171,6 +185,79 @@ func main() {
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func runPermissionCheck(dataDir, sessionStorePath, extraPaths string) error {
+	home, _ := os.UserHomeDir()
+	paths := []string{
+		dataDir,
+		filepath.Join(home, ".claude", "projects"),
+		filepath.Join(home, ".codex", "sessions"),
+	}
+	if sessionStorePath != "" {
+		paths = append(paths, sessionStorePath)
+	}
+	if extraPaths != "" {
+		paths = append(paths, filepath.SplitList(extraPaths)...)
+	}
+
+	var failures []string
+	seen := map[string]bool{}
+	for _, p := range paths {
+		p = strings.TrimSpace(os.ExpandEnv(p))
+		if p == "" || seen[p] {
+			continue
+		}
+		seen[p] = true
+		if err := checkReadablePath(p); err != nil {
+			failures = append(failures, fmt.Sprintf("%s: %v", p, err))
+		}
+	}
+	if len(failures) > 0 {
+		return errors.New(strings.Join(failures, "; "))
+	}
+	return nil
+}
+
+func checkReadablePath(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if !info.IsDir() {
+		f, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		_, _ = io.CopyN(io.Discard, f, 1)
+		return nil
+	}
+
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return err
+	}
+	for _, ent := range entries {
+		child := filepath.Join(path, ent.Name())
+		if ent.IsDir() {
+			if _, err := os.ReadDir(child); err != nil && !os.IsNotExist(err) {
+				return err
+			}
+			return nil
+		}
+		f, err := os.Open(child)
+		if err != nil {
+			return err
+		}
+		_, _ = io.CopyN(io.Discard, f, 1)
+		_ = f.Close()
+		return nil
+	}
+	return nil
 }
 
 // detectLanIP returns the first non-loopback IPv4 address, surfaced in

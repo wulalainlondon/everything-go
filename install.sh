@@ -24,11 +24,96 @@ PORT="${EVERYTHING_GO_PORT:-8766}"
 RUNTIME_DIR="${EVERYTHING_GO_HOME:-$HOME/.everything-go-runtime}"
 LABEL="com.everything-go.app"
 BIN="$RUNTIME_DIR/everything-go"
+APP_DIR="$RUNTIME_DIR/Everything Go.app"
+APP_BIN="$APP_DIR/Contents/MacOS/everything-go"
 LAUNCH="$RUNTIME_DIR/everything_go_launch.sh"
+SESSION_STORE="${EVERYTHING_GO_SESSION_STORE:-$HOME/.claude-bridge-runtime/saved_sessions.json}"
+SERVICE_BIN="$BIN"
+PERMISSION_TARGET="$BIN"
 
 say()  { printf '\033[1;36m[everything-go]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[everything-go]\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31m[everything-go]\033[0m %s\n' "$*" >&2; exit 1; }
+
+run_permission_check() {
+  local extra_paths="$HOME/Downloads:$HOME/Documents:$HOME/Desktop"
+  "$SERVICE_BIN" \
+    --permission-check \
+    --data-dir "$RUNTIME_DIR" \
+    --session-store "$SESSION_STORE" \
+    --permission-check-paths "$extra_paths"
+}
+
+open_full_disk_access_settings() {
+  if command -v open >/dev/null 2>&1; then
+    open "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles" >/dev/null 2>&1 || true
+  fi
+}
+
+ensure_macos_permissions() {
+  [ "$OS" = darwin ] || return 0
+  [ "${EVERYTHING_GO_SKIP_PERMISSION_CHECK:-0}" = "1" ] && {
+    warn "skipping macOS permission check because EVERYTHING_GO_SKIP_PERMISSION_CHECK=1"
+    return 0
+  }
+
+  say "checking macOS file permissions with the installed bridge binary ..."
+  if run_permission_check; then
+    say "macOS permission check passed"
+    return 0
+  fi
+
+  warn "macOS blocked the bridge from reading one or more local folders."
+  warn "Grant Full Disk Access to: $PERMISSION_TARGET"
+  warn "System Settings → Privacy & Security → Full Disk Access"
+  open_full_disk_access_settings
+
+  while true; do
+    if [ ! -r /dev/tty ]; then
+      die "permission approval needs an interactive terminal; re-run install.sh in Terminal after granting Full Disk Access to $SERVICE_BIN"
+    fi
+    printf "Press Enter after granting Full Disk Access, or Ctrl-C to stop: " >/dev/tty
+    read -r _unused </dev/tty
+    if run_permission_check; then
+      say "macOS permission check passed"
+      return 0
+    fi
+    warn "permission check still failed; confirm Full Disk Access is enabled for $SERVICE_BIN"
+    open_full_disk_access_settings
+  done
+}
+
+install_bridge_binary() {
+  mkdir -p "$RUNTIME_DIR"
+  URL="https://github.com/$REPO/releases/latest/download/$ASSET"
+
+  if [ "$OS" = darwin ]; then
+    local app_asset="everything-go-darwin-${ARCH}.app.zip"
+    local app_url="https://github.com/$REPO/releases/latest/download/$app_asset"
+    say "downloading $app_asset ..."
+    if curl -fSL --proto '=https' --tlsv1.2 "$app_url" -o "$RUNTIME_DIR/$app_asset.tmp"; then
+      rm -rf "$APP_DIR.tmp" "$APP_DIR"
+      ditto -x -k "$RUNTIME_DIR/$app_asset.tmp" "$RUNTIME_DIR"
+      rm -f "$RUNTIME_DIR/$app_asset.tmp"
+      [ -x "$APP_BIN" ] || die "app asset did not contain executable: $APP_BIN"
+      SERVICE_BIN="$APP_BIN"
+      PERMISSION_TARGET="$APP_DIR"
+      say "app installed: $APP_DIR"
+      return 0
+    fi
+    rm -f "$RUNTIME_DIR/$app_asset.tmp"
+    warn "app asset unavailable; falling back to unsigned raw binary"
+  fi
+
+  say "downloading $ASSET ..."
+  curl -fSL --proto '=https' --tlsv1.2 "$URL" -o "$BIN.tmp" \
+    || die "download failed: $URL"
+  chmod +x "$BIN.tmp"
+  mv -f "$BIN.tmp" "$BIN"
+  SERVICE_BIN="$BIN"
+  PERMISSION_TARGET="$BIN"
+  say "binary installed: $BIN"
+}
 
 # ── 1. platform detection ──────────────────────────────────────────
 OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
@@ -59,15 +144,8 @@ for b in "$CLAUDE_BIN" "$CODEX_BIN"; do
   [ -n "$b" ] && CLI_PATHS="$CLI_PATHS:$(dirname "$b")"
 done
 
-# ── 3. download the bridge binary ──────────────────────────────────
-mkdir -p "$RUNTIME_DIR"
-URL="https://github.com/$REPO/releases/latest/download/$ASSET"
-say "downloading $ASSET ..."
-curl -fSL --proto '=https' --tlsv1.2 "$URL" -o "$BIN.tmp" \
-  || die "download failed: $URL"
-chmod +x "$BIN.tmp"
-mv -f "$BIN.tmp" "$BIN"
-say "binary installed: $BIN"
+# ── 3. download the bridge binary/app ──────────────────────────────
+install_bridge_binary
 
 # ── 4. ensure cloudflared (remote access; optional but recommended) ─
 CF_PATH=""
@@ -98,16 +176,18 @@ cat > "$LAUNCH" <<EOF
 #!/usr/bin/env bash
 set -uo pipefail
 export PATH="$SERVICE_PATH:\$PATH"
-exec "$BIN" \\
+exec "$SERVICE_BIN" \\
   --port "$PORT" \\
   --executor go \\
   --data-dir "$RUNTIME_DIR" \\
+  --session-store "$SESSION_STORE" \\
   --mdns \\
   --tunnel \\
   --instance-name "\$(hostname -s 2>/dev/null || echo everything-go)"
 EOF
 chmod +x "$LAUNCH"
 say "launch script written: $LAUNCH"
+ensure_macos_permissions
 
 # ── 6. install as a background service ─────────────────────────────
 install_launchd() {

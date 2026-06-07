@@ -13,6 +13,7 @@ package session
 
 import (
 	"log"
+	"strings"
 	"sync"
 	"time"
 )
@@ -176,6 +177,19 @@ func (s *Session) SetContext(used, max int) {
 	s.mu.Unlock()
 }
 
+// SetLastActivity records externally observed activity, such as a native CLI
+// JSONL transcript update. It never moves activity backwards.
+func (s *Session) SetLastActivity(ts float64) {
+	if ts <= 0 {
+		return
+	}
+	s.mu.Lock()
+	if ts > s.lastActivity {
+		s.lastActivity = ts
+	}
+	s.mu.Unlock()
+}
+
 // Registry is the in-memory session store, owned by the Go connection core.
 type Registry struct {
 	mu       sync.RWMutex
@@ -241,6 +255,101 @@ func (r *Registry) Create(id, name, cwd, backend, model, sandbox, resumeID strin
 	}
 	r.sessions[id] = s
 	return s
+}
+
+// HasResumeID reports whether any registered session already represents the
+// native runtime conversation handle.
+func (r *Registry) HasResumeID(resumeID string) bool {
+	if resumeID == "" {
+		return false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, s := range r.sessions {
+		if s.ResumeID() == resumeID {
+			return true
+		}
+	}
+	return false
+}
+
+// UpsertExternal registers or refreshes a session discovered from the native
+// Claude/Codex JSONL stores. It dedupes by resumeID so a bridge-created session
+// and a native watcher event cannot produce two dashboard rows for one thread.
+// The returned bool is true when the registry changed enough to merit a client
+// sessions_list broadcast.
+func (r *Registry) UpsertExternal(id, name, cwd, backend, resumeID string, lastUsed int64) (*Session, bool) {
+	if id == "" || resumeID == "" {
+		return nil, false
+	}
+	if name == "" {
+		name = resumeID
+		if len(name) > 8 {
+			name = name[:8]
+		}
+	}
+	now := nowSeconds()
+	activity := float64(lastUsed)
+	if activity <= 0 {
+		activity = now
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	for _, s := range r.sessions {
+		if s.ResumeID() != resumeID {
+			continue
+		}
+		before := s.Snapshot()
+		s.mu.Lock()
+		if s.name == "" || strings.HasPrefix(s.ID, "jl_") {
+			s.name = name
+		}
+		if s.cwd == "" || strings.HasPrefix(s.ID, "jl_") {
+			s.cwd = cwd
+		}
+		if s.backend == "" {
+			s.backend = backend
+		}
+		if activity > s.lastActivity {
+			s.lastActivity = activity
+		}
+		after := s.snapshotLocked()
+		s.mu.Unlock()
+		// NOTE: lastActivity changes do NOT count as "changed". A session being
+		// actively written by its CLI bumps mtime constantly; treating that as a
+		// change would re-broadcast sessions_list every tick. It's also pointless:
+		// the broadcast's last_activity comes from the search index's last_ts, not
+		// this field. Only structural changes (name/cwd/backend) warrant a refresh.
+		return s, before.Name != after.Name || before.Cwd != after.Cwd ||
+			before.Backend != after.Backend
+	}
+
+	if s, ok := r.sessions[id]; ok {
+		before := s.Snapshot()
+		s.mu.Lock()
+		s.name = name
+		s.cwd = cwd
+		s.backend = backend
+		s.resumeID = resumeID
+		if activity > s.lastActivity {
+			s.lastActivity = activity
+		}
+		after := s.snapshotLocked()
+		s.mu.Unlock()
+		// lastActivity excluded from "changed" — see note above.
+		return s, before.Name != after.Name || before.Cwd != after.Cwd ||
+			before.Backend != after.Backend || before.ResumeID != after.ResumeID
+	}
+
+	s := &Session{
+		ID: id, CreatedAt: activity,
+		name: name, cwd: cwd, backend: backend, resumeID: resumeID,
+		lastActivity: activity, state: Idle,
+	}
+	r.sessions[id] = s
+	return s, true
 }
 
 func (r *Registry) Get(id string) (*Session, bool) {

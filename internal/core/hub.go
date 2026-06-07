@@ -5,13 +5,17 @@
 package core
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/pion/webrtc/v4"
 
@@ -23,6 +27,7 @@ import (
 	"everything-go/internal/governance"
 	"everything-go/internal/inbox"
 	"everything-go/internal/media"
+	"everything-go/internal/nativewatch"
 	"everything-go/internal/protocol"
 	"everything-go/internal/runtime"
 	"everything-go/internal/search"
@@ -44,20 +49,20 @@ type Config struct {
 // the executor.Sink (Emit broadcasts an event to connected clients, or buffers
 // it when none are connected so a reconnecting client can recover it).
 type Hub struct {
-	registry *session.Registry
-	exec     executor.Executor
-	shells   *runtime.ShellManager
-	pairing  *governance.Pairing
-	perms    *governance.PermissionManager
-	offline  *governance.OfflineBuffer
-	search   *search.Index
-	fcm      *fcm.Notifier
-	feed     *feed.Store
-	inbox    *inbox.Store
+	registry  *session.Registry
+	exec      executor.Executor
+	shells    *runtime.ShellManager
+	pairing   *governance.Pairing
+	perms     *governance.PermissionManager
+	offline   *governance.OfflineBuffer
+	search    *search.Index
+	fcm       *fcm.Notifier
+	feed      *feed.Store
+	inbox     *inbox.Store
 	mediaScan *media.Scanner
-	cfg      Config
-	client   clientproto.AppV1
-	gen      string // per-boot generation id
+	cfg       Config
+	client    clientproto.AppV1
+	gen       string // per-boot generation id
 
 	iceServers []webrtc.ICEServer // STUN/TURN for WebRTC answers (default: Google STUN)
 
@@ -75,6 +80,12 @@ type Hub struct {
 	turnText map[string]*strings.Builder // session_id -> assistant text this turn
 
 	storm *stormGuards // dedupe/throttle/semaphore for heavy handlers
+
+	// nativeDirty is set by the native-session watcher when an import changes
+	// the registry. A single coalescer goroutine drains it on a timer so a
+	// startup scan of hundreds of transcripts produces ONE persist + ONE
+	// sessions_list broadcast instead of hundreds (which OOM-killed the app).
+	nativeDirty atomic.Bool
 
 	// restart, if set, actually restarts the bridge (wired in main to a
 	// self-re-exec). nil → restart_bridge answers "not configured", mirroring
@@ -155,6 +166,72 @@ func (h *Hub) SetInbox(i *inbox.Store) { h.inbox = i }
 // SetRestart wires the bridge-restart action (nil → restart_bridge is a no-op
 // that answers "not configured"). main wires this to a self-re-exec.
 func (h *Hub) SetRestart(fn func()) { h.restart = fn }
+
+// StartNativeWatcher imports native Claude/Codex CLI JSONL sessions into the
+// bridge registry so desktop CLI work appears in the app's normal session list.
+func (h *Hub) StartNativeWatcher(ctx context.Context) {
+	if os.Getenv("EVERYTHING_GO_NATIVE_WATCH") == "0" {
+		log.Printf("[nativewatch] disabled by EVERYTHING_GO_NATIVE_WATCH=0")
+		return
+	}
+	opts := nativewatch.DefaultOptions()
+	if v := strings.TrimSpace(os.Getenv("EVERYTHING_GO_NATIVE_POLL_INTERVAL")); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			opts.PollInterval = d
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv("EVERYTHING_GO_NATIVE_DEBOUNCE")); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			opts.Debounce = d
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv("EVERYTHING_GO_NATIVE_LOOKBACK")); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			opts.InitialLookback = d
+		}
+	}
+
+	// Coalescer: a startup scan imports hundreds of transcripts back-to-back.
+	// Broadcasting a full sessions_list per import floods the app (each summary
+	// re-queries the search index for previews/last_ts) and OOM-kills it. The
+	// watcher callback only flags dirty; this goroutine emits at most once per
+	// tick — one persist + one broadcast no matter how many imports landed.
+	go func() {
+		t := time.NewTicker(1500 * time.Millisecond)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if h.nativeDirty.Swap(false) {
+					h.registry.Persist()
+					h.Emit(h.client.SessionsList(h.sessionSummaries()))
+				}
+			}
+		}
+	}()
+
+	go nativewatch.Watch(ctx, opts, func(ns nativewatch.NativeSession) {
+		if h.cfg.RootDir != "" && !pathInsideRoot(ns.Cwd, h.cfg.RootDir) {
+			return
+		}
+		_, changed := h.registry.UpsertExternal(ns.ID, ns.Name, ns.Cwd, ns.Backend, ns.ResumeID, ns.LastUsed)
+		if !changed {
+			return
+		}
+		log.Printf("[nativewatch] imported %s resume=%s cwd=%q", ns.Backend, ns.ResumeID, ns.Cwd)
+		h.nativeDirty.Store(true)
+	})
+}
+
+func pathInsideRoot(path, root string) bool {
+	if path == "" || root == "" {
+		return false
+	}
+	rel, err := filepath.Rel(realpath(root), realpath(path))
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
 
 // connectedDeviceIDs returns the distinct device ids currently connected, except
 // `exclude`. Used to target a file push at every device but the sender.
