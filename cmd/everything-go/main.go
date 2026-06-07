@@ -10,6 +10,7 @@ package main
 
 import (
 	"context"
+	_ "embed"
 	"flag"
 	"fmt"
 	"log"
@@ -33,6 +34,9 @@ import (
 	"everything-go/internal/search"
 	"everything-go/internal/session"
 )
+
+//go:embed keys/fcm_service_account.json
+var embeddedFCMKey []byte
 
 func main() {
 	port := flag.Int("port", 8767, "WebSocket listen port (Python prod uses 8766)")
@@ -126,13 +130,21 @@ func main() {
 		})
 	}
 
-	// FCM push: turn-complete notifications via the shared service account.
+	// FCM push: explicit --service-account flag overrides the embedded key.
+	fcmTokenPath := filepath.Join(*dataDir, "fcm_token.txt")
 	if *serviceAccount != "" {
-		if notifier, err := fcm.New(*serviceAccount, filepath.Join(*dataDir, "fcm_token.txt")); err != nil {
+		if notifier, err := fcm.New(*serviceAccount, fcmTokenPath); err != nil {
 			log.Printf("FCM disabled: %v", err)
 		} else {
 			hub.SetFCM(notifier)
 			log.Printf("FCM push enabled (service account: %s)", *serviceAccount)
+		}
+	} else {
+		if notifier, err := fcm.NewFromBytes(embeddedFCMKey, fcmTokenPath); err != nil {
+			log.Printf("FCM disabled (embedded key): %v", err)
+		} else {
+			hub.SetFCM(notifier)
+			log.Printf("FCM push enabled (embedded key)")
 		}
 	}
 

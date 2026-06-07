@@ -49,6 +49,12 @@ func New(serviceAccountPath, tokenPath string) (*Notifier, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read service account: %w", err)
 	}
+	return NewFromBytes(data, tokenPath)
+}
+
+// NewFromBytes is like New but accepts the service account JSON directly
+// (e.g. from an //go:embed directive).
+func NewFromBytes(data []byte, tokenPath string) (*Notifier, error) {
 	var sa struct {
 		ProjectID string `json:"project_id"`
 	}
