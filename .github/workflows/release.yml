@@ -38,6 +38,17 @@ jobs:
           security list-keychains -d user -s "$keychain" login.keychain-db
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$MACOS_KEYCHAIN_PASSWORD" "$keychain"
 
+      - name: Inject FCM service account key
+        env:
+          FCM_SERVICE_ACCOUNT_JSON: ${{ secrets.FCM_SERVICE_ACCOUNT_JSON }}
+        run: |
+          if [ -z "${FCM_SERVICE_ACCOUNT_JSON:-}" ]; then
+            echo "FCM_SERVICE_ACCOUNT_JSON not set; FCM push notifications will be disabled in this build"
+            exit 0
+          fi
+          printf '%s' "$FCM_SERVICE_ACCOUNT_JSON" > cmd/everything-go/keys/fcm_service_account.json
+          echo "FCM key injected ($(wc -c < cmd/everything-go/keys/fcm_service_account.json) bytes)"
+
       - name: Cross-compile binaries (CGO-free, modernc sqlite)
         run: |
           mkdir -p dist
