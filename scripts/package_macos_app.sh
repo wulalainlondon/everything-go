@@ -9,6 +9,10 @@ fi
 BIN_SRC="$1"
 ARCH="$2"
 OUT_ZIP="$3"
+OUT_DIR="$(dirname "$OUT_ZIP")"
+OUT_BASE="$(basename "$OUT_ZIP")"
+mkdir -p "$OUT_DIR"
+OUT_ZIP="$(cd "$OUT_DIR" && pwd)/$OUT_BASE"
 
 APP_NAME="Everything Go"
 BUNDLE_ID="${EVERYTHING_GO_BUNDLE_ID:-com.everything-go.app}"
@@ -55,6 +59,5 @@ if command -v codesign >/dev/null 2>&1; then
   fi
 fi
 
-mkdir -p "$(dirname "$OUT_ZIP")"
 (cd "$WORK_DIR" && ditto -c -k --sequesterRsrc --keepParent "$APP_NAME.app" "$OUT_ZIP")
 echo "wrote $OUT_ZIP"

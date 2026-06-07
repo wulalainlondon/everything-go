@@ -7,6 +7,9 @@ if [ "$#" -ne 1 ]; then
 fi
 
 ZIP_PATH="$1"
+ZIP_DIR="$(dirname "$ZIP_PATH")"
+ZIP_BASE="$(basename "$ZIP_PATH")"
+ZIP_PATH="$(cd "$ZIP_DIR" && pwd)/$ZIP_BASE"
 KEY_ID="${APPSTORE_CONNECT_API_KEY_ID:-}"
 ISSUER_ID="${APPSTORE_CONNECT_API_ISSUER_ID:-}"
 KEY_P8_BASE64="${APPSTORE_CONNECT_API_KEY_P8_BASE64:-}"
