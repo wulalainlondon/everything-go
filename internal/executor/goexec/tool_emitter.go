@@ -4,8 +4,8 @@ import (
 	"strings"
 	"sync"
 
+	"everything-go/internal/backend"
 	"everything-go/internal/executor"
-	"everything-go/internal/protocol"
 )
 
 // toolEmitter is the shared bridge from backend-specific tool events to the
@@ -33,14 +33,14 @@ func (e *toolEmitter) Start(sessionID, reqID, toolUseID, name, command string) {
 	e.mu.Lock()
 	e.outputs[toolKey(sessionID, reqID, toolUseID)] = ""
 	e.mu.Unlock()
-	e.sink.Emit(protocol.NewToolStart(sessionID, reqID, toolUseID, name, command))
+	e.sink.Emit(backend.NewToolStart(sessionID, reqID, toolUseID, name, command))
 }
 
 func (e *toolEmitter) Result(sessionID, reqID, toolUseID, output string) {
 	if toolUseID == "" {
 		toolUseID = "tool"
 	}
-	e.sink.Emit(protocol.NewToolResult(sessionID, reqID, toolUseID, output))
+	e.sink.Emit(backend.NewToolResult(sessionID, reqID, toolUseID, output))
 }
 
 func (e *toolEmitter) Delta(sessionID, reqID, toolUseID, delta string) string {
@@ -49,7 +49,9 @@ func (e *toolEmitter) Delta(sessionID, reqID, toolUseID, delta string) string {
 	}
 	k := toolKey(sessionID, reqID, toolUseID)
 	e.mu.Lock()
-	e.outputs[k] += delta
+	if !strings.Contains(e.outputs[k], backend.ToolResultTruncatedMark) {
+		e.outputs[k] = backend.TruncateToolOutput(e.outputs[k] + delta)
+	}
 	out := e.outputs[k]
 	e.mu.Unlock()
 	e.Result(sessionID, reqID, toolUseID, out)
@@ -63,7 +65,7 @@ func (e *toolEmitter) End(sessionID, reqID, toolUseID string) {
 	e.mu.Lock()
 	delete(e.outputs, toolKey(sessionID, reqID, toolUseID))
 	e.mu.Unlock()
-	e.sink.Emit(protocol.NewToolEnd(sessionID, reqID, toolUseID))
+	e.sink.Emit(backend.NewToolEnd(sessionID, reqID, toolUseID))
 }
 
 func (e *toolEmitter) ResultEnd(sessionID, reqID, toolUseID, output string) {

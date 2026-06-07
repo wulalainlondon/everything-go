@@ -5,7 +5,7 @@ import (
 	"sync"
 	"testing"
 
-	"everything-go/internal/protocol"
+	"everything-go/internal/backend"
 	"everything-go/internal/session"
 )
 
@@ -73,10 +73,10 @@ func TestNormalizeQuestionsMultiSelect(t *testing.T) {
 // we must map back), the exact sentence wrapper, multi-select joining, free-form
 // passthrough, and the dismissed fallback.
 func TestBuildUserInputResultText(t *testing.T) {
-	p := protocol.UserInputRequestPayload{
-		Questions: []protocol.UserInputQuestion{{
+	p := backend.UserInputPayload{
+		Questions: []backend.UserInputQuestion{{
 			QuestionID: "q1", Text: "Pick a color",
-			Options: []protocol.UserInputOption{{ID: "opt_red", Label: "Red"}, {ID: "opt_blue", Label: "Blue"}},
+			Options: []backend.UserInputOption{{ID: "opt_red", Label: "Red"}, {ID: "opt_blue", Label: "Blue"}},
 		}},
 	}
 	got := buildUserInputResultText(p, map[string]any{"q1": "opt_blue"}, false)
@@ -86,16 +86,16 @@ func TestBuildUserInputResultText(t *testing.T) {
 	}
 
 	// Multi-select: ids resolved to labels, joined.
-	pm := protocol.UserInputRequestPayload{Questions: []protocol.UserInputQuestion{{
+	pm := backend.UserInputPayload{Questions: []backend.UserInputQuestion{{
 		QuestionID: "q1", Text: "Pick colors", MultiSelect: true,
-		Options: []protocol.UserInputOption{{ID: "r", Label: "Red"}, {ID: "b", Label: "Blue"}},
+		Options: []backend.UserInputOption{{ID: "r", Label: "Red"}, {ID: "b", Label: "Blue"}},
 	}}}
 	if got := buildUserInputResultText(pm, map[string]any{"q1": []any{"r", "b"}}, false); got != `User has answered your questions: "Pick colors"="Red, Blue". You can now continue with the user's answers in mind.` {
 		t.Errorf("multi: %s", got)
 	}
 
 	// Free-form: value isn't an option id → passed through.
-	pf := protocol.UserInputRequestPayload{Questions: []protocol.UserInputQuestion{{QuestionID: "q1", Text: "Your name?"}}}
+	pf := backend.UserInputPayload{Questions: []backend.UserInputQuestion{{QuestionID: "q1", Text: "Your name?"}}}
 	if got := buildUserInputResultText(pf, map[string]any{"q1": "Alice"}, false); got != `User has answered your questions: "Your name?"="Alice". You can now continue with the user's answers in mind.` {
 		t.Errorf("freeform: %s", got)
 	}
@@ -121,7 +121,7 @@ func TestInteractionLifecycle(t *testing.T) {
 	c.registerInteraction(s, "toolu_1", "AskUserQuestion",
 		json.RawMessage(`{"header":"H","questions":[{"question":"Q?","options":[{"label":"Yes"}]}]}`))
 
-	reqs := sink.count(func(e any) bool { _, ok := e.(protocol.UserInputRequestEvent); return ok })
+	reqs := sink.count(func(e any) bool { _, ok := e.(backend.UserInputRequest); return ok })
 	if reqs != 1 {
 		t.Fatalf("want 1 user_input_request emitted, got %d", reqs)
 	}
@@ -143,7 +143,7 @@ func TestInteractionLifecycle(t *testing.T) {
 		t.Fatal("interaction should be cleared after respond")
 	}
 	resolved := sink.count(func(e any) bool {
-		r, ok := e.(protocol.InteractionResolved)
+		r, ok := e.(backend.InteractionResolved)
 		return ok && r.RequestID == reqID && r.Status == "resolved"
 	})
 	if resolved != 1 {
@@ -176,7 +176,7 @@ func TestCancelInteractionsFor(t *testing.T) {
 		t.Fatal("cancel should clear pending interactions")
 	}
 	cancelled := sink.count(func(e any) bool {
-		r, ok := e.(protocol.InteractionResolved)
+		r, ok := e.(backend.InteractionResolved)
 		return ok && r.Status == "cancelled"
 	})
 	if cancelled != 1 {

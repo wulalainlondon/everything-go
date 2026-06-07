@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"log"
 
+	"everything-go/internal/backend"
+	"everything-go/internal/clientproto"
 	"everything-go/internal/history"
 	"everything-go/internal/protocol"
 	"everything-go/internal/runtime"
+	"everything-go/internal/search"
 	"everything-go/internal/session"
 )
 
@@ -23,53 +26,54 @@ func truncate(s string, n int) string {
 // commands are answered locally from the Hub's own state; the rest are forwarded
 // to the Executor. The payload beyond {type, session_id} is only inspected by
 // the specific handler that needs it.
-func (h *Hub) route(ctx context.Context, c *Client, in protocol.Inbound) {
-	switch in.Type {
+func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
+	switch cmd.Kind {
 	case "hello":
-		c.deviceID = in.DeviceID
+		c.deviceID = cmd.DeviceID
 		// Latest-device-wins: evict any older client from the same device so the
 		// half-disconnect storm can't pile up zombie clients (#1).
 		h.registerLatest(c)
-		c.enqueueEvent(protocol.HelloAck{
-			Type: "hello_ack", ClientID: c.clientID, DeviceID: in.DeviceID,
-			DeviceName: in.DeviceName, InstanceID: h.cfg.InstanceID, Gen: h.gen,
+		c.enqueueEvent(h.client.HelloAck(clientproto.HelloInput{
+			ClientID: c.clientID, DeviceID: cmd.DeviceID,
+			DeviceName: cmd.DeviceName, InstanceID: h.cfg.InstanceID, Gen: h.gen,
 			IsLocked:     h.pairing.IsLocked(),
-			LockedToMe:   h.pairing.LockedTo(in.AuthToken),
+			LockedToMe:   h.pairing.LockedTo(cmd.AuthToken),
 			InstanceName: h.cfg.InstanceName, RootDir: h.cfg.RootDir,
 			DataDir: h.cfg.DataDir, LanIP: h.cfg.LanIP,
-		})
+			Backends: h.cfg.Backends,
+		}))
 		// Proactively push the session list, then recover any events buffered
 		// while this (or the previous) client was offline — same ordering as the
 		// Python bridge so the app reconciles before replayed events arrive.
-		c.enqueueEvent(protocol.NewSessionsList(h.sessionSummaries()))
+		c.enqueueEvent(h.client.SessionsList(h.sessionSummaries()))
 		h.replayOffline(c)
 		// Replay any file pushes this device hasn't acked yet (parity with the
 		// Python bridge, which re-emits pending file_push frames on hello).
 		h.sendPendingPushes(c)
 
 	case "ping":
-		c.enqueueEvent(protocol.NewPong())
+		c.enqueueEvent(h.client.Pong())
 
 	case "claim_bridge":
-		if in.AuthToken == "" {
-			c.enqueueEvent(protocol.NewError("", "", "auth_token required for claim_bridge"))
+		if cmd.AuthToken == "" {
+			c.enqueueEvent(h.client.Error("", "", "auth_token required for claim_bridge"))
 			return
 		}
-		if err := h.pairing.Claim(in.AuthToken, in.DeviceID); err != nil {
-			c.enqueueEvent(protocol.NewError("", "", err.Error()))
+		if err := h.pairing.Claim(cmd.AuthToken, cmd.DeviceID); err != nil {
+			c.enqueueEvent(h.client.Error("", "", err.Error()))
 			return
 		}
-		c.enqueueEvent(protocol.NewClaimAck())
+		c.enqueueEvent(h.client.ClaimAck())
 
 	case "unclaim_bridge":
-		if err := h.pairing.Unclaim(in.AuthToken); err != nil {
-			c.enqueueEvent(protocol.NewError("", "", err.Error()))
+		if err := h.pairing.Unclaim(cmd.AuthToken); err != nil {
+			c.enqueueEvent(h.client.Error("", "", err.Error()))
 			return
 		}
-		c.enqueueEvent(protocol.NewUnclaimAck())
+		c.enqueueEvent(h.client.UnclaimAck())
 
 	case "request_sessions_list":
-		c.enqueueEvent(protocol.NewSessionsList(h.sessionSummaries()))
+		c.enqueueEvent(h.client.SessionsList(h.sessionSummaries()))
 
 	case "get_all_sessions":
 		go h.handleGetAllSessions(c)
@@ -82,38 +86,37 @@ func (h *Hub) route(ctx context.Context, c *Client, in protocol.Inbound) {
 		// os.path.expanduser(msg["cwd"] or default_cwd) in session_routes.py.
 		// Storing the resolved path keeps get_git_diff / get_tasks / spawn all
 		// consistent — the app sends a literal "~" as the default cwd.
-		cwd := runtime.ExpandPath(in.Cwd)
-		s := h.registry.Create(in.SessionID, in.Name, cwd, in.Backend, in.Model, in.Sandbox, in.ResumeClaudeID)
+		cwd := runtime.ExpandPath(cmd.Cwd)
+		s := h.registry.Create(cmd.SessionID, cmd.Name, cwd, cmd.Backend, cmd.Model, cmd.Sandbox, cmd.ResumeClaudeID)
 		snap := s.Snapshot()
-		c.enqueueEvent(protocol.SessionCreated{
-			Type: "session_created", SessionID: snap.ID, Name: snap.Name,
-			CreatedAt: snap.CreatedAt, Cwd: snap.Cwd, Backend: snap.Backend,
-			Model: snap.Model, Sandbox: snap.Sandbox,
-		})
+		c.enqueueEvent(h.client.SessionCreated(clientproto.SessionCreatedInput{
+			ID: snap.ID, Name: snap.Name, CreatedAt: snap.CreatedAt, Cwd: snap.Cwd,
+			Backend: snap.Backend, Model: snap.Model, Sandbox: snap.Sandbox,
+		}))
 		go h.registry.Persist()
-		h.Emit(protocol.NewSessionsList(h.sessionSummaries()))
+		h.Emit(h.client.SessionsList(h.sessionSummaries()))
 
 	case "message":
-		s, ok := h.registry.Get(in.SessionID)
+		s, ok := h.registry.Get(cmd.SessionID)
 		if !ok {
-			h.Emit(protocol.NewError(in.SessionID, "no_session", "unknown session"))
+			h.Emit(h.client.Error(cmd.SessionID, "no_session", "unknown session"))
 			return
 		}
 		// Enqueue on the session's turn worker: turns for one session run one at
 		// a time, in order, so two messages can't interleave a backend's stdin.
 		// The turn outlives this connection, so it gets its own context.
-		reqID, content := in.RequestID, in.Content
-		images, files := in.Images, in.Files
+		reqID, content := cmd.RequestID, cmd.Content
+		images, files := cmd.Images, cmd.Files
 		if !s.Submit(func() {
 			if err := h.exec.Send(context.Background(), s, reqID, content, images, files); err != nil {
 				log.Printf("[%s] send error: %v", s.ID, err)
 			}
 		}) {
-			h.Emit(protocol.NewError(in.SessionID, "session_closed", "session is closed"))
+			h.Emit(h.client.Error(cmd.SessionID, "session_closed", "session is closed"))
 		}
 
 	case "stop":
-		if s, ok := h.registry.Get(in.SessionID); ok {
+		if s, ok := h.registry.Get(cmd.SessionID); ok {
 			s.MarkStopping()
 			go func() {
 				_ = h.exec.Stop(context.Background(), s)
@@ -122,7 +125,7 @@ func (h *Hub) route(ctx context.Context, c *Client, in protocol.Inbound) {
 		}
 
 	case "clear_session":
-		if s, ok := h.registry.Get(in.SessionID); ok {
+		if s, ok := h.registry.Get(cmd.SessionID); ok {
 			go func() {
 				_ = h.exec.Clear(context.Background(), s)
 				s.EndTurn() // clear cancels an in-flight turn without a done/stopped
@@ -130,82 +133,75 @@ func (h *Hub) route(ctx context.Context, c *Client, in protocol.Inbound) {
 		}
 
 	case "close_session":
-		if s, ok := h.registry.Get(in.SessionID); ok {
+		if s, ok := h.registry.Get(cmd.SessionID); ok {
 			go func() { _ = h.exec.Close(context.Background(), s) }()
-			h.registry.Delete(in.SessionID) // also stops the session's turn worker
-			h.Emit(protocol.NewSessionClosed(in.SessionID))
+			h.registry.Delete(cmd.SessionID) // also stops the session's turn worker
+			h.Emit(h.client.SessionClosed(cmd.SessionID))
 			go h.registry.Persist()
 		}
 
 	case "request_history":
-		s, ok := h.registry.Get(in.SessionID)
+		s, ok := h.registry.Get(cmd.SessionID)
 		if !ok {
-			c.enqueueEvent(protocol.HistorySnapshot{
-				Type: "history_snapshot", SessionID: in.SessionID,
-				Messages: []map[string]any{}, SourceCount: 0,
-				HasMoreBefore: false, KnownIDFound: true,
-			})
+			c.enqueueEvent(h.client.HistorySnapshot(cmd.SessionID, []map[string]any{}, 0, false, true, ""))
 			return
 		}
-		go h.sendHistory(c, s, in)
+		go h.sendHistory(c, s, cmd)
 
 	case "get_resumable_sessions":
 		go h.sendResumable(c, 100)
 
 	case "rename_session":
-		if s, ok := h.registry.Get(in.SessionID); ok {
-			s.SetName(in.Name)
-			h.Emit(protocol.NewSessionRenamed(s.ID, in.Name))
+		if s, ok := h.registry.Get(cmd.SessionID); ok {
+			s.SetName(cmd.Name)
+			h.Emit(h.client.SessionRenamed(s.ID, cmd.Name))
 			go h.registry.Persist()
 		}
 
 	case "set_session_meta":
-		if s, ok := h.registry.Get(in.SessionID); ok {
-			s.SetMeta(in.Pinned, in.Hidden)
-			h.Emit(protocol.SessionMetaUpdated{
-				Type: "session_meta_updated", SessionID: in.SessionID,
-				Pinned: in.Pinned, Hidden: in.Hidden,
-			})
+		if s, ok := h.registry.Get(cmd.SessionID); ok {
+			s.SetMeta(cmd.Pinned, cmd.Hidden)
+			h.Emit(h.client.SessionMetaUpdated(cmd.SessionID, cmd.Pinned, cmd.Hidden))
 			go h.registry.Persist()
 		}
 
 	case "set_effort":
 		// Stored on the session; applied as --effort on the next claude spawn.
-		if s, ok := h.registry.Get(in.SessionID); ok {
-			s.SetEffort(in.Effort)
+		if s, ok := h.registry.Get(cmd.SessionID); ok {
+			s.SetEffort(cmd.Effort)
 			go h.registry.Persist()
 		}
 
 	case "switch_session_config":
-		if s, ok := h.registry.Get(in.SessionID); ok {
-			s.ApplyConfig(in.Backend, in.Model, in.Sandbox)
+		if s, ok := h.registry.Get(cmd.SessionID); ok {
+			s.ApplyConfig(cmd.Backend, cmd.Model, cmd.Sandbox)
 			go h.registry.Persist()
 		}
 
 	case "fork_session":
-		go h.handleFork(c, in)
+		go h.handleFork(c, cmd)
 
 	case "get_agent_tree":
-		go h.handleAgentTree(c, in.SessionID)
+		go h.handleAgentTree(c, cmd.SessionID)
 
 	// --- Runtime ops: usage / shell / tasks / processes / browse ----------
 
 	case "get_usage":
-		go h.sendUsage(c, in.SessionID)
+		go h.sendUsage(c, cmd.SessionID)
 
 	case "shell_create":
-		shellID, errMsg := h.shells.Create(in.Cwd)
+		shellID, errMsg := h.shells.Create(cmd.Cwd)
 		if errMsg != "" {
-			c.enqueueEvent(protocol.NewError("", "", errMsg))
+			c.enqueueEvent(h.client.Error("", "", errMsg))
 			return
 		}
-		c.enqueueEvent(protocol.NewShellCreated(shellID))
+		c.enqueueEvent(h.client.ShellCreated(shellID))
 
 	case "shell_input":
 		// Gate behind permission approval. Run in a goroutine so the read loop
 		// keeps reading — the permission_response arrives on this same loop and
 		// would deadlock if we blocked here (see permission.go).
-		shellID, data, dev := in.ShellID, in.Data, c.deviceID
+		shellID, data, dev := cmd.ShellID, cmd.Data, c.deviceID
 		go func() {
 			if !h.perms.Request(dev, "shell_input", "Allow shell command?",
 				"Execute command in bridge shell session", truncate(data, 300), "high", "") {
@@ -215,40 +211,40 @@ func (h *Hub) route(ctx context.Context, c *Client, in protocol.Inbound) {
 		}()
 
 	case "shell_close":
-		h.shells.Close(in.ShellID)
+		h.shells.Close(cmd.ShellID)
 
 	case "get_tasks":
-		c.enqueueEvent(protocol.NewTasksList(h.collectTasks()))
+		c.enqueueEvent(h.client.TasksList(h.collectTasks()))
 
 	case "kill_task":
-		c.enqueueEvent(protocol.NewTaskKilled(in.ID, h.killTask(in.ID)))
+		c.enqueueEvent(h.client.TaskKilled(cmd.ID, h.killTask(cmd.ID)))
 
 	case "get_processes":
-		go func() { c.enqueueEvent(protocol.NewProcessesList(runtime.CollectProcesses(200))) }()
+		go func() { c.enqueueEvent(h.client.ProcessesList(runtime.CollectProcesses(200))) }()
 
 	case "kill_process":
-		pid, force, dev := in.PID, in.Force, c.deviceID
+		pid, force, dev := cmd.PID, cmd.Force, c.deviceID
 		go func() {
 			if !h.perms.Request(dev, "kill_process", "Allow process kill?",
 				"Terminate a local OS process", fmt.Sprintf("pid=%d force=%v", pid, force), "high", "") {
-				c.enqueueEvent(protocol.NewProcessKilled(pid, false, "permission_denied"))
+				c.enqueueEvent(h.client.ProcessKilled(pid, false, "permission_denied"))
 				return
 			}
 			ok, msg := runtime.KillProcess(pid, force)
-			c.enqueueEvent(protocol.NewProcessKilled(pid, ok, msg))
+			c.enqueueEvent(h.client.ProcessKilled(pid, ok, msg))
 		}()
 
 	case "browse_dir":
-		go h.sendDirListing(c, in)
+		go h.sendDirListing(c, cmd)
 
 	case "open_file":
-		go h.sendFileOpened(c, in)
+		go h.sendFileOpened(c, cmd)
 
 	case "request_status":
-		c.enqueueEvent(h.statusResult(in.SessionID))
+		c.enqueueEvent(h.statusResult(cmd.SessionID))
 
 	case "get_git_diff":
-		s, ok := h.registry.Get(in.SessionID)
+		s, ok := h.registry.Get(cmd.SessionID)
 		cwd := ""
 		if ok {
 			// Expand "~" defensively: new sessions store a resolved cwd, but
@@ -258,16 +254,16 @@ func (h *Hub) route(ctx context.Context, c *Client, in protocol.Inbound) {
 		}
 		go func() {
 			r := runtime.GitDiff(cwd)
-			c.enqueueEvent(protocol.NewGitDiffResult(in.SessionID, r.Diff, r.Error, r.Initialized))
+			c.enqueueEvent(h.client.GitDiffResult(cmd.SessionID, r.Diff, r.Error, r.Initialized))
 		}()
 
 	case "fcm_token":
 		if h.fcm != nil {
-			h.fcm.SetToken(in.Token)
+			h.fcm.SetToken(cmd.Token)
 		}
 
 	case "permission_response":
-		h.perms.Resolve(in.RequestID, in.Decision, c.deviceID)
+		h.perms.Resolve(cmd.RequestID, cmd.Decision, c.deviceID)
 
 	// --- WebRTC P2P signaling --------------------------------------------
 	// Bridge is the answerer: webrtc_offer → webrtc_answer (+ baked ICE),
@@ -276,10 +272,10 @@ func (h *Hub) route(ctx context.Context, c *Client, in protocol.Inbound) {
 	// never sent by the app and is ignored if received.
 
 	case "webrtc_offer":
-		h.handleWebRTCOffer(ctx, c, in)
+		h.handleWebRTCOffer(ctx, c, cmd.WebRTCOffer())
 
 	case "webrtc_ice":
-		h.handleWebRTCICE(c, in)
+		h.handleWebRTCICE(c, cmd.WebRTCICE())
 
 	case "webrtc_answer":
 		// Bridge is always the answerer; clients should not send answers back.
@@ -291,95 +287,95 @@ func (h *Hub) route(ctx context.Context, c *Client, in protocol.Inbound) {
 	// implemented; the app polls all of these on connect.
 
 	case "list_instances":
-		c.enqueueEvent(protocol.NewInstancesList())
+		c.enqueueEvent(h.client.InstancesList())
 
 	case "push_file":
-		go h.handlePushFile(c, in.Path)
+		go h.handlePushFile(c, cmd.Path)
 
 	case "file_push_ack":
-		h.handleFilePushAck(in.FileID, c.deviceID)
+		h.handleFilePushAck(cmd.FileID, c.deviceID)
 
 	case "get_inbox":
-		c.enqueueEvent(protocol.NewInboxListItems(h.inboxItems(c.deviceID)))
+		c.enqueueEvent(h.client.InboxListItems(h.inboxItems(c.deviceID)))
 
 	case "feed_list_request":
 		if h.feed == nil {
-			c.enqueueEvent(protocol.NewFeedList(nil))
+			c.enqueueEvent(h.client.FeedList(nil))
 			return
 		}
-		c.enqueueEvent(protocol.NewFeedList(h.feed.List()))
+		c.enqueueEvent(h.client.FeedList(h.feed.List()))
 
 	case "feed_push":
 		if h.feed == nil {
 			return
 		}
-		id, deduped, err := h.feed.Push(in.Title, in.HTML, in.Source, in.URL, in.ClientDedupKey, in.ContentType)
+		id, deduped, err := h.feed.Push(cmd.Title, cmd.HTML, cmd.Source, cmd.URL, cmd.ClientDedupKey, cmd.ContentType)
 		if err != nil {
-			c.enqueueEvent(protocol.NewError("", "", err.Error()))
+			c.enqueueEvent(h.client.Error("", "", err.Error()))
 			return
 		}
-		c.enqueueEvent(protocol.NewFeedAck(id))
+		c.enqueueEvent(h.client.FeedAck(id))
 		if deduped {
 			return // already pushed; no new broadcast / push
 		}
 		// Broadcast the new item to all clients, and push FCM.
 		for _, m := range h.feed.List() {
 			if m.FeedID == id {
-				h.Emit(protocol.NewFeedNew(m))
+				h.Emit(h.client.FeedNew(m))
 				break
 			}
 		}
 		if h.fcm != nil {
-			go h.fcm.NotifyFeedNew(id, in.Title)
+			go h.fcm.NotifyFeedNew(id, cmd.Title)
 		}
 
 	case "feed_fetch":
 		if h.feed == nil {
 			return
 		}
-		if html, ct, ok := h.feed.Fetch(in.FeedID); ok {
-			c.enqueueEvent(protocol.NewFeedDetail(in.FeedID, html, ct))
+		if html, ct, ok := h.feed.Fetch(cmd.FeedID); ok {
+			c.enqueueEvent(h.client.FeedDetail(cmd.FeedID, html, ct))
 		} else {
-			c.enqueueEvent(protocol.NewError("", "", "Feed item not found: "+in.FeedID))
+			c.enqueueEvent(h.client.Error("", "", "Feed item not found: "+cmd.FeedID))
 		}
 
 	case "feed_mark_read":
 		if h.feed == nil {
 			return
 		}
-		if m, ok := h.feed.MarkRead(in.FeedID); ok {
-			h.Emit(protocol.NewFeedUpdated(m.FeedID, m.Read, m.Deleted))
+		if m, ok := h.feed.MarkRead(cmd.FeedID); ok {
+			h.Emit(h.client.FeedUpdated(m.FeedID, m.Read, m.Deleted))
 		}
 
 	case "feed_delete":
 		if h.feed == nil {
 			return
 		}
-		if m, ok := h.feed.Delete(in.FeedID); ok {
-			h.Emit(protocol.NewFeedUpdated(m.FeedID, m.Read, m.Deleted))
+		if m, ok := h.feed.Delete(cmd.FeedID); ok {
+			h.Emit(h.client.FeedUpdated(m.FeedID, m.Read, m.Deleted))
 		}
 
 	// --- Interactions: AskUserQuestion ------------------------------------
 
 	case "user_input_response":
-		cancelled := in.Cancelled != nil && *in.Cancelled
+		cancelled := cmd.Cancelled != nil && *cmd.Cancelled
 		if ir, ok := h.exec.(interactionResponder); ok {
-			if !ir.RespondUserInput(in.RequestID, in.Answers, cancelled) {
-				log.Printf("client %s: user_input_response for unknown request %q", c.clientID, in.RequestID)
+			if !ir.RespondUserInput(cmd.RequestID, cmd.Answers, cancelled) {
+				log.Printf("client %s: user_input_response for unknown request %q", c.clientID, cmd.RequestID)
 			}
 		}
 
 	case "pending_interactions_list":
-		var items []protocol.UserInputRequestPayload
+		var items []backend.UserInputPayload
 		if ir, ok := h.exec.(interactionResponder); ok {
-			items = ir.PendingInteractions(in.SessionID)
+			items = ir.PendingInteractions(cmd.SessionID)
 		}
-		c.enqueueEvent(protocol.NewPendingInteractionsList(items))
+		c.enqueueEvent(h.client.PendingInteractionsList(items))
 
 	// --- Search (FTS5) ----------------------------------------------------
 
 	case "request_search":
-		go h.sendSearch(c, in)
+		go h.sendSearch(c, cmd)
 
 	case "request_search_health":
 		go func() {
@@ -394,7 +390,7 @@ func (h *Hub) route(ctx context.Context, c *Client, in protocol.Inbound) {
 			if h.search == nil {
 				return
 			}
-			c.enqueueEvent(h.search.ListSessions(in.Cursor, clampLimit(in.Limit, 30), in.ProjectDir, in.IncludeHidden))
+			c.enqueueEvent(h.search.ListSessions(cmd.Cursor, clampLimit(cmd.Limit, 30), cmd.ProjectDir, cmd.IncludeHidden))
 		}()
 
 	case "request_search_context":
@@ -402,20 +398,20 @@ func (h *Hub) route(ctx context.Context, c *Client, in protocol.Inbound) {
 			if h.search == nil {
 				return
 			}
-			c.enqueueEvent(h.search.GetContext(in.SessionID, in.MsgUUID, in.Around))
+			c.enqueueEvent(h.search.GetContext(cmd.SessionID, cmd.MsgUUID, cmd.Around))
 		}()
 
 	default:
 		// Not yet implemented in the Go core (history/search/fork/etc.).
-		log.Printf("client %s: unhandled type %q", c.clientID, in.Type)
+		log.Printf("client %s: unhandled type %q", c.clientID, cmd.Kind)
 	}
 }
 
 // historyRouter is the subset of the executor that can serve history. The Mux
 // implements it; if the wired executor doesn't, history is simply unavailable.
 type historyRouter interface {
-	ProviderFor(s *session.Session) (history.Provider, bool)
-	AllProviders() []history.Provider
+	ProviderFor(s *session.Session) (backend.HistoryProvider, bool)
+	AllProviders() []backend.HistoryProvider
 }
 
 // interactionResponder is the subset of the executor that can answer/list paused
@@ -423,10 +419,10 @@ type historyRouter interface {
 // backend); if unavailable, the commands are no-ops / empty.
 type interactionResponder interface {
 	RespondUserInput(id string, answers map[string]any, cancelled bool) bool
-	PendingInteractions(sessionID string) []protocol.UserInputRequestPayload
+	PendingInteractions(sessionID string) []backend.UserInputPayload
 }
 
-func (h *Hub) sendHistory(c *Client, s *session.Session, in protocol.Inbound) {
+func (h *Hub) sendHistory(c *Client, s *session.Session, cmd clientproto.Command) {
 	if !c.live() {
 		return
 	}
@@ -438,16 +434,15 @@ func (h *Hub) sendHistory(c *Client, s *session.Session, in protocol.Inbound) {
 	resumeID := s.ResumeID()
 	if !ok || resumeID == "" {
 		// No history backend or no resume id yet → empty snapshot.
-		c.enqueueEvent(protocol.HistorySnapshot{Type: "history_snapshot", SessionID: s.ID,
-			Messages: []map[string]any{}, KnownIDFound: in.KnownLast == ""})
+		c.enqueueEvent(h.client.HistorySnapshot(s.ID, []map[string]any{}, 0, false, cmd.KnownLast == "", ""))
 		return
 	}
 	// Coalesce + cache identical history requests so a reconnect burst triggers
 	// LoadHistory (JSONL parse) at most once per key within the TTL (#4/#5).
-	key := c.deviceID + "|" + s.ID + "|" + resumeID + "|" + in.Mode + "|" + in.Before + "|" + in.KnownLast + "|" + itoa(in.Limit)
+	key := c.deviceID + "|" + s.ID + "|" + resumeID + "|" + cmd.Mode + "|" + cmd.Before + "|" + cmd.KnownLast + "|" + itoa(cmd.Limit)
 	v := h.coalesce(&h.storm.histSF, h.storm.histCache, key, historyCacheTTL, func() any {
 		res, err := provider.LoadHistory(resumeID, history.Opts{
-			Limit: in.Limit, KnownLast: in.KnownLast, Mode: in.Mode, Before: in.Before,
+			Limit: cmd.Limit, KnownLast: cmd.KnownLast, Mode: cmd.Mode, Before: cmd.Before,
 		})
 		if err != nil {
 			return nil
@@ -466,17 +461,10 @@ func (h *Hub) sendHistory(c *Client, s *session.Session, in protocol.Inbound) {
 		msgs = []map[string]any{}
 	}
 	if res.Kind == "delta" {
-		c.enqueueEvent(protocol.HistoryDelta{
-			Type: "history_delta", SessionID: s.ID, AfterSourceMessageID: in.KnownLast,
-			Messages: msgs, SourceCount: res.SourceCount,
-		})
+		c.enqueueEvent(h.client.HistoryDelta(s.ID, cmd.KnownLast, msgs, res.SourceCount))
 		return
 	}
-	c.enqueueEvent(protocol.HistorySnapshot{
-		Type: "history_snapshot", SessionID: s.ID, Messages: msgs,
-		SourceCount: res.SourceCount, HasMoreBefore: res.HasMoreBefore,
-		KnownIDFound: res.KnownIDFound, SnapshotReason: res.SnapshotReason,
-	})
+	c.enqueueEvent(h.client.HistorySnapshot(s.ID, msgs, res.SourceCount, res.HasMoreBefore, res.KnownIDFound, res.SnapshotReason))
 }
 
 func (h *Hub) sendResumable(c *Client, limit int) {
@@ -484,7 +472,7 @@ func (h *Hub) sendResumable(c *Client, limit int) {
 		return
 	}
 	if _, ok := h.exec.(historyRouter); !ok {
-		c.enqueueEvent(protocol.NewResumableSessions([]history.ResumableSession{}))
+		c.enqueueEvent(h.client.ResumableSessions([]history.ResumableSession{}))
 		return
 	}
 	// One provider scan per (limit) within the TTL, shared across reconnect
@@ -493,19 +481,53 @@ func (h *Hub) sendResumable(c *Client, limit int) {
 	if !c.live() {
 		return
 	}
-	c.enqueueEvent(protocol.NewResumableSessions(all))
+	c.enqueueEvent(h.client.ResumableSessions(all))
 }
 
 func (h *Hub) sessionSummaries() []protocol.SessionSummary {
 	sessions := h.registry.List()
 	out := make([]protocol.SessionSummary, 0, len(sessions))
+
+	// Batch-fetch recent messages + real last-activity for preview, keyed by hub
+	// session ID. Search DB uses "claude:{resumeID}" or "codex:rollout-{ts}-{uid}"
+	// as keys; RecentMessagesByUID handles the mapping transparently.
+	var previewByHubID map[string]*search.SessionPreview
+	if h.search != nil {
+		var uids []search.SessionUID
+		for _, s := range sessions {
+			snap := s.Snapshot()
+			if snap.ResumeID != "" && snap.Backend != "" {
+				uids = append(uids, search.SessionUID{
+					HubID: snap.ID, Backend: snap.Backend, UID: snap.ResumeID,
+				})
+			}
+		}
+		if len(uids) > 0 {
+			previewByHubID = h.search.RecentMessagesByUID(uids, 3)
+		}
+	}
+
 	for _, s := range sessions {
 		snap := s.Snapshot()
+		var recent []protocol.RecentMessage
+		// last_activity must reflect real activity. The session store's last_used
+		// can be flattened/stale; the search index's newest message ts is the
+		// source of truth, so prefer it when available.
+		lastActivity := snap.LastActivity
+		if pv := previewByHubID[snap.ID]; pv != nil {
+			for _, m := range pv.Recent {
+				recent = append(recent, protocol.RecentMessage{Role: m.Role, Text: m.Text})
+			}
+			if pv.LastTS > 0 {
+				lastActivity = float64(pv.LastTS)
+			}
+		}
 		out = append(out, protocol.SessionSummary{
 			ID: snap.ID, Name: snap.Name, IsStreaming: snap.Streaming,
-			CreatedAt: snap.CreatedAt, LastActivity: snap.LastActivity,
+			CreatedAt: snap.CreatedAt, LastActivity: lastActivity,
 			Cwd: snap.Cwd, Model: snap.Model, Backend: snap.Backend,
 			Sandbox: snap.Sandbox, Pinned: snap.Pinned, Hidden: snap.Hidden,
+			RecentMessages: recent,
 		})
 	}
 	return out

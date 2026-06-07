@@ -13,8 +13,8 @@ import (
 	"sync"
 	"time"
 
+	"everything-go/internal/backend"
 	"everything-go/internal/executor"
-	"everything-go/internal/protocol"
 	"everything-go/internal/session"
 )
 
@@ -41,7 +41,7 @@ func NewOllama(sink executor.Sink, host, model string) *Ollama {
 		host = "http://localhost:11434"
 	}
 	if model == "" {
-		model = "llama3.2"
+		model = "qwen2.5:7b"
 	}
 	return &Ollama{
 		sink: sink, host: host, defaultModel: model,
@@ -50,7 +50,7 @@ func NewOllama(sink executor.Sink, host, model string) *Ollama {
 	}
 }
 
-func (o *Ollama) Send(ctx context.Context, s *session.Session, reqID, content string, _ []protocol.InboundImage, _ []protocol.InboundFile) error {
+func (o *Ollama) Send(ctx context.Context, s *session.Session, reqID, content string, _ []backend.ImageAttachment, _ []backend.FileAttachment) error {
 	// Ollama backend is text-only for now; image/file attachments are ignored.
 	o.mu.Lock()
 	hist := append(o.histories[s.ID], ollamaMsg{Role: "user", Content: content})
@@ -117,7 +117,7 @@ func (o *Ollama) runTurn(ctx context.Context, s *session.Session, reqID string, 
 		}
 		if d.Message.Content != "" {
 			full += d.Message.Content
-			o.sink.Emit(protocol.NewTextChunk(s.ID, reqID, d.Message.Content))
+			o.sink.Emit(backend.NewTextChunk(s.ID, reqID, d.Message.Content))
 		}
 		if d.Done {
 			break
@@ -132,17 +132,11 @@ func (o *Ollama) runTurn(ctx context.Context, s *session.Session, reqID string, 
 	o.histories[s.ID] = capHistory(append(o.histories[s.ID], ollamaMsg{Role: "assistant", Content: full}))
 	o.mu.Unlock()
 
-	o.sink.Emit(protocol.NewDone(s.ID, reqID))
+	o.sink.Emit(backend.NewDone(s.ID, reqID))
 }
 
 func (o *Ollama) fail(s *session.Session, reqID string, err error) {
-	o.sink.Emit(protocol.Error{
-		Type:      "error",
-		SessionID: s.ID,
-		RequestID: reqID,
-		Code:      "ollama_error",
-		Message:   "Ollama error: " + err.Error(),
-	})
+	o.sink.Emit(backend.NewError(s.ID, reqID, backend.ErrOllama, "Ollama error: "+err.Error()))
 }
 
 func (o *Ollama) Stop(ctx context.Context, s *session.Session) error {
@@ -151,7 +145,7 @@ func (o *Ollama) Stop(ctx context.Context, s *session.Session) error {
 		cancel()
 	}
 	o.mu.Unlock()
-	o.sink.Emit(protocol.NewStopped(s.ID, ""))
+	o.sink.Emit(backend.NewStopped(s.ID, ""))
 	return nil
 }
 
@@ -159,7 +153,7 @@ func (o *Ollama) Clear(ctx context.Context, s *session.Session) error {
 	o.mu.Lock()
 	o.histories[s.ID] = nil
 	o.mu.Unlock()
-	o.sink.Emit(protocol.NewSessionWarning(s.ID, "History cleared."))
+	o.sink.Emit(backend.NewSessionWarning(s.ID, "History cleared."))
 	return nil
 }
 

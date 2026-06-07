@@ -3,8 +3,7 @@ package executor
 import (
 	"context"
 
-	"everything-go/internal/history"
-	"everything-go/internal/protocol"
+	"everything-go/internal/backend"
 	"everything-go/internal/session"
 )
 
@@ -33,7 +32,7 @@ func (m *Mux) pick(s *session.Session) Executor {
 	return m.def
 }
 
-func (m *Mux) Send(ctx context.Context, s *session.Session, reqID, content string, images []protocol.InboundImage, files []protocol.InboundFile) error {
+func (m *Mux) Send(ctx context.Context, s *session.Session, reqID, content string, images []backend.ImageAttachment, files []backend.FileAttachment) error {
 	e := m.pick(s)
 	if m.terminal == nil {
 		return e.Send(ctx, s, reqID, content, images, files)
@@ -44,23 +43,23 @@ func (m *Mux) Stop(ctx context.Context, s *session.Session) error  { return m.pi
 func (m *Mux) Clear(ctx context.Context, s *session.Session) error { return m.pick(s).Clear(ctx, s) }
 func (m *Mux) Close(ctx context.Context, s *session.Session) error { return m.pick(s).Close(ctx, s) }
 
-// ProviderFor returns the history.Provider backing this session's backend, if any.
-func (m *Mux) ProviderFor(s *session.Session) (history.Provider, bool) {
-	hp, ok := m.pick(s).(history.Provider)
+// ProviderFor returns the history provider backing this session's backend, if any.
+func (m *Mux) ProviderFor(s *session.Session) (backend.HistoryProvider, bool) {
+	hp, ok := m.pick(s).(backend.HistoryProvider)
 	return hp, ok
 }
 
 // AllProviders returns the distinct history providers across all backends,
 // for aggregating resumable sessions.
-func (m *Mux) AllProviders() []history.Provider {
+func (m *Mux) AllProviders() []backend.HistoryProvider {
 	seen := map[Executor]bool{}
-	var out []history.Provider
+	var out []backend.HistoryProvider
 	for _, e := range m.byBackend {
 		if seen[e] {
 			continue
 		}
 		seen[e] = true
-		if hp, ok := e.(history.Provider); ok {
+		if hp, ok := e.(backend.HistoryProvider); ok {
 			out = append(out, hp)
 		}
 	}
@@ -124,9 +123,9 @@ func (m *Mux) RespondUserInput(id string, answers map[string]any, cancelled bool
 }
 
 // PendingInteractions aggregates open interactions across all backends.
-func (m *Mux) PendingInteractions(sessionID string) []protocol.UserInputRequestPayload {
+func (m *Mux) PendingInteractions(sessionID string) []backend.UserInputPayload {
 	seen := map[Executor]bool{}
-	out := []protocol.UserInputRequestPayload{}
+	out := []backend.UserInputPayload{}
 	for _, e := range m.byBackend {
 		if seen[e] {
 			continue

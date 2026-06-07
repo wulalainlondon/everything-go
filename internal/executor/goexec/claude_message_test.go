@@ -2,17 +2,19 @@ package goexec
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
-	"everything-go/internal/protocol"
+	"everything-go/internal/backend"
+	"everything-go/internal/session"
 )
 
 // TestUserMessageJSONAttachments pins the stream-json content-block order/shape
 // (images → files → text) matching claude_cli.py.
 func TestUserMessageJSONAttachments(t *testing.T) {
 	raw := userMessageJSON("hello",
-		[]protocol.InboundImage{{Data: "AAAA", MediaType: "image/png"}},
-		[]protocol.InboundFile{
+		[]backend.ImageAttachment{{Data: "AAAA", MediaType: "image/png"}},
+		[]backend.FileAttachment{
 			{Name: "a.go", Content: "package x", MediaType: "text/plain"},
 			{Name: "doc.pdf", Content: "JVBER", MediaType: "application/pdf"},
 		},
@@ -66,5 +68,140 @@ func TestUserMessageJSONTextOnly(t *testing.T) {
 	_ = json.Unmarshal(raw, &f)
 	if len(f.Message.Content) != 1 || f.Message.Content[0]["text"] != "hi" {
 		t.Fatalf("text-only wrong: %v", f.Message.Content)
+	}
+}
+
+func TestClaudeSpawnArgsSandboxAndPlanParity(t *testing.T) {
+	base := session.Snapshot{Model: "claude-sonnet-4", Sandbox: "read-only", ResumeID: "uuid", Effort: "high"}
+	args := claudeSpawnArgs(base, "")
+	joined := strings.Join(args, " ")
+	for _, want := range []string{
+		"--allowedTools", "Read,Glob,Grep,WebSearch,WebFetch",
+		"--model claude-sonnet-4", "--resume uuid", "--effort high",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("read-only args missing %q: %v", want, args)
+		}
+	}
+
+	ws := session.Snapshot{Model: "claude-sonnet-4", Sandbox: "workspace-write"}
+	args = claudeSpawnArgs(ws, "")
+	joined = strings.Join(args, " ")
+	if !strings.Contains(joined, "--disallowedTools Bash") {
+		t.Fatalf("workspace-write should disallow Bash: %v", args)
+	}
+
+	plan := session.Snapshot{Model: "opusplan", Sandbox: "danger-full-access"}
+	args = claudeSpawnArgs(plan, "")
+	joined = strings.Join(args, " ")
+	if !strings.Contains(joined, "--model opus --permission-mode plan") || strings.Contains(joined, "--dangerously-skip-permissions") {
+		t.Fatalf("opusplan args wrong: %v", args)
+	}
+}
+
+func TestClaudeReadStdoutCapturesSystemInitSessionID(t *testing.T) {
+	sink := &capSink{}
+	c := NewClaude(sink, "claude")
+	reg := session.NewRegistry()
+	s := reg.Create("s1", "claude", "/tmp", "claude", "", "", "")
+	p := &proc{reqID: "r1", tools: newToolNormalizer(sink, c)}
+
+	c.readStdout(s, p, strings.NewReader(`{"type":"system","subtype":"init","session_id":"uuid-1"}`+"\n"))
+
+	if got := s.ResumeID(); got != "uuid-1" {
+		t.Fatalf("resume id not captured from system/init: %q", got)
+	}
+	if sink.count(func(e any) bool {
+		ev, ok := e.(backend.SessionUUID)
+		return ok && ev.ClaudeUUID == "uuid-1"
+	}) != 1 {
+		t.Fatalf("session_uuid event not emitted: %+v", sink.events)
+	}
+}
+
+func TestClaudeReadStdoutResultErrorDoesNotEmitDone(t *testing.T) {
+	sink := &capSink{}
+	c := NewClaude(sink, "claude")
+	reg := session.NewRegistry()
+	s := reg.Create("s1", "claude", "/tmp", "claude", "", "", "")
+	p := &proc{reqID: "r1", tools: newToolNormalizer(sink, c)}
+
+	c.readStdout(s, p, strings.NewReader(`{"type":"result","subtype":"error","result":"boom"}`+"\n"))
+
+	if sink.count(func(e any) bool {
+		_, ok := e.(backend.Done)
+		return ok
+	}) != 0 {
+		t.Fatalf("error result must not emit done: %+v", sink.events)
+	}
+	if sink.count(func(e any) bool {
+		ev, ok := e.(backend.Error)
+		return ok && ev.Code == backend.ErrTurn && strings.Contains(ev.Message, "boom")
+	}) != 1 {
+		t.Fatalf("turn error not emitted: %+v", sink.events)
+	}
+}
+
+func TestClaudeCompactResultEmitsSessionCommandDone(t *testing.T) {
+	sink := &capSink{}
+	c := NewClaude(sink, "claude")
+	reg := session.NewRegistry()
+	s := reg.Create("s1", "claude", "/tmp", "claude", "", "", "")
+	p := &proc{model: "claude-sonnet-4", tools: newToolNormalizer(sink, c)}
+	p.beginTurn("compact_s1", true)
+
+	c.readStdout(s, p, strings.NewReader(`{"type":"result","subtype":"success"}`+"\n"))
+
+	if sink.count(func(e any) bool {
+		ev, ok := e.(backend.SessionCommandDone)
+		return ok && ev.RequestID == "compact_s1"
+	}) != 1 {
+		t.Fatalf("compact done command event missing: %+v", sink.events)
+	}
+}
+
+func TestClaudeCompactResultErrorEmitsSessionCommandFailed(t *testing.T) {
+	sink := &capSink{}
+	c := NewClaude(sink, "claude")
+	reg := session.NewRegistry()
+	s := reg.Create("s1", "claude", "/tmp", "claude", "", "", "")
+	p := &proc{model: "claude-sonnet-4", tools: newToolNormalizer(sink, c)}
+	p.beginTurn("compact_s1", true)
+
+	c.readStdout(s, p, strings.NewReader(`{"type":"result","subtype":"error","result":"compact boom"}`+"\n"))
+
+	if sink.count(func(e any) bool {
+		ev, ok := e.(backend.SessionCommandFailed)
+		return ok && ev.RequestID == "compact_s1" && strings.Contains(ev.Message, "compact boom")
+	}) != 1 {
+		t.Fatalf("compact failed command event missing: %+v", sink.events)
+	}
+}
+
+func TestClaudeReadStdoutRecordsContextUsage(t *testing.T) {
+	sink := &capSink{}
+	c := NewClaude(sink, "claude")
+	reg := session.NewRegistry()
+	s := reg.Create("s1", "claude", "/tmp", "claude", "", "", "")
+	p := &proc{reqID: "r1", model: "claude-sonnet-4", tools: newToolNormalizer(sink, c)}
+
+	c.readStdout(s, p, strings.NewReader(`{"type":"result","subtype":"success","usage":{"input_tokens":1200,"cache_creation_input_tokens":300}}`+"\n"))
+
+	snap := s.Snapshot()
+	if snap.ContextUsed != 1500 || snap.ContextMax != 200000 {
+		t.Fatalf("context usage not recorded: %+v", snap)
+	}
+}
+
+func TestClaudeAutoCompactThreshold(t *testing.T) {
+	c := NewClaude(&capSink{}, "claude")
+	if !c.shouldAutoCompact(160000, 200000) {
+		t.Fatal("expected auto compact at 80 percent")
+	}
+	if c.shouldAutoCompact(159999, 200000) {
+		t.Fatal("must not compact below threshold")
+	}
+	if got := claudeContextLimit("claude-sonnet-4-1000000"); got != 1_000_000 {
+		t.Fatalf("1m context limit = %d", got)
 	}
 }

@@ -3,6 +3,7 @@ package goexec
 import (
 	"testing"
 
+	"everything-go/internal/backend"
 	"everything-go/internal/protocol"
 )
 
@@ -50,5 +51,31 @@ func TestToolEmitterResultEndOrder(t *testing.T) {
 	}
 	if _, ok := sink.events[1].(protocol.ToolEnd); !ok {
 		t.Fatalf("second event should be ToolEnd, got %T", sink.events[1])
+	}
+}
+
+func TestToolEmitterDeltaAccumulatorIsBounded(t *testing.T) {
+	sink := &capSink{}
+	em := newToolEmitter(sink)
+	chunk := make([]byte, backend.MaxToolResultOutputBytes)
+	for i := range chunk {
+		chunk[i] = 'x'
+	}
+
+	em.Delta("s1", "r1", "toolA", string(chunk))
+	em.Delta("s1", "r1", "toolA", string(chunk))
+	em.Delta("s1", "r1", "toolA", "tail-that-should-not-grow-buffer")
+
+	var last protocol.ToolResult
+	for _, e := range sink.events {
+		if tr, ok := e.(protocol.ToolResult); ok {
+			last = tr
+		}
+	}
+	if len(last.Output) > backend.MaxToolResultOutputBytes {
+		t.Fatalf("tool output length = %d, want <= %d", len(last.Output), backend.MaxToolResultOutputBytes)
+	}
+	if got := last.Output[len(last.Output)-len(backend.ToolResultTruncatedMark):]; got != backend.ToolResultTruncatedMark {
+		t.Fatalf("missing truncation marker: %q", got)
 	}
 }

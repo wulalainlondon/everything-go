@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"everything-go/internal/protocol"
+	"everything-go/internal/backend"
 )
 
 func postRPC(t *testing.T, url, body string) map[string]any {
@@ -94,7 +94,7 @@ func waitReqID(t *testing.T, sink *capSink) string {
 	for time.Now().Before(deadline) {
 		sink.mu.Lock()
 		for _, e := range sink.events {
-			if ev, ok := e.(protocol.UserInputRequestEvent); ok {
+			if ev, ok := e.(backend.UserInputRequest); ok {
 				sink.mu.Unlock()
 				return ev.RequestID
 			}

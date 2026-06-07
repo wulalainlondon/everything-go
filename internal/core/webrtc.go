@@ -12,7 +12,7 @@ import (
 
 	"github.com/pion/webrtc/v4"
 
-	"everything-go/internal/protocol"
+	"everything-go/internal/clientproto"
 )
 
 // WebRTC P2P upgrade. The legacy WebSocket (typically Cloudflare-tunneled) acts
@@ -53,15 +53,15 @@ func (h *Hub) SetICEServers(servers []webrtc.ICEServer) { h.iceServers = servers
 // subsequent webrtc_ice frame (read on the same loop) is applied. It blocks
 // until ICE gathering finishes (candidates baked into the answer) or the gather
 // timeout elapses, then emits webrtc_answer.
-func (h *Hub) handleWebRTCOffer(ctx context.Context, c *Client, in protocol.Inbound) {
+func (h *Hub) handleWebRTCOffer(ctx context.Context, c *Client, offer clientproto.WebRTCOfferInput) {
 	// Validate on a trimmed copy, but hand Pion the original SDP: the SDP grammar
 	// requires every line (including the last) to end in CRLF, so trimming the
 	// trailing newline would make the parser fail with EOF.
-	if strings.TrimSpace(in.SDP) == "" {
-		c.enqueueEvent(protocol.NewError("", "webrtc_offer_invalid", "missing sdp"))
+	if strings.TrimSpace(offer.SDP) == "" {
+		c.enqueueEvent(h.client.Error("", "webrtc_offer_invalid", "missing sdp"))
 		return
 	}
-	sdp := in.SDP
+	sdp := offer.SDP
 
 	// Re-offer on the same signaling channel: tear down the previous (un-promoted)
 	// PC before negotiating a fresh one.
@@ -73,7 +73,7 @@ func (h *Hub) handleWebRTCOffer(ctx context.Context, c *Client, in protocol.Inbo
 	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{ICEServers: h.iceServers})
 	if err != nil {
 		log.Printf("[webrtc] NewPeerConnection: %v", err)
-		c.enqueueEvent(protocol.NewError("", "webrtc_negotiation_failed", "could not create peer connection"))
+		c.enqueueEvent(h.client.Error("", "webrtc_negotiation_failed", "could not create peer connection"))
 		return
 	}
 	peer := &webrtcPeer{pc: pc}
@@ -97,7 +97,7 @@ func (h *Hub) handleWebRTCOffer(ctx context.Context, c *Client, in protocol.Inbo
 			go h.serveConn(context.Background(), dcc)
 			// Tell the signaling client the server side is ready (informational;
 			// the app's own dc.onopen drives its takeover).
-			c.enqueueEvent(protocol.NewWebRTCReady())
+			c.enqueueEvent(h.client.WebRTCReady())
 		})
 	})
 
@@ -132,31 +132,31 @@ func (h *Hub) handleWebRTCOffer(ctx context.Context, c *Client, in protocol.Inbo
 		h.failOffer(c, pc, "localDescription", errors.New("nil after gather"))
 		return
 	}
-	c.enqueueEvent(protocol.NewWebRTCAnswer(local.SDP))
+	c.enqueueEvent(h.client.WebRTCAnswer(local.SDP))
 }
 
 func (h *Hub) failOffer(c *Client, pc *webrtc.PeerConnection, stage string, err error) {
 	log.Printf("[webrtc] offer negotiation failed at %s: %v", stage, err)
 	_ = pc.Close()
-	c.enqueueEvent(protocol.NewError("", "webrtc_negotiation_failed", "could not produce SDP answer"))
+	c.enqueueEvent(h.client.Error("", "webrtc_negotiation_failed", "could not produce SDP answer"))
 }
 
 // handleWebRTCICE applies a client-trickled ICE candidate to the answering PC.
 // An empty candidate signals end-of-trickle (nothing to apply).
-func (h *Hub) handleWebRTCICE(c *Client, in protocol.Inbound) {
+func (h *Hub) handleWebRTCICE(c *Client, ice clientproto.WebRTCICEInput) {
 	if c.rtc == nil {
 		return
 	}
-	if strings.TrimSpace(in.Candidate) == "" {
+	if strings.TrimSpace(ice.Candidate) == "" {
 		return
 	}
-	init := webrtc.ICECandidateInit{Candidate: in.Candidate}
-	if in.SDPMid != "" {
-		mid := in.SDPMid
+	init := webrtc.ICECandidateInit{Candidate: ice.Candidate}
+	if ice.SDPMid != "" {
+		mid := ice.SDPMid
 		init.SDPMid = &mid
 	}
-	if in.SDPMLineIndex != nil {
-		idx := uint16(*in.SDPMLineIndex)
+	if ice.SDPMLineIndex != nil {
+		idx := uint16(*ice.SDPMLineIndex)
 		init.SDPMLineIndex = &idx
 	}
 	if err := c.rtc.pc.AddICECandidate(init); err != nil {

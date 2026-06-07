@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"everything-go/internal/backend"
 	"everything-go/internal/protocol"
 	"everything-go/internal/session"
 )
@@ -65,7 +66,7 @@ func (s *TerminalSink) Begin(sessionID, reqID string) turnKey {
 			case <-done:
 			case <-time.After(s.timeout):
 				if s.complete(k) {
-					s.delegate.Emit(protocol.NewError(sessionID, "turn_timeout", "executor turn timed out without a terminal event"))
+					s.delegate.Emit(backend.NewError(sessionID, "", backend.ErrTimeout, "executor turn timed out without a terminal event"))
 				}
 			}
 		}()
@@ -133,20 +134,20 @@ func (s *TerminalSink) observeTerminal(event any) {
 
 // sendReliable enforces the Executor adapter contract for one turn. It lives
 // below Mux.Send so optional capability detection still sees the raw backend.
-func sendReliable(ctx context.Context, inner Executor, sink *TerminalSink, s *session.Session, reqID, content string, images []protocol.InboundImage, files []protocol.InboundFile) (err error) {
+func sendReliable(ctx context.Context, inner Executor, sink *TerminalSink, s *session.Session, reqID, content string, images []backend.ImageAttachment, files []backend.FileAttachment) (err error) {
 	k := sink.Begin(s.ID, reqID)
 	defer func() {
 		if rec := recover(); rec != nil {
 			err = fmt.Errorf("executor panic: %v", rec)
 			log.Printf("[%s] %v", s.ID, err)
 			if !sink.Done(k) {
-				sink.Emit(protocol.NewError(s.ID, "executor_panic", err.Error()))
+				sink.Emit(backend.NewError(s.ID, reqID, backend.ErrPanic, err.Error()))
 			}
 		}
 	}()
 	err = inner.Send(ctx, s, reqID, content, images, files)
 	if err != nil && !sink.Done(k) {
-		sink.Emit(protocol.NewError(s.ID, "send_error", err.Error()))
+		sink.Emit(backend.NewError(s.ID, reqID, backend.ErrSend, err.Error()))
 	}
 	return err
 }

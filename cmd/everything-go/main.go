@@ -30,6 +30,7 @@ import (
 	"everything-go/internal/feed"
 	"everything-go/internal/governance"
 	"everything-go/internal/inbox"
+	"everything-go/internal/media"
 	"everything-go/internal/netsvc"
 	"everything-go/internal/search"
 	"everything-go/internal/session"
@@ -76,7 +77,7 @@ func main() {
 		LanIP:        detectLanIP(),
 		Backends:     backend.DefaultRegistry(*remoteWSURL != ""),
 	}
-	hub := core.NewHub(reg, cfg, pairing)
+	hub := core.NewHub(reg, cfg, pairing, *port)
 
 	switch *execName {
 	case "go":
@@ -162,6 +163,7 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
+	mux.Handle("/media/", media.Handler())
 	mux.HandleFunc("/", hub.ServeWS)
 
 	addr := fmt.Sprintf(":%d", *port)

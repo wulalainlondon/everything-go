@@ -72,15 +72,28 @@ func (c *Claude) LoadHistory(resumeID string, opts history.Opts) (*history.Resul
 	if path == "" {
 		return history.Slice(nil, opts), nil
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
+	fi, err := os.Stat(path)
+	if err != nil || fi.IsDir() {
 		return history.Slice(nil, opts), nil
 	}
-	fileMtimeMs := time.Now().UnixMilli()
-	if fi, err := os.Stat(path); err == nil {
-		fileMtimeMs = fi.ModTime().UnixMilli()
+	mtimeNS := fi.ModTime().UnixNano()
+	size := fi.Size()
+	key := history.FileKey{Path: path, MtimeNS: mtimeNS, Size: size}
+	cacheName := "claude:" + resumeID
+	if messages, ok := history.DefaultCache().Load(cacheName, key); ok {
+		return history.Slice(messages, opts), nil
 	}
 
+	messages := loadClaudeHistoryMessages(path, resumeID, fi.ModTime().UnixMilli())
+	history.DefaultCache().SaveAsync(cacheName, key, messages)
+	return history.Slice(messages, opts), nil
+}
+
+func loadClaudeHistoryMessages(path, resumeID string, fileMtimeMs int64) []map[string]any {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
 	type rec struct {
 		lineNo int
 		row    claudeRow
@@ -144,7 +157,7 @@ func (c *Claude) LoadHistory(resumeID string, opts history.Opts) (*history.Resul
 		))
 	}
 
-	return history.Slice(messages, opts), nil
+	return messages
 }
 
 func parseBlocks(content json.RawMessage) []claudeBlock {

@@ -1,6 +1,6 @@
-// Package executor defines the seam between the Go connection core and whatever
-// actually runs the AI workload. This is the architectural pivot that unlocks
-// the three test configurations:
+// Package executor implements backend-adapter helpers on top of the neutral
+// backend contract. This is the architectural pivot that unlocks the three test
+// configurations:
 //
 //	GoExecutor      → spawns the CLI + parses streams in Go      (config 2: pure Go)
 //	PythonExecutor  → forwards to a Python worker over a socket   (config 3: Go + Python, the "P3" hybrid)
@@ -13,44 +13,23 @@ package executor
 import (
 	"context"
 
-	"everything-go/internal/protocol"
+	"everything-go/internal/backend"
 	"everything-go/internal/session"
 )
 
-// Sink is how an Executor pushes normalized wire events back toward the client.
-// The value passed to Emit is one of the protocol.* outbound structs; the hub
-// marshals it and delivers it to the active connection. Emit must be safe for
-// concurrent use.
-type Sink interface {
-	Emit(event any)
-}
+// Sink is re-exported for existing backend implementations. The source of truth
+// is backend.Sink; executor adds muxing/reliability around that contract.
+type Sink = backend.Sink
 
-// Executor runs AI turns for sessions. Implementations own all runtime-specific
-// state (subprocesses, sockets) keyed by Session.ID and report progress via the
-// Sink they were constructed with.
-type Executor interface {
-	// Send delivers a user prompt to the session, spawning the underlying
-	// runtime on first use. It returns quickly; the turn streams asynchronously
-	// through the Sink (text_chunk/tool_*/done). reqID is stamped onto every
-	// emitted event so the client can correlate the streaming turn. images/files
-	// are optional message attachments (nil when none).
-	Send(ctx context.Context, s *session.Session, reqID, content string, images []protocol.InboundImage, files []protocol.InboundFile) error
-
-	// Stop aborts the current turn. Emits `stopped`.
-	Stop(ctx context.Context, s *session.Session) error
-
-	// Clear resets the session's conversation history.
-	Clear(ctx context.Context, s *session.Session) error
-
-	// Close tears down all runtime resources for the session.
-	Close(ctx context.Context, s *session.Session) error
-}
+// Executor is re-exported for existing backend implementations. The source of
+// truth is backend.Executor.
+type Executor = backend.Executor
 
 // UsageProvider is an optional backend capability: report quota/usage windows.
 // Claude (claude.ai OAuth via bun) and Codex (app-server rate limits) implement
 // it; Ollama does not. get_usage skips backends that don't.
 type UsageProvider interface {
-	FetchUsage(ctx context.Context) (*protocol.UsageReport, error)
+	FetchUsage(ctx context.Context) (*backend.UsageReport, error)
 }
 
 // ProcInspector is an optional capability: report / kill the live subprocess
@@ -67,5 +46,5 @@ type ProcInspector interface {
 // matched a pending interaction.
 type InteractionResponder interface {
 	RespondUserInput(id string, answers map[string]any, cancelled bool) bool
-	PendingInteractions(sessionID string) []protocol.UserInputRequestPayload
+	PendingInteractions(sessionID string) []backend.UserInputPayload
 }

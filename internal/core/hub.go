@@ -22,6 +22,7 @@ import (
 	"everything-go/internal/feed"
 	"everything-go/internal/governance"
 	"everything-go/internal/inbox"
+	"everything-go/internal/media"
 	"everything-go/internal/protocol"
 	"everything-go/internal/runtime"
 	"everything-go/internal/search"
@@ -53,6 +54,7 @@ type Hub struct {
 	fcm      *fcm.Notifier
 	feed     *feed.Store
 	inbox    *inbox.Store
+	mediaScan *media.Scanner
 	cfg      Config
 	client   clientproto.AppV1
 	gen      string // per-boot generation id
@@ -80,7 +82,7 @@ type Hub struct {
 	restart func()
 }
 
-func NewHub(reg *session.Registry, cfg Config, pairing *governance.Pairing) *Hub {
+func NewHub(reg *session.Registry, cfg Config, pairing *governance.Pairing, port int) *Hub {
 	h := &Hub{
 		registry:       reg,
 		pairing:        pairing,
@@ -93,6 +95,7 @@ func NewHub(reg *session.Registry, cfg Config, pairing *governance.Pairing) *Hub
 		turnText:       make(map[string]*strings.Builder),
 		iceServers:     stunServers,
 		storm:          newStormGuards(),
+		mediaScan:      media.NewScanner(port),
 	}
 	// Shell output is broadcast to connected clients via the Hub sink.
 	h.shells = runtime.NewShellManager(h.Emit)
@@ -127,8 +130,16 @@ func (h *Hub) SetSearch(s *search.Index) { h.search = s }
 // SetFCM wires the push notifier (nil disables push).
 func (h *Hub) SetFCM(n *fcm.Notifier) { h.fcm = n }
 
-// NotifyTunnelURL pushes the new tunnel URL to the device via FCM (no-op if FCM not configured).
+// SetTunnelURL updates the tunnel base URL used when building media/document
+// URLs in scan results. Call this whenever the tunnel address changes.
+func (h *Hub) SetTunnelURL(wsURL string) {
+	h.mediaScan.SetTunnelURL(wsURL)
+}
+
+// NotifyTunnelURL pushes the new tunnel URL to the device via FCM and updates
+// the media scanner so subsequent scan results use the tunnel address.
 func (h *Hub) NotifyTunnelURL(wsURL string) {
+	h.mediaScan.SetTunnelURL(wsURL)
 	if h.fcm == nil {
 		return
 	}
@@ -261,7 +272,16 @@ func (h *Hub) accumulateTurn(event any) {
 		b := h.turnText[e.SessionID]
 		delete(h.turnText, e.SessionID)
 		h.turnMu.Unlock()
-		if h.fcm == nil || b == nil || b.Len() == 0 {
+
+		var text string
+		if b != nil {
+			text = b.String()
+		}
+
+		// Scan for media/document paths regardless of FCM being configured.
+		h.scanAndEmitMedia(e.SessionID, text)
+
+		if h.fcm == nil || text == "" {
 			return
 		}
 		name := e.SessionID
@@ -270,12 +290,29 @@ func (h *Hub) accumulateTurn(event any) {
 				name = n
 			}
 		}
-		text := b.String()
 		go h.fcm.NotifyTaskDone(name, text, e.SessionID)
 	case protocol.Stopped:
 		h.turnMu.Lock()
 		delete(h.turnText, e.SessionID)
 		h.turnMu.Unlock()
+	}
+}
+
+// scanAndEmitMedia scans accumulated turn text for file paths and emits
+// protocol.Media / protocol.Document events for any that exist on disk.
+// Mirrors Python bridge's scan_for_media, called at the same time as FCM notify.
+func (h *Hub) scanAndEmitMedia(sessionID, text string) {
+	if text == "" {
+		return
+	}
+	var cwd string
+	if s, ok := h.registry.Get(sessionID); ok {
+		cwd = s.Cwd()
+	}
+	results := h.mediaScan.Scan(text, sessionID, cwd)
+	log.Printf("[media] scan session=%s textLen=%d cwd=%q found=%d", sessionID, len(text), cwd, len(results))
+	for _, r := range results {
+		h.Emit(r)
 	}
 }
 

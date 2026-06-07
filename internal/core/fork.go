@@ -13,7 +13,7 @@ import (
 	"strconv"
 	"strings"
 
-	"everything-go/internal/protocol"
+	"everything-go/internal/clientproto"
 	"everything-go/internal/session"
 )
 
@@ -46,22 +46,22 @@ func (h *Hub) transcriptPath(s *session.Session) (string, bool) {
 	return loc.TranscriptPath(s.ResumeID())
 }
 
-func (h *Hub) handleFork(c *Client, in protocol.Inbound) {
-	parentID := in.SessionID
+func (h *Hub) handleFork(c *Client, cmd clientproto.Command) {
+	parentID := cmd.SessionID
 	parent, ok := h.registry.Get(parentID)
 	if !ok {
-		c.enqueueEvent(protocol.NewError(parentID, "", "Unknown session: "+parentID))
+		c.enqueueEvent(h.client.Error(parentID, "", "Unknown session: "+parentID))
 		return
 	}
 	// A fork copies the transcript file; forking mid-turn would race the backend
 	// still appending to it. Refuse while the parent has a turn in flight.
 	if parent.IsStreaming() {
-		c.enqueueEvent(protocol.NewForkError(parentID, "parent_busy"))
+		c.enqueueEvent(h.client.ForkError(parentID, "parent_busy"))
 		return
 	}
 	src, ok := h.transcriptPath(parent)
 	if !ok {
-		c.enqueueEvent(protocol.NewForkError(parentID, "no_history_file"))
+		c.enqueueEvent(h.client.ForkError(parentID, "no_history_file"))
 		return
 	}
 
@@ -69,30 +69,30 @@ func (h *Hub) handleFork(c *Client, in protocol.Inbound) {
 	dstPath := filepath.Join(filepath.Dir(src), newResumeID+".jsonl")
 	tmpPath := dstPath + ".tmp"
 
-	if after := in.ForkAfterMessageID; after != "" {
+	if after := cmd.ForkAfterMessageID; after != "" {
 		offset, found := findForkOffset(src, after)
 		if !found {
-			c.enqueueEvent(protocol.NewForkError(parentID, "fork_point_not_found"))
+			c.enqueueEvent(h.client.ForkError(parentID, "fork_point_not_found"))
 			return
 		}
 		if err := copyPrefix(src, tmpPath, offset); err != nil {
 			_ = os.Remove(tmpPath)
-			c.enqueueEvent(protocol.NewForkError(parentID, "copy_failed: "+err.Error()))
+			c.enqueueEvent(h.client.ForkError(parentID, "copy_failed: "+err.Error()))
 			return
 		}
 	} else if err := copyFileContents(src, tmpPath); err != nil {
 		_ = os.Remove(tmpPath)
-		c.enqueueEvent(protocol.NewForkError(parentID, "copy_failed: "+err.Error()))
+		c.enqueueEvent(h.client.ForkError(parentID, "copy_failed: "+err.Error()))
 		return
 	}
 	if err := os.Rename(tmpPath, dstPath); err != nil {
 		_ = os.Remove(tmpPath)
-		c.enqueueEvent(protocol.NewForkError(parentID, "copy_failed: "+err.Error()))
+		c.enqueueEvent(h.client.ForkError(parentID, "copy_failed: "+err.Error()))
 		return
 	}
 
 	snap := parent.Snapshot()
-	name := in.Name
+	name := cmd.Name
 	if name == "" {
 		name = snap.Name + " (fork)"
 	}
@@ -104,10 +104,10 @@ func (h *Hub) handleFork(c *Client, in protocol.Inbound) {
 	go h.registry.Persist()
 
 	fsnap := fork.Snapshot()
-	log.Printf("[fork] %s → %s (resume=%s, after=%q)", parentID, newID, newResumeID, in.ForkAfterMessageID)
+	log.Printf("[fork] %s → %s (resume=%s, after=%q)", parentID, newID, newResumeID, cmd.ForkAfterMessageID)
 	// Announce the new session, then the refreshed list (parity with fork_ops.py).
-	h.Emit(protocol.NewSessionForked(newID, parentID, fsnap.Name, fsnap.CreatedAt))
-	h.Emit(protocol.NewSessionsList(h.sessionSummaries()))
+	h.Emit(h.client.SessionForked(newID, parentID, fsnap.Name, fsnap.CreatedAt))
+	h.Emit(h.client.SessionsList(h.sessionSummaries()))
 }
 
 // findForkOffset returns the byte offset just past the line identified by

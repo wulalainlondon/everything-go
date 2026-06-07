@@ -142,18 +142,45 @@ func ParseInbound(raw []byte) (Inbound, error) {
 // marshals the returned value and writes it to the socket.
 
 type HelloAck struct {
-	Type         string `json:"type"`
-	ClientID     string `json:"client_id"`
-	DeviceID     string `json:"device_id"`
-	DeviceName   string `json:"device_name,omitempty"`
-	InstanceID   string `json:"instance_id,omitempty"`
-	Gen          string `json:"gen,omitempty"`
-	IsLocked     bool   `json:"is_locked"`
-	LockedToMe   bool   `json:"locked_to_me"`
-	InstanceName string `json:"instance_name,omitempty"`
-	RootDir      string `json:"root_dir"`
-	DataDir      string `json:"data_dir"`
-	LanIP        string `json:"lan_ip,omitempty"`
+	Type         string              `json:"type"`
+	ClientID     string              `json:"client_id"`
+	DeviceID     string              `json:"device_id"`
+	DeviceName   string              `json:"device_name,omitempty"`
+	InstanceID   string              `json:"instance_id,omitempty"`
+	Gen          string              `json:"gen,omitempty"`
+	IsLocked     bool                `json:"is_locked"`
+	LockedToMe   bool                `json:"locked_to_me"`
+	InstanceName string              `json:"instance_name,omitempty"`
+	RootDir      string              `json:"root_dir"`
+	DataDir      string              `json:"data_dir"`
+	LanIP        string              `json:"lan_ip,omitempty"`
+	Backends     []BackendDefinition `json:"backend_registry,omitempty"`
+}
+
+// BackendDefinition is the bridge-advertised backend/model registry consumed by
+// the app's new-session UI. It is intentionally wire-level and static per
+// bridge process; runtime status remains in sessions/tasks/usage events.
+type BackendDefinition struct {
+	ID           string              `json:"id"`
+	Label        string              `json:"label"`
+	DefaultModel string              `json:"default_model,omitempty"`
+	Models       []ModelDefinition   `json:"models,omitempty"`
+	Capabilities BackendCapabilities `json:"capabilities"`
+}
+
+type ModelDefinition struct {
+	ID    string `json:"id"`
+	Label string `json:"label,omitempty"`
+}
+
+type BackendCapabilities struct {
+	History      bool `json:"history,omitempty"`
+	Usage        bool `json:"usage,omitempty"`
+	Interactions bool `json:"interactions,omitempty"`
+	Sandbox      bool `json:"sandbox,omitempty"`
+	Images       bool `json:"images,omitempty"`
+	Files        bool `json:"files,omitempty"`
+	Remote       bool `json:"remote,omitempty"`
 }
 
 // --- Pairing acks -----------------------------------------------------------
@@ -183,19 +210,26 @@ type Pong struct {
 
 func NewPong() Pong { return Pong{Type: "pong"} }
 
+// RecentMessage is one entry in SessionSummary.RecentMessages.
+type RecentMessage struct {
+	Role string `json:"role"`
+	Text string `json:"text"`
+}
+
 // SessionSummary mirrors SessionSummarySchema.
 type SessionSummary struct {
-	ID           string  `json:"id"`
-	Name         string  `json:"name"`
-	IsStreaming  bool    `json:"is_streaming"`
-	CreatedAt    float64 `json:"created_at"`
-	LastActivity float64 `json:"last_activity,omitempty"`
-	Cwd          string  `json:"cwd,omitempty"`
-	Model        string  `json:"model,omitempty"`
-	Backend      string  `json:"backend,omitempty"`
-	Sandbox      string  `json:"sandbox,omitempty"`
-	Pinned       bool    `json:"pinned"`
-	Hidden       bool    `json:"hidden"`
+	ID             string          `json:"id"`
+	Name           string          `json:"name"`
+	IsStreaming    bool            `json:"is_streaming"`
+	CreatedAt      float64         `json:"created_at"`
+	LastActivity   float64         `json:"last_activity,omitempty"`
+	Cwd            string          `json:"cwd,omitempty"`
+	Model          string          `json:"model,omitempty"`
+	Backend        string          `json:"backend,omitempty"`
+	Sandbox        string          `json:"sandbox,omitempty"`
+	Pinned         bool            `json:"pinned"`
+	Hidden         bool            `json:"hidden"`
+	RecentMessages []RecentMessage `json:"recent_messages,omitempty"`
 }
 
 type SessionsList struct {
@@ -265,6 +299,49 @@ type SessionWarning struct {
 
 func NewSessionWarning(sessionID, msg string) SessionWarning {
 	return SessionWarning{Type: "session_warning", SessionID: sessionID, Message: msg}
+}
+
+type SessionCommandStarted struct {
+	Type        string `json:"type"`
+	SessionID   string `json:"session_id"`
+	RequestID   string `json:"request_id"`
+	QueueLength int    `json:"queue_length"`
+}
+
+func NewSessionCommandStarted(sessionID, requestID string, queueLength int) SessionCommandStarted {
+	return SessionCommandStarted{
+		Type: "session_command_started", SessionID: sessionID,
+		RequestID: requestID, QueueLength: queueLength,
+	}
+}
+
+type SessionCommandDone struct {
+	Type        string `json:"type"`
+	SessionID   string `json:"session_id"`
+	RequestID   string `json:"request_id"`
+	QueueLength int    `json:"queue_length"`
+}
+
+func NewSessionCommandDone(sessionID, requestID string, queueLength int) SessionCommandDone {
+	return SessionCommandDone{
+		Type: "session_command_done", SessionID: sessionID,
+		RequestID: requestID, QueueLength: queueLength,
+	}
+}
+
+type SessionCommandFailed struct {
+	Type        string `json:"type"`
+	SessionID   string `json:"session_id"`
+	RequestID   string `json:"request_id"`
+	Message     string `json:"message"`
+	QueueLength int    `json:"queue_length"`
+}
+
+func NewSessionCommandFailed(sessionID, requestID, message string, queueLength int) SessionCommandFailed {
+	return SessionCommandFailed{
+		Type: "session_command_failed", SessionID: sessionID,
+		RequestID: requestID, Message: message, QueueLength: queueLength,
+	}
 }
 
 // --- Streaming / turn events (session-scoped) ------------------------------
@@ -950,6 +1027,31 @@ type InteractionResolved struct {
 
 func NewInteractionResolved(requestID, sessionID, status string) InteractionResolved {
 	return InteractionResolved{Type: "interaction_resolved", RequestID: requestID, SessionID: sessionID, Status: status}
+}
+
+// --- Media scan events (bridge→client) ----------------------------------------
+// Emitted after a turn completes when the assistant text contains file paths
+// that exist on disk. Mirrors scan_for_media in the Python bridge.
+
+// Media announces an image or video file found in the assistant's output.
+// media_type is "image" | "video".
+type Media struct {
+	Type      string `json:"type"`       // "media"
+	SessionID string `json:"session_id"`
+	MediaType string `json:"media_type"` // "image" | "video"
+	Path      string `json:"path"`
+	URL       string `json:"url"`
+}
+
+// Document announces a document file (pdf/html) found in the assistant's output.
+// doc_type is "pdf" | "html".
+type Document struct {
+	Type      string `json:"type"`       // "document"
+	SessionID string `json:"session_id"`
+	Path      string `json:"path"`
+	URL       string `json:"url"`
+	Title     string `json:"title"`
+	DocType   string `json:"doc_type"` // "pdf" | "html"
 }
 
 // --- permission approval (bridge↔client), mirrors permission_manager.py ------

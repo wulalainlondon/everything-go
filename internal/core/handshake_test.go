@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+
+	"everything-go/internal/backend"
 )
 
 func (h *Hub) clientCount() int {
@@ -124,6 +126,10 @@ func TestHandshakeRejectsWrongTokenWhenLocked(t *testing.T) {
 
 func TestHandshakeAcceptsValidHello(t *testing.T) {
 	h, _ := newTestHub(t)
+	h.cfg.Backends = []backend.Definition{{
+		ID: "remote-ws", Label: "Remote WS",
+		Capabilities: backend.Capabilities{Remote: true},
+	}}
 	conn, ctx, cleanup := dialWS(t, h)
 	defer cleanup()
 
@@ -131,6 +137,14 @@ func TestHandshakeAcceptsValidHello(t *testing.T) {
 	m := readEvent(t, ctx, conn)
 	if m["type"] != "hello_ack" {
 		t.Fatalf("valid hello should get hello_ack, got %v", m)
+	}
+	registry, ok := m["backend_registry"].([]any)
+	if !ok || len(registry) != 1 {
+		t.Fatalf("hello_ack should include backend_registry, got %v", m["backend_registry"])
+	}
+	backend := registry[0].(map[string]any)
+	if backend["id"] != "remote-ws" {
+		t.Fatalf("backend_registry id = %v, want remote-ws", backend["id"])
 	}
 	// hello_ack is followed by the proactive sessions_list.
 	m2 := readEvent(t, ctx, conn)

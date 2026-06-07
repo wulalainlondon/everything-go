@@ -3,6 +3,7 @@ package core
 import (
 	"testing"
 
+	"everything-go/internal/backend"
 	"everything-go/internal/history"
 	"everything-go/internal/protocol"
 	"everything-go/internal/session"
@@ -29,8 +30,12 @@ type treeExec struct {
 	prov *treeProv
 }
 
-func (e *treeExec) ProviderFor(*session.Session) (history.Provider, bool) { return e.prov, true }
-func (e *treeExec) AllProviders() []history.Provider                      { return []history.Provider{e.prov} }
+func (e *treeExec) ProviderFor(*session.Session) (backend.HistoryProvider, bool) {
+	return e.prov, true
+}
+func (e *treeExec) AllProviders() []backend.HistoryProvider {
+	return []backend.HistoryProvider{e.prov}
+}
 
 // plainProv supports history but NOT agent trees (Codex/Ollama parity).
 type plainProv struct{}
@@ -45,8 +50,12 @@ type plainExec struct {
 	prov plainProv
 }
 
-func (e *plainExec) ProviderFor(*session.Session) (history.Provider, bool) { return e.prov, true }
-func (e *plainExec) AllProviders() []history.Provider                      { return []history.Provider{e.prov} }
+func (e *plainExec) ProviderFor(*session.Session) (backend.HistoryProvider, bool) {
+	return e.prov, true
+}
+func (e *plainExec) AllProviders() []backend.HistoryProvider {
+	return []backend.HistoryProvider{e.prov}
+}
 
 func TestGetAgentTreeRoutesToBackend(t *testing.T) {
 	h, _ := newTestHub(t)

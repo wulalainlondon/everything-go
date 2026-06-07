@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"everything-go/internal/backend"
 	"everything-go/internal/executor"
 	"everything-go/internal/governance"
 	"everything-go/internal/protocol"
@@ -21,7 +22,7 @@ type fakeExec struct {
 	onSend func(s *session.Session, reqID, content string)
 }
 
-func (f *fakeExec) Send(_ context.Context, s *session.Session, reqID, content string, _ []protocol.InboundImage, _ []protocol.InboundFile) error {
+func (f *fakeExec) Send(_ context.Context, s *session.Session, reqID, content string, _ []backend.ImageAttachment, _ []backend.FileAttachment) error {
 	if f.onSend != nil {
 		f.onSend(s, reqID, content)
 	}
@@ -44,7 +45,7 @@ func newTestHub(t *testing.T) (*Hub, *fakeExec) {
 	t.Helper()
 	reg := session.NewRegistry()
 	pairing := governance.NewPairing(filepath.Join(t.TempDir(), "pairing.json"))
-	h := NewHub(reg, Config{InstanceID: "i1", InstanceName: "test"}, pairing)
+	h := NewHub(reg, Config{InstanceID: "i1", InstanceName: "test"}, pairing, 0)
 	fe := &fakeExec{sink: h}
 	h.SetExecutor(fe)
 	return h, fe
@@ -64,7 +65,7 @@ func route(h *Hub, c *Client, frame string) {
 	if err != nil {
 		panic(err)
 	}
-	h.route(context.Background(), c, in)
+	h.route(context.Background(), c, h.client.ParseCommand(in))
 }
 
 // waitForType drains the client's send channel until it sees an event of the

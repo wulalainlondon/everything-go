@@ -17,16 +17,24 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
+	"everything-go/internal/backend"
 	"everything-go/internal/executor"
 	"everything-go/internal/protocol"
 	"everything-go/internal/runtime"
 	"everything-go/internal/session"
 )
 
-// maxLine bounds a single NDJSON stdout line. Claude emits large tool results;
-// 16 MiB mirrors the Python _STREAM_READER_LIMIT order of magnitude.
-const maxLine = 16 * 1024 * 1024
+const (
+	// maxLine bounds a single NDJSON stdout line. Claude emits large tool results;
+	// 16 MiB mirrors the Python _STREAM_READER_LIMIT order of magnitude.
+	maxLine = 16 * 1024 * 1024
+
+	claudeCompactThreshold = 0.80
+	claudeIdleTimeout      = 6000 * time.Second
+	claudeAskUserMaxWait   = 30 * time.Minute
+)
 
 // todoTools are Task/plan tools normalized into todo_update events instead of
 // rendered as tool cards. Mirrors claude_stream.py's _TODO_TOOLS.
@@ -39,9 +47,69 @@ type proc struct {
 	stdin  *bufWriteCloser
 	cancel context.CancelFunc
 	reqID  string // request_id of the in-flight turn, stamped onto events
+	model  string
 
 	// Tool/todo presentation state, touched only by this proc's readStdout goroutine.
 	tools *toolNormalizer
+
+	mu                sync.Mutex
+	lastActivity      time.Time
+	compactInProgress bool
+}
+
+func (p *proc) beginTurn(reqID string, compact bool) {
+	p.mu.Lock()
+	p.reqID = reqID
+	p.compactInProgress = compact
+	p.lastActivity = time.Now()
+	p.mu.Unlock()
+}
+
+func (p *proc) touch() {
+	p.mu.Lock()
+	p.lastActivity = time.Now()
+	p.mu.Unlock()
+}
+
+func (p *proc) currentReqID() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.reqID
+}
+
+func (p *proc) finishTurn() (reqID string, wasCompact bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	reqID = p.reqID
+	wasCompact = p.compactInProgress
+	p.reqID = ""
+	p.compactInProgress = false
+	return reqID, wasCompact
+}
+
+func (p *proc) markCompact(reqID string) {
+	p.beginTurn(reqID, true)
+}
+
+func (p *proc) idleFor() (string, time.Duration) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.reqID == "" {
+		return "", 0
+	}
+	return p.reqID, time.Since(p.lastActivity)
+}
+
+func (p *proc) currentModel() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.model
+}
+
+type claudeState struct {
+	mu           sync.Mutex
+	restartCount int
+	badResume    bool
 }
 
 // Claude implements executor.Executor over the local `claude` CLI.
@@ -51,8 +119,9 @@ type Claude struct {
 	claudeBin   string
 	projectsDir string
 
-	mu    sync.Mutex
-	procs map[string]*proc // sessionID -> running subprocess
+	mu     sync.Mutex
+	procs  map[string]*proc // sessionID -> running subprocess
+	states map[string]*claudeState
 
 	interMu sync.Mutex
 	pending map[string]*pendingInteraction // request_id -> paused AskUserQuestion
@@ -72,6 +141,7 @@ func NewClaude(sink executor.Sink, claudeBin string) *Claude {
 		sink: sink, claudeBin: claudeBin, projectsDir: projectsDir,
 		tools:   newToolEmitter(sink),
 		procs:   make(map[string]*proc),
+		states:  make(map[string]*claudeState),
 		pending: make(map[string]*pendingInteraction),
 	}
 	// Host the ask_user MCP server so AskUserQuestion-style prompts can actually
@@ -85,9 +155,20 @@ func NewClaude(sink executor.Sink, claudeBin string) *Claude {
 	return c
 }
 
+func (c *Claude) state(sessionID string) *claudeState {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	st := c.states[sessionID]
+	if st == nil {
+		st = &claudeState{}
+		c.states[sessionID] = st
+	}
+	return st
+}
+
 // Send writes a user message to the session's claude process (spawning it on
 // first use) and lets the stdout reader stream the response.
-func (c *Claude) Send(ctx context.Context, s *session.Session, reqID, content string, images []protocol.InboundImage, files []protocol.InboundFile) error {
+func (c *Claude) Send(ctx context.Context, s *session.Session, reqID, content string, images []backend.ImageAttachment, files []backend.FileAttachment) error {
 	c.mu.Lock()
 	p := c.procs[s.ID]
 	if p == nil {
@@ -95,20 +176,34 @@ func (c *Claude) Send(ctx context.Context, s *session.Session, reqID, content st
 		p, err = c.spawn(s)
 		if err != nil {
 			c.mu.Unlock()
-			c.sink.Emit(protocol.NewError(s.ID, "session_dead", "Failed to spawn claude: "+err.Error()))
+			c.sink.Emit(backend.NewError(s.ID, reqID, backend.ErrProcessDied, "Failed to spawn claude: "+err.Error()))
 			return err
 		}
 		c.procs[s.ID] = p
 	}
-	p.reqID = reqID
+	isCompact := strings.TrimSpace(content) == "/compact"
+	p.beginTurn(reqID, isCompact)
 	c.mu.Unlock()
+	if isCompact {
+		c.sink.Emit(backend.NewSessionCommandStarted(s.ID, reqID, 0))
+	}
 
 	payload := userMessageJSON(content, images, files)
 	if _, err := p.stdin.Write(payload); err != nil {
-		c.sink.Emit(protocol.NewError(s.ID, "", "stdin write failed: "+err.Error()))
+		if isCompact {
+			c.sink.Emit(backend.NewSessionCommandFailed(s.ID, reqID, "stdin write failed: "+err.Error(), 0))
+		}
+		c.sink.Emit(backend.NewError(s.ID, reqID, backend.ErrSend, "stdin write failed: "+err.Error()))
 		return err
 	}
-	return p.stdin.Flush()
+	if err := p.stdin.Flush(); err != nil {
+		if isCompact {
+			c.sink.Emit(backend.NewSessionCommandFailed(s.ID, reqID, "stdin flush failed: "+err.Error(), 0))
+		}
+		return err
+	}
+	go c.agentTreePoller(s, p)
+	return nil
 }
 
 func (c *Claude) Stop(ctx context.Context, s *session.Session) error {
@@ -121,7 +216,7 @@ func (c *Claude) Stop(ctx context.Context, s *session.Session) error {
 		p.cancel() // SIGKILL via context; the reader goroutine exits on EOF
 	}
 	c.cancelInteractionsFor(s.ID)
-	c.sink.Emit(protocol.NewStopped(s.ID, ""))
+	c.sink.Emit(backend.NewStopped(s.ID, ""))
 	return nil
 }
 
@@ -137,8 +232,8 @@ func (c *Claude) Clear(ctx context.Context, s *session.Session) error {
 	s.SetResumeID("")
 	// The next Send spawns a fresh proc (and todoStore), so the panel resets;
 	// tell the app to clear it now. Mirrors claude_cli.clear's _evt_todo_update([]).
-	c.sink.Emit(protocol.NewTodoUpdate(s.ID, "", nil))
-	c.sink.Emit(protocol.NewSessionWarning(s.ID, "Session history cleared."))
+	c.sink.Emit(backend.NewTodoUpdate(s.ID, "", nil))
+	c.sink.Emit(backend.NewSessionWarning(s.ID, "Session history cleared."))
 	return nil
 }
 
@@ -186,35 +281,14 @@ func (c *Claude) spawn(s *session.Session) (*proc, error) {
 	snap := s.Snapshot() // consistent view of model/resume/effort/cwd
 	ctx, cancel := context.WithCancel(context.Background())
 
-	args := []string{
-		"--print",
-		"--input-format", "stream-json",
-		"--output-format", "stream-json",
-		"--verbose",
-		"--dangerously-skip-permissions",
-	}
 	// Register the in-process ask_user MCP server (per-session URL) and steer
 	// Claude to use it instead of the built-in AskUserQuestion, which can't be
 	// answered in headless mode. skip-permissions already allows MCP tools.
+	mcpURL := ""
 	if c.mcp != nil {
-		cfg := fmt.Sprintf(`{"mcpServers":{"ask_user":{"type":"http","url":%q,"timeout":1800000}}}`, c.mcp.sessionURL(s.ID))
-		// NB: keep the append-system-prompt ASCII-only. A non-ASCII char (e.g. an
-		// em-dash) in --append-system-prompt makes the claude CLI hang when the
-		// turn also contains an image — a real CLI quirk found via A/B testing.
-		args = append(args,
-			"--mcp-config", cfg,
-			"--append-system-prompt", "When you need to ask the user a question or have them choose between options, call the ask_user MCP tool (mcp__ask_user__ask_question) and wait for the result. Do NOT use the built-in AskUserQuestion tool, which cannot be answered in this environment.",
-		)
+		mcpURL = c.mcp.sessionURL(s.ID)
 	}
-	if snap.Model != "" {
-		args = append(args, "--model", snap.Model)
-	}
-	if snap.ResumeID != "" {
-		args = append(args, "--resume", snap.ResumeID)
-	}
-	if snap.Effort != "" && snap.Effort != "auto" {
-		args = append(args, "--effort", snap.Effort)
-	}
+	args := claudeSpawnArgs(snap, mcpURL)
 
 	cmd := exec.CommandContext(ctx, c.claudeBin, args...)
 	if snap.Cwd != "" {
@@ -250,20 +324,62 @@ func (c *Claude) spawn(s *session.Session) (*proc, error) {
 	log.Printf("[%s] spawned claude pid=%d cwd=%s resume=%s", s.ID, cmd.Process.Pid, snap.Cwd, snap.ResumeID)
 	p := &proc{
 		cmd: cmd, stdin: newBufWriteCloser(stdinPipe), cancel: cancel,
-		tools: newToolNormalizer(c.sink, c),
+		tools: newToolNormalizer(c.sink, c), model: snap.Model,
 	}
+	p.touch()
 
 	go c.readStdout(s, p, stdoutPipe)
-	go drainStderr(s.ID, stderrPipe)
-	go func() {
-		_ = cmd.Wait()
-		c.mu.Lock()
-		if c.procs[s.ID] == p {
-			delete(c.procs, s.ID)
-		}
-		c.mu.Unlock()
-	}()
+	go c.readStderr(s.ID, stderrPipe)
+	go c.idleWatchdog(s, p)
+	go c.watchProc(s, p)
 	return p, nil
+}
+
+func claudeSpawnArgs(snap session.Snapshot, mcpURL string) []string {
+	args := []string{
+		"--print",
+		"--input-format", "stream-json",
+		"--output-format", "stream-json",
+		"--verbose",
+	}
+	model := snap.Model
+	if model == "opusplan" {
+		args = append(args, "--model", "opus", "--permission-mode", "plan")
+	} else {
+		switch snap.Sandbox {
+		case "read-only":
+			args = append(args,
+				"--dangerously-skip-permissions",
+				"--allowedTools", "Read,Glob,Grep,WebSearch,WebFetch",
+			)
+		case "workspace-write":
+			args = append(args,
+				"--dangerously-skip-permissions",
+				"--disallowedTools", "Bash",
+			)
+		default:
+			args = append(args, "--dangerously-skip-permissions")
+		}
+		if model != "" {
+			args = append(args, "--model", model)
+		}
+	}
+	if mcpURL != "" {
+		cfg := fmt.Sprintf(`{"mcpServers":{"ask_user":{"type":"http","url":%q,"timeout":1800000}}}`, mcpURL)
+		// NB: keep the append-system-prompt ASCII-only. A non-ASCII char in this
+		// prompt can make the claude CLI hang when the turn also contains an image.
+		args = append(args,
+			"--mcp-config", cfg,
+			"--append-system-prompt", "When you need to ask the user a question or have them choose between options, call the ask_user MCP tool (mcp__ask_user__ask_question) and wait for the result. Do NOT use the built-in AskUserQuestion tool, which cannot be answered in this environment.",
+		)
+	}
+	if snap.ResumeID != "" {
+		args = append(args, "--resume", snap.ResumeID)
+	}
+	if snap.Effort != "" && snap.Effort != "auto" {
+		args = append(args, "--effort", snap.Effort)
+	}
+	return args
 }
 
 // ndLine is the union of stdout line shapes we care about.
@@ -276,6 +392,12 @@ type ndLine struct {
 	ToolUseID string          `json:"tool_use_id"`
 	Content   json.RawMessage `json:"content"`    // tool_result payload
 	SessionID string          `json:"session_id"` // result → new resume uuid
+	Model     string          `json:"model"`      // system/init
+	Result    json.RawMessage `json:"result"`     // result error payload
+	Usage     struct {
+		InputTokens              int `json:"input_tokens"`
+		CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+	} `json:"usage"`
 }
 
 type block struct {
@@ -299,9 +421,11 @@ func (c *Claude) readStdout(s *session.Session, p *proc, stdout interface{ Read(
 		if err := json.Unmarshal(line, &evt); err != nil {
 			continue // non-JSON diagnostic line
 		}
-		reqID := p.reqID
+		p.touch()
+		reqID := p.currentReqID()
 		switch evt.Type {
 		case "assistant":
+			var askWaits []<-chan struct{}
 			for _, raw := range evt.Message.Content {
 				var b block
 				if json.Unmarshal(raw, &b) != nil {
@@ -310,20 +434,25 @@ func (c *Claude) readStdout(s *session.Session, p *proc, stdout interface{ Read(
 				switch b.Type {
 				case "thinking":
 					if b.Thinking != "" {
-						c.sink.Emit(protocol.NewThinkingChunk(s.ID, reqID, b.Thinking))
+						c.sink.Emit(backend.NewThinkingChunk(s.ID, reqID, b.Thinking))
 					}
 				case "text":
 					if b.Text != "" {
-						c.sink.Emit(protocol.NewTextChunk(s.ID, reqID, b.Text))
+						c.sink.Emit(backend.NewTextChunk(s.ID, reqID, b.Text))
 					}
 				case "tool_use":
 					if p.tools.HandleClaudeToolUse(s.ID, reqID, b.ID, b.Name, b.Input) {
 						continue
 					}
 					command := extractCommand(b.Input)
-					p.tools.HandleClaudeVisibleToolUse(s, b.ID, b.Name, b.Input)
+					if ch := p.tools.HandleClaudeVisibleToolUse(s, b.ID, b.Name, b.Input); ch != nil {
+						askWaits = append(askWaits, ch)
+					}
 					c.tools.Start(s.ID, reqID, b.ID, b.Name, command)
 				}
+			}
+			if len(askWaits) > 0 {
+				c.waitForClaudeAskUser(s, askWaits)
 			}
 		case "tool_result":
 			output := flattenToolOutput(evt.Content)
@@ -332,14 +461,281 @@ func (c *Claude) readStdout(s *session.Session, p *proc, stdout interface{ Read(
 			}
 			c.tools.ResultEnd(s.ID, reqID, evt.ToolUseID, output)
 		case "result":
+			if evt.Subtype != "" && evt.Subtype != "success" {
+				msg := claudeRawToString(evt.Result)
+				if msg == "" {
+					msg = "Claude result failed"
+				}
+				_, wasCompact := p.finishTurn()
+				if wasCompact {
+					c.sink.Emit(backend.NewSessionCommandFailed(s.ID, reqID, msg, 0))
+				}
+				c.sink.Emit(backend.NewError(s.ID, reqID, backend.ErrTurn, msg))
+				continue
+			}
+			st := c.state(s.ID)
+			st.mu.Lock()
+			st.restartCount = 0
+			st.mu.Unlock()
+			contextUsed := evt.Usage.InputTokens + evt.Usage.CacheCreationInputTokens
+			contextLimit := claudeContextLimit(p.currentModel())
+			if contextLimit > 0 || contextUsed > 0 {
+				s.SetContext(contextUsed, contextLimit)
+			}
 			if evt.SessionID != "" && evt.SessionID != s.ResumeID() {
 				s.SetResumeID(evt.SessionID)
-				c.sink.Emit(protocol.NewSessionUUID(s.ID, evt.SessionID))
+				c.sink.Emit(backend.NewSessionUUID(s.ID, evt.SessionID))
 			}
-			c.sink.Emit(protocol.NewDone(s.ID, reqID))
+			doneReqID, wasCompact := p.finishTurn()
+			if doneReqID != "" {
+				reqID = doneReqID
+			}
+			c.sink.Emit(backend.NewDone(s.ID, reqID))
+			if wasCompact {
+				c.sink.Emit(backend.NewSessionCommandDone(s.ID, reqID, 0))
+			}
+			if !wasCompact && c.shouldAutoCompact(contextUsed, contextLimit) {
+				c.startAutoCompact(s, p)
+			}
+		case "system":
+			if evt.Model != "" {
+				p.mu.Lock()
+				p.model = evt.Model
+				p.mu.Unlock()
+			}
+			if evt.Subtype == "init" && evt.SessionID != "" && evt.SessionID != s.ResumeID() {
+				first := s.ResumeID() == ""
+				s.SetResumeID(evt.SessionID)
+				if first {
+					c.sink.Emit(backend.NewSessionUUID(s.ID, evt.SessionID))
+				}
+			}
 		}
 	}
 	// stdout closed → process gone
+}
+
+func (c *Claude) readStderr(sessionID string, r interface{ Read([]byte) (int, error) }) {
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 0, 64*1024), maxLine)
+	for sc.Scan() {
+		line := sc.Text()
+		log.Printf("[%s] claude stderr: %s", sessionID, line)
+		if strings.Contains(line, "No conversation found") {
+			st := c.state(sessionID)
+			st.mu.Lock()
+			st.badResume = true
+			st.mu.Unlock()
+		}
+	}
+}
+
+func (c *Claude) waitForClaudeAskUser(s *session.Session, waits []<-chan struct{}) {
+	deadline := time.After(claudeAskUserMaxWait)
+	for _, ch := range waits {
+		select {
+		case <-ch:
+		case <-deadline:
+			c.sink.Emit(backend.NewSessionWarning(s.ID, "AskUserQuestion timed out; cancelling pending question."))
+			c.cancelInteractionsFor(s.ID)
+			return
+		}
+	}
+}
+
+func (c *Claude) watchProc(s *session.Session, p *proc) {
+	_ = p.cmd.Wait()
+	rc := 0
+	if p.cmd.ProcessState != nil {
+		rc = p.cmd.ProcessState.ExitCode()
+	}
+
+	c.mu.Lock()
+	if c.procs[s.ID] != p {
+		c.mu.Unlock()
+		return
+	}
+	delete(c.procs, s.ID)
+	c.mu.Unlock()
+
+	reqID := p.reqID
+	if reqID != "" {
+		c.sink.Emit(backend.NewError(
+			s.ID, reqID, backend.ErrProcessDied,
+			fmt.Sprintf("Claude process exited (rc=%d); current response was stopped.", rc),
+		))
+		_, wasCompact := p.finishTurn()
+		if wasCompact {
+			c.sink.Emit(backend.NewSessionCommandFailed(
+				s.ID, reqID,
+				fmt.Sprintf("Claude process exited during compact (rc=%d)", rc),
+				0,
+			))
+		}
+	}
+
+	st := c.state(s.ID)
+	st.mu.Lock()
+	badResume := st.badResume
+	if badResume {
+		st.badResume = false
+		st.restartCount = 0
+	}
+	restartCount := st.restartCount
+	st.mu.Unlock()
+
+	if badResume {
+		old := s.ResumeID()
+		s.SetResumeID("")
+		c.sink.Emit(backend.NewSessionWarning(
+			s.ID,
+			fmt.Sprintf("Resume session %s not found, starting fresh...", old),
+		))
+		c.restartClaude(s, reqID)
+		return
+	}
+	if rc != 0 && restartCount < 3 {
+		st.mu.Lock()
+		st.restartCount++
+		attempt := st.restartCount
+		st.mu.Unlock()
+		c.sink.Emit(backend.NewSessionWarning(
+			s.ID,
+			fmt.Sprintf("Claude process exited (rc=%d), restarting (%d/3)...", rc, attempt),
+		))
+		c.restartClaude(s, reqID)
+		return
+	}
+	if rc != 0 {
+		c.sink.Emit(backend.NewSessionWarning(
+			s.ID,
+			fmt.Sprintf("Claude process exited (rc=%d) and will not restart.", rc),
+		))
+	}
+}
+
+func (c *Claude) restartClaude(s *session.Session, reqID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.procs[s.ID] != nil {
+		return
+	}
+	p, err := c.spawn(s)
+	if err != nil {
+		c.sink.Emit(backend.NewError(s.ID, reqID, backend.ErrProcessDied, "Failed to restart claude: "+err.Error()))
+		return
+	}
+	c.procs[s.ID] = p
+}
+
+func (c *Claude) shouldAutoCompact(contextUsed, contextLimit int) bool {
+	return contextLimit > 0 && contextUsed >= int(float64(contextLimit)*claudeCompactThreshold)
+}
+
+func (c *Claude) startAutoCompact(s *session.Session, p *proc) {
+	reqID := "compact_" + s.ID
+	p.markCompact(reqID)
+	c.sink.Emit(backend.NewSessionCommandStarted(s.ID, reqID, 0))
+	payload := userMessageJSON("/compact", nil, nil)
+	if _, err := p.stdin.Write(payload); err != nil {
+		p.finishTurn()
+		c.sink.Emit(backend.NewSessionCommandFailed(s.ID, reqID, err.Error(), 0))
+		c.sink.Emit(backend.NewSessionWarning(s.ID, "Claude auto-compact failed: "+err.Error()))
+		return
+	}
+	if err := p.stdin.Flush(); err != nil {
+		p.finishTurn()
+		c.sink.Emit(backend.NewSessionCommandFailed(s.ID, reqID, err.Error(), 0))
+		c.sink.Emit(backend.NewSessionWarning(s.ID, "Claude auto-compact failed: "+err.Error()))
+		return
+	}
+	log.Printf("[%s] claude auto-compact triggered: context_used=%d context_max=%d", s.ID, s.Snapshot().ContextUsed, s.Snapshot().ContextMax)
+}
+
+func claudeContextLimit(model string) int {
+	m := strings.ToLower(model)
+	if !strings.Contains(m, "claude") {
+		return 0
+	}
+	if strings.Contains(m, "[1m]") || strings.Contains(m, "-1m") || strings.Contains(m, "1000000") {
+		return 1_000_000
+	}
+	return 200_000
+}
+
+func (c *Claude) idleWatchdog(s *session.Session, p *proc) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		c.mu.Lock()
+		current := c.procs[s.ID] == p
+		c.mu.Unlock()
+		if !current {
+			return
+		}
+		reqID, idle := p.idleFor()
+		if reqID == "" {
+			continue
+		}
+		if idle < claudeIdleTimeout {
+			continue
+		}
+		c.sink.Emit(backend.NewSessionWarning(
+			s.ID,
+			fmt.Sprintf("Tool idle timeout after %.0fs; restarting Claude...", idle.Seconds()),
+		))
+		p.cancel()
+		return
+	}
+}
+
+func (c *Claude) agentTreePoller(s *session.Session, p *proc) {
+	time.Sleep(3 * time.Second)
+	lastTotal, lastDone := -1, -1
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		c.mu.Lock()
+		current := c.procs[s.ID] == p
+		c.mu.Unlock()
+		if !current || p.currentReqID() == "" {
+			return
+		}
+		resumeID := s.ResumeID()
+		if resumeID != "" {
+			total, tree := c.BuildAgentTree(resumeID)
+			if total > 0 {
+				done := countDoneAgents(tree)
+				if total != lastTotal || done != lastDone {
+					lastTotal, lastDone = total, done
+					c.sink.Emit(protocol.NewAgentTree(s.ID, resumeID, total, tree))
+				}
+			}
+		}
+		<-ticker.C
+	}
+}
+
+func countDoneAgents(nodes []*protocol.AgentNode) int {
+	total := 0
+	for _, n := range nodes {
+		if n.EndTS != nil {
+			total++
+		}
+		total += countDoneAgents(n.Children)
+	}
+	return total
+}
+
+func claudeRawToString(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s
+	}
+	return string(raw)
 }
 
 // extractCommand mirrors Python: input.command if present, else the raw input
@@ -387,7 +783,7 @@ func flattenToolOutput(content json.RawMessage) string {
 // content blocks in the same order/shape as claude_cli.py: images first
 // (base64 image blocks), then files (PDF → document block, else a fenced text
 // block), then the text content last.
-func userMessageJSON(content string, images []protocol.InboundImage, files []protocol.InboundFile) []byte {
+func userMessageJSON(content string, images []backend.ImageAttachment, files []backend.FileAttachment) []byte {
 	blocks := make([]map[string]any, 0, len(images)+len(files)+1)
 	for _, img := range images {
 		mt := img.MediaType

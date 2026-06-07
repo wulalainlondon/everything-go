@@ -3,13 +3,13 @@ package goexec
 import (
 	"encoding/json"
 
+	"everything-go/internal/backend"
 	"everything-go/internal/executor"
-	"everything-go/internal/protocol"
 	"everything-go/internal/session"
 )
 
 type userInputRegistrar interface {
-	RegisterUserInputRequest(s *session.Session, toolUseID, agent string, input json.RawMessage)
+	RegisterUserInputRequest(s *session.Session, toolUseID, agent string, input json.RawMessage) <-chan struct{}
 }
 
 // toolNormalizer owns backend-agnostic tool presentation rules that require
@@ -58,17 +58,18 @@ func (n *toolNormalizer) HandleClaudeToolUse(sessionID, reqID, toolUseID, name s
 		n.suppressed[toolUseID] = true
 	}
 	if changed {
-		n.sink.Emit(protocol.NewTodoUpdate(sessionID, reqID, n.todos.asList()))
+		n.sink.Emit(backend.NewTodoUpdate(sessionID, reqID, n.todos.asList()))
 	}
 	return true
 }
 
 // HandleClaudeVisibleToolUse handles visible, non-suppressed tools that still
 // need side effects before their normal tool_start is emitted.
-func (n *toolNormalizer) HandleClaudeVisibleToolUse(s *session.Session, toolUseID, name string, input json.RawMessage) {
+func (n *toolNormalizer) HandleClaudeVisibleToolUse(s *session.Session, toolUseID, name string, input json.RawMessage) <-chan struct{} {
 	if name == "AskUserQuestion" && n.questions != nil {
-		n.questions.RegisterUserInputRequest(s, toolUseID, name, input)
+		return n.questions.RegisterUserInputRequest(s, toolUseID, name, input)
 	}
+	return nil
 }
 
 // HandleClaudeToolResult returns true when the raw tool_result was consumed and
@@ -79,7 +80,7 @@ func (n *toolNormalizer) HandleClaudeToolResult(sessionID, reqID, toolUseID, out
 	}
 	delete(n.suppressed, toolUseID)
 	if n.todos.resolveCreate(toolUseID, output) {
-		n.sink.Emit(protocol.NewTodoUpdate(sessionID, reqID, n.todos.asList()))
+		n.sink.Emit(backend.NewTodoUpdate(sessionID, reqID, n.todos.asList()))
 	}
 	return true
 }

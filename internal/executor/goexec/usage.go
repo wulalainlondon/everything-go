@@ -6,7 +6,7 @@ import (
 	"os/exec"
 	"time"
 
-	"everything-go/internal/protocol"
+	"everything-go/internal/backend"
 )
 
 // bunUsageScript reads the Claude Code OAuth token from the macOS keychain and
@@ -27,7 +27,7 @@ console.log(JSON.stringify(data));
 // FetchUsage runs the bun helper and maps the claude.ai usage payload to a
 // usage_report. Returns nil (no error) if usage can't be fetched, so the caller
 // can simply skip emitting for this backend.
-func (c *Claude) FetchUsage(ctx context.Context) (*protocol.UsageReport, error) {
+func (c *Claude) FetchUsage(ctx context.Context) (*backend.UsageReport, error) {
 	bun := "bun"
 	if p, err := exec.LookPath("bun"); err == nil {
 		bun = p
@@ -47,7 +47,7 @@ func (c *Claude) FetchUsage(ctx context.Context) (*protocol.UsageReport, error) 
 	if err := json.Unmarshal(out, &data); err != nil {
 		return nil, nil
 	}
-	rep := protocol.NewUsageReport(
+	rep := backend.NewUsageReport(
 		data.FiveHour.window(),
 		data.SevenDay.window(),
 		data.SevenDaySonnet.window(),
@@ -60,9 +60,9 @@ type claudeUsageEntry struct {
 	ResetsAt    *string  `json:"resets_at"`
 }
 
-// window converts a claude.ai entry to a wire UsageWindow: utilization is a
+// window converts a claude.ai entry to a backend UsageWindow: utilization is a
 // 0..100 percent there, normalized to a 0..1 fraction here (matching Python).
-func (e *claudeUsageEntry) window() *protocol.UsageWindow {
+func (e *claudeUsageEntry) window() *backend.UsageWindow {
 	if e == nil {
 		return nil
 	}
@@ -71,12 +71,12 @@ func (e *claudeUsageEntry) window() *protocol.UsageWindow {
 		f := *e.Utilization / 100.0
 		util = &f
 	}
-	return &protocol.UsageWindow{Utilization: util, ResetsAt: e.ResetsAt}
+	return &backend.UsageWindow{Utilization: util, ResetsAt: e.ResetsAt}
 }
 
 // FetchUsage queries the Codex app-server rate limits and maps primary/secondary
 // windows to five_hour/seven_day. Mirrors codex_appserver.py fetch_usage.
-func (c *Codex) FetchUsage(ctx context.Context) (*protocol.UsageReport, error) {
+func (c *Codex) FetchUsage(ctx context.Context) (*backend.UsageReport, error) {
 	if err := c.ensureServer(); err != nil {
 		return nil, nil
 	}
@@ -97,13 +97,13 @@ func (c *Codex) FetchUsage(ctx context.Context) (*protocol.UsageReport, error) {
 	}
 	five := codexWindow(limits["primary"])
 	seven := codexWindow(limits["secondary"])
-	rep := protocol.NewUsageReport(five, seven, nil)
+	rep := backend.NewUsageReport(five, seven, nil)
 	return &rep, nil
 }
 
 // codexWindow maps a Codex rate-limit window. usedPercent is 0..100 → 0..1;
 // resetsAt may be an epoch seconds number (converted to ISO) or a string.
-func codexWindow(raw json.RawMessage) *protocol.UsageWindow {
+func codexWindow(raw json.RawMessage) *backend.UsageWindow {
 	if len(raw) == 0 {
 		return nil
 	}
@@ -129,7 +129,7 @@ func codexWindow(raw json.RawMessage) *protocol.UsageWindow {
 	if len(resets) == 0 {
 		resets = w.ResetsAt2
 	}
-	return &protocol.UsageWindow{Utilization: util, ResetsAt: resetsAtString(resets)}
+	return &backend.UsageWindow{Utilization: util, ResetsAt: resetsAtString(resets)}
 }
 
 // resetsAtString accepts a JSON value that is either a string or an epoch

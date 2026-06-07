@@ -164,6 +164,18 @@ func (s *Session) SetResumeID(id string) {
 	s.mu.Unlock()
 }
 
+// SetContext records backend-reported context usage for summaries/status views.
+func (s *Session) SetContext(used, max int) {
+	s.mu.Lock()
+	if used >= 0 {
+		s.contextUsed = used
+	}
+	if max >= 0 {
+		s.contextMax = max
+	}
+	s.mu.Unlock()
+}
+
 // Registry is the in-memory session store, owned by the Go connection core.
 type Registry struct {
 	mu       sync.RWMutex

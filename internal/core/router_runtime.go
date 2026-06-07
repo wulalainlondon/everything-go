@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"everything-go/internal/clientproto"
 	"everything-go/internal/executor"
 	"everything-go/internal/protocol"
 	rt "everything-go/internal/runtime"
@@ -55,7 +56,7 @@ func (h *Hub) emitUsage(c *Client, ctx context.Context, up executor.UsageProvide
 	if !c.live() {
 		return // client replaced/gone during the usage fetch (#3)
 	}
-	c.enqueueEvent(*rep)
+	c.enqueueEvent(h.client.UsageReport(*rep))
 }
 
 // --- tasks ------------------------------------------------------------------
@@ -99,14 +100,14 @@ func (h *Hub) killTask(id string) bool {
 
 // sendDirListing answers browse_dir in two stages, mirroring file_ops.py:
 // (1) filesystem entries + active sessions, (2) enriched with resumable sessions.
-func (h *Hub) sendDirListing(c *Client, in protocol.Inbound) {
+func (h *Hub) sendDirListing(c *Client, cmd clientproto.Command) {
 	if !c.live() {
 		return
 	}
-	path := rt.ExpandPath(in.Path)
+	path := rt.ExpandPath(cmd.Path)
 	entries := rt.ListEntries(path)
 	hash := rt.DirHash(entries)
-	unchanged := in.ClientHash != "" && in.ClientHash == hash
+	unchanged := cmd.ClientHash != "" && cmd.ClientHash == hash
 
 	sendEntries := entries
 	if unchanged {
@@ -138,8 +139,8 @@ var previewTextExtensions = map[string]bool{
 	".xml": true, ".yaml": true, ".yml": true,
 }
 
-func (h *Hub) sendFileOpened(c *Client, in protocol.Inbound) {
-	path := rt.ExpandPath(in.Path)
+func (h *Hub) sendFileOpened(c *Client, cmd clientproto.Command) {
+	path := rt.ExpandPath(cmd.Path)
 	name := filepath.Base(path)
 	info, err := os.Stat(path)
 	if err != nil {
@@ -296,30 +297,30 @@ func realpath(p string) string {
 // --- search -----------------------------------------------------------------
 
 // sendSearch maps the inbound request_search frame to a search.Search call.
-func (h *Hub) sendSearch(c *Client, in protocol.Inbound) {
+func (h *Hub) sendSearch(c *Client, cmd clientproto.Command) {
 	if h.search == nil || !c.live() {
 		return
 	}
 	f := search.Filters{MaxPerSession: 3}
-	if in.Filters != nil {
+	if cmd.Filters != nil {
 		f = search.Filters{
-			ProjectDir:       in.Filters.ProjectDir,
-			Since:            in.Filters.Since,
-			Role:             in.Filters.Role,
-			ExcludeSubagents: in.Filters.ExcludeSubagents,
-			Source:           in.Filters.Source,
-			MaxPerSession:    in.Filters.MaxPerSession,
+			ProjectDir:       cmd.Filters.ProjectDir,
+			Since:            cmd.Filters.Since,
+			Role:             cmd.Filters.Role,
+			ExcludeSubagents: cmd.Filters.ExcludeSubagents,
+			Source:           cmd.Filters.Source,
+			MaxPerSession:    cmd.Filters.MaxPerSession,
 		}
 		if f.MaxPerSession <= 0 {
 			f.MaxPerSession = 3
 		}
 	}
-	limit := clampLimit(in.Limit, 50)
-	offset := in.Offset
+	limit := clampLimit(cmd.Limit, 50)
+	offset := cmd.Offset
 	if offset < 0 {
 		offset = 0
 	}
-	res := h.search.Search(in.Query, f, limit, offset)
+	res := h.search.Search(cmd.Query, f, limit, offset)
 	if !c.live() {
 		return // client replaced/gone during the query (#3)
 	}

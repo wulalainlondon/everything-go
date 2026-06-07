@@ -51,11 +51,14 @@ type captureRegistrar struct {
 	input     string
 }
 
-func (r *captureRegistrar) RegisterUserInputRequest(s *session.Session, toolUseID, agent string, input json.RawMessage) {
+func (r *captureRegistrar) RegisterUserInputRequest(s *session.Session, toolUseID, agent string, input json.RawMessage) <-chan struct{} {
 	r.sessionID = s.ID
 	r.toolUseID = toolUseID
 	r.agent = agent
 	r.input = string(input)
+	ch := make(chan struct{})
+	close(ch)
+	return ch
 }
 
 func TestToolNormalizerRegistersAskUserQuestionVisibleTool(t *testing.T) {

@@ -519,3 +519,206 @@ func (idx *Index) GetContext(sessionID, msgUUID string, around int) ContextRespo
 	resp.ElapsedMs = float64(time.Since(t0).Microseconds()) / 1000.0
 	return resp
 }
+
+// RecentMsg is a lightweight role+text pair returned by RecentMessagesBySession.
+type RecentMsg struct {
+	Role string
+	Text string
+}
+
+// SessionUID is a (backend, uid) pair used by RecentMessagesByUID.
+// For claude the uid is the Claude UUID (search DB key = "claude:{uid}").
+// For codex the uid is the 36-char suffix of the rollout filename (the search
+// DB key is "codex:rollout-{timestamp}-{uid}", so we match by suffix).
+type SessionUID struct {
+	// HubID is the hub session ID used as the return-map key.
+	HubID   string
+	Backend string
+	UID     string
+}
+
+// SessionPreview bundles the recent-message preview with the real last-activity
+// timestamp (unix seconds) derived from the search index. LastTS is the source
+// of truth for "last active" — the session store's last_used can be stale or
+// flattened, so callers prefer this when it is > 0.
+type SessionPreview struct {
+	Recent []RecentMsg
+	LastTS int64 // unix seconds of the newest indexed message; 0 if unknown
+}
+
+// parseISOUnix converts an ISO-8601 timestamp (e.g. "2026-06-07T09:18:58.954Z")
+// to unix seconds, returning 0 on failure.
+func parseISOUnix(s string) int64 {
+	if s == "" {
+		return 0
+	}
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		// Some rows omit the timezone; try a looser layout.
+		t, err = time.Parse("2006-01-02T15:04:05.999999999", strings.TrimSuffix(s, "Z"))
+		if err != nil {
+			return 0
+		}
+	}
+	return t.Unix()
+}
+
+// RecentMessagesByUID returns, per HubID, the last n non-subagent messages plus
+// the real last-activity timestamp. The map is keyed by HubID (not the search
+// DB session_id).
+func (idx *Index) RecentMessagesByUID(uids []SessionUID, n int) map[string]*SessionPreview {
+	if len(uids) == 0 {
+		return nil
+	}
+
+	// Split into exact-match (claude) and suffix-match (codex) groups.
+	type entry struct {
+		hubID string
+		uid   string // codex: last 36 chars
+	}
+	var exactArgs []any
+	var exactKeys []string
+	hubByExact := map[string]string{}
+	var codexEntries []entry
+
+	for _, u := range uids {
+		switch u.Backend {
+		case "claude":
+			key := "claude:" + u.UID
+			exactArgs = append(exactArgs, key)
+			exactKeys = append(exactKeys, key)
+			hubByExact[key] = u.HubID
+		case "codex":
+			if len(u.UID) == 36 {
+				codexEntries = append(codexEntries, entry{hubID: u.HubID, uid: u.UID})
+			}
+		}
+	}
+
+	out := make(map[string]*SessionPreview, len(uids))
+	get := func(hubID string) *SessionPreview {
+		if p := out[hubID]; p != nil {
+			return p
+		}
+		p := &SessionPreview{}
+		out[hubID] = p
+		return p
+	}
+	addRow := func(hubID, role, content, ts string) {
+		p := get(hubID)
+		if u := parseISOUnix(ts); u > p.LastTS {
+			p.LastTS = u
+		}
+		text := strings.TrimSpace(content)
+		if text == "" {
+			return
+		}
+		if len(text) > 200 {
+			text = text[:200]
+		}
+		p.Recent = append(p.Recent, RecentMsg{Role: role, Text: text})
+	}
+
+	// --- claude: exact IN query -----------------------------------------------
+	if len(exactKeys) > 0 {
+		ph := strings.Repeat("?,", len(exactKeys))
+		ph = ph[:len(ph)-1]
+		q := fmt.Sprintf(`
+			SELECT session_id, role, content, ts FROM (
+				SELECT session_id, role, content, ts,
+					ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY ts DESC) AS rn
+				FROM messages
+				WHERE session_id IN (%s) AND is_subagent = 0
+			) WHERE rn <= ?
+			ORDER BY session_id, rn DESC`, ph)
+		args := append(exactArgs, n)
+		rows, err := idx.db.Query(q, args...)
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var sid, role, content, ts string
+				if rows.Scan(&sid, &role, &content, &ts) != nil {
+					continue
+				}
+				addRow(hubByExact[sid], role, content, ts)
+			}
+		}
+	}
+
+	// --- codex: suffix match (last 36 chars of session_id = UID) --------------
+	for _, ce := range codexEntries {
+		q := `
+			SELECT session_id, role, content, ts FROM (
+				SELECT session_id, role, content, ts,
+					ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY ts DESC) AS rn
+				FROM messages
+				WHERE substr(session_id, -36) = ? AND is_subagent = 0
+			) WHERE rn <= ?
+			ORDER BY session_id, rn DESC`
+		rows, err := idx.db.Query(q, ce.uid, n)
+		if err != nil {
+			continue
+		}
+		func() {
+			defer rows.Close()
+			for rows.Next() {
+				var sid, role, content, ts string
+				if rows.Scan(&sid, &role, &content, &ts) != nil {
+					continue
+				}
+				addRow(ce.hubID, role, content, ts)
+			}
+		}()
+	}
+
+	return out
+}
+
+// RecentMessagesBySession returns the last n non-subagent messages for each
+// session in sessionIDs. Results are ordered oldest-first within each session.
+func (idx *Index) RecentMessagesBySession(sessionIDs []string, n int) map[string][]RecentMsg {
+	if len(sessionIDs) == 0 {
+		return nil
+	}
+	placeholders := strings.Repeat("?,", len(sessionIDs))
+	placeholders = placeholders[:len(placeholders)-1]
+
+	args := make([]any, len(sessionIDs)+1)
+	for i, id := range sessionIDs {
+		args[i] = id
+	}
+	args[len(sessionIDs)] = n
+
+	// For each session pick the last N rows then return them oldest-first.
+	q := fmt.Sprintf(`
+		SELECT session_id, role, content FROM (
+			SELECT session_id, role, content,
+				ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY ts DESC) AS rn
+			FROM messages
+			WHERE session_id IN (%s) AND is_subagent = 0
+		) WHERE rn <= ?
+		ORDER BY session_id, rn DESC`, placeholders)
+
+	rows, err := idx.db.Query(q, args...)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	out := make(map[string][]RecentMsg, len(sessionIDs))
+	for rows.Next() {
+		var sid, role, content string
+		if rows.Scan(&sid, &role, &content) != nil {
+			continue
+		}
+		text := strings.TrimSpace(content)
+		if text == "" {
+			continue
+		}
+		if len(text) > 200 {
+			text = text[:200]
+		}
+		out[sid] = append(out[sid], RecentMsg{Role: role, Text: text})
+	}
+	return out
+}

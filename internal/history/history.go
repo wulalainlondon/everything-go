@@ -1,6 +1,7 @@
-// Package history reproduces the Python bridge's history wire contract:
-// message shape, canonical content hash (for client-side dedup), and the
-// snapshot/delta slicing in bridge/backends/history.py.
+// Package history owns transcript slicing, resumable-session discovery shapes,
+// and the canonical content hash used for client-side dedup. It intentionally
+// preserves the Python bridge's history message shape so existing clients can
+// replay mixed backend histories without per-backend branching.
 package history
 
 import (

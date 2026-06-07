@@ -13,8 +13,8 @@ import (
 
 	"github.com/coder/websocket"
 
+	"everything-go/internal/backend"
 	"everything-go/internal/history"
-	"everything-go/internal/protocol"
 	"everything-go/internal/session"
 )
 
@@ -114,20 +114,76 @@ func TestWSExecutorTextToolDone(t *testing.T) {
 		t.Fatal("backend did not receive turn_start")
 	}
 	sink.waitFor(t, func(e any) bool {
-		d, ok := e.(protocol.Done)
+		d, ok := e.(backend.Done)
 		return ok && d.SessionID == "s1" && d.RequestID == "r1"
 	})
 
 	var sawAB bool
 	sink.mu.Lock()
 	for _, e := range sink.events {
-		if tr, ok := e.(protocol.ToolResult); ok && tr.ToolUseID == "t1" && tr.Output == "ab" {
+		if tr, ok := e.(backend.ToolResult); ok && tr.ToolUseID == "t1" && tr.Output == "ab" {
 			sawAB = true
 		}
 	}
 	sink.mu.Unlock()
 	if !sawAB {
 		t.Fatalf("expected accumulated tool output 'ab', got %+v", sink.events)
+	}
+}
+
+func TestWSExecutorToolDeltaIsBounded(t *testing.T) {
+	chunk := make([]byte, 16*1024)
+	for i := range chunk {
+		chunk[i] = 'x'
+	}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("accept: %v", err)
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "")
+		ctx := r.Context()
+		_, _, _ = conn.Read(ctx) // remote_hello
+		_, _, _ = conn.Read(ctx) // turn_start
+		for i := 0; i < 20; i++ {
+			frame := map[string]any{
+				"type": "tool_delta", "session_id": "s1", "request_id": "r1",
+				"tool_id": "t1", "delta": string(chunk),
+			}
+			out, _ := json.Marshal(frame)
+			if err := conn.Write(ctx, websocket.MessageText, out); err != nil {
+				t.Errorf("write tool_delta: %v", err)
+				return
+			}
+		}
+		_ = conn.Write(ctx, websocket.MessageText, []byte(`{"type":"done","session_id":"s1","request_id":"r1"}`))
+	}))
+	defer ts.Close()
+
+	sink := &capSink{}
+	ex := NewWS(sink, wsURL(ts), "")
+	s := session.NewRegistry().Create("s1", "n", "/tmp", "remote-ws", "", "", "")
+	if err := ex.Send(context.Background(), s, "r1", "hello", nil, nil); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	sink.waitFor(t, func(e any) bool {
+		_, ok := e.(backend.Done)
+		return ok
+	})
+	var last backend.ToolResult
+	sink.mu.Lock()
+	for _, e := range sink.events {
+		if tr, ok := e.(backend.ToolResult); ok {
+			last = tr
+		}
+	}
+	sink.mu.Unlock()
+	if len(last.Output) > backend.MaxToolResultOutputBytes {
+		t.Fatalf("tool output length = %d, want <= %d", len(last.Output), backend.MaxToolResultOutputBytes)
+	}
+	if got := last.Output[len(last.Output)-len(backend.ToolResultTruncatedMark):]; got != backend.ToolResultTruncatedMark {
+		t.Fatalf("missing truncation marker: %q", got)
 	}
 }
 
@@ -151,8 +207,8 @@ func TestWSExecutorDisconnectFailsTurn(t *testing.T) {
 		t.Fatalf("Send: %v", err)
 	}
 	ev := sink.waitFor(t, func(e any) bool {
-		er, ok := e.(protocol.Error)
-		return ok && er.Code == "remote_disconnected" && er.RequestID == "r1"
+		er, ok := e.(backend.Error)
+		return ok && er.Code == backend.ErrRemoteDisconnected && er.RequestID == "r1"
 	})
 	if ev == nil {
 		t.Fatal("missing disconnect error")
@@ -204,14 +260,14 @@ func TestWSExecutorReusesConnectionAcrossTurns(t *testing.T) {
 		t.Fatalf("Send1: %v", err)
 	}
 	sink.waitFor(t, func(e any) bool {
-		d, ok := e.(protocol.Done)
+		d, ok := e.(backend.Done)
 		return ok && d.SessionID == "s1"
 	})
 	if err := ex.Send(context.Background(), s2, "r2", "two", nil, nil); err != nil {
 		t.Fatalf("Send2: %v", err)
 	}
 	sink.waitFor(t, func(e any) bool {
-		d, ok := e.(protocol.Done)
+		d, ok := e.(backend.Done)
 		return ok && d.SessionID == "s2"
 	})
 
@@ -259,7 +315,14 @@ func TestWSExecutorCapabilityRPCs(t *testing.T) {
 					"sessions": []any{map[string]any{"id": "r1", "name": "Remote", "claude_uuid": "u1", "last_used": 123, "cwd": "/tmp", "backend": "remote-ws"}},
 				}
 			case "usage_request":
-				resp = map[string]any{"type": "usage_result", "rpc_id": rpcID, "report": map[string]any{"type": "usage_report"}}
+				resp = map[string]any{
+					"type":   "usage_result",
+					"rpc_id": rpcID,
+					"report": map[string]any{
+						"type":      "usage_report",
+						"five_hour": map[string]any{"utilization": 0.1, "resets_at": "2026-01-01T00:00:00Z"},
+					},
+				}
 			default:
 				t.Errorf("unexpected rpc type: %s", typ)
 				return
@@ -292,7 +355,7 @@ func TestWSExecutorCapabilityRPCs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FetchUsage: %v", err)
 	}
-	if usage.Type != "usage_report" {
+	if usage.FiveHour == nil || usage.FiveHour.Utilization == nil || *usage.FiveHour.Utilization != 0.1 {
 		t.Fatalf("bad usage report: %+v", usage)
 	}
 	got := []string{<-seen, <-seen, <-seen}
@@ -371,7 +434,7 @@ func TestWSExecutorRemoteInteractions(t *testing.T) {
 		t.Fatalf("Send: %v", err)
 	}
 	sink.waitFor(t, func(e any) bool {
-		ui, ok := e.(protocol.UserInputRequestEvent)
+		ui, ok := e.(backend.UserInputRequest)
 		return ok && ui.RequestID == "ui_1" && ui.ToolUseID == "toolu_1"
 	})
 	pending := ex.PendingInteractions("s1")
@@ -386,7 +449,7 @@ func TestWSExecutorRemoteInteractions(t *testing.T) {
 		t.Fatalf("bad remote response: %+v", resp)
 	}
 	sink.waitFor(t, func(e any) bool {
-		r, ok := e.(protocol.InteractionResolved)
+		r, ok := e.(backend.InteractionResolved)
 		return ok && r.RequestID == "ui_1" && r.Status == "resolved"
 	})
 	if got := ex.PendingInteractions("s1"); len(got) != 0 {
@@ -417,7 +480,7 @@ func TestWSExecutorRemoteInteractionExpiresOnDisconnect(t *testing.T) {
 		t.Fatalf("Send: %v", err)
 	}
 	sink.waitFor(t, func(e any) bool {
-		r, ok := e.(protocol.InteractionResolved)
+		r, ok := e.(backend.InteractionResolved)
 		return ok && r.RequestID == "ui_1" && r.Status == "expired"
 	})
 }

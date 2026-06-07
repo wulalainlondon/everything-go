@@ -61,7 +61,7 @@ func TestWebRTCPromotesDataChannelToClient(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseInbound: %v", err)
 	}
-	h.route(context.Background(), sig, in) // blocks until the answer is gathered
+	h.route(context.Background(), sig, h.client.ParseCommand(in)) // blocks until the answer is gathered
 
 	answer := waitForType(t, sig, "webrtc_answer")
 	sdp, _ := answer["sdp"].(string)
@@ -110,7 +110,7 @@ func TestWebRTCPromotesDataChannelToClient(t *testing.T) {
 func TestWebRTCOfferMissingSDP(t *testing.T) {
 	h, _ := newTestHub(t)
 	sig := newTestClient(h)
-	h.route(context.Background(), sig, protocol.Inbound{Type: "webrtc_offer"})
+	h.route(context.Background(), sig, h.client.ParseCommand(protocol.Inbound{Type: "webrtc_offer"}))
 	ev := waitForType(t, sig, "error")
 	if ev["code"] != "webrtc_offer_invalid" {
 		t.Fatalf("error code = %v, want webrtc_offer_invalid", ev["code"])
@@ -125,7 +125,7 @@ func TestWebRTCOfferMissingSDP(t *testing.T) {
 func TestWebRTCICEWithoutPeerIsNoop(t *testing.T) {
 	h, _ := newTestHub(t)
 	sig := newTestClient(h)
-	h.route(context.Background(), sig, protocol.Inbound{Type: "webrtc_ice", Candidate: "candidate:bogus"})
+	h.route(context.Background(), sig, h.client.ParseCommand(protocol.Inbound{Type: "webrtc_ice", Candidate: "candidate:bogus"}))
 	if sig.rtc != nil {
 		t.Fatal("webrtc_ice must not create a peer")
 	}

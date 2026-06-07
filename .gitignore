@@ -1,3 +1,14 @@
 /everything-go
 *.log
 .DS_Store
+
+# Runtime state written into --data-dir when the bridge is run from the source
+# tree (default data-dir is cwd). The real service writes to ~/.everything-go-runtime.
+everything_go_sessions.json
+everything_go_search.db
+everything_go_search.db-shm
+everything_go_search.db-wal
+pairing.json
+fcm_token.txt
+/feed/
+/inbox/

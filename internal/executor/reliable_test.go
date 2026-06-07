@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"everything-go/internal/backend"
 	"everything-go/internal/history"
 	"everything-go/internal/protocol"
 	"everything-go/internal/session"
@@ -22,7 +23,7 @@ type reliableFake struct {
 	called bool
 }
 
-func (f *reliableFake) Send(ctx context.Context, s *session.Session, reqID, content string, images []protocol.InboundImage, files []protocol.InboundFile) error {
+func (f *reliableFake) Send(ctx context.Context, s *session.Session, reqID, content string, images []backend.ImageAttachment, files []backend.FileAttachment) error {
 	f.called = true
 	if f.panic {
 		panic("boom")

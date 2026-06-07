@@ -10,6 +10,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"everything-go/internal/clientproto"
 	"everything-go/internal/protocol"
 )
 
@@ -269,22 +270,22 @@ func (h *Hub) serveConn(ctx context.Context, conn wireConn) {
 // auth token. On success it returns the parsed hello for the caller to route;
 // on failure it writes a protocol error directly (the write pump is not running
 // yet) and returns false.
-func (c *Client) handshake(ctx context.Context) (protocol.Inbound, bool) {
+func (c *Client) handshake(ctx context.Context) (clientproto.Command, bool) {
 	data, err := c.conn.Read(ctx)
 	if err != nil {
-		return protocol.Inbound{}, false
+		return clientproto.Command{}, false
 	}
 	in, err := protocol.ParseInbound(data)
 	if err != nil || in.Type != "hello" {
 		c.writeNow(ctx, protocol.NewError("", "", "Protocol error: first message must be hello"))
-		return protocol.Inbound{}, false
+		return clientproto.Command{}, false
 	}
 	if !c.hub.authValid(strings.TrimSpace(in.AuthToken)) {
 		c.writeNow(ctx, protocol.NewError("", "", "Unauthorized: invalid auth token"))
-		return protocol.Inbound{}, false
+		return clientproto.Command{}, false
 	}
 	logInbound(in.Type, in.SessionID)
-	return in, true
+	return c.hub.client.ParseCommand(in), true
 }
 
 // writeNow sends a single event synchronously, used during the handshake before
@@ -332,6 +333,6 @@ func (c *Client) readLoop(ctx context.Context) error {
 			continue
 		}
 		logInbound(in.Type, in.SessionID)
-		c.hub.route(ctx, c, in)
+		c.hub.route(ctx, c, c.hub.client.ParseCommand(in))
 	}
 }

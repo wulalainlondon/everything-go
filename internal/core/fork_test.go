@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"everything-go/internal/backend"
+	"everything-go/internal/clientproto"
 	"everything-go/internal/history"
 	"everything-go/internal/protocol"
 	"everything-go/internal/session"
@@ -31,8 +33,12 @@ type forkExec struct {
 	prov *forkProv
 }
 
-func (e *forkExec) ProviderFor(*session.Session) (history.Provider, bool) { return e.prov, true }
-func (e *forkExec) AllProviders() []history.Provider                      { return []history.Provider{e.prov} }
+func (e *forkExec) ProviderFor(*session.Session) (backend.HistoryProvider, bool) {
+	return e.prov, true
+}
+func (e *forkExec) AllProviders() []backend.HistoryProvider {
+	return []backend.HistoryProvider{e.prov}
+}
 
 func writeJSONL(t *testing.T, dir, name string, lines []string) string {
 	t.Helper()
@@ -95,7 +101,7 @@ func TestForkFullCopy(t *testing.T) {
 	h.addClient(c)
 	h.registerLatest(c)
 
-	h.handleFork(c, protocol.Inbound{Type: "fork_session", SessionID: "p1"})
+	h.handleFork(c, clientproto.NewAppV1().ParseCommand(protocol.Inbound{Type: "fork_session", SessionID: "p1"}))
 
 	ev := waitForType(t, c, "session_forked")
 	newID, _ := ev["session_id"].(string)
@@ -132,7 +138,7 @@ func TestForkTruncated(t *testing.T) {
 	h.addClient(c)
 	h.registerLatest(c)
 
-	h.handleFork(c, protocol.Inbound{Type: "fork_session", SessionID: "p1", ForkAfterMessageID: "claude:x:line:2", Name: "Cut"})
+	h.handleFork(c, clientproto.NewAppV1().ParseCommand(protocol.Inbound{Type: "fork_session", SessionID: "p1", ForkAfterMessageID: "claude:x:line:2", Name: "Cut"}))
 
 	ev := waitForType(t, c, "session_forked")
 	if ev["name"] != "Cut" {
@@ -172,7 +178,7 @@ func TestForkParentBusy(t *testing.T) {
 	h.addClient(c)
 	h.registerLatest(c)
 
-	h.handleFork(c, protocol.Inbound{Type: "fork_session", SessionID: "p1"})
+	h.handleFork(c, clientproto.NewAppV1().ParseCommand(protocol.Inbound{Type: "fork_session", SessionID: "p1"}))
 	ev := waitForType(t, c, "fork_error")
 	if ev["reason"] != "parent_busy" {
 		t.Fatalf("expected parent_busy, got %v", ev["reason"])
@@ -186,7 +192,7 @@ func TestForkNoHistory(t *testing.T) {
 	h.addClient(c)
 	h.registerLatest(c)
 
-	h.handleFork(c, protocol.Inbound{Type: "fork_session", SessionID: "p1"})
+	h.handleFork(c, clientproto.NewAppV1().ParseCommand(protocol.Inbound{Type: "fork_session", SessionID: "p1"}))
 	ev := waitForType(t, c, "fork_error")
 	if ev["reason"] != "no_history_file" {
 		t.Fatalf("expected no_history_file, got %v", ev["reason"])
@@ -198,7 +204,7 @@ func TestForkUnknownSession(t *testing.T) {
 	c := newDeviceClient(h, "dev", 64)
 	h.addClient(c)
 	h.registerLatest(c)
-	h.handleFork(c, protocol.Inbound{Type: "fork_session", SessionID: "ghost"})
+	h.handleFork(c, clientproto.NewAppV1().ParseCommand(protocol.Inbound{Type: "fork_session", SessionID: "ghost"}))
 	ev := waitForType(t, c, "error")
 	if msg, _ := ev["message"].(string); msg == "" {
 		t.Fatalf("expected an error event for unknown session, got %+v", ev)

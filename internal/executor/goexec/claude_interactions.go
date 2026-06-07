@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"everything-go/internal/protocol"
+	"everything-go/internal/backend"
 	"everything-go/internal/session"
 )
 
@@ -21,9 +21,10 @@ import (
 // tool_result into the same session's stdin to resume the turn.
 
 type pendingInteraction struct {
-	payload   protocol.UserInputRequestPayload
+	payload   backend.UserInputPayload
 	sessionID string
 	toolUseID string
+	doneCh    chan struct{}
 	// resultCh is set when the interaction originated from the ask_user MCP tool
 	// (the preferred path). RespondUserInput delivers the answer here instead of
 	// writing a stdin tool_result, and the blocked MCP handler returns it to
@@ -41,8 +42,8 @@ type interactionAnswer struct {
 // registerMCPInteraction registers an interaction raised by the ask_user MCP
 // tool: it normalizes the questions, emits user_input_request to the app, and
 // returns the payload plus a channel the handler blocks on for the answer.
-func (c *Claude) registerMCPInteraction(sessionID string, input json.RawMessage) (protocol.UserInputRequestPayload, chan interactionAnswer) {
-	payload := protocol.UserInputRequestPayload{
+func (c *Claude) registerMCPInteraction(sessionID string, input json.RawMessage) (backend.UserInputPayload, chan interactionAnswer) {
+	payload := backend.UserInputPayload{
 		RequestID:       "ui_" + randHex(12),
 		SessionID:       sessionID,
 		Source:          "claude",
@@ -57,7 +58,7 @@ func (c *Claude) registerMCPInteraction(sessionID string, input json.RawMessage)
 	c.interMu.Lock()
 	c.pending[payload.RequestID] = &pendingInteraction{payload: payload, sessionID: sessionID, resultCh: ch}
 	c.interMu.Unlock()
-	c.sink.Emit(protocol.NewUserInputRequest(payload))
+	c.sink.Emit(backend.NewUserInputRequest(payload))
 	log.Printf("[%s] ask_user MCP → user_input_request %s (%d question(s))", sessionID, payload.RequestID, len(payload.Questions))
 	return payload, ch
 }
@@ -65,9 +66,10 @@ func (c *Claude) registerMCPInteraction(sessionID string, input json.RawMessage)
 // RegisterUserInputRequest converts an AskUserQuestion tool_use into a
 // user_input_request, stores it, and broadcasts it. Keyed by a fresh request_id
 // (the app answers with that id; the tool_use_id is accepted as an alias).
-func (c *Claude) RegisterUserInputRequest(s *session.Session, toolUseID, agent string, input json.RawMessage) {
+func (c *Claude) RegisterUserInputRequest(s *session.Session, toolUseID, agent string, input json.RawMessage) <-chan struct{} {
 	questions := normalizeQuestions(input)
-	payload := protocol.UserInputRequestPayload{
+	doneCh := make(chan struct{})
+	payload := backend.UserInputPayload{
 		RequestID:       "ui_" + randHex(12),
 		SessionID:       s.ID,
 		Source:          "claude",
@@ -80,11 +82,12 @@ func (c *Claude) RegisterUserInputRequest(s *session.Session, toolUseID, agent s
 		Status:          "pending",
 	}
 	c.interMu.Lock()
-	c.pending[payload.RequestID] = &pendingInteraction{payload: payload, sessionID: s.ID, toolUseID: toolUseID}
+	c.pending[payload.RequestID] = &pendingInteraction{payload: payload, sessionID: s.ID, toolUseID: toolUseID, doneCh: doneCh}
 	c.interMu.Unlock()
 
-	c.sink.Emit(protocol.NewUserInputRequest(payload))
+	c.sink.Emit(backend.NewUserInputRequest(payload))
 	log.Printf("[%s] AskUserQuestion → user_input_request %s (%d question(s))", s.ID, payload.RequestID, len(questions))
+	return doneCh
 }
 
 func (c *Claude) registerInteraction(s *session.Session, toolUseID, agent string, input json.RawMessage) {
@@ -133,12 +136,15 @@ func (c *Claude) RespondUserInput(id string, answers map[string]any, cancelled b
 			}
 		}
 	}
+	if pi.doneCh != nil {
+		close(pi.doneCh)
+	}
 
 	status := "resolved"
 	if cancelled {
 		status = "cancelled"
 	}
-	c.sink.Emit(protocol.NewInteractionResolved(pi.payload.RequestID, pi.sessionID, status))
+	c.sink.Emit(backend.NewInteractionResolved(pi.payload.RequestID, pi.sessionID, status))
 	return true
 }
 
@@ -150,16 +156,16 @@ func (c *Claude) dropInteraction(requestID string) {
 	delete(c.pending, requestID)
 	c.interMu.Unlock()
 	if pi != nil {
-		c.sink.Emit(protocol.NewInteractionResolved(requestID, pi.sessionID, "expired"))
+		c.sink.Emit(backend.NewInteractionResolved(requestID, pi.sessionID, "expired"))
 	}
 }
 
 // PendingInteractions returns the open interactions, optionally filtered by
 // session. Never nil so the wire array is [] not null.
-func (c *Claude) PendingInteractions(sessionID string) []protocol.UserInputRequestPayload {
+func (c *Claude) PendingInteractions(sessionID string) []backend.UserInputPayload {
 	c.interMu.Lock()
 	defer c.interMu.Unlock()
-	out := []protocol.UserInputRequestPayload{}
+	out := []backend.UserInputPayload{}
 	for _, p := range c.pending {
 		if sessionID == "" || p.sessionID == sessionID {
 			out = append(out, p.payload)
@@ -179,12 +185,15 @@ func (c *Claude) cancelInteractionsFor(sessionID string) {
 			if p.resultCh != nil {
 				p.resultCh <- interactionAnswer{cancelled: true} // unblock the MCP handler
 			}
+			if p.doneCh != nil {
+				close(p.doneCh)
+			}
 			delete(c.pending, rid)
 		}
 	}
 	c.interMu.Unlock()
 	for _, rid := range ids {
-		c.sink.Emit(protocol.NewInteractionResolved(rid, sessionID, "cancelled"))
+		c.sink.Emit(backend.NewInteractionResolved(rid, sessionID, "cancelled"))
 	}
 }
 
@@ -195,7 +204,7 @@ func (c *Claude) cancelInteractionsFor(sessionID string) {
 // those to the question text + option label(s) from the stored payload so Claude
 // recognizes the selection. Falls back to the raw key/value when an answer isn't
 // keyed by a known question_id (e.g. free-form).
-func buildUserInputResultText(payload protocol.UserInputRequestPayload, answers map[string]any, cancelled bool) string {
+func buildUserInputResultText(payload backend.UserInputPayload, answers map[string]any, cancelled bool) string {
 	const dismissed = "The user dismissed the question(s) without answering. Continue without their input."
 	if cancelled {
 		return dismissed
@@ -231,7 +240,7 @@ func buildUserInputResultText(payload protocol.UserInputRequestPayload, answers 
 // resolveOptionLabels turns an answer value (a single option id, a list of ids,
 // or free-form text) into a human-readable label string, mapping option ids to
 // their labels via the question's options.
-func resolveOptionLabels(q protocol.UserInputQuestion, v any) string {
+func resolveOptionLabels(q backend.UserInputQuestion, v any) string {
 	idToLabel := make(map[string]string, len(q.Options))
 	for _, o := range q.Options {
 		idToLabel[o.ID] = o.Label
@@ -290,7 +299,7 @@ func toolResultMessageJSON(toolUseID, output string) []byte {
 
 // --- AskUserQuestion input normalization (port of interactions.py) ----------
 
-func normalizeQuestions(input json.RawMessage) []protocol.UserInputQuestion {
+func normalizeQuestions(input json.RawMessage) []backend.UserInputQuestion {
 	var cmd map[string]any
 	if json.Unmarshal(input, &cmd) != nil || cmd == nil {
 		cmd = map[string]any{}
@@ -300,7 +309,7 @@ func normalizeQuestions(input json.RawMessage) []protocol.UserInputQuestion {
 		rawQuestions = []any{cmd} // treat the whole input as a single question
 	}
 
-	out := make([]protocol.UserInputQuestion, 0, len(rawQuestions))
+	out := make([]backend.UserInputQuestion, 0, len(rawQuestions))
 	for idx, raw := range rawQuestions {
 		q, ok := raw.(map[string]any)
 		if !ok {
@@ -329,7 +338,7 @@ func normalizeQuestions(input json.RawMessage) []protocol.UserInputQuestion {
 		if text == "" {
 			text = "Question"
 		}
-		out = append(out, protocol.UserInputQuestion{
+		out = append(out, backend.UserInputQuestion{
 			QuestionID:  qid,
 			Text:        text,
 			Header:      firstStr(q, "header", "title"),
@@ -342,7 +351,7 @@ func normalizeQuestions(input json.RawMessage) []protocol.UserInputQuestion {
 	return out
 }
 
-func normalizeOptions(raws ...any) []protocol.UserInputOption {
+func normalizeOptions(raws ...any) []backend.UserInputOption {
 	var list []any
 	for _, r := range raws {
 		if l, ok := r.([]any); ok {
@@ -350,14 +359,14 @@ func normalizeOptions(raws ...any) []protocol.UserInputOption {
 			break
 		}
 	}
-	out := []protocol.UserInputOption{}
+	out := []backend.UserInputOption{}
 	for idx, raw := range list {
 		if o, ok := raw.(map[string]any); ok {
 			label := firstStr(o, "label", "text", "value", "id")
 			if label == "" {
 				label = strconv.Itoa(idx)
 			}
-			out = append(out, protocol.UserInputOption{
+			out = append(out, backend.UserInputOption{
 				ID:          optionID(o, idx),
 				Label:       label,
 				Description: firstStr(o, "description", "detail"),
@@ -369,7 +378,7 @@ func normalizeOptions(raws ...any) []protocol.UserInputOption {
 			if id == "" {
 				id = strconv.Itoa(idx)
 			}
-			out = append(out, protocol.UserInputOption{ID: id, Label: s})
+			out = append(out, backend.UserInputOption{ID: id, Label: s})
 		}
 	}
 	return out

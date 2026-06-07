@@ -6,15 +6,16 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
 
+	"everything-go/internal/backend"
 	"everything-go/internal/executor"
 	"everything-go/internal/history"
-	"everything-go/internal/protocol"
 	"everything-go/internal/session"
 )
 
@@ -40,7 +41,7 @@ type WS struct {
 	nextRPC  atomic.Uint64
 	pending  map[string]chan rpcReply
 	interMu  sync.Mutex
-	inter    map[string]protocol.UserInputRequestPayload
+	inter    map[string]backend.UserInputPayload
 }
 
 type rpcReply struct {
@@ -62,11 +63,11 @@ func NewWS(sink executor.Sink, url, token string) *WS {
 		sink: sink, url: url, token: token,
 		active: make(map[string]*turn), capState: make(map[string]bool),
 		pending: make(map[string]chan rpcReply),
-		inter:   make(map[string]protocol.UserInputRequestPayload),
+		inter:   make(map[string]backend.UserInputPayload),
 	}
 }
 
-func (w *WS) Send(ctx context.Context, s *session.Session, reqID, content string, images []protocol.InboundImage, files []protocol.InboundFile) error {
+func (w *WS) Send(ctx context.Context, s *session.Session, reqID, content string, images []backend.ImageAttachment, files []backend.FileAttachment) error {
 	if w.url == "" {
 		return fmt.Errorf("remote websocket url is empty")
 	}
@@ -78,22 +79,14 @@ func (w *WS) Send(ctx context.Context, s *session.Session, reqID, content string
 
 	w.mu.Lock()
 	if old := w.active[s.ID]; old != nil {
-		w.failLocked(old, "remote_replaced", "new turn replaced previous in-flight turn")
+		w.failLocked(old, backend.ErrRemoteReplaced, "new turn replaced previous in-flight turn")
 	}
 	w.active[s.ID] = t
 	w.mu.Unlock()
 
-	if err := w.writeConn(ctx, conn, map[string]any{
-		"type":       "turn_start",
-		"session_id": s.ID,
-		"request_id": reqID,
-		"content":    content,
-		"model":      s.Snapshot().Model,
-		"images":     images,
-		"files":      files,
-	}); err != nil {
+	if err := w.writeConn(ctx, conn, turnStart(s.ID, reqID, content, s.Snapshot().Model, images, files)); err != nil {
 		w.removeIfCurrent(s.ID, t)
-		w.fail(t, "remote_send_failed", err.Error())
+		w.fail(t, backend.ErrRemoteSendFailed, err.Error())
 		w.dropConn(conn, err)
 		return err
 	}
@@ -103,33 +96,33 @@ func (w *WS) Send(ctx context.Context, s *session.Session, reqID, content string
 func (w *WS) Stop(ctx context.Context, s *session.Session) error {
 	t := w.get(s.ID)
 	if t == nil {
-		w.sink.Emit(protocol.NewStopped(s.ID, ""))
+		w.sink.Emit(backend.NewStopped(s.ID, ""))
 		return nil
 	}
 	if conn := w.currentConn(); conn != nil {
-		_ = w.writeConn(ctx, conn, map[string]any{"type": "turn_stop", "session_id": s.ID, "request_id": t.reqID})
+		_ = w.writeConn(ctx, conn, turnStop(s.ID, t.reqID))
 	}
 	t.markEnded()
 	w.removeIfCurrent(s.ID, t)
-	w.sink.Emit(protocol.NewStopped(s.ID, t.reqID))
+	w.sink.Emit(backend.NewStopped(s.ID, t.reqID))
 	return nil
 }
 
 func (w *WS) Clear(ctx context.Context, s *session.Session) error {
 	if conn := w.currentConn(); conn != nil {
-		_ = w.writeConn(ctx, conn, map[string]any{"type": "session_clear", "session_id": s.ID})
+		_ = w.writeConn(ctx, conn, sessionClear(s.ID))
 	}
 	if t := w.get(s.ID); t != nil {
 		w.removeIfCurrent(s.ID, t)
 	}
 	s.SetResumeID("")
-	w.sink.Emit(protocol.NewSessionWarning(s.ID, "Session history cleared."))
+	w.sink.Emit(backend.NewSessionWarning(s.ID, "Session history cleared."))
 	return nil
 }
 
 func (w *WS) Close(ctx context.Context, s *session.Session) error {
 	if conn := w.currentConn(); conn != nil {
-		_ = w.writeConn(ctx, conn, map[string]any{"type": "session_close", "session_id": s.ID})
+		_ = w.writeConn(ctx, conn, sessionClose(s.ID))
 	}
 	w.mu.Lock()
 	delete(w.active, s.ID)
@@ -195,7 +188,7 @@ func (w *WS) dial(ctx context.Context) (*websocket.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := w.writeConn(dialCtx, conn, map[string]any{"type": "remote_hello", "version": 1}); err != nil {
+	if err := w.writeConn(dialCtx, conn, remoteHello()); err != nil {
 		conn.Close(websocket.StatusNormalClosure, "hello failed")
 		return nil, err
 	}
@@ -214,33 +207,11 @@ func (w *WS) readLoop(conn *websocket.Conn) {
 }
 
 func (w *WS) handleFrame(data []byte) {
-	var ev struct {
-		Type         string                       `json:"type"`
-		SessionID    string                       `json:"session_id"`
-		RequestID    string                       `json:"request_id"`
-		Delta        string                       `json:"delta"`
-		Content      string                       `json:"content"`
-		ToolID       string                       `json:"tool_id"`
-		ToolUseID    string                       `json:"tool_use_id"`
-		Name         string                       `json:"name"`
-		Command      string                       `json:"command"`
-		Output       string                       `json:"output"`
-		Code         string                       `json:"code"`
-		Message      string                       `json:"message"`
-		ResumeID     string                       `json:"resume_id"`
-		Capabilities map[string]bool              `json:"capabilities"`
-		RPCID        string                       `json:"rpc_id"`
-		Header       string                       `json:"header"`
-		Agent        string                       `json:"requesting_agent"`
-		Kind         string                       `json:"kind"`
-		Questions    []protocol.UserInputQuestion `json:"questions"`
-		CreatedAt    int64                        `json:"created_at"`
-		Status       string                       `json:"status"`
-	}
-	if json.Unmarshal(data, &ev) != nil {
+	ev, ok := parseRemoteFrame(data)
+	if !ok {
 		return
 	}
-	if ev.Type == "remote_hello_ack" {
+	if ev.Type == frameRemoteHelloAck {
 		w.capMu.Lock()
 		w.capState = ev.Capabilities
 		ready := w.capReady
@@ -254,11 +225,11 @@ func (w *WS) handleFrame(data []byte) {
 	if ev.RPCID != "" && w.completeRPC(ev.RPCID, data) {
 		return
 	}
-	if ev.Type == "user_input_request" {
+	if ev.Type == frameUserInputRequest {
 		w.handleUserInputRequest(ev.SessionID, ev.RequestID, ev.Kind, ev.Header, ev.ToolUseID, ev.Agent, ev.Questions, ev.CreatedAt, ev.Status)
 		return
 	}
-	if ev.Type == "interaction_resolved" {
+	if ev.Type == frameInteractionResolved {
 		w.resolveInteraction(ev.RequestID, ev.SessionID, first(ev.Status, "resolved"))
 		return
 	}
@@ -272,50 +243,46 @@ func (w *WS) handleFrame(data []byte) {
 	toolID := first(ev.ToolID, ev.ToolUseID, "tool")
 	switch ev.Type {
 	case "text_delta", "text_chunk":
-		w.sink.Emit(protocol.NewTextChunk(sid, reqID, first(ev.Delta, ev.Content)))
+		w.sink.Emit(backend.NewTextChunk(sid, reqID, first(ev.Delta, ev.Content)))
 	case "thinking_delta", "thinking_chunk":
-		w.sink.Emit(protocol.NewThinkingChunk(sid, reqID, first(ev.Delta, ev.Content)))
+		w.sink.Emit(backend.NewThinkingChunk(sid, reqID, first(ev.Delta, ev.Content)))
 	case "tool_start":
 		t.mu.Lock()
 		t.tools[toolID] = ""
 		t.mu.Unlock()
-		w.sink.Emit(protocol.NewToolStart(sid, reqID, toolID, ev.Name, ev.Command))
+		w.sink.Emit(backend.NewToolStart(sid, reqID, toolID, ev.Name, ev.Command))
 	case "tool_delta":
 		t.mu.Lock()
-		t.tools[toolID] += first(ev.Delta, ev.Output)
+		if !strings.Contains(t.tools[toolID], backend.ToolResultTruncatedMark) {
+			t.tools[toolID] = backend.TruncateToolOutput(t.tools[toolID] + first(ev.Delta, ev.Output))
+		}
 		out := t.tools[toolID]
 		t.mu.Unlock()
-		w.sink.Emit(protocol.NewToolResult(sid, reqID, toolID, out))
+		w.sink.Emit(backend.NewToolResult(sid, reqID, toolID, out))
 	case "tool_result":
-		w.sink.Emit(protocol.NewToolResult(sid, reqID, toolID, ev.Output))
+		w.sink.Emit(backend.NewToolResult(sid, reqID, toolID, ev.Output))
 	case "tool_end":
 		t.mu.Lock()
 		delete(t.tools, toolID)
 		t.mu.Unlock()
-		w.sink.Emit(protocol.NewToolEnd(sid, reqID, toolID))
+		w.sink.Emit(backend.NewToolEnd(sid, reqID, toolID))
 	case "session_uuid":
 		if ev.ResumeID != "" {
 			t.session.SetResumeID(ev.ResumeID)
-			w.sink.Emit(protocol.NewSessionUUID(sid, ev.ResumeID))
+			w.sink.Emit(backend.NewSessionUUID(sid, ev.ResumeID))
 		}
 	case "done":
 		t.markEnded()
 		w.removeIfCurrent(sid, t)
-		w.sink.Emit(protocol.NewDone(sid, reqID))
+		w.sink.Emit(backend.NewDone(sid, reqID))
 	case "stopped":
 		t.markEnded()
 		w.removeIfCurrent(sid, t)
-		w.sink.Emit(protocol.NewStopped(sid, reqID))
+		w.sink.Emit(backend.NewStopped(sid, reqID))
 	case "error":
 		t.markEnded()
 		w.removeIfCurrent(sid, t)
-		w.sink.Emit(protocol.Error{
-			Type:      "error",
-			SessionID: sid,
-			RequestID: reqID,
-			Code:      first(ev.Code, "remote_error"),
-			Message:   ev.Message,
-		})
+		w.sink.Emit(backend.NewError(sid, reqID, first(ev.Code, backend.ErrRemote), ev.Message))
 	}
 }
 
@@ -323,18 +290,9 @@ func (w *WS) LoadHistory(resumeID string, opts history.Opts) (*history.Result, e
 	if !w.requireCapability(context.Background(), "history") {
 		return nil, fmt.Errorf("remote history unsupported")
 	}
-	var out struct {
-		Kind           string           `json:"kind"`
-		Messages       []map[string]any `json:"messages"`
-		SourceCount    int              `json:"source_count"`
-		KnownIDFound   bool             `json:"known_id_found"`
-		SnapshotReason string           `json:"snapshot_reason"`
-		HasMoreBefore  bool             `json:"has_more_before"`
-		Error          string           `json:"error"`
-	}
-	if err := w.rpc(context.Background(), "history_request", map[string]any{
-		"resume_id": resumeID,
-		"opts":      opts,
+	var out historyResultFrame
+	if err := w.rpc(context.Background(), frameHistoryRequest, func(rpcID string) any {
+		return historyRequest(rpcID, resumeID, opts)
 	}, &out); err != nil {
 		return nil, err
 	}
@@ -352,12 +310,9 @@ func (w *WS) ResumableSessions(limit int) ([]history.ResumableSession, error) {
 	if !w.requireCapability(context.Background(), "history") {
 		return nil, fmt.Errorf("remote history unsupported")
 	}
-	var out struct {
-		Sessions []history.ResumableSession `json:"sessions"`
-		Error    string                     `json:"error"`
-	}
-	if err := w.rpc(context.Background(), "resumable_sessions_request", map[string]any{
-		"limit": limit,
+	var out resumableSessionsResultFrame
+	if err := w.rpc(context.Background(), frameResumableSessionsRequest, func(rpcID string) any {
+		return resumableSessionsRequest(rpcID, limit)
 	}, &out); err != nil {
 		return nil, err
 	}
@@ -370,15 +325,14 @@ func (w *WS) ResumableSessions(limit int) ([]history.ResumableSession, error) {
 	return out.Sessions, nil
 }
 
-func (w *WS) FetchUsage(ctx context.Context) (*protocol.UsageReport, error) {
+func (w *WS) FetchUsage(ctx context.Context) (*backend.UsageReport, error) {
 	if !w.requireCapability(ctx, "usage") {
 		return nil, fmt.Errorf("remote usage unsupported")
 	}
-	var out struct {
-		Report *protocol.UsageReport `json:"report"`
-		Error  string                `json:"error"`
-	}
-	if err := w.rpc(ctx, "usage_request", nil, &out); err != nil {
+	var out usageResultFrame
+	if err := w.rpc(ctx, frameUsageRequest, func(rpcID string) any {
+		return usageRequest(rpcID)
+	}, &out); err != nil {
 		return nil, err
 	}
 	if out.Error != "" {
@@ -387,7 +341,7 @@ func (w *WS) FetchUsage(ctx context.Context) (*protocol.UsageReport, error) {
 	if out.Report == nil {
 		return nil, fmt.Errorf("remote usage response missing report")
 	}
-	return out.Report, nil
+	return usageReportFromWire(out.Report), nil
 }
 
 func (w *WS) RespondUserInput(id string, answers map[string]any, cancelled bool) bool {
@@ -413,13 +367,7 @@ func (w *WS) RespondUserInput(id string, answers map[string]any, cancelled bool)
 	if err != nil {
 		return false
 	}
-	if err := w.writeConn(context.Background(), conn, map[string]any{
-		"type":       "user_input_response",
-		"request_id": payload.RequestID,
-		"session_id": payload.SessionID,
-		"answers":    answers,
-		"cancelled":  cancelled,
-	}); err != nil {
+	if err := w.writeConn(context.Background(), conn, userInputResponse(payload, answers, cancelled)); err != nil {
 		return false
 	}
 	status := "resolved"
@@ -430,13 +378,13 @@ func (w *WS) RespondUserInput(id string, answers map[string]any, cancelled bool)
 	return true
 }
 
-func (w *WS) PendingInteractions(sessionID string) []protocol.UserInputRequestPayload {
+func (w *WS) PendingInteractions(sessionID string) []backend.UserInputPayload {
 	if !w.requireCapability(context.Background(), "interactions") {
-		return []protocol.UserInputRequestPayload{}
+		return []backend.UserInputPayload{}
 	}
 	w.interMu.Lock()
 	defer w.interMu.Unlock()
-	out := []protocol.UserInputRequestPayload{}
+	out := []backend.UserInputPayload{}
 	for _, p := range w.inter {
 		if sessionID == "" || p.SessionID == sessionID {
 			out = append(out, p)
@@ -445,7 +393,7 @@ func (w *WS) PendingInteractions(sessionID string) []protocol.UserInputRequestPa
 	return out
 }
 
-func (w *WS) handleUserInputRequest(sessionID, requestID, kind, header, toolUseID, agent string, questions []protocol.UserInputQuestion, createdAt int64, status string) {
+func (w *WS) handleUserInputRequest(sessionID, requestID, kind, header, toolUseID, agent string, questions []backend.UserInputQuestion, createdAt int64, status string) {
 	if requestID == "" || sessionID == "" {
 		return
 	}
@@ -458,7 +406,7 @@ func (w *WS) handleUserInputRequest(sessionID, requestID, kind, header, toolUseI
 	if createdAt == 0 {
 		createdAt = time.Now().UnixMilli()
 	}
-	payload := protocol.UserInputRequestPayload{
+	payload := backend.UserInputPayload{
 		RequestID: requestID, SessionID: sessionID, Source: "remote-ws",
 		Kind: kind, Header: header, ToolUseID: toolUseID, RequestingAgent: agent,
 		Questions: questions, CreatedAt: createdAt, Status: status,
@@ -466,7 +414,7 @@ func (w *WS) handleUserInputRequest(sessionID, requestID, kind, header, toolUseI
 	w.interMu.Lock()
 	w.inter[requestID] = payload
 	w.interMu.Unlock()
-	w.sink.Emit(protocol.NewUserInputRequest(payload))
+	w.sink.Emit(backend.NewUserInputRequest(payload))
 }
 
 func (w *WS) resolveInteraction(requestID, sessionID, status string) {
@@ -480,13 +428,10 @@ func (w *WS) resolveInteraction(requestID, sessionID, status string) {
 	if sessionID == "" {
 		sessionID = payload.SessionID
 	}
-	w.sink.Emit(protocol.NewInteractionResolved(requestID, sessionID, status))
+	w.sink.Emit(backend.NewInteractionResolved(requestID, sessionID, status))
 }
 
-func (w *WS) rpc(ctx context.Context, typ string, payload map[string]any, out any) error {
-	if payload == nil {
-		payload = map[string]any{}
-	}
+func (w *WS) rpc(ctx context.Context, typ string, build func(rpcID string) any, out any) error {
 	conn, err := w.ensureConn(ctx)
 	if err != nil {
 		return err
@@ -496,8 +441,7 @@ func (w *WS) rpc(ctx context.Context, typ string, payload map[string]any, out an
 	w.mu.Lock()
 	w.pending[id] = ch
 	w.mu.Unlock()
-	payload["type"] = typ
-	payload["rpc_id"] = id
+	payload := build(id)
 	if err := w.writeConn(ctx, conn, payload); err != nil {
 		w.mu.Lock()
 		delete(w.pending, id)
@@ -602,11 +546,11 @@ func (w *WS) dropConn(conn *websocket.Conn, err error) {
 	w.pending = make(map[string]chan rpcReply)
 	w.mu.Unlock()
 	w.interMu.Lock()
-	var interactions []protocol.UserInputRequestPayload
+	var interactions []backend.UserInputPayload
 	for _, p := range w.inter {
 		interactions = append(interactions, p)
 	}
-	w.inter = make(map[string]protocol.UserInputRequestPayload)
+	w.inter = make(map[string]backend.UserInputPayload)
 	w.interMu.Unlock()
 	w.capMu.Lock()
 	ready := w.capReady
@@ -618,25 +562,19 @@ func (w *WS) dropConn(conn *websocket.Conn, err error) {
 	}
 	_ = conn.Close(websocket.StatusNormalClosure, "")
 	for _, t := range active {
-		w.fail(t, "remote_disconnected", err.Error())
+		w.fail(t, backend.ErrRemoteDisconnected, err.Error())
 	}
 	for _, ch := range pending {
 		ch <- rpcReply{err: fmt.Errorf("remote disconnected: %w", err)}
 	}
 	for _, p := range interactions {
-		w.sink.Emit(protocol.NewInteractionResolved(p.RequestID, p.SessionID, "expired"))
+		w.sink.Emit(backend.NewInteractionResolved(p.RequestID, p.SessionID, "expired"))
 	}
 }
 
 func (w *WS) failLocked(t *turn, code, msg string) {
 	if t.markEnded() {
-		w.sink.Emit(protocol.Error{
-			Type:      "error",
-			SessionID: t.session.ID,
-			RequestID: t.reqID,
-			Code:      code,
-			Message:   msg,
-		})
+		w.sink.Emit(backend.NewError(t.session.ID, t.reqID, code, msg))
 	}
 }
 

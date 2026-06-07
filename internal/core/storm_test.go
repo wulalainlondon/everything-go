@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"everything-go/internal/backend"
+	"everything-go/internal/clientproto"
 	"everything-go/internal/history"
 	"everything-go/internal/protocol"
 	"everything-go/internal/session"
@@ -63,8 +65,12 @@ type histExec struct {
 	prov *countingProvider
 }
 
-func (e *histExec) ProviderFor(*session.Session) (history.Provider, bool) { return e.prov, true }
-func (e *histExec) AllProviders() []history.Provider                      { return []history.Provider{e.prov} }
+func (e *histExec) ProviderFor(*session.Session) (backend.HistoryProvider, bool) {
+	return e.prov, true
+}
+func (e *histExec) AllProviders() []backend.HistoryProvider {
+	return []backend.HistoryProvider{e.prov}
+}
 
 func newDeviceClient(h *Hub, device string, buf int) *Client {
 	return &Client{
@@ -133,11 +139,12 @@ func TestHistoryCoalesced(t *testing.T) {
 	c := newDeviceClient(h, "dev", 256)
 	h.registerLatest(c)
 	in := protocol.Inbound{Type: "request_history", SessionID: "s1", Mode: "snapshot"}
+	cmd := clientproto.NewAppV1().ParseCommand(in)
 
 	var wg sync.WaitGroup
 	for i := 0; i < 100; i++ {
 		wg.Add(1)
-		go func() { defer wg.Done(); h.sendHistory(c, s, in) }()
+		go func() { defer wg.Done(); h.sendHistory(c, s, cmd) }()
 	}
 	wg.Wait()
 	if n := atomic.LoadInt64(&prov.loadHist); n != 1 {
