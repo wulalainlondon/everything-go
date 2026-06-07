@@ -15,6 +15,8 @@ import (
 
 	"github.com/pion/webrtc/v4"
 
+	"everything-go/internal/backend"
+	"everything-go/internal/clientproto"
 	"everything-go/internal/executor"
 	"everything-go/internal/fcm"
 	"everything-go/internal/feed"
@@ -34,6 +36,7 @@ type Config struct {
 	RootDir      string
 	DataDir      string
 	LanIP        string
+	Backends     []backend.Definition
 }
 
 // Hub owns the set of connected clients and the session registry, and acts as
@@ -51,6 +54,7 @@ type Hub struct {
 	feed     *feed.Store
 	inbox    *inbox.Store
 	cfg      Config
+	client   clientproto.AppV1
 	gen      string // per-boot generation id
 
 	iceServers []webrtc.ICEServer // STUN/TURN for WebRTC answers (default: Google STUN)
@@ -82,6 +86,7 @@ func NewHub(reg *session.Registry, cfg Config, pairing *governance.Pairing) *Hub
 		pairing:        pairing,
 		offline:        governance.NewOfflineBuffer(),
 		cfg:            cfg,
+		client:         clientproto.NewAppV1(),
 		gen:            randomID(),
 		clients:        make(map[*Client]struct{}),
 		latestByDevice: make(map[string]*Client),
@@ -121,6 +126,14 @@ func (h *Hub) SetSearch(s *search.Index) { h.search = s }
 
 // SetFCM wires the push notifier (nil disables push).
 func (h *Hub) SetFCM(n *fcm.Notifier) { h.fcm = n }
+
+// NotifyTunnelURL pushes the new tunnel URL to the device via FCM (no-op if FCM not configured).
+func (h *Hub) NotifyTunnelURL(wsURL string) {
+	if h.fcm == nil {
+		return
+	}
+	go h.fcm.NotifyTunnelURL(wsURL, h.cfg.InstanceID)
+}
 
 // SetFeed wires the feed store (nil → feed commands answer empty/no-op).
 func (h *Hub) SetFeed(f *feed.Store) { h.feed = f }

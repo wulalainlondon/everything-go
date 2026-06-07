@@ -127,6 +127,21 @@ func (n *Notifier) NotifyFilePush(fileID, filename string) {
 	n.send(msg, "file_push")
 }
 
+// NotifyTunnelURL mirrors push_registry.send_tunnel_fcm_once.
+// Sends a data-only (silent) push so the app can update its tunnel URL.
+func (n *Notifier) NotifyTunnelURL(wsURL, instanceID string) {
+	tok := n.token()
+	if tok == "" {
+		return
+	}
+	msg := v1message{}
+	msg.Message.Token = tok
+	msg.Message.Data = map[string]string{
+		"type": "tunnel_url", "url": wsURL, "instance_id": instanceID,
+	}
+	n.send(msg, "tunnel_url")
+}
+
 // NotifyFeedNew mirrors feed_ops.notify_fcm_feed_new.
 func (n *Notifier) NotifyFeedNew(feedID, title string) {
 	tok := n.token()

@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"everything-go/internal/backend"
 	"everything-go/internal/core"
 	"everything-go/internal/executor"
 	"everything-go/internal/executor/goexec"
@@ -42,6 +43,7 @@ func main() {
 	remoteWSURL := flag.String("remote-ws-url", "", "remote backend WebSocket URL for backend=remote-ws")
 	remoteWSToken := flag.String("remote-ws-token", "", "bearer token for remote backend WebSocket")
 	dataDir := flag.String("data-dir", ".", "directory for everything-go's own persisted state")
+	sessionStore := flag.String("session-store", os.Getenv("EVERYTHING_GO_SESSION_STORE"), "canonical saved_sessions.json path (empty = DATA_DIR/everything_go_sessions.json)")
 	instanceName := flag.String("instance-name", "everything-go", "human label shown in the app")
 	rootDir := flag.String("root-dir", "", "filesystem jail root (\"\" = no jail)")
 	serviceAccount := flag.String("service-account", "", "path to Firebase serviceAccountKey.json for FCM push (empty = disabled)")
@@ -53,8 +55,13 @@ func main() {
 	mdnsOff := flag.Bool("no-mdns", false, "deprecated: mDNS is disabled by default")
 	flag.Parse()
 
+	sessionStorePath := *sessionStore
+	if sessionStorePath == "" {
+		sessionStorePath = filepath.Join(*dataDir, "everything_go_sessions.json")
+	}
+
 	reg := session.NewRegistry()
-	reg.AttachStore(session.NewStore(filepath.Join(*dataDir, "everything_go_sessions.json")))
+	reg.AttachStore(session.NewStore(sessionStorePath))
 
 	pairing := governance.NewPairing(filepath.Join(*dataDir, "pairing.json"))
 	cfg := core.Config{
@@ -63,6 +70,7 @@ func main() {
 		RootDir:      *rootDir,
 		DataDir:      *dataDir,
 		LanIP:        detectLanIP(),
+		Backends:     backend.DefaultRegistry(*remoteWSURL != ""),
 	}
 	hub := core.NewHub(reg, cfg, pairing)
 
@@ -138,7 +146,7 @@ func main() {
 		go netsvc.RegisterMDNS(ctx, *port, cfg.InstanceName)
 	}
 	if *tunnel {
-		go netsvc.NewTunnel(*port, nil).Run(ctx)
+		go netsvc.NewTunnel(*port, hub.NotifyTunnelURL).Run(ctx)
 	}
 
 	mux := http.NewServeMux()
