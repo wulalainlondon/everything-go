@@ -212,9 +212,13 @@ install_launchd() {
 </dict>
 </plist>
 EOF
-  launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
-  launchctl bootstrap "gui/$(id -u)" "$plist"
-  launchctl kickstart -k "gui/$(id -u)/$LABEL"
+  local target="gui/$(id -u)/$LABEL"
+  if launchctl print "$target" >/dev/null 2>&1; then
+    launchctl kickstart -k "$target"
+  else
+    launchctl bootstrap "gui/$(id -u)" "$plist"
+    launchctl kickstart -k "$target"
+  fi
 }
 
 install_systemd() {
