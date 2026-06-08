@@ -1036,9 +1036,10 @@ func NewInteractionResolved(requestID, sessionID, status string) InteractionReso
 // Media announces an image or video file found in the assistant's output.
 // media_type is "image" | "video".
 type Media struct {
-	Type      string `json:"type"`       // "media"
+	Type      string `json:"type"`                  // "media"
 	SessionID string `json:"session_id"`
-	MediaType string `json:"media_type"` // "image" | "video"
+	RequestID string `json:"request_id,omitempty"`  // mirrors the done event's request_id so app attaches to the right message
+	MediaType string `json:"media_type"`             // "image" | "video"
 	Path      string `json:"path"`
 	URL       string `json:"url"`
 }
@@ -1046,8 +1047,9 @@ type Media struct {
 // Document announces a document file (pdf/html) found in the assistant's output.
 // doc_type is "pdf" | "html".
 type Document struct {
-	Type      string `json:"type"`       // "document"
+	Type      string `json:"type"`                  // "document"
 	SessionID string `json:"session_id"`
+	RequestID string `json:"request_id,omitempty"`  // mirrors the done event's request_id
 	Path      string `json:"path"`
 	URL       string `json:"url"`
 	Title     string `json:"title"`

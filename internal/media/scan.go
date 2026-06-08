@@ -66,8 +66,9 @@ func (s *Scanner) SetLanIP(ip string) {
 
 // Scan finds all media/document file paths in text, resolves relative paths
 // against cwd, confirms files exist, and returns a slice of protocol.Media
-// and protocol.Document values (as any).
-func (s *Scanner) Scan(text, sessionID, cwd string) []any {
+// and protocol.Document values (as any). requestID should be the done event's
+// request_id so the app attaches media blocks to the correct message.
+func (s *Scanner) Scan(text, sessionID, requestID, cwd string) []any {
 	paths := extractPaths(text, cwd)
 	if len(paths) == 0 {
 		return nil
@@ -84,6 +85,7 @@ func (s *Scanner) Scan(text, sessionID, cwd string) []any {
 			results = append(results, protocol.Media{
 				Type:      "media",
 				SessionID: sessionID,
+				RequestID: requestID,
 				MediaType: "image",
 				Path:      absPath,
 				URL:       mediaURL,
@@ -92,6 +94,7 @@ func (s *Scanner) Scan(text, sessionID, cwd string) []any {
 			results = append(results, protocol.Media{
 				Type:      "media",
 				SessionID: sessionID,
+				RequestID: requestID,
 				MediaType: "video",
 				Path:      absPath,
 				URL:       mediaURL,
@@ -104,6 +107,7 @@ func (s *Scanner) Scan(text, sessionID, cwd string) []any {
 			results = append(results, protocol.Document{
 				Type:      "document",
 				SessionID: sessionID,
+				RequestID: requestID,
 				Path:      absPath,
 				URL:       mediaURL,
 				Title:     filepath.Base(absPath),

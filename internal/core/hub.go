@@ -363,7 +363,7 @@ func (h *Hub) accumulateTurn(event any) {
 		}
 
 		// Scan for media/document paths regardless of FCM being configured.
-		h.scanAndEmitMedia(e.SessionID, text)
+		h.scanAndEmitMedia(e.SessionID, e.RequestID, text)
 
 		if h.fcm == nil || text == "" {
 			return
@@ -385,7 +385,7 @@ func (h *Hub) accumulateTurn(event any) {
 // scanAndEmitMedia scans accumulated turn text for file paths and emits
 // protocol.Media / protocol.Document events for any that exist on disk.
 // Mirrors Python bridge's scan_for_media, called at the same time as FCM notify.
-func (h *Hub) scanAndEmitMedia(sessionID, text string) {
+func (h *Hub) scanAndEmitMedia(sessionID, requestID, text string) {
 	if text == "" {
 		return
 	}
@@ -393,9 +393,15 @@ func (h *Hub) scanAndEmitMedia(sessionID, text string) {
 	if s, ok := h.registry.Get(sessionID); ok {
 		cwd = s.Cwd()
 	}
-	results := h.mediaScan.Scan(text, sessionID, cwd)
+	results := h.mediaScan.Scan(text, sessionID, requestID, cwd)
 	log.Printf("[media] scan session=%s textLen=%d cwd=%q found=%d", sessionID, len(text), cwd, len(results))
 	for _, r := range results {
+		switch v := r.(type) {
+		case protocol.Media:
+			log.Printf("[media] emit type=media url=%s req=%s", v.URL, v.RequestID)
+		case protocol.Document:
+			log.Printf("[media] emit type=document url=%s req=%s", v.URL, v.RequestID)
+		}
 		h.Emit(r)
 	}
 }
