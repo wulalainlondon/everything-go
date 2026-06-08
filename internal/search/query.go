@@ -645,30 +645,62 @@ func (idx *Index) RecentMessagesByUID(uids []SessionUID, n int) map[string]*Sess
 		}
 	}
 
-	// --- codex: suffix match (last 36 chars of session_id = UID) --------------
-	for _, ce := range codexEntries {
-		q := `
-			SELECT session_id, role, content, ts FROM (
-				SELECT session_id, role, content, ts,
-					ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY ts DESC) AS rn
-				FROM messages
-				WHERE substr(session_id, -36) = ? AND is_subagent = 0
-			) WHERE rn <= ?
-			ORDER BY session_id, rn DESC`
-		rows, err := idx.db.Query(q, ce.uid, n)
-		if err != nil {
-			continue
+	// --- codex: two-step lookup to avoid full messages-table scan --------------
+	// Old approach: substr(session_id,-36)=? on the messages table (no index,
+	// O(messages) per session). New: resolve UIDs via the small sessions table
+	// first, then do a single indexed IN query on messages.
+	if len(codexEntries) > 0 {
+		uidToHub := make(map[string]string, len(codexEntries))
+		uidArgs := make([]any, len(codexEntries))
+		for i, ce := range codexEntries {
+			uidToHub[ce.uid] = ce.hubID
+			uidArgs[i] = ce.uid
 		}
-		func() {
-			defer rows.Close()
-			for rows.Next() {
-				var sid, role, content, ts string
-				if rows.Scan(&sid, &role, &content, &ts) != nil {
-					continue
+		ph := strings.Repeat("?,", len(codexEntries))
+		ph = ph[:len(ph)-1]
+		sidRows, sidErr := idx.db.Query(fmt.Sprintf(
+			"SELECT session_id, substr(session_id,-36) FROM sessions WHERE source='codex' AND substr(session_id,-36) IN (%s)", ph),
+			uidArgs...)
+		if sidErr == nil {
+			var codexSidArgs []any
+			hubByCodexSid := map[string]string{}
+			func() {
+				defer sidRows.Close()
+				for sidRows.Next() {
+					var sid, uid string
+					if sidRows.Scan(&sid, &uid) == nil {
+						if hubID, ok := uidToHub[uid]; ok {
+							codexSidArgs = append(codexSidArgs, sid)
+							hubByCodexSid[sid] = hubID
+						}
+					}
 				}
-				addRow(ce.hubID, role, content, ts)
+			}()
+			if len(codexSidArgs) > 0 {
+				ph2 := strings.Repeat("?,", len(codexSidArgs))
+				ph2 = ph2[:len(ph2)-1]
+				q := fmt.Sprintf(`
+					SELECT session_id, role, content, ts FROM (
+						SELECT session_id, role, content, ts,
+							ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY ts DESC) AS rn
+						FROM messages
+						WHERE session_id IN (%s) AND is_subagent = 0
+					) WHERE rn <= ?
+					ORDER BY session_id, rn DESC`, ph2)
+				cArgs := append(codexSidArgs, n)
+				rows, err := idx.db.Query(q, cArgs...)
+				if err == nil {
+					defer rows.Close()
+					for rows.Next() {
+						var sid, role, content, ts string
+						if rows.Scan(&sid, &role, &content, &ts) != nil {
+							continue
+						}
+						addRow(hubByCodexSid[sid], role, content, ts)
+					}
+				}
 			}
-		}()
+		}
 	}
 
 	return out

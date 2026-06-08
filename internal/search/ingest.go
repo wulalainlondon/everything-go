@@ -145,9 +145,28 @@ func (idx *Index) ingestFile(src source, path string) (extracted int, err error)
 	return len(msgs), nil
 }
 
-// discoverJobs scans all configured sources and sorts newest files first. Recent
-// conversations become searchable before older archives during a cold ingest.
+type cachedState struct {
+	size  int64
+	mtime float64
+}
+
+// discoverJobs scans all configured sources and sorts newest files first.
+// It loads the entire ingest_state table in one query so unchanged files can
+// be filtered out before any file I/O, keeping incremental cycles fast.
 func (idx *Index) discoverJobs() []ingestJob {
+	// Bulk-load ingest_state in a single query (~3000+ rows but one round-trip).
+	known := make(map[string]cachedState)
+	if rows, err := idx.db.Query("SELECT source_path, file_size, last_mtime FROM ingest_state"); err == nil {
+		for rows.Next() {
+			var path string
+			var s cachedState
+			if rows.Scan(&path, &s.size, &s.mtime) == nil {
+				known[path] = s
+			}
+		}
+		rows.Close()
+	}
+
 	var jobs []ingestJob
 	for _, src := range idx.sources {
 		if !src.enabled() {
@@ -157,6 +176,13 @@ func (idx *Index) discoverJobs() []ingestJob {
 			info, err := os.Stat(path)
 			if err != nil {
 				continue
+			}
+			// Skip files whose size and mtime are unchanged — nothing to ingest.
+			if s, ok := known[path]; ok {
+				mtime := float64(info.ModTime().UnixNano()) / 1e9
+				if info.Size() == s.size && mtime == s.mtime {
+					continue
+				}
 			}
 			jobs = append(jobs, ingestJob{src: src, path: path, mtime: info.ModTime()})
 		}

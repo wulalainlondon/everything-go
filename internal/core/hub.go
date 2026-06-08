@@ -88,6 +88,12 @@ type Hub struct {
 	// sessions_list broadcast instead of hundreds (which OOM-killed the app).
 	nativeDirty atomic.Bool
 
+	// tunnelURL is the current cloudflared public URL, set by NotifyTunnelURL
+	// and included in hello_ack so reconnecting clients always get the latest URL
+	// even if they missed the FCM push when the tunnel started.
+	tunnelURLMu sync.RWMutex
+	tunnelURL   string
+
 	// restart, if set, actually restarts the bridge (wired in main to a
 	// self-re-exec). nil → restart_bridge answers "not configured", mirroring
 	// Python's gate on an unset restart-trigger path.
@@ -154,9 +160,12 @@ func (h *Hub) SetTunnelURL(wsURL string) {
 	h.mediaScan.SetTunnelURL(wsURL)
 }
 
-// NotifyTunnelURL pushes the new tunnel URL to the device via FCM and updates
-// the media scanner so subsequent scan results use the tunnel address.
+// NotifyTunnelURL pushes the new tunnel URL to the device via FCM, updates
+// the media scanner, and stores it so reconnecting clients get it in hello_ack.
 func (h *Hub) NotifyTunnelURL(wsURL string) {
+	h.tunnelURLMu.Lock()
+	h.tunnelURL = wsURL
+	h.tunnelURLMu.Unlock()
 	h.mediaScan.SetTunnelURL(wsURL)
 	if h.fcm == nil {
 		return

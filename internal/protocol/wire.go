@@ -154,6 +154,7 @@ type HelloAck struct {
 	RootDir      string              `json:"root_dir"`
 	DataDir      string              `json:"data_dir"`
 	LanIP        string              `json:"lan_ip,omitempty"`
+	TunnelURL    string              `json:"tunnel_url,omitempty"`
 	Backends     []BackendDefinition `json:"backend_registry,omitempty"`
 }
 

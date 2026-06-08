@@ -33,6 +33,9 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		// Latest-device-wins: evict any older client from the same device so the
 		// half-disconnect storm can't pile up zombie clients (#1).
 		h.registerLatest(c)
+		h.tunnelURLMu.RLock()
+		tunnelURL := h.tunnelURL
+		h.tunnelURLMu.RUnlock()
 		c.enqueueEvent(h.client.HelloAck(clientproto.HelloInput{
 			ClientID: c.clientID, DeviceID: cmd.DeviceID,
 			DeviceName: cmd.DeviceName, InstanceID: h.cfg.InstanceID, Gen: h.gen,
@@ -40,7 +43,8 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 			LockedToMe:   h.pairing.LockedTo(cmd.AuthToken),
 			InstanceName: h.cfg.InstanceName, RootDir: h.cfg.RootDir,
 			DataDir: h.cfg.DataDir, LanIP: h.cfg.LanIP,
-			Backends: h.cfg.Backends,
+			TunnelURL: tunnelURL,
+			Backends:  h.cfg.Backends,
 		}))
 		// Proactively push the session list, then recover any events buffered
 		// while this (or the previous) client was offline — same ordering as the

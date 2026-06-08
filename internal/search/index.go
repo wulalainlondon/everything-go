@@ -94,7 +94,10 @@ func (idx *Index) ingestLoop(interval time.Duration) {
 			var added int
 			jobs, added = idx.ingestBatch(jobs, ingestBatchFiles, ingestBatchTime)
 			total += added
-			if len(jobs) > 0 {
+			// Pause only during the first full scan so startup doesn't
+			// monopolize I/O. Incremental cycles are fast (mtime check
+			// skips unchanged files) and need no throttle.
+			if len(jobs) > 0 && first {
 				time.Sleep(ingestBatchPause)
 			}
 		}

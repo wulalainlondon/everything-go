@@ -199,6 +199,7 @@ type HelloInput struct {
 	RootDir      string
 	DataDir      string
 	LanIP        string
+	TunnelURL    string
 	Backends     []backend.Definition
 }
 
@@ -216,6 +217,7 @@ func (AppV1) HelloAck(in HelloInput) protocol.HelloAck {
 		RootDir:      in.RootDir,
 		DataDir:      in.DataDir,
 		LanIP:        in.LanIP,
+		TunnelURL:    in.TunnelURL,
 		Backends:     backendDefinitionsToWire(in.Backends),
 	}
 }
