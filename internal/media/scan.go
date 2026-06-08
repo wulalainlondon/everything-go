@@ -32,21 +32,36 @@ var (
 
 // Scanner scans assistant text for media/document file references.
 type Scanner struct {
-	port      int
-	tunnelURL atomic.Value // stores string
+	port         int
+	tunnelURL    atomic.Value // stores string
+	tailscaleIP  atomic.Value // stores string — Tailscale (100.x) IP, phone-reachable over VPN
+	lanIP        atomic.Value // stores string — LAN IP fallback for same-WiFi clients
 }
 
 // NewScanner creates a Scanner bound to the given HTTP port.
 func NewScanner(port int) *Scanner {
 	s := &Scanner{port: port}
 	s.tunnelURL.Store("")
+	s.tailscaleIP.Store("")
+	s.lanIP.Store("")
 	return s
 }
 
 // SetTunnelURL updates the tunnel base URL used to build media URLs.
-// Pass "" to revert to the local 127.0.0.1 URL.
+// Pass "" to revert to the LAN IP (or 127.0.0.1) URL.
 func (s *Scanner) SetTunnelURL(u string) {
 	s.tunnelURL.Store(u)
+}
+
+// SetTailscaleIP sets the Tailscale (100.x.x.x) IP used when no tunnel is
+// active. Preferred over LAN IP because Tailscale clients can always reach it.
+func (s *Scanner) SetTailscaleIP(ip string) {
+	s.tailscaleIP.Store(ip)
+}
+
+// SetLanIP sets the LAN IP used when no tunnel and no Tailscale IP is available.
+func (s *Scanner) SetLanIP(ip string) {
+	s.lanIP.Store(ip)
 }
 
 // Scan finds all media/document file paths in text, resolves relative paths
@@ -140,7 +155,7 @@ func extractPaths(text, cwd string) []string {
 }
 
 // buildURL produces the media URL for the given absolute path.
-// tunnelBase takes priority over the local address when non-empty.
+// Priority: tunnel > Tailscale IP > LAN IP > 127.0.0.1 (loopback, unreachable from phone).
 func (s *Scanner) buildURL(absPath, tunnelBase string) string {
 	encoded := url.PathEscape(absPath)
 	// url.PathEscape escapes '/' as well; we need slashes preserved in the
@@ -149,6 +164,12 @@ func (s *Scanner) buildURL(absPath, tunnelBase string) string {
 
 	if tunnelBase != "" {
 		return fmt.Sprintf("%s/media%s", strings.TrimRight(tunnelBase, "/"), encoded)
+	}
+	if ts := s.tailscaleIP.Load().(string); ts != "" {
+		return fmt.Sprintf("http://%s:%d/media%s", ts, s.port, encoded)
+	}
+	if lan := s.lanIP.Load().(string); lan != "" {
+		return fmt.Sprintf("http://%s:%d/media%s", lan, s.port, encoded)
 	}
 	return fmt.Sprintf("http://127.0.0.1:%d/media%s", s.port, encoded)
 }

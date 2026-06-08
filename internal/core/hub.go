@@ -42,6 +42,7 @@ type Config struct {
 	RootDir      string
 	DataDir      string
 	LanIP        string
+	TailscaleIP  string
 	Backends     []backend.Definition
 }
 
@@ -107,6 +108,12 @@ func NewHub(reg *session.Registry, cfg Config, pairing *governance.Pairing, port
 		iceServers:     stunServers,
 		storm:          newStormGuards(),
 		mediaScan:      media.NewScanner(port),
+	}
+	if cfg.TailscaleIP != "" {
+		h.mediaScan.SetTailscaleIP(cfg.TailscaleIP)
+	}
+	if cfg.LanIP != "" {
+		h.mediaScan.SetLanIP(cfg.LanIP)
 	}
 	// Shell output is broadcast to connected clients via the Hub sink.
 	h.shells = runtime.NewShellManager(h.Emit)

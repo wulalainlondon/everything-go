@@ -88,6 +88,7 @@ func main() {
 		RootDir:      *rootDir,
 		DataDir:      *dataDir,
 		LanIP:        detectLanIP(),
+		TailscaleIP:  detectTailscaleIP(),
 		Backends:     backend.DefaultRegistry(*remoteWSURL != ""),
 	}
 	hub := core.NewHub(reg, cfg, pairing, *port)
@@ -260,20 +261,57 @@ func checkReadablePath(path string) error {
 	return nil
 }
 
-// detectLanIP returns the first non-loopback IPv4 address, surfaced in
-// hello_ack.lan_ip so the app can show how to reach this bridge on the LAN.
+// detectLanIP returns the first non-loopback, non-Tailscale IPv4 address.
 func detectLanIP() string {
-	addrs, err := net.InterfaceAddrs()
+	ifaces, err := net.Interfaces()
 	if err != nil {
 		return ""
 	}
-	for _, a := range addrs {
-		ipnet, ok := a.(*net.IPNet)
-		if !ok || ipnet.IP.IsLoopback() {
+	for _, iface := range ifaces {
+		// Skip Tailscale virtual interfaces — those are handled by detectTailscaleIP.
+		if strings.HasPrefix(iface.Name, "utun") || iface.Name == "tailscale0" {
 			continue
 		}
-		if ip4 := ipnet.IP.To4(); ip4 != nil {
-			return ip4.String()
+		addrs, _ := iface.Addrs()
+		for _, a := range addrs {
+			ipnet, ok := a.(*net.IPNet)
+			if !ok || ipnet.IP.IsLoopback() {
+				continue
+			}
+			if ip4 := ipnet.IP.To4(); ip4 != nil {
+				return ip4.String()
+			}
+		}
+	}
+	return ""
+}
+
+// detectTailscaleIP returns the Tailscale IP (100.64.0.0/10 CGNAT range) on
+// the local machine, or "" if Tailscale is not running. Phones connected via
+// Tailscale can reach this IP; LAN-only clients cannot.
+func detectTailscaleIP() string {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return ""
+	}
+	for _, iface := range ifaces {
+		if !strings.HasPrefix(iface.Name, "utun") && iface.Name != "tailscale0" {
+			continue
+		}
+		addrs, _ := iface.Addrs()
+		for _, a := range addrs {
+			ipnet, ok := a.(*net.IPNet)
+			if !ok || ipnet.IP.IsLoopback() {
+				continue
+			}
+			ip4 := ipnet.IP.To4()
+			if ip4 == nil {
+				continue
+			}
+			// Tailscale uses 100.64.0.0/10 (first octet 100, second 64–127).
+			if ip4[0] == 100 && ip4[1] >= 64 && ip4[1] <= 127 {
+				return ip4.String()
+			}
 		}
 	}
 	return ""
