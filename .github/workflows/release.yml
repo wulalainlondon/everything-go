@@ -46,6 +46,7 @@ jobs:
             echo "FCM_SERVICE_ACCOUNT_JSON not set; FCM push notifications will be disabled in this build"
             exit 0
           fi
+          mkdir -p cmd/everything-go/keys
           printf '%s' "$FCM_SERVICE_ACCOUNT_JSON" > cmd/everything-go/keys/fcm_service_account.json
           echo "FCM key injected ($(wc -c < cmd/everything-go/keys/fcm_service_account.json) bytes)"
 
