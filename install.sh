@@ -85,11 +85,30 @@ ensure_macos_permissions() {
 
 install_bridge_binary() {
   mkdir -p "$RUNTIME_DIR"
-  URL="https://github.com/$REPO/releases/latest/download/$ASSET"
+
+  # Resolve the latest tag via API to build a direct /releases/download/<tag>/
+  # URL, bypassing the /releases/latest/download/ redirect which returns 504
+  # for zip assets on some GitHub CDN nodes.
+  local latest_tag
+  latest_tag=$(curl -fsSL --proto '=https' --tlsv1.2 \
+    "https://api.github.com/repos/$REPO/releases/latest" \
+    | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
+  [ -n "$latest_tag" ] || latest_tag="latest"
+
+  base_url() { # $1 = asset filename
+    if [ "$latest_tag" = "latest" ]; then
+      echo "https://github.com/$REPO/releases/latest/download/$1"
+    else
+      echo "https://github.com/$REPO/releases/download/$latest_tag/$1"
+    fi
+  }
+
+  URL=$(base_url "$ASSET")
 
   if [ "$OS" = darwin ]; then
     local app_asset="everything-go-darwin-${ARCH}.app.zip"
-    local app_url="https://github.com/$REPO/releases/latest/download/$app_asset"
+    local app_url
+    app_url=$(base_url "$app_asset")
     say "downloading $app_asset ..."
     if curl -fSL --proto '=https' --tlsv1.2 "$app_url" -o "$RUNTIME_DIR/$app_asset.tmp"; then
       rm -rf "$APP_DIR.tmp" "$APP_DIR"
