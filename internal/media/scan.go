@@ -178,6 +178,13 @@ func (s *Scanner) buildURL(absPath, tunnelBase string) string {
 	return fmt.Sprintf("http://127.0.0.1:%d/media%s", s.port, encoded)
 }
 
+// LocalURL returns the HTTP URL for serving a local absolute path.
+// Uses the same priority as Scan: tunnel > Tailscale > LAN > loopback.
+func (s *Scanner) LocalURL(absPath string) string {
+	tunnel := s.tunnelURL.Load().(string)
+	return s.buildURL(absPath, tunnel)
+}
+
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil

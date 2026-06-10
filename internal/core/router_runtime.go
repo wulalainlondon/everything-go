@@ -132,11 +132,28 @@ const maxPreviewFileBytes = 256 * 1024
 
 var previewTextExtensions = map[string]bool{
 	".c": true, ".cc": true, ".cpp": true, ".css": true, ".go": true,
-	".h": true, ".hpp": true, ".html": true, ".java": true, ".js": true,
+	".h": true, ".hpp": true, ".java": true, ".js": true,
 	".json": true, ".jsx": true, ".kt": true, ".log": true, ".md": true,
 	".py": true, ".rb": true, ".rs": true, ".sh": true, ".sql": true,
 	".swift": true, ".toml": true, ".ts": true, ".tsx": true, ".txt": true,
 	".xml": true, ".yaml": true, ".yml": true,
+}
+
+// previewURLTypes maps extensions that are served via HTTP URL (not raw content).
+// Value is the MIME type sent to the client.
+var previewURLTypes = map[string]string{
+	// images
+	".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+	".gif": "image/gif", ".webp": "image/webp",
+	// video
+	".mp4": "video/mp4", ".mov": "video/quicktime", ".m4v": "video/mp4",
+	".webm": "video/webm", ".avi": "video/x-msvideo",
+	// audio
+	".mp3": "audio/mpeg", ".wav": "audio/wav", ".aac": "audio/aac",
+	".ogg": "audio/ogg", ".m4a": "audio/mp4", ".flac": "audio/flac",
+	// documents rendered by browser
+	".pdf": "application/pdf",
+	".html": "text/html", ".htm": "text/html",
 }
 
 func (h *Hub) sendFileOpened(c *Client, cmd clientproto.Command) {
@@ -144,28 +161,33 @@ func (h *Hub) sendFileOpened(c *Client, cmd clientproto.Command) {
 	name := filepath.Base(path)
 	info, err := os.Stat(path)
 	if err != nil {
-		c.enqueueEvent(protocol.NewFileOpened(path, name, "", 0, "text/plain", err.Error()))
+		c.enqueueEvent(protocol.NewFileOpened(path, name, "", "", 0, "text/plain", err.Error()))
 		return
 	}
 	if info.IsDir() {
-		c.enqueueEvent(protocol.NewFileOpened(path, name, "", 0, "text/plain", "path is a directory"))
-		return
-	}
-	if info.Size() > maxPreviewFileBytes {
-		c.enqueueEvent(protocol.NewFileOpened(path, name, "", info.Size(), "text/plain", "file is too large to preview"))
+		c.enqueueEvent(protocol.NewFileOpened(path, name, "", "", 0, "text/plain", "path is a directory"))
 		return
 	}
 	ext := strings.ToLower(filepath.Ext(path))
+	if mimeType, ok := previewURLTypes[ext]; ok {
+		mediaURL := h.mediaScan.LocalURL(path)
+		c.enqueueEvent(protocol.NewFileOpened(path, name, "", mediaURL, info.Size(), mimeType, ""))
+		return
+	}
+	if info.Size() > maxPreviewFileBytes {
+		c.enqueueEvent(protocol.NewFileOpened(path, name, "", "", info.Size(), "text/plain", "file is too large to preview"))
+		return
+	}
 	if !previewTextExtensions[ext] {
-		c.enqueueEvent(protocol.NewFileOpened(path, name, "", info.Size(), "application/octet-stream", "preview supports text files only"))
+		c.enqueueEvent(protocol.NewFileOpened(path, name, "", "", info.Size(), "application/octet-stream", "preview supports text files only"))
 		return
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		c.enqueueEvent(protocol.NewFileOpened(path, name, "", info.Size(), "text/plain", err.Error()))
+		c.enqueueEvent(protocol.NewFileOpened(path, name, "", "", info.Size(), "text/plain", err.Error()))
 		return
 	}
-	c.enqueueEvent(protocol.NewFileOpened(path, name, string(data), info.Size(), "text/plain; charset=utf-8", ""))
+	c.enqueueEvent(protocol.NewFileOpened(path, name, string(data), "", info.Size(), "text/plain; charset=utf-8", ""))
 }
 
 func (h *Hub) activeSessionsForPath(path string) []protocol.DirSession {

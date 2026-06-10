@@ -737,17 +737,19 @@ type FileOpened struct {
 	Path     string `json:"path"`
 	Name     string `json:"name"`
 	Content  string `json:"content,omitempty"`
+	URL      string `json:"url,omitempty"`
 	Size     int64  `json:"size"`
 	MimeType string `json:"mime_type"`
 	Error    string `json:"error,omitempty"`
 }
 
-func NewFileOpened(path, name, content string, size int64, mimeType, errorMessage string) FileOpened {
+func NewFileOpened(path, name, content, mediaURL string, size int64, mimeType, errorMessage string) FileOpened {
 	return FileOpened{
 		Type:     "file_opened",
 		Path:     path,
 		Name:     name,
 		Content:  content,
+		URL:      mediaURL,
 		Size:     size,
 		MimeType: mimeType,
 		Error:    errorMessage,

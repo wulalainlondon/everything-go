@@ -32,6 +32,7 @@ import (
 	"everything-go/internal/fcm"
 	"everything-go/internal/feed"
 	"everything-go/internal/governance"
+	"everything-go/internal/filetransfer"
 	"everything-go/internal/inbox"
 	"everything-go/internal/media"
 	"everything-go/internal/netsvc"
@@ -179,6 +180,8 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.Handle("/media/", media.Handler())
+	mux.Handle("/upload", filetransfer.UploadHandler())
+	mux.Handle("/files", filetransfer.DownloadHandler())
 	mux.HandleFunc("/", hub.ServeWS)
 
 	addr := fmt.Sprintf(":%d", *port)
