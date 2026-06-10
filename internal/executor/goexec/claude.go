@@ -345,6 +345,8 @@ func claudeSpawnArgs(snap session.Snapshot, mcpURL string) []string {
 	model := snap.Model
 	if model == "opusplan" {
 		args = append(args, "--model", "opus", "--permission-mode", "plan")
+	} else if model == "fable" {
+		args = append(args, "--model", "claude-fable-5")
 	} else {
 		switch snap.Sandbox {
 		case "read-only":

@@ -13,6 +13,7 @@ func DefaultRegistry(includeRemoteWS bool) []Definition {
 				{ID: "sonnet", Label: "sonnet"},
 				{ID: "opus", Label: "opus"},
 				{ID: "opusplan", Label: "opus · plan"},
+				{ID: "fable", Label: "fable"},
 			},
 			Capabilities: Capabilities{
 				History: true, Usage: true, Interactions: true, Sandbox: true, Images: true, Files: true,
