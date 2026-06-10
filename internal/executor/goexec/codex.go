@@ -344,13 +344,11 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 		}
 
 	case "item/started":
-		itemID := firstNonEmpty(p.ItemID, p.Item.ID, "codex_item")
-		name := firstNonEmpty(p.Name, p.Item.Name, p.Item.Type, "codex")
-		command := rawToString(p.Command)
-		if command == "" {
-			command = rawToString(p.Item.Command)
+		tool, ok := normalizeCodexLiveTool(m.Params)
+		if !ok {
+			return
 		}
-		c.tools.Start(s.ID, reqID, itemID, name, command)
+		c.tools.Start(s.ID, reqID, tool.ID, tool.Name, tool.Command)
 
 	case "item/completed":
 		itemID := firstNonEmpty(p.ItemID, p.Item.ID, "codex_item")

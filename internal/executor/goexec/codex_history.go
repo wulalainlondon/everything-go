@@ -118,6 +118,12 @@ func (c *Codex) readCodexHistory(path, resumeID string) ([]map[string]any, error
 	}
 	defer closeFn()
 
+	type rec struct {
+		lineNo int
+		row    codexHistoryRow
+	}
+	var records []rec
+	toolOutputs := map[string]string{}
 	var messages []map[string]any
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), maxLine)
@@ -128,39 +134,78 @@ func (c *Codex) readCodexHistory(path, resumeID string) ([]map[string]any, error
 		if json.Unmarshal(sc.Bytes(), &row) != nil {
 			continue
 		}
-		if row.Type != "response_item" || row.Payload.Type != "message" {
+		if row.Type != "response_item" {
 			continue
 		}
-		role := row.Payload.Role
+		records = append(records, rec{lineNo: lineNo, row: row})
+		if id, out, ok := codexResponseToolOutput(row.Payload); ok {
+			toolOutputs[id] = out
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return nil, err
+	}
+
+	for _, rc := range records {
+		if tool, ok := normalizeCodexResponseTool(rc.row.Payload, toolOutputs[codexPayloadCallID(rc.row.Payload)]); ok {
+			messages = append(messages, history.CompleteMsg(
+				"codex", resumeID, "codex:"+resumeID+":line:"+itoa(rc.lineNo),
+				"assistant", firstNonEmpty(tool.Command, tool.Name), parseCodexISOms(rc.row.Timestamp), []map[string]any{tool.historyBlock()},
+			))
+			continue
+		}
+		payload := parseCodexHistoryPayload(rc.row.Payload)
+		if payload.Type != "message" {
+			continue
+		}
+		role := payload.Role
 		if role != "user" && role != "assistant" {
 			continue
 		}
-		if role == "assistant" && row.Payload.Phase == "commentary" {
+		if role == "assistant" && payload.Phase == "commentary" {
 			continue
 		}
-		text := extractCodexText(row.Payload.Content)
+		text := extractCodexText(payload.Content)
 		if text == "" || (role == "user" && isCodexBootstrapText(text)) {
 			continue
 		}
-		ts := parseCodexISOms(row.Timestamp)
+		ts := parseCodexISOms(rc.row.Timestamp)
 		messages = append(messages, history.CompleteMsg(
-			"codex", resumeID, "codex:"+resumeID+":line:"+itoa(lineNo),
+			"codex", resumeID, "codex:"+resumeID+":line:"+itoa(rc.lineNo),
 			role, text, ts, []map[string]any{{"type": "text", "text": text}},
 		))
 	}
-	return messages, sc.Err()
+	return messages, nil
 }
 
 type codexHistoryRow struct {
-	Timestamp string `json:"timestamp"`
-	Type      string `json:"type"`
-	Payload   struct {
-		Type    string          `json:"type"`
-		Role    string          `json:"role"`
-		Phase   string          `json:"phase"`
-		Content json.RawMessage `json:"content"`
-		Cwd     string          `json:"cwd"`
-	} `json:"payload"`
+	Timestamp string          `json:"timestamp"`
+	Type      string          `json:"type"`
+	Payload   json.RawMessage `json:"payload"`
+}
+
+type codexHistoryPayload struct {
+	Type    string          `json:"type"`
+	Role    string          `json:"role"`
+	Phase   string          `json:"phase"`
+	Content json.RawMessage `json:"content"`
+	Cwd     string          `json:"cwd"`
+}
+
+func parseCodexHistoryPayload(raw json.RawMessage) codexHistoryPayload {
+	var p codexHistoryPayload
+	_ = json.Unmarshal(raw, &p)
+	return p
+}
+
+func codexPayloadCallID(raw json.RawMessage) string {
+	var p struct {
+		CallID  string `json:"call_id"`
+		CallID2 string `json:"callId"`
+		ID      string `json:"id"`
+	}
+	_ = json.Unmarshal(raw, &p)
+	return firstNonEmpty(p.CallID, p.CallID2, p.ID)
 }
 
 func (c *Codex) codexCwdAndName(path, uid string) (string, string) {
@@ -178,11 +223,12 @@ func (c *Codex) codexCwdAndName(path, uid string) (string, string) {
 		if json.Unmarshal(sc.Bytes(), &row) != nil {
 			continue
 		}
+		payload := parseCodexHistoryPayload(row.Payload)
 		switch {
-		case row.Type == "session_meta" && row.Payload.Cwd != "":
-			cwd = row.Payload.Cwd
-		case row.Type == "response_item" && row.Payload.Role == "user":
-			text := extractCodexText(row.Payload.Content)
+		case row.Type == "session_meta" && payload.Cwd != "":
+			cwd = payload.Cwd
+		case row.Type == "response_item" && payload.Role == "user":
+			text := extractCodexText(payload.Content)
 			if text != "" && !isCodexBootstrapText(text) {
 				name = text
 				return cwd, name

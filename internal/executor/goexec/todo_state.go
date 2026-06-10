@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"regexp"
 	"strconv"
+	"strings"
 
 	"everything-go/internal/protocol"
 )
@@ -28,7 +29,37 @@ import (
 
 var validTodoStatus = map[string]bool{"pending": true, "in_progress": true, "completed": true}
 
-var taskIDRe = regexp.MustCompile(`#(\d+)`)
+var todoStatusAliases = map[string]string{
+	"todo":        "pending",
+	"open":        "pending",
+	"queued":      "pending",
+	"doing":       "in_progress",
+	"running":     "in_progress",
+	"in-progress": "in_progress",
+	"inprogress":  "in_progress",
+	"active":      "in_progress",
+	"done":        "completed",
+	"complete":    "completed",
+	"success":     "completed",
+	"succeeded":   "completed",
+}
+
+var taskIDRe = regexp.MustCompile(`(?i)(?:#|task(?:[_\s-]*id)?\D+|id\D+)(\d+)`)
+
+func normalizeTodoStatus(status string) string {
+	key := strings.ToLower(strings.TrimSpace(status))
+	if key == "" {
+		return ""
+	}
+	key = strings.ReplaceAll(key, " ", "_")
+	if validTodoStatus[key] {
+		return key
+	}
+	if mapped, ok := todoStatusAliases[key]; ok {
+		return mapped
+	}
+	return status
+}
 
 // jsonStr unmarshals a JSON string field; "" if absent or not a string.
 func jsonStr(raw json.RawMessage) string {
@@ -76,6 +107,7 @@ func scalarStr(raw json.RawMessage) string {
 
 // coerceItem returns a canonical item, or nil if content/status are invalid.
 func coerceItem(content, status string, activeForm *string, id string) *protocol.TodoItem {
+	status = normalizeTodoStatus(status)
 	if content == "" || !validTodoStatus[status] {
 		return nil
 	}
@@ -194,7 +226,7 @@ func (s *todoStore) applyUpdate(input json.RawMessage) bool {
 	if tid == "" {
 		return false
 	}
-	status := jsonStr(in.Status)
+	status := normalizeTodoStatus(jsonStr(in.Status))
 	for i, it := range s.items {
 		if it.ID != tid {
 			continue

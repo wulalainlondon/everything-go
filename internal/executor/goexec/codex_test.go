@@ -270,6 +270,41 @@ func TestCodexHostedToolCallEmitsTraceAndSafeError(t *testing.T) {
 	}
 }
 
+func TestCodexLiveToolStartNormalizesFunctionCall(t *testing.T) {
+	sink := &capSink{}
+	c := NewCodex(sink, "codex")
+	reg := session.NewRegistry()
+	s := reg.Create("s1", "codex", "/tmp", "codex", "", "", "")
+	st := c.state(s.ID)
+	st.threadID = "thread-1"
+	st.reqID = "r1"
+	c.threadToSession["thread-1"] = s
+
+	c.dispatch(json.RawMessage(`{
+		"method":"item/started",
+		"params":{
+			"threadId":"thread-1",
+			"item":{
+				"id":"call_1",
+				"type":"function_call",
+				"name":"exec_command",
+				"arguments":"{\"cmd\":\"pwd\",\"workdir\":\"/tmp\"}"
+			}
+		}
+	}`))
+
+	var got backend.ToolStart
+	for _, ev := range sink.events {
+		if ts, ok := ev.(backend.ToolStart); ok {
+			got = ts
+			break
+		}
+	}
+	if got.ToolUseID != "call_1" || got.Name != "Bash" || got.Command != "pwd" {
+		t.Fatalf("bad normalized tool_start: %+v", got)
+	}
+}
+
 func TestCodexTokenUsageUpdatesAutoCompactThreshold(t *testing.T) {
 	c := NewCodex(&capSink{}, "codex")
 	reg := session.NewRegistry()
@@ -411,6 +446,52 @@ func TestCodexHistoryStripsTurnAbortedNotice(t *testing.T) {
 	content, _ := hist.Messages[0]["content"].(string)
 	if !strings.Contains(content, "打包taildrop給我") || !strings.Contains(content, "我什麼都沒做") || strings.Contains(content, "turn_aborted") {
 		t.Fatalf("turn_aborted wrapper not stripped: %q", content)
+	}
+}
+
+func TestCodexHistoryReplaysToolBlocks(t *testing.T) {
+	uid := "123e4567-e89b-12d3-a456-426614174002"
+	root := t.TempDir()
+	day := filepath.Join(root, "2026", "06", "06")
+	if err := os.MkdirAll(day, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(day, "rollout-2026-06-06T00-00-00-"+uid+".jsonl")
+	records := []map[string]any{
+		{"timestamp": "2026-06-06T00:00:00.000Z", "type": "response_item", "payload": map[string]any{
+			"type": "message", "role": "user", "content": []any{map[string]any{"type": "input_text", "text": "run tools"}},
+		}},
+		{"timestamp": "2026-06-06T00:00:01.000Z", "type": "response_item", "payload": map[string]any{
+			"type": "function_call", "name": "exec_command", "arguments": `{"cmd":"pwd"}`, "call_id": "call_1",
+		}},
+		{"timestamp": "2026-06-06T00:00:02.000Z", "type": "response_item", "payload": map[string]any{
+			"type": "function_call_output", "call_id": "call_1", "output": "/tmp\n",
+		}},
+		{"timestamp": "2026-06-06T00:00:03.000Z", "type": "response_item", "payload": map[string]any{
+			"type": "custom_tool_call", "name": "apply_patch", "input": "*** Begin Patch\n*** Add File: x.txt\n+hi\n*** End Patch\n", "call_id": "call_2",
+		}},
+		{"timestamp": "2026-06-06T00:00:04.000Z", "type": "response_item", "payload": map[string]any{
+			"type": "custom_tool_call_output", "call_id": "call_2", "output": "Success\n",
+		}},
+	}
+	writeJSONL(t, path, records)
+
+	c := NewCodex(&capSink{}, "codex")
+	c.sessionsRoot = root
+	hist, err := c.LoadHistory(uid, history.Opts{Limit: 20, Mode: "snapshot"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hist.Messages) != 3 {
+		t.Fatalf("want user + two tool messages, got %+v", hist.Messages)
+	}
+	bash := hist.Messages[1]["blocks"].([]map[string]any)[0]
+	if bash["name"] != "Bash" || bash["command"] != "pwd" || bash["output"] != "/tmp\n" {
+		t.Fatalf("bad bash block: %+v", bash)
+	}
+	patch := hist.Messages[2]["blocks"].([]map[string]any)[0]
+	if patch["name"] != "ApplyPatch" || !strings.Contains(patch["command"].(string), "*** Add File: x.txt") || patch["output"] != "Success\n" {
+		t.Fatalf("bad patch block: %+v", patch)
 	}
 }
 

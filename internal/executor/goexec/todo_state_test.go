@@ -68,6 +68,37 @@ func TestTodoStoreDeleteByID(t *testing.T) {
 	}
 }
 
+func TestTodoStoreStatusAliases(t *testing.T) {
+	st := newTodoStore()
+
+	ok := st.applyTodoWrite(raw(`{"todos":[
+		{"content":"A","status":"done"},
+		{"content":"B","status":"running"},
+		{"content":"C","status":"todo"}
+	]}`))
+	if !ok {
+		t.Fatal("applyTodoWrite should accept status aliases")
+	}
+	list := st.asList()
+	if len(list) != 3 {
+		t.Fatalf("want 3 normalized todos, got %+v", list)
+	}
+	if list[0].Status != "completed" || list[1].Status != "in_progress" || list[2].Status != "pending" {
+		t.Fatalf("aliases not normalized: %+v", list)
+	}
+
+	st.resolveCreate("missing", "ignored")
+	st.noteCreate("tu1", raw(`{"subject":"Finish aliases"}`))
+	st.resolveCreate("tu1", "created id: 12")
+	if !st.applyUpdate(raw(`{"taskId":12,"status":"complete"}`)) {
+		t.Fatal("TaskUpdate status=complete should be accepted")
+	}
+	last := st.asList()[len(st.asList())-1]
+	if last.ID != "12" || last.Status != "completed" {
+		t.Fatalf("fallback id/status alias failed: %+v", last)
+	}
+}
+
 // TestTodoStoreTodoWriteReplace: legacy full-replace overwrites everything.
 func TestTodoStoreTodoWriteReplace(t *testing.T) {
 	st := newTodoStore()
