@@ -112,7 +112,7 @@ func handleDownload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cleaned := filepath.Clean(decoded)
-	if strings.Contains(cleaned, "..") || !filepath.IsAbs(cleaned) {
+	if !filepath.IsAbs(cleaned) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
