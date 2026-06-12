@@ -58,6 +58,12 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 	case "ping":
 		c.enqueueEvent(h.client.Pong())
 
+	case "tunnel_url_ack":
+		// App sends tunnel URL acknowledgements (FCM de-dup handshake).
+		// The Python bridge uses this to stop resend retries; Go currently
+		// keeps tunnel delivery state in-process and treats this as no-op.
+		return
+
 	case "claim_bridge":
 		if cmd.AuthToken == "" {
 			c.enqueueEvent(h.client.Error("", "", "auth_token required for claim_bridge"))

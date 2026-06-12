@@ -8,20 +8,65 @@ import (
 
 func TestOfflineBufferDrainOrder(t *testing.T) {
 	b := NewOfflineBuffer()
+	// Two distinct in-flight turns (no terminal events) drain in order.
 	b.Append(protocol.NewToolStart("s1", "r1", "t1", "Bash", "ls"))
-	b.Append(protocol.NewDone("s1", "r1"))
+	b.Append(protocol.NewToolStart("s2", "r1", "t2", "Bash", "pwd"))
 	got := b.Drain()
 	if len(got) != 2 {
 		t.Fatalf("want 2 events, got %d", len(got))
 	}
-	if _, ok := got[0].(protocol.ToolStart); !ok {
-		t.Fatalf("first event should be ToolStart, got %T", got[0])
+	if ts, ok := got[0].(protocol.ToolStart); !ok || ts.SessionID != "s1" {
+		t.Fatalf("first event should be s1 ToolStart, got %T", got[0])
 	}
-	if _, ok := got[1].(protocol.Done); !ok {
-		t.Fatalf("second event should be Done, got %T", got[1])
+	if ts, ok := got[1].(protocol.ToolStart); !ok || ts.SessionID != "s2" {
+		t.Fatalf("second event should be s2 ToolStart, got %T", got[1])
 	}
 	if b.Len() != 0 {
 		t.Fatal("drain must empty the buffer")
+	}
+}
+
+// A terminated turn's streaming content is collapsed so reconnect replay does
+// not re-animate a finished session as if it were streaming. Only the terminal
+// marker survives; the content is recoverable from history.
+func TestOfflineBufferCollapsesCompletedTurnContent(t *testing.T) {
+	b := NewOfflineBuffer()
+	b.Append(protocol.NewTextChunk("s1", "r1", "Hello "))
+	b.Append(protocol.NewToolStart("s1", "r1", "t1", "Bash", "ls"))
+	b.Append(protocol.NewTextChunk("s1", "r1", "world"))
+	b.Append(protocol.NewDone("s1", "r1"))
+
+	got := b.Drain()
+	if len(got) != 1 {
+		t.Fatalf("completed turn should collapse to just its terminal event, got %d: %v", len(got), got)
+	}
+	if _, ok := got[0].(protocol.Done); !ok {
+		t.Fatalf("survivor should be Done, got %T", got[0])
+	}
+}
+
+// Collapsing is keyed by (session, request): an in-flight turn and other
+// sessions are not disturbed when one turn terminates.
+func TestOfflineBufferCollapseScopedToTurn(t *testing.T) {
+	b := NewOfflineBuffer()
+	b.Append(protocol.NewTextChunk("s1", "r1", "done-turn"))
+	b.Append(protocol.NewTextChunk("s1", "r2", "live-turn")) // different request, still in-flight
+	b.Append(protocol.NewTextChunk("s2", "r1", "other-session"))
+	b.Append(protocol.NewStopped("s1", "r1")) // terminate only s1/r1
+
+	got := b.Drain()
+	// s1/r1 chunk collapsed; survivors: s1/r2 chunk, s2/r1 chunk, s1/r1 Stopped.
+	if len(got) != 3 {
+		t.Fatalf("only the terminated turn's content should collapse, got %d: %v", len(got), got)
+	}
+	if tc, ok := got[0].(protocol.TextChunk); !ok || tc.RequestID != "r2" {
+		t.Fatalf("first survivor should be the in-flight s1/r2 chunk, got %T %+v", got[0], got[0])
+	}
+	if tc, ok := got[1].(protocol.TextChunk); !ok || tc.SessionID != "s2" {
+		t.Fatalf("second survivor should be the s2 chunk, got %T %+v", got[1], got[1])
+	}
+	if _, ok := got[2].(protocol.Stopped); !ok {
+		t.Fatalf("third survivor should be Stopped, got %T", got[2])
 	}
 }
 
