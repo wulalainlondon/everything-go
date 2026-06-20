@@ -149,6 +149,111 @@ func TestBuildAgentTreeNesting(t *testing.T) {
 	}
 }
 
+// TestBuildAgentTreeWorkflowGroup exercises the Workflow tool's deeper layout:
+// subagents/workflows/<wf_id>/agent-*.jsonl, where every agent shares one turn
+// promptId and there is no Task-style parentage. The flat ReadDir must skip the
+// workflows/ directory, and the run must surface as a single synthetic group
+// node ("wf_x") whose children are the run's agents.
+func TestBuildAgentTreeWorkflowGroup(t *testing.T) {
+	projects := t.TempDir()
+	proj := filepath.Join(projects, "proj")
+	wfDir := filepath.Join(proj, "resume-w", "subagents", "workflows", "wf_demo-1")
+	if err := os.MkdirAll(wfDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// pWF is the turn that ran the workflow and is the latest non-sidechain turn.
+	writeJSONLLines(t, filepath.Join(proj, "resume-w.jsonl"),
+		`{"type":"user","promptId":"pWF","timestamp":"2026-06-01T01:00:00Z","message":{"content":"run the workflow"}}`,
+	)
+	// Two workflow agents, both anchored to pWF (sidechain in their own logs).
+	writeJSONLLines(t, filepath.Join(wfDir, "agent-w1.jsonl"),
+		`{"type":"user","promptId":"pWF","isSidechain":true,"timestamp":"2026-06-01T01:00:01Z","message":{"content":[{"type":"text","text":"finder one"}]}}`,
+		`{"type":"assistant","timestamp":"2026-06-01T01:00:02Z","message":{"content":[{"type":"tool_use","name":"Grep"},{"type":"text","text":"w1 done"}]}}`,
+	)
+	writeJSONLLines(t, filepath.Join(wfDir, "agent-w1.meta.json"), `{"agentType":"workflow-subagent"}`)
+	writeJSONLLines(t, filepath.Join(wfDir, "agent-w2.jsonl"),
+		`{"type":"user","promptId":"pWF","isSidechain":true,"timestamp":"2026-06-01T01:00:03Z","message":{"content":[{"type":"text","text":"finder two"}]}}`,
+		`{"type":"assistant","timestamp":"2026-06-01T01:00:06Z","message":{"content":[{"type":"text","text":"w2 done"}]}}`,
+	)
+	writeJSONLLines(t, filepath.Join(wfDir, "agent-w2.meta.json"), `{"agentType":"workflow-subagent"}`)
+
+	c := NewClaude(&capSink{}, "claude")
+	c.projectsDir = projects
+
+	total, tree := c.BuildAgentTree("resume-w")
+	// total counts real agents only, not the synthetic group node.
+	if total != 2 {
+		t.Fatalf("total_agents = %d, want 2 (w1,w2; group excluded)", total)
+	}
+	if len(tree) != 1 {
+		t.Fatalf("expected a single workflow group root, got %d: %+v", len(tree), tree)
+	}
+	g := tree[0]
+	if g.AgentID != "wf_demo-1" || g.AgentType != "workflow" {
+		t.Fatalf("group node = (%q,%q), want (wf_demo-1, workflow)", g.AgentID, g.AgentType)
+	}
+	// Group carries the run's shared promptId so the latest-turn filter keeps it.
+	if g.PromptID == nil || *g.PromptID != "pWF" {
+		t.Fatalf("group prompt_id = %v, want pWF", g.PromptID)
+	}
+	if len(g.Children) != 2 || g.Children[0].AgentID != "w1" || g.Children[1].AgentID != "w2" {
+		t.Fatalf("group children = %+v, want [w1 w2] in discovery order", g.Children)
+	}
+	// Group timing spans its children (min start … max end).
+	if g.StartTS == nil || g.EndTS == nil || g.DurationMS == nil || *g.DurationMS <= 0 {
+		t.Fatalf("group timing missing: start=%v end=%v dur=%v", g.StartTS, g.EndTS, g.DurationMS)
+	}
+	if g.Children[1].OutputPreview != "w2 done" {
+		t.Errorf("child w2 output_preview = %q, want 'w2 done'", g.Children[1].OutputPreview)
+	}
+}
+
+// TestBuildAgentTreeMixedTaskAndWorkflow verifies a turn that ran BOTH a flat
+// Task subagent and a workflow: both must appear as sibling roots, and the count
+// must include every real agent.
+func TestBuildAgentTreeMixedTaskAndWorkflow(t *testing.T) {
+	projects := t.TempDir()
+	proj := filepath.Join(projects, "proj")
+	subagents := filepath.Join(proj, "resume-m", "subagents")
+	wfDir := filepath.Join(subagents, "workflows", "wf_mix")
+	if err := os.MkdirAll(wfDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	writeJSONLLines(t, filepath.Join(proj, "resume-m.jsonl"),
+		`{"type":"user","promptId":"pM","timestamp":"2026-06-01T01:00:00Z","message":{"content":"turn"}}`,
+	)
+	// Flat Task subagent rooted at pM.
+	writeJSONLLines(t, filepath.Join(subagents, "agent-T.jsonl"),
+		`{"type":"user","promptId":"pM","timestamp":"2026-06-01T01:00:01Z","message":{"content":[{"type":"text","text":"task agent"}]}}`,
+		`{"type":"assistant","timestamp":"2026-06-01T01:00:02Z","message":{"content":[{"type":"text","text":"T done"}]}}`,
+	)
+	// Workflow agent under workflows/wf_mix, same turn pM.
+	writeJSONLLines(t, filepath.Join(wfDir, "agent-W.jsonl"),
+		`{"type":"user","promptId":"pM","isSidechain":true,"timestamp":"2026-06-01T01:00:03Z","message":{"content":[{"type":"text","text":"wf agent"}]}}`,
+		`{"type":"assistant","timestamp":"2026-06-01T01:00:04Z","message":{"content":[{"type":"text","text":"W done"}]}}`,
+	)
+
+	c := NewClaude(&capSink{}, "claude")
+	c.projectsDir = projects
+
+	total, tree := c.BuildAgentTree("resume-m")
+	if total != 2 {
+		t.Fatalf("total_agents = %d, want 2 (T + W)", total)
+	}
+	if len(tree) != 2 {
+		t.Fatalf("expected 2 roots (task agent + workflow group), got %d: %+v", len(tree), tree)
+	}
+	// Discovery order: flat task agents first, then workflow groups.
+	if tree[0].AgentID != "T" {
+		t.Errorf("first root = %q, want T (flat task before workflow group)", tree[0].AgentID)
+	}
+	if tree[1].AgentType != "workflow" || len(tree[1].Children) != 1 || tree[1].Children[0].AgentID != "W" {
+		t.Errorf("second root must be workflow group owning W, got %+v", tree[1])
+	}
+}
+
 func TestBuildAgentTreeNoSubagentDir(t *testing.T) {
 	projects := t.TempDir()
 	proj := filepath.Join(projects, "proj")

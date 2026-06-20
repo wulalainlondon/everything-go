@@ -34,9 +34,53 @@ func (c *Claude) BuildAgentTree(resumeID string) (int, []*protocol.AgentNode) {
 
 	mainPromptIDs, latestPromptID := scanMainJSONL(mainPath)
 
-	entries, err := os.ReadDir(subagentDir)
-	if err != nil {
+	// Task-tool subagents sit flat under subagents/; their hierarchy is rebuilt
+	// from promptId parentage (the original behaviour).
+	taskTotal, tree := buildFlatTaskTree(subagentDir, mainPromptIDs)
+
+	// Workflow-tool runs land one level deeper, under
+	// subagents/workflows/<wf_id>/agent-*.jsonl. Their agents share a single turn
+	// promptId and carry no Task-style parentage, so the flat ReadDir above never
+	// sees them (it skips the workflows/ directory). Group each run under a
+	// synthetic node so the orchestration reads as "one workflow, N agents"
+	// instead of N indistinguishable siblings. Deliberate divergence from Python,
+	// which predates the Workflow tool and has no workflows/ handling.
+	wfTotal, wfTree := buildWorkflowGroups(filepath.Join(subagentDir, "workflows"))
+	tree = append(tree, wfTree...)
+
+	total := taskTotal + wfTotal
+	if total == 0 {
 		return 0, empty
+	}
+
+	// Filter to the latest conversation turn only (parity with Python). Synthetic
+	// workflow nodes carry their run's shared promptId, so a workflow that ran in
+	// the latest turn survives the same filter.
+	if latestPromptID != "" {
+		var filtered []*protocol.AgentNode
+		for _, n := range tree {
+			if n.PromptID != nil && *n.PromptID == latestPromptID {
+				filtered = append(filtered, n)
+			}
+		}
+		if len(filtered) > 0 {
+			tree = filtered
+		}
+	}
+	if tree == nil {
+		tree = empty
+	}
+	return total, tree
+}
+
+// buildFlatTaskTree reconstructs the Task-tool subagent hierarchy from the flat
+// agent-*.jsonl files directly under dir, linking parents via promptId. Returns
+// the agent count and the unfiltered root list. Nested directories (e.g.
+// workflows/) are skipped — buildWorkflowGroups handles those.
+func buildFlatTaskTree(dir string, mainPromptIDs map[string]bool) (int, []*protocol.AgentNode) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0, nil
 	}
 
 	agents := map[string]*protocol.AgentNode{}
@@ -52,44 +96,20 @@ func (c *Claude) BuildAgentTree(resumeID string) (int, []*protocol.AgentNode) {
 		if agentID == "" {
 			continue
 		}
-		agentPath := filepath.Join(subagentDir, name)
 
-		agentType := readAgentType(filepath.Join(subagentDir, "agent-"+agentID+".meta.json"))
-		scan := scanAgentJSONL(agentPath)
+		agentType := readAgentType(filepath.Join(dir, "agent-"+agentID+".meta.json"))
+		scan := scanAgentJSONL(filepath.Join(dir, name))
 
 		for _, pid := range scan.promptIDs {
 			subagentPromptIDs[pid] = agentID
 		}
 
-		var duration *int64
-		if scan.startTS != nil && scan.endTS != nil {
-			d := *scan.endTS - *scan.startTS
-			duration = &d
-		}
-		var firstPID *string
-		if scan.firstPromptID != "" {
-			fp := scan.firstPromptID
-			firstPID = &fp
-		}
-
-		agents[agentID] = &protocol.AgentNode{
-			AgentID:       agentID,
-			AgentType:     agentType,
-			Description:   scan.description,
-			PromptID:      firstPID,
-			ParentAgentID: nil,
-			StartTS:       scan.startTS,
-			EndTS:         scan.endTS,
-			DurationMS:    duration,
-			ToolCalls:     scan.toolCalls,
-			OutputPreview: scan.outputPreview,
-			Children:      []*protocol.AgentNode{},
-		}
+		agents[agentID] = nodeFromScan(agentID, agentType, scan)
 		order = append(order, agentID)
 	}
 
 	if len(agents) == 0 {
-		return 0, empty
+		return 0, nil
 	}
 
 	// Determine parent_agent_id: an agent whose first prompt is in the main
@@ -145,23 +165,114 @@ func (c *Claude) BuildAgentTree(resumeID string) (int, []*protocol.AgentNode) {
 	for _, aid := range rootNodes {
 		tree = append(tree, build(aid))
 	}
+	return len(agents), tree
+}
 
-	// Filter to the latest conversation turn only (parity with Python).
-	if latestPromptID != "" {
-		var filtered []*protocol.AgentNode
-		for _, n := range tree {
-			if n.PromptID != nil && *n.PromptID == latestPromptID {
-				filtered = append(filtered, n)
+// buildWorkflowGroups scans subagents/workflows/<wf_id>/ and returns one
+// synthetic group node per workflow run, with that run's agents as leaf
+// children. The group's promptId/timing are derived from its children: the
+// shared turn promptId (so the latest-turn filter applies) and the min-start /
+// max-end span. Returns the total real-agent count (group nodes excluded) and
+// the group nodes. A missing workflows/ directory yields (0, nil).
+func buildWorkflowGroups(workflowsDir string) (int, []*protocol.AgentNode) {
+	dirs, err := os.ReadDir(workflowsDir)
+	if err != nil {
+		return 0, nil
+	}
+
+	total := 0
+	var groups []*protocol.AgentNode
+	for _, d := range dirs {
+		if !d.IsDir() {
+			continue
+		}
+		wfDir := filepath.Join(workflowsDir, d.Name())
+		files, err := os.ReadDir(wfDir)
+		if err != nil {
+			continue
+		}
+
+		var children []*protocol.AgentNode
+		var startTS, endTS *int64
+		var groupPromptID *string
+		for _, f := range files {
+			name := f.Name()
+			if f.IsDir() || !strings.HasSuffix(name, ".jsonl") || !strings.HasPrefix(name, "agent-") {
+				continue
+			}
+			agentID := name[len("agent-") : len(name)-len(".jsonl")]
+			if agentID == "" {
+				continue
+			}
+			agentType := readAgentType(filepath.Join(wfDir, "agent-"+agentID+".meta.json"))
+			child := nodeFromScan(agentID, agentType, scanAgentJSONL(filepath.Join(wfDir, name)))
+			children = append(children, child)
+
+			if child.StartTS != nil && (startTS == nil || *child.StartTS < *startTS) {
+				v := *child.StartTS
+				startTS = &v
+			}
+			if child.EndTS != nil && (endTS == nil || *child.EndTS > *endTS) {
+				v := *child.EndTS
+				endTS = &v
+			}
+			if groupPromptID == nil && child.PromptID != nil {
+				v := *child.PromptID
+				groupPromptID = &v
 			}
 		}
-		if len(filtered) > 0 {
-			tree = filtered
+		if len(children) == 0 {
+			continue
 		}
+		total += len(children)
+
+		var duration *int64
+		if startTS != nil && endTS != nil {
+			d := *endTS - *startTS
+			duration = &d
+		}
+		groups = append(groups, &protocol.AgentNode{
+			AgentID:       d.Name(),
+			AgentType:     "workflow",
+			Description:   d.Name(),
+			PromptID:      groupPromptID,
+			ParentAgentID: nil,
+			StartTS:       startTS,
+			EndTS:         endTS,
+			DurationMS:    duration,
+			ToolCalls:     []protocol.AgentToolCall{},
+			OutputPreview: "",
+			Children:      children,
+		})
 	}
-	if tree == nil {
-		tree = empty
+	return total, groups
+}
+
+// nodeFromScan builds a leaf AgentNode from a single agent's transcript scan.
+func nodeFromScan(agentID, agentType string, scan agentScan) *protocol.AgentNode {
+	var duration *int64
+	if scan.startTS != nil && scan.endTS != nil {
+		d := *scan.endTS - *scan.startTS
+		duration = &d
 	}
-	return len(agents), tree
+	var firstPID *string
+	if scan.firstPromptID != "" {
+		fp := scan.firstPromptID
+		firstPID = &fp
+	}
+	return &protocol.AgentNode{
+		AgentID:       agentID,
+		AgentType:     agentType,
+		Description:   scan.description,
+		PromptID:      firstPID,
+		ParentAgentID: nil,
+		StartTS:       scan.startTS,
+		EndTS:         scan.endTS,
+		DurationMS:    duration,
+		ToolCalls:     scan.toolCalls,
+		OutputPreview: scan.outputPreview,
+		Children:      []*protocol.AgentNode{},
+	}
 }
 
 // scanMainJSONL collects every user promptId in the main transcript and the
