@@ -11,6 +11,23 @@ import (
 	"everything-go/internal/protocol"
 )
 
+// liveAgentWindowMs is how recently an agent transcript must have been written
+// to be treated as still running. The transcript carries no explicit completion
+// marker (stop_reason is absent), so recent write activity is the liveness
+// signal. Kept comfortably above the agentTreePoller's 2 s tick so a busy agent
+// isn't flipped to "done" between writes.
+const liveAgentWindowMs = 8000
+
+// cachedAgentScan memoises one parsed transcript keyed by its file mtime, so the
+// 2 s poller does not re-read every unchanged agent-*.jsonl on each tick (cf.
+// Python's _AGENT_TREE_CACHE). Bounded by the number of distinct agent files
+// seen this process; acceptable for a turn's worth of subagents.
+type cachedAgentScan struct {
+	mtimeNS   int64
+	agentType string
+	scan      agentScan
+}
+
 // BuildAgentTree reconstructs the subagent hierarchy for a Claude session from
 // the on-disk transcripts under <dir>/<resume_id>/subagents/agent-*.jsonl.
 // Mirrors ClaudeHistory._build_agent_tree_sync (bridge/backends/claude_history.py).
@@ -18,10 +35,18 @@ import (
 // it, so get_agent_tree on those backends is a no-op (parity with Python, whose
 // only build_agent_tree lives on the Claude backend).
 //
-// Deliberate parity gap: Python keeps an mtime-keyed LRU cache (_AGENT_TREE_CACHE)
-// to skip re-scanning unchanged transcripts. Go scans fresh each call — simpler,
-// and the trees are small (one turn's subagents). No cache.
+// This is the post-hoc entry point (no liveness): every agent that wrote a row
+// is reported done. The live agentTreePoller calls buildAgentTree with a clock
+// so in-flight agents surface as running.
 func (c *Claude) BuildAgentTree(resumeID string) (int, []*protocol.AgentNode) {
+	return c.buildAgentTree(resumeID, 0)
+}
+
+// buildAgentTree is BuildAgentTree with an injectable clock. When nowMs > 0, an
+// agent whose transcript was written within liveAgentWindowMs of nowMs is marked
+// running (EndTS/DurationMS cleared); nowMs == 0 disables liveness entirely (the
+// post-hoc and test path).
+func (c *Claude) buildAgentTree(resumeID string, nowMs int64) (int, []*protocol.AgentNode) {
 	empty := []*protocol.AgentNode{}
 	mainPath := c.findSessionFile(resumeID)
 	if mainPath == "" {
@@ -36,7 +61,7 @@ func (c *Claude) BuildAgentTree(resumeID string) (int, []*protocol.AgentNode) {
 
 	// Task-tool subagents sit flat under subagents/; their hierarchy is rebuilt
 	// from promptId parentage (the original behaviour).
-	taskTotal, tree := buildFlatTaskTree(subagentDir, mainPromptIDs)
+	taskTotal, tree := c.buildFlatTaskTree(subagentDir, mainPromptIDs, nowMs)
 
 	// Workflow-tool runs land one level deeper, under
 	// subagents/workflows/<wf_id>/agent-*.jsonl. Their agents share a single turn
@@ -45,7 +70,7 @@ func (c *Claude) BuildAgentTree(resumeID string) (int, []*protocol.AgentNode) {
 	// synthetic node so the orchestration reads as "one workflow, N agents"
 	// instead of N indistinguishable siblings. Deliberate divergence from Python,
 	// which predates the Workflow tool and has no workflows/ handling.
-	wfTotal, wfTree := buildWorkflowGroups(filepath.Join(subagentDir, "workflows"))
+	wfTotal, wfTree := c.buildWorkflowGroups(filepath.Join(subagentDir, "workflows"), nowMs)
 	tree = append(tree, wfTree...)
 
 	total := taskTotal + wfTotal
@@ -77,7 +102,7 @@ func (c *Claude) BuildAgentTree(resumeID string) (int, []*protocol.AgentNode) {
 // agent-*.jsonl files directly under dir, linking parents via promptId. Returns
 // the agent count and the unfiltered root list. Nested directories (e.g.
 // workflows/) are skipped — buildWorkflowGroups handles those.
-func buildFlatTaskTree(dir string, mainPromptIDs map[string]bool) (int, []*protocol.AgentNode) {
+func (c *Claude) buildFlatTaskTree(dir string, mainPromptIDs map[string]bool, nowMs int64) (int, []*protocol.AgentNode) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return 0, nil
@@ -97,14 +122,13 @@ func buildFlatTaskTree(dir string, mainPromptIDs map[string]bool) (int, []*proto
 			continue
 		}
 
-		agentType := readAgentType(filepath.Join(dir, "agent-"+agentID+".meta.json"))
-		scan := scanAgentJSONL(filepath.Join(dir, name))
+		node, scan := c.loadAgentNode(dir, agentID, nowMs)
 
 		for _, pid := range scan.promptIDs {
 			subagentPromptIDs[pid] = agentID
 		}
 
-		agents[agentID] = nodeFromScan(agentID, agentType, scan)
+		agents[agentID] = node
 		order = append(order, agentID)
 	}
 
@@ -174,7 +198,7 @@ func buildFlatTaskTree(dir string, mainPromptIDs map[string]bool) (int, []*proto
 // shared turn promptId (so the latest-turn filter applies) and the min-start /
 // max-end span. Returns the total real-agent count (group nodes excluded) and
 // the group nodes. A missing workflows/ directory yields (0, nil).
-func buildWorkflowGroups(workflowsDir string) (int, []*protocol.AgentNode) {
+func (c *Claude) buildWorkflowGroups(workflowsDir string, nowMs int64) (int, []*protocol.AgentNode) {
 	dirs, err := os.ReadDir(workflowsDir)
 	if err != nil {
 		return 0, nil
@@ -195,6 +219,7 @@ func buildWorkflowGroups(workflowsDir string) (int, []*protocol.AgentNode) {
 		var children []*protocol.AgentNode
 		var startTS, endTS *int64
 		var groupPromptID *string
+		anyRunning := false
 		for _, f := range files {
 			name := f.Name()
 			if f.IsDir() || !strings.HasSuffix(name, ".jsonl") || !strings.HasPrefix(name, "agent-") {
@@ -204,8 +229,7 @@ func buildWorkflowGroups(workflowsDir string) (int, []*protocol.AgentNode) {
 			if agentID == "" {
 				continue
 			}
-			agentType := readAgentType(filepath.Join(wfDir, "agent-"+agentID+".meta.json"))
-			child := nodeFromScan(agentID, agentType, scanAgentJSONL(filepath.Join(wfDir, name)))
+			child, _ := c.loadAgentNode(wfDir, agentID, nowMs)
 			children = append(children, child)
 
 			if child.StartTS != nil && (startTS == nil || *child.StartTS < *startTS) {
@@ -215,6 +239,8 @@ func buildWorkflowGroups(workflowsDir string) (int, []*protocol.AgentNode) {
 			if child.EndTS != nil && (endTS == nil || *child.EndTS > *endTS) {
 				v := *child.EndTS
 				endTS = &v
+			} else if child.EndTS == nil && child.StartTS != nil {
+				anyRunning = true // a started-but-unfinished child keeps the group live
 			}
 			if groupPromptID == nil && child.PromptID != nil {
 				v := *child.PromptID
@@ -226,8 +252,12 @@ func buildWorkflowGroups(workflowsDir string) (int, []*protocol.AgentNode) {
 		}
 		total += len(children)
 
+		// While any child is still running the group reads as running too (no end
+		// time); once they all finish, the group spans min-start … max-end.
 		var duration *int64
-		if startTS != nil && endTS != nil {
+		if anyRunning {
+			endTS = nil
+		} else if startTS != nil && endTS != nil {
 			d := *endTS - *startTS
 			duration = &d
 		}
@@ -246,6 +276,48 @@ func buildWorkflowGroups(workflowsDir string) (int, []*protocol.AgentNode) {
 		})
 	}
 	return total, groups
+}
+
+// loadAgentNode reads one agent's transcript (via the mtime-keyed cache so an
+// unchanged file isn't re-parsed every poll) and builds its leaf node. When
+// nowMs > 0 and the file was written within liveAgentWindowMs, the agent is
+// treated as still running: EndTS/DurationMS are cleared so the UI shows it live.
+func (c *Claude) loadAgentNode(dir, agentID string, nowMs int64) (*protocol.AgentNode, agentScan) {
+	jsonlPath := filepath.Join(dir, "agent-"+agentID+".jsonl")
+	metaPath := filepath.Join(dir, "agent-"+agentID+".meta.json")
+	agentType, scan, mtimeMs := c.cachedScan(jsonlPath, metaPath)
+	node := nodeFromScan(agentID, agentType, scan)
+	if nowMs > 0 && mtimeMs > 0 && mtimeMs >= nowMs-liveAgentWindowMs && node.StartTS != nil {
+		node.EndTS = nil
+		node.DurationMS = nil
+	}
+	return node, scan
+}
+
+// cachedScan returns the parsed transcript + agentType for one agent file,
+// reusing a cached parse when the file's mtime is unchanged. The third return is
+// the file mtime in ms (0 if the file can't be stat'd, which disables liveness).
+func (c *Claude) cachedScan(jsonlPath, metaPath string) (string, agentScan, int64) {
+	fi, err := os.Stat(jsonlPath)
+	if err != nil {
+		return readAgentType(metaPath), scanAgentJSONL(jsonlPath), 0
+	}
+	mtimeNS := fi.ModTime().UnixNano()
+
+	c.treeScanMu.Lock()
+	if e, ok := c.treeScanCache[jsonlPath]; ok && e.mtimeNS == mtimeNS {
+		c.treeScanMu.Unlock()
+		return e.agentType, e.scan, fi.ModTime().UnixMilli()
+	}
+	c.treeScanMu.Unlock()
+
+	at := readAgentType(metaPath)
+	sc := scanAgentJSONL(jsonlPath)
+
+	c.treeScanMu.Lock()
+	c.treeScanCache[jsonlPath] = cachedAgentScan{mtimeNS: mtimeNS, agentType: at, scan: sc}
+	c.treeScanMu.Unlock()
+	return at, sc, fi.ModTime().UnixMilli()
 }
 
 // nodeFromScan builds a leaf AgentNode from a single agent's transcript scan.

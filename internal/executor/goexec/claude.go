@@ -127,6 +127,9 @@ type Claude struct {
 	pending map[string]*pendingInteraction // request_id -> paused AskUserQuestion
 
 	mcp *askUserMCP // in-process ask_user MCP server (nil if it failed to start)
+
+	treeScanMu    sync.Mutex                 // guards treeScanCache
+	treeScanCache map[string]cachedAgentScan // agent jsonl path -> mtime-keyed parse
 }
 
 func NewClaude(sink executor.Sink, claudeBin string) *Claude {
@@ -143,6 +146,8 @@ func NewClaude(sink executor.Sink, claudeBin string) *Claude {
 		procs:   make(map[string]*proc),
 		states:  make(map[string]*claudeState),
 		pending: make(map[string]*pendingInteraction),
+
+		treeScanCache: make(map[string]cachedAgentScan),
 	}
 	// Host the ask_user MCP server so AskUserQuestion-style prompts can actually
 	// be answered from the app (the built-in tool can't be answered in headless
@@ -705,7 +710,7 @@ func (c *Claude) agentTreePoller(s *session.Session, p *proc) {
 		}
 		resumeID := s.ResumeID()
 		if resumeID != "" {
-			total, tree := c.BuildAgentTree(resumeID)
+			total, tree := c.buildAgentTree(resumeID, time.Now().UnixMilli())
 			if total > 0 {
 				done := countDoneAgents(tree)
 				if total != lastTotal || done != lastDone {

@@ -254,6 +254,83 @@ func TestBuildAgentTreeMixedTaskAndWorkflow(t *testing.T) {
 	}
 }
 
+// TestBuildAgentTreeLiveness verifies the mtime-based running/done heuristic the
+// agentTreePoller relies on: with an injected clock, an agent whose transcript
+// was written within liveAgentWindowMs reads as running (EndTS cleared), and the
+// enclosing workflow group is running too; once the clock advances past the
+// window every agent — and the group — reads as done.
+func TestBuildAgentTreeLiveness(t *testing.T) {
+	projects := t.TempDir()
+	proj := filepath.Join(projects, "proj")
+	wfDir := filepath.Join(proj, "resume-l", "subagents", "workflows", "wf_live")
+	subagents := filepath.Join(proj, "resume-l", "subagents")
+	if err := os.MkdirAll(wfDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeJSONLLines(t, filepath.Join(proj, "resume-l.jsonl"),
+		`{"type":"user","promptId":"pL","timestamp":"2026-06-01T01:00:00Z","message":{"content":"run"}}`,
+	)
+	// One flat Task agent and one workflow agent, both from turn pL.
+	writeJSONLLines(t, filepath.Join(subagents, "agent-T.jsonl"),
+		`{"type":"user","promptId":"pL","timestamp":"2026-06-01T01:00:01Z","message":{"content":[{"type":"text","text":"task"}]}}`,
+		`{"type":"assistant","timestamp":"2026-06-01T01:00:02Z","message":{"content":[{"type":"text","text":"T"}]}}`,
+	)
+	wfAgent := filepath.Join(wfDir, "agent-W.jsonl")
+	writeJSONLLines(t, wfAgent,
+		`{"type":"user","promptId":"pL","isSidechain":true,"timestamp":"2026-06-01T01:00:03Z","message":{"content":[{"type":"text","text":"wf"}]}}`,
+		`{"type":"assistant","timestamp":"2026-06-01T01:00:04Z","message":{"content":[{"type":"text","text":"W"}]}}`,
+	)
+
+	c := NewClaude(&capSink{}, "claude")
+	c.projectsDir = projects
+
+	// Anchor the clock to the files' real mtime (set when written just now).
+	fi, err := os.Stat(wfAgent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mtimeMs := fi.ModTime().UnixMilli()
+
+	// Clock just after the write → inside the window → everything running.
+	_, live := c.buildAgentTree("resume-l", mtimeMs+1000)
+	for _, n := range live {
+		switch n.AgentType {
+		case "workflow":
+			if n.EndTS != nil {
+				t.Errorf("live: workflow group EndTS = %v, want nil (running)", *n.EndTS)
+			}
+			if len(n.Children) != 1 || n.Children[0].EndTS != nil {
+				t.Errorf("live: workflow child should be running (EndTS nil), got %+v", n.Children)
+			}
+		default: // the flat Task agent T
+			if n.EndTS != nil {
+				t.Errorf("live: task agent EndTS = %v, want nil (running)", *n.EndTS)
+			}
+		}
+	}
+
+	// Clock well past the window → stale files → everything done.
+	_, doneTree := c.buildAgentTree("resume-l", mtimeMs+liveAgentWindowMs+5000)
+	for _, n := range doneTree {
+		if n.EndTS == nil {
+			t.Errorf("stale: node %s EndTS = nil, want done", n.AgentID)
+		}
+		for _, ch := range n.Children {
+			if ch.EndTS == nil {
+				t.Errorf("stale: child %s EndTS = nil, want done", ch.AgentID)
+			}
+		}
+	}
+
+	// nowMs == 0 (post-hoc / BuildAgentTree) must never mark anything running.
+	_, posthoc := c.BuildAgentTree("resume-l")
+	for _, n := range posthoc {
+		if n.EndTS == nil {
+			t.Errorf("post-hoc: node %s unexpectedly running", n.AgentID)
+		}
+	}
+}
+
 func TestBuildAgentTreeNoSubagentDir(t *testing.T) {
 	projects := t.TempDir()
 	proj := filepath.Join(projects, "proj")
