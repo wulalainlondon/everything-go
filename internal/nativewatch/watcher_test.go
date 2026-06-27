@@ -3,9 +3,26 @@ package nativewatch
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
+
+func TestUsePollingMode(t *testing.T) {
+	t.Setenv("EVERYTHING_GO_NATIVEWATCH_MODE", "poll")
+	if !usePolling() {
+		t.Fatal("mode=poll must force polling")
+	}
+	t.Setenv("EVERYTHING_GO_NATIVEWATCH_MODE", "fsnotify")
+	if usePolling() {
+		t.Fatal("mode=fsnotify must force fsnotify")
+	}
+	// Default (unset) follows the platform: poll on darwin, fsnotify elsewhere.
+	t.Setenv("EVERYTHING_GO_NATIVEWATCH_MODE", "")
+	if got, want := usePolling(), runtime.GOOS == "darwin"; got != want {
+		t.Fatalf("default usePolling=%v, want %v (GOOS=%s)", got, want, runtime.GOOS)
+	}
+}
 
 func TestParseClaudePath(t *testing.T) {
 	root := t.TempDir()

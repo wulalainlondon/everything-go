@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -72,10 +73,36 @@ func Watch(ctx context.Context, opts Options, onSession func(NativeSession)) {
 	}
 
 	scanRecent(opts, onSession)
+	if usePolling() {
+		// macOS fsnotify is backed by kqueue, which must hold an open file
+		// descriptor for every file in every watched directory. Watching the
+		// whole ~/.claude/projects + ~/.codex/sessions tree (thousands of
+		// transcripts) opens and pins thousands of FDs for the process
+		// lifetime — the dominant cause of the bridge's FD/RSS bloat. Polling
+		// is stat-only and cheap; ~PollInterval latency is fine for surfacing
+		// externally-created native sessions in the dashboard.
+		poll(ctx, opts, onSession)
+		return
+	}
 	if err := watchFS(ctx, opts, onSession); err != nil {
 		log.Printf("[nativewatch] fsnotify unavailable (%v), falling back to polling", err)
 		poll(ctx, opts, onSession)
 	}
+}
+
+// usePolling reports whether to skip fsnotify and poll the trees instead.
+// Defaults to polling on macOS — kqueue opens an FD per watched file, which
+// exhausts and pins FDs on large history trees — and fsnotify elsewhere (Linux
+// inotify watches per directory, not per file, so the tree is cheap to watch).
+// Override either way with EVERYTHING_GO_NATIVEWATCH_MODE=poll|fsnotify.
+func usePolling() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("EVERYTHING_GO_NATIVEWATCH_MODE"))) {
+	case "poll", "polling":
+		return true
+	case "fsnotify", "watch", "kqueue", "inotify":
+		return false
+	}
+	return runtime.GOOS == "darwin"
 }
 
 func watchFS(ctx context.Context, opts Options, onSession func(NativeSession)) error {
