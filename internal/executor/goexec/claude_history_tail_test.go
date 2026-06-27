@@ -3,10 +3,64 @@ package goexec
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
+
+// A large transcript must load with peak heap bounded to ~the byte budget, not
+// the file size — the whole point of the fix (an 826MB file used to spike the
+// bridge to ~3.4GB). Generates a ~150MB fixture and samples peak HeapInuse.
+func TestLoadClaudeHistoryBoundedPeakMemory(t *testing.T) {
+	if testing.Short() {
+		t.Skip("generates a 150MB fixture")
+	}
+	path := filepath.Join(t.TempDir(), "big.jsonl")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line := `{"type":"user","timestamp":"2026-01-01T00:00:00Z","message":{"content":"` + strings.Repeat("x", 2000) + `"}}` + "\n"
+	for i := 0; i < 75000; i++ { // ~150MB
+		if _, err := f.WriteString(line); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.Close()
+	fi, _ := os.Stat(path)
+	fileMB := float64(fi.Size()) / 1e6
+
+	var peak uint64
+	done := make(chan struct{})
+	go func() {
+		var ms runtime.MemStats
+		for {
+			select {
+			case <-done:
+				return
+			default:
+				runtime.ReadMemStats(&ms)
+				if ms.HeapInuse > peak {
+					peak = ms.HeapInuse
+				}
+				time.Sleep(time.Millisecond)
+			}
+		}
+	}()
+	msgs, truncated := loadClaudeHistoryMessages(path, "abc", 0)
+	close(done)
+	peakMB := float64(peak) / 1e6
+	t.Logf("file=%.0fMB peak_heap=%.0fMB messages=%d truncated=%v", fileMB, peakMB, len(msgs), truncated)
+
+	if !truncated {
+		t.Fatal("a 150MB file must truncate under the 32MB budget")
+	}
+	if peakMB > 400 {
+		t.Fatalf("peak heap %.0fMB not bounded (file was %.0fMB) — tail-streaming failed", peakMB, fileMB)
+	}
+}
 
 // A runaway transcript must load only its recent tail (bounded memory) while
 // keeping ABSOLUTE line numbers, so message ids stay stable across the
