@@ -62,6 +62,56 @@ func TestLoadClaudeHistoryBoundedPeakMemory(t *testing.T) {
 	}
 }
 
+// scanCwdAndName (resumable-sessions list) must read only the file's head, not
+// the whole thing — it used to os.ReadFile every transcript, spiking the bridge
+// to multiple GB on giant sessions when get_resumable_sessions ran.
+func TestScanCwdAndNameBoundedMemory(t *testing.T) {
+	if testing.Short() {
+		t.Skip("generates a 150MB fixture")
+	}
+	path := filepath.Join(t.TempDir(), "big.jsonl")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// cwd + first user text live on line 1 — the scan must stop there.
+	f.WriteString(`{"type":"user","cwd":"/home/x/proj","message":{"content":"first user message here"}}` + "\n")
+	bulk := strings.Repeat("x", 2000)
+	for i := 0; i < 75000; i++ { // ~150MB of trailing content that must never be read
+		f.WriteString(`{"type":"assistant","message":{"content":"` + bulk + `"}}` + "\n")
+	}
+	f.Close()
+
+	var peak uint64
+	done := make(chan struct{})
+	go func() {
+		var ms runtime.MemStats
+		for {
+			select {
+			case <-done:
+				return
+			default:
+				runtime.ReadMemStats(&ms)
+				if ms.HeapInuse > peak {
+					peak = ms.HeapInuse
+				}
+				time.Sleep(time.Millisecond)
+			}
+		}
+	}()
+	cwd, name := scanCwdAndName(path)
+	close(done)
+	peakMB := float64(peak) / 1e6
+	t.Logf("cwd=%q name=%q peak_heap=%.0fMB", cwd, name, peakMB)
+
+	if cwd != "/home/x/proj" || name != "first user message here" {
+		t.Fatalf("scan returned cwd=%q name=%q", cwd, name)
+	}
+	if peakMB > 100 {
+		t.Fatalf("peak heap %.0fMB — scan read far more than the head of a 150MB file", peakMB)
+	}
+}
+
 // A runaway transcript must load only its recent tail (bounded memory) while
 // keeping ABSOLUTE line numbers, so message ids stay stable across the
 // whole-file vs tail-streamed paths.

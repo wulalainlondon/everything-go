@@ -1,6 +1,8 @@
 package goexec
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -279,34 +281,40 @@ func (c *Claude) ResumableSessions(limit int) ([]history.ResumableSession, error
 	return sessions, nil
 }
 
-// scanCwdAndName reads a transcript for its cwd and first user-text name.
+// scanCwdAndName reads a transcript for its cwd and first user-text name. Both
+// live in the first handful of lines, so it streams and stops early instead of
+// reading the whole file — a runaway session can be 800MB+, and this runs once
+// per transcript when building the resumable-sessions list (get_resumable_sessions).
 func scanCwdAndName(path string) (cwd, name string) {
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		return "", ""
 	}
-	for _, raw := range strings.Split(string(data), "\n") {
-		raw = strings.TrimSpace(raw)
-		if raw == "" {
-			continue
-		}
-		var d claudeRow
-		if json.Unmarshal([]byte(raw), &d) != nil {
-			continue
-		}
-		if cwd == "" && strings.TrimSpace(d.Cwd) != "" {
-			cwd = strings.TrimSpace(d.Cwd)
-		}
-		if name == "" && d.Type == "user" {
-			text, _ := buildClaudeBlocks(d.Message.Content, "user", nil)
-			if text != "" && !strings.HasPrefix(text, "<") {
-				if len(text) > 50 {
-					text = text[:50]
+	defer f.Close()
+	br := bufio.NewReaderSize(f, 64*1024)
+	for i := 0; i < 400; i++ {
+		line, readErr := br.ReadBytes('\n')
+		if raw := bytes.TrimSpace(line); len(raw) > 0 {
+			var d claudeRow
+			if json.Unmarshal(raw, &d) == nil {
+				if cwd == "" && strings.TrimSpace(d.Cwd) != "" {
+					cwd = strings.TrimSpace(d.Cwd)
 				}
-				name = strings.TrimSpace(text)
+				if name == "" && d.Type == "user" {
+					text, _ := buildClaudeBlocks(d.Message.Content, "user", nil)
+					if text != "" && !strings.HasPrefix(text, "<") {
+						if len(text) > 50 {
+							text = text[:50]
+						}
+						name = strings.TrimSpace(text)
+					}
+				}
+				if cwd != "" && name != "" {
+					return cwd, name
+				}
 			}
 		}
-		if cwd != "" && name != "" {
+		if readErr != nil {
 			break
 		}
 	}
