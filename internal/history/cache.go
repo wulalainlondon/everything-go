@@ -1,14 +1,26 @@
 package history
 
 import (
+	"container/list"
 	"database/sql"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
+)
+
+// In-memory cache sizing. The SQLite tier is the source of truth and is always
+// written; the in-memory tier is only a hot-set accelerator and MUST be bounded
+// or a long-lived process accumulates every session's full transcript on the
+// heap (parsed []map[string]any blows up 5-10x over the JSON bytes, so an 80MB
+// corpus became ~700MB-1.2GB RSS). Accounting is by serialized JSON bytes.
+const (
+	defaultMaxMemBytes   = 32 << 20 // total in-memory budget (JSON bytes)
+	defaultMaxEntryBytes = 1 << 20  // entries larger than this stay SQLite-only
 )
 
 type FileKey struct {
@@ -20,12 +32,23 @@ type FileKey struct {
 type cacheEntry struct {
 	key      FileKey
 	messages []map[string]any
+	bytes    int // serialized JSON size, used for LRU accounting
+}
+
+type lruItem struct {
+	name  string
+	entry cacheEntry
 }
 
 type Cache struct {
-	mu  sync.Mutex
-	mem map[string]cacheEntry
-	db  *sql.DB
+	mu       sync.Mutex
+	mem      map[string]*list.Element // cacheName -> *list.Element holding *lruItem
+	ll       *list.List               // front = most recently used
+	curBytes int
+
+	maxBytes      int
+	maxEntryBytes int
+	db            *sql.DB
 }
 
 var (
@@ -54,8 +77,18 @@ func defaultCachePath() string {
 	return filepath.Join(base, "everything-go", "history_cache.sqlite")
 }
 
+func newCache(db *sql.DB) *Cache {
+	return &Cache{
+		mem:           map[string]*list.Element{},
+		ll:            list.New(),
+		maxBytes:      envBytes("EVERYTHING_GO_HISTORY_CACHE_MAX_BYTES", defaultMaxMemBytes),
+		maxEntryBytes: envBytes("EVERYTHING_GO_HISTORY_CACHE_MAX_ENTRY_BYTES", defaultMaxEntryBytes),
+		db:            db,
+	}
+}
+
 func NewMemoryCache() *Cache {
-	return &Cache{mem: map[string]cacheEntry{}}
+	return newCache(nil)
 }
 
 func NewSQLiteCache(path string) (*Cache, error) {
@@ -66,7 +99,7 @@ func NewSQLiteCache(path string) (*Cache, error) {
 	if err != nil {
 		return nil, err
 	}
-	c := &Cache{mem: map[string]cacheEntry{}, db: db}
+	c := newCache(db)
 	if err := c.initDB(); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -102,10 +135,16 @@ func (c *Cache) Load(cacheName string, key FileKey) ([]map[string]any, bool) {
 		return nil, false
 	}
 	c.mu.Lock()
-	if ent, ok := c.mem[cacheName]; ok && sameFileKey(ent.key, key) {
-		messages := cloneMessages(ent.messages)
-		c.mu.Unlock()
-		return messages, true
+	if el, ok := c.mem[cacheName]; ok {
+		it := el.Value.(*lruItem)
+		if sameFileKey(it.entry.key, key) {
+			c.ll.MoveToFront(el)
+			messages := cloneMessages(it.entry.messages)
+			c.mu.Unlock()
+			return messages, true
+		}
+		// Stale file key (transcript changed on disk) — drop it.
+		c.removeElementLocked(el)
 	}
 	c.mu.Unlock()
 	if c.db == nil {
@@ -125,24 +164,37 @@ func (c *Cache) Load(cacheName string, key FileKey) ([]map[string]any, bool) {
 		return nil, false
 	}
 	c.mu.Lock()
-	c.mem[cacheName] = cacheEntry{key: key, messages: cloneMessages(messages)}
+	c.putLocked(cacheName, cacheEntry{key: key, messages: cloneMessages(messages), bytes: len(raw)})
 	c.mu.Unlock()
 	return messages, true
 }
 
 func (c *Cache) Save(cacheName string, key FileKey, messages []map[string]any) {
-	if c == nil || cacheName == "" {
+	c.store(cacheName, key, cloneMessages(messages))
+}
+
+func (c *Cache) SaveAsync(cacheName string, key FileKey, messages []map[string]any) {
+	if c == nil {
 		return
 	}
-	stored := cloneMessages(messages)
-	c.mu.Lock()
-	c.mem[cacheName] = cacheEntry{key: key, messages: stored}
-	c.mu.Unlock()
-	if c.db == nil {
+	snapshot := cloneMessages(messages)
+	go c.store(cacheName, key, snapshot)
+}
+
+// store takes ownership of stored — the caller must not mutate it afterwards.
+// Both Save and SaveAsync hand it an exclusive clone, so we never clone again.
+func (c *Cache) store(cacheName string, key FileKey, stored []map[string]any) {
+	if c == nil || cacheName == "" {
 		return
 	}
 	raw, err := json.Marshal(stored)
 	if err != nil {
+		return
+	}
+	c.mu.Lock()
+	c.putLocked(cacheName, cacheEntry{key: key, messages: stored, bytes: len(raw)})
+	c.mu.Unlock()
+	if c.db == nil {
 		return
 	}
 	_, _ = c.db.Exec(
@@ -158,12 +210,35 @@ ON CONFLICT(cache_name) DO UPDATE SET
 	)
 }
 
-func (c *Cache) SaveAsync(cacheName string, key FileKey, messages []map[string]any) {
-	if c == nil {
+// putLocked inserts or replaces the in-memory entry for cacheName and evicts
+// least-recently-used entries until the byte budget is satisfied. Entries that
+// exceed maxEntryBytes are dropped from the mem tier entirely (SQLite-only):
+// the few huge transcripts are exactly the worst heap offenders and rarely the
+// hot set. Caller holds c.mu.
+func (c *Cache) putLocked(cacheName string, entry cacheEntry) {
+	if el, ok := c.mem[cacheName]; ok {
+		c.removeElementLocked(el)
+	}
+	if c.maxEntryBytes > 0 && entry.bytes > c.maxEntryBytes {
 		return
 	}
-	snapshot := cloneMessages(messages)
-	go c.Save(cacheName, key, snapshot)
+	el := c.ll.PushFront(&lruItem{name: cacheName, entry: entry})
+	c.mem[cacheName] = el
+	c.curBytes += entry.bytes
+	for c.maxBytes > 0 && c.curBytes > c.maxBytes {
+		back := c.ll.Back()
+		if back == nil || back == el {
+			break
+		}
+		c.removeElementLocked(back)
+	}
+}
+
+func (c *Cache) removeElementLocked(el *list.Element) {
+	it := el.Value.(*lruItem)
+	delete(c.mem, it.name)
+	c.curBytes -= it.entry.bytes
+	c.ll.Remove(el)
 }
 
 func sameFileKey(a, b FileKey) bool {
@@ -183,4 +258,16 @@ func cloneMessages(messages []map[string]any) []map[string]any {
 		out[i] = cp
 	}
 	return out
+}
+
+func envBytes(name string, def int) int {
+	v := os.Getenv(name)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return def
+	}
+	return n
 }
