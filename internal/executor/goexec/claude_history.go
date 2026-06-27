@@ -84,31 +84,37 @@ func (c *Claude) LoadHistory(resumeID string, opts history.Opts) (*history.Resul
 		return history.Slice(messages, opts), nil
 	}
 
-	messages := loadClaudeHistoryMessages(path, resumeID, fi.ModTime().UnixMilli())
-	history.DefaultCache().SaveAsync(cacheName, key, messages)
+	messages, truncated := loadClaudeHistoryMessages(path, resumeID, fi.ModTime().UnixMilli())
+	if !truncated {
+		history.DefaultCache().SaveAsync(cacheName, key, messages)
+	}
 	return history.Slice(messages, opts), nil
 }
 
-func loadClaudeHistoryMessages(path, resumeID string, fileMtimeMs int64) []map[string]any {
-	data, err := os.ReadFile(path)
+// loadClaudeHistoryMessages parses the transcript and returns its wire messages
+// plus whether the file was tail-truncated (too large to hold whole). A
+// truncated result must not be cached, since it is only the most recent window.
+func loadClaudeHistoryMessages(path, resumeID string, fileMtimeMs int64) ([]map[string]any, bool) {
+	f, err := os.Open(path)
 	if err != nil {
-		return nil
+		return nil, false
+	}
+	defer f.Close()
+	lines, truncated, err := history.StreamTailLines(f, history.LoadMaxBytes())
+	if err != nil {
+		return nil, truncated
 	}
 	type rec struct {
 		lineNo int
 		row    claudeRow
 	}
 	var records []rec
-	for i, raw := range strings.Split(string(data), "\n") {
-		raw = strings.TrimSpace(raw)
-		if raw == "" {
-			continue
-		}
+	for _, ln := range lines {
 		var r claudeRow
-		if json.Unmarshal([]byte(raw), &r) != nil {
+		if json.Unmarshal(ln.Data, &r) != nil {
 			continue
 		}
-		records = append(records, rec{lineNo: i + 1, row: r})
+		records = append(records, rec{lineNo: ln.LineNo, row: r})
 	}
 
 	// Pass 1: tool_use_id -> output.
@@ -157,7 +163,7 @@ func loadClaudeHistoryMessages(path, resumeID string, fileMtimeMs int64) []map[s
 		))
 	}
 
-	return messages
+	return messages, truncated
 }
 
 func parseBlocks(content json.RawMessage) []claudeBlock {

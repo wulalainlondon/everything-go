@@ -26,14 +26,16 @@ func (c *Codex) LoadHistory(resumeID string, opts history.Opts) (*history.Result
 		if messages, ok := history.DefaultCache().Load(cacheName, key); ok {
 			return history.Slice(messages, opts), nil
 		}
-		messages, err := c.readCodexHistory(path, resumeID)
+		messages, truncated, err := c.readCodexHistory(path, resumeID)
 		if err != nil {
 			return history.Slice(nil, opts), nil
 		}
-		history.DefaultCache().SaveAsync(cacheName, key, messages)
+		if !truncated {
+			history.DefaultCache().SaveAsync(cacheName, key, messages)
+		}
 		return history.Slice(messages, opts), nil
 	}
-	messages, err := c.readCodexHistory(path, resumeID)
+	messages, _, err := c.readCodexHistory(path, resumeID)
 	if err != nil {
 		return history.Slice(nil, opts), nil
 	}
@@ -111,12 +113,20 @@ func (c *Codex) codexRolloutFiles() []string {
 	return out
 }
 
-func (c *Codex) readCodexHistory(path, resumeID string) ([]map[string]any, error) {
+// readCodexHistory parses the rollout and returns its wire messages plus whether
+// the file was tail-truncated (too large to hold whole). A truncated result must
+// not be cached, since it is only the most recent window.
+func (c *Codex) readCodexHistory(path, resumeID string) ([]map[string]any, bool, error) {
 	r, closeFn, err := openCodexRollout(path)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer closeFn()
+
+	lines, truncated, err := history.StreamTailLines(r, history.LoadMaxBytes())
+	if err != nil {
+		return nil, truncated, err
+	}
 
 	type rec struct {
 		lineNo int
@@ -125,25 +135,18 @@ func (c *Codex) readCodexHistory(path, resumeID string) ([]map[string]any, error
 	var records []rec
 	toolOutputs := map[string]string{}
 	var messages []map[string]any
-	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 0, 64*1024), maxLine)
-	lineNo := 0
-	for sc.Scan() {
-		lineNo++
+	for _, ln := range lines {
 		var row codexHistoryRow
-		if json.Unmarshal(sc.Bytes(), &row) != nil {
+		if json.Unmarshal(ln.Data, &row) != nil {
 			continue
 		}
 		if row.Type != "response_item" {
 			continue
 		}
-		records = append(records, rec{lineNo: lineNo, row: row})
+		records = append(records, rec{lineNo: ln.LineNo, row: row})
 		if id, out, ok := codexResponseToolOutput(row.Payload); ok {
 			toolOutputs[id] = out
 		}
-	}
-	if err := sc.Err(); err != nil {
-		return nil, err
 	}
 
 	for _, rc := range records {
@@ -175,7 +178,7 @@ func (c *Codex) readCodexHistory(path, resumeID string) ([]map[string]any, error
 			role, text, ts, []map[string]any{{"type": "text", "text": text}},
 		))
 	}
-	return messages, nil
+	return messages, truncated, nil
 }
 
 type codexHistoryRow struct {
