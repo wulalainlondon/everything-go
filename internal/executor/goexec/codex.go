@@ -218,22 +218,45 @@ func (c *Codex) rpcCall(method string, params any, timeout time.Duration) (json.
 	return c.rpc.request(method, params, timeout)
 }
 
-func (c *Codex) readLoop(stdout interface{ Read([]byte) (int, error) }) {
-	sc := bufio.NewScanner(stdout)
-	sc.Buffer(make([]byte, 0, 64*1024), maxLine)
-	for sc.Scan() {
-		line := sc.Bytes()
-		if len(line) == 0 {
-			continue
+// readLoop consumes the app-server's newline-delimited stdout. It uses a
+// bufio.Reader rather than a bufio.Scanner because a thread/resume reply can
+// serialize an entire thread's history into a single line — hundreds of MB,
+// far beyond any fixed buffer cap. Scanner would hit ErrTooLong, silently end
+// the loop, and (since the app-server is a singleton) wedge every codex
+// session. ReadBytes grows unbounded, matching the Python reference's
+// readline().
+func (c *Codex) readLoop(stdout io.Reader) {
+	r := bufio.NewReaderSize(stdout, 64*1024)
+	for {
+		line, err := r.ReadBytes('\n')
+		if n := trimLineEnd(line); n > 0 {
+			raw := make(json.RawMessage, n)
+			copy(raw, line[:n])
+			if !c.rpc.dispatchResponse(raw) {
+				c.dispatch(raw)
+			}
 		}
-		raw := make(json.RawMessage, len(line))
-		copy(raw, line)
-		if c.rpc.dispatchResponse(raw) {
-			continue
+		if err != nil {
+			if err != io.EOF {
+				log.Printf("[codex] read loop error: %v", err)
+			}
+			break
 		}
-		c.dispatch(raw)
 	}
 	log.Printf("[codex] read loop exited")
+}
+
+// trimLineEnd returns the content length of a line read by ReadBytes('\n'),
+// excluding the trailing \n and an optional preceding \r.
+func trimLineEnd(line []byte) int {
+	n := len(line)
+	if n > 0 && line[n-1] == '\n' {
+		n--
+		if n > 0 && line[n-1] == '\r' {
+			n--
+		}
+	}
+	return n
 }
 
 type codexMsg struct {
