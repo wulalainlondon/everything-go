@@ -357,7 +357,10 @@ func (idx *Index) Health() HealthResponse {
 	if info, err := os.Stat(idx.path); err == nil {
 		h.DBSizeMB = float64(info.Size()) / (1024 * 1024)
 	}
-	h.Ready = idx.isReady()
+	// Ingestion runs out-of-process, so derive readiness from the DB (any
+	// ingested file or message) as well as the in-memory flag the bridge sets
+	// after the first child indexer run.
+	h.Ready = idx.isReady() || h.IndexedMessages > 0 || lastIngest != nil
 	p := idx.snapshotProgress()
 	status := p.status
 	if status == "" {

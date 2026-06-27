@@ -160,3 +160,37 @@ func TestListSessionsPagination(t *testing.T) {
 		t.Fatalf("expected newest-first ordering, got %s first", page.Items[0].SessionID)
 	}
 }
+
+func TestHealthReadyFromMarkReady(t *testing.T) {
+	idx := newTestIndex(t)
+	// Empty index, ingest runs out-of-process, no MarkReady yet → not ready.
+	if idx.Health().Ready {
+		t.Fatal("empty index should report not ready")
+	}
+	idx.MarkReady() // bridge calls this after the first child indexer run
+	if !idx.Health().Ready {
+		t.Fatal("MarkReady should make Health ready")
+	}
+}
+
+func TestHealthReadyDerivedFromMessages(t *testing.T) {
+	idx := newTestIndex(t)
+	seed(t, idx, "s1", "hello world", "2026-01-01T00:00:00Z")
+	// A populated DB reports ready even without the in-memory MarkReady flag, so
+	// the bridge surfaces a usable index immediately after a restart.
+	if !idx.Health().Ready {
+		t.Fatal("index with messages should report ready without MarkReady")
+	}
+}
+
+func TestSetIndexingStatus(t *testing.T) {
+	idx := newTestIndex(t)
+	idx.SetIndexing(true)
+	if got := idx.Health().IngestProgress["status"]; got != "ingesting" {
+		t.Fatalf("status while child indexer runs = %v, want ingesting", got)
+	}
+	idx.SetIndexing(false)
+	if got := idx.Health().IngestProgress["status"]; got != "ready" {
+		t.Fatalf("status after child indexer exits = %v, want ready", got)
+	}
+}

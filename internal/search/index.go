@@ -2,14 +2,14 @@ package search
 
 import (
 	"database/sql"
-	"log"
 	"sync"
 	"time"
 )
 
-// Index owns the search database and the background ingest loop. One Index is
-// shared by the whole bridge; queries run concurrently against the WAL DB while
-// a single goroutine serializes writes through writeMu.
+// Index owns the search database. One Index is shared by the whole bridge and
+// queries run concurrently against the WAL DB. Ingestion does NOT run in this
+// process — it happens in a short-lived `--mode=index` child (see RunOnce), so
+// the resident bridge only ever reads.
 type Index struct {
 	db      *sql.DB
 	path    string
@@ -34,14 +34,9 @@ type ingestProgress struct {
 	cycleDone     time.Time
 }
 
-const (
-	ingestBatchFiles = 20
-	ingestBatchTime  = 2 * time.Second
-	ingestBatchPause = 250 * time.Millisecond
-)
-
 // New opens (creating if needed) the search index at dbPath and registers the
-// Claude + Codex sources. It does not start ingesting — call Start.
+// Claude + Codex sources. It does not ingest — the bridge issues read-only
+// queries while the `--mode=index` child calls RunOnce.
 func New(dbPath string) (*Index, error) {
 	db, err := openDB(dbPath)
 	if err != nil {
@@ -54,10 +49,33 @@ func New(dbPath string) (*Index, error) {
 	}, nil
 }
 
-// Start ingests in bounded background batches, then re-scans every interval to
-// pick up new messages. The first full pass no longer monopolizes startup.
-func (idx *Index) Start(interval time.Duration) {
-	go idx.ingestLoop(interval)
+// RunOnce ingests every source's new content to completion and returns the
+// number of messages added. It is the body of the `--mode=index` child: a
+// short-lived process that does the heap-heavy parse and then exits, handing all
+// of its memory back to the OS so the resident bridge stays lightweight.
+func (idx *Index) RunOnce() int { return idx.ingestAll() }
+
+// MarkReady marks the index queryable. The bridge calls it after the first
+// successful child indexer run; Health also derives readiness from the DB.
+func (idx *Index) MarkReady() {
+	idx.mu.Lock()
+	idx.ready = true
+	idx.mu.Unlock()
+}
+
+// SetIndexing records whether a child indexer is currently running so Health()
+// can surface ingest activity to the app.
+func (idx *Index) SetIndexing(on bool) {
+	idx.setProgress(func(p *ingestProgress) {
+		if on {
+			p.status = "ingesting"
+			p.cycleStarted = time.Now()
+			p.cycleDone = time.Time{}
+		} else {
+			p.status = "ready"
+			p.cycleDone = time.Now()
+		}
+	})
 }
 
 func (idx *Index) isReady() bool {
@@ -70,56 +88,6 @@ func (idx *Index) snapshotProgress() ingestProgress {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 	return idx.progress
-}
-
-func (idx *Index) ingestLoop(interval time.Duration) {
-	first := true
-	for {
-		t0 := time.Now()
-		jobs := idx.discoverJobs()
-		idx.setProgress(func(p *ingestProgress) {
-			p.status = "ingesting"
-			p.filesTotal = len(jobs)
-			p.filesDone = 0
-			p.currentFile = ""
-			p.currentSource = ""
-			p.lastAdded = 0
-			p.lastError = ""
-			p.cycleStarted = t0
-			p.cycleDone = time.Time{}
-		})
-
-		total := 0
-		for len(jobs) > 0 {
-			var added int
-			jobs, added = idx.ingestBatch(jobs, ingestBatchFiles, ingestBatchTime)
-			total += added
-			// Pause only during the first full scan so startup doesn't
-			// monopolize I/O. Incremental cycles are fast (mtime check
-			// skips unchanged files) and need no throttle.
-			if len(jobs) > 0 && first {
-				time.Sleep(ingestBatchPause)
-			}
-		}
-
-		idx.mu.Lock()
-		idx.ready = true
-		idx.progress.status = "ready"
-		idx.progress.currentFile = ""
-		idx.progress.currentSource = ""
-		idx.progress.lastAdded = total
-		idx.progress.cycleDone = time.Now()
-		idx.mu.Unlock()
-
-		if first {
-			log.Printf("[search] initial ingest: %d messages in %s", total, time.Since(t0).Round(time.Millisecond))
-			first = false
-		} else if total > 0 {
-			log.Printf("[search] incremental ingest: +%d messages in %s", total, time.Since(t0).Round(time.Millisecond))
-		}
-
-		time.Sleep(interval)
-	}
 }
 
 func (idx *Index) setProgress(fn func(*ingestProgress)) {

@@ -19,6 +19,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -31,8 +32,8 @@ import (
 	"everything-go/internal/executor/remote"
 	"everything-go/internal/fcm"
 	"everything-go/internal/feed"
-	"everything-go/internal/governance"
 	"everything-go/internal/filetransfer"
+	"everything-go/internal/governance"
 	"everything-go/internal/inbox"
 	"everything-go/internal/media"
 	"everything-go/internal/netsvc"
@@ -64,7 +65,15 @@ func main() {
 	tunnel := flag.Bool("tunnel", false, "start a cloudflared quick tunnel for remote access")
 	mdns := flag.Bool("mdns", false, "enable mDNS (_bridge._tcp) registration")
 	mdnsOff := flag.Bool("no-mdns", false, "deprecated: mDNS is disabled by default")
+	mode := flag.String("mode", "bridge", "run mode: bridge (resident server) | index (one-shot search ingest, then exit)")
 	flag.Parse()
+
+	// `--mode=index` is the short-lived indexer child: it ingests the search DB
+	// to completion and exits, keeping the heap-heavy transcript parse out of the
+	// resident bridge. It needs nothing else, so branch before any server setup.
+	if *mode == "index" {
+		os.Exit(runSearchIndexer(*dataDir))
+	}
 
 	sessionStorePath := *sessionStore
 	if sessionStorePath == "" {
@@ -116,12 +125,20 @@ func main() {
 		os.Exit(2)
 	}
 
-	// Search index: FTS5 over Claude/Codex JSONL, ingested in the background.
+	// Search index: FTS5 over Claude/Codex JSONL. The resident bridge only READS
+	// the WAL DB; ingestion runs in short-lived `--mode=index` child processes so
+	// the heap-heavy parse of every transcript lands in a process that exits and
+	// returns its memory to the OS (see runSearchIndexerLoop).
+	ctx := context.Background()
 	if idx, err := search.New(filepath.Join(*dataDir, "everything_go_search.db")); err != nil {
 		log.Printf("search index disabled: %v", err)
 	} else {
-		idx.Start(30 * time.Second)
 		hub.SetSearch(idx)
+		if exePath, err := os.Executable(); err == nil {
+			go runSearchIndexerLoop(ctx, idx, exePath, *dataDir, 60*time.Second)
+		} else {
+			log.Printf("[search] cannot locate binary for indexer child (%v); serving existing index only", err)
+		}
 	}
 
 	// Feed store: HTML/markdown articles pushed from local pipelines, surfaced
@@ -166,7 +183,6 @@ func main() {
 
 	// Network presence services (P3 discovery + P4 tunnel). They are opt-in so
 	// the fixed-endpoint P2 path stays deterministic and easy to debug.
-	ctx := context.Background()
 	hub.StartNativeWatcher(ctx)
 	if *discovery && !*noDiscovery {
 		go netsvc.NewBeacon(*port, *discoveryPort, cfg.InstanceID).Run(ctx)
@@ -189,6 +205,77 @@ func main() {
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// runSearchIndexer is the body of `--mode=index`: a one-shot search ingest that
+// runs to completion and exits, so the heap-heavy transcript parse happens in a
+// throwaway process rather than the resident bridge. A flock prevents two
+// indexers from writing the WAL DB at once (e.g. across a bridge restart).
+func runSearchIndexer(dataDir string) int {
+	unlock, err := acquireIndexLock(dataDir)
+	if err != nil {
+		log.Printf("[indexer] another indexer is running (%v); exiting", err)
+		return 0
+	}
+	defer unlock()
+
+	idx, err := search.New(filepath.Join(dataDir, "everything_go_search.db"))
+	if err != nil {
+		log.Printf("[indexer] open search db: %v", err)
+		return 1
+	}
+	defer idx.Close()
+
+	t0 := time.Now()
+	n := idx.RunOnce()
+	log.Printf("[indexer] ingested %d messages in %s", n, time.Since(t0).Round(time.Millisecond))
+	return 0
+}
+
+// runSearchIndexerLoop keeps the search index fresh by spawning a `--mode=index`
+// child, waiting for it to finish, then sleeping. Spawn-and-wait serializes runs
+// (never two at once from this bridge) and each child's exit returns its ingest
+// memory to the OS. The first run does the full parse; later runs are cheap
+// incremental passes (ingest_state skips unchanged files).
+func runSearchIndexerLoop(ctx context.Context, idx *search.Index, exePath, dataDir string, interval time.Duration) {
+	for {
+		idx.SetIndexing(true)
+		cmd := exec.CommandContext(ctx, exePath, "--mode=index", "--data-dir", dataDir)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		err := cmd.Run()
+		idx.SetIndexing(false)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			log.Printf("[search] indexer child failed: %v", err)
+		} else {
+			idx.MarkReady()
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(interval):
+		}
+	}
+}
+
+// acquireIndexLock takes an exclusive, non-blocking flock so only one indexer
+// child writes the search DB at a time. The returned func releases it.
+func acquireIndexLock(dataDir string) (func(), error) {
+	f, err := os.OpenFile(filepath.Join(dataDir, "everything_go_indexer.lock"), os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return func() {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = f.Close()
+	}, nil
 }
 
 func runPermissionCheck(dataDir, sessionStorePath, extraPaths string) error {
