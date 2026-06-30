@@ -148,7 +148,7 @@ func TestListSessionsPagination(t *testing.T) {
 	seed(t, idx, "s1", "a", "2026-01-01T00:00:01Z")
 	seed(t, idx, "s2", "b", "2026-01-01T00:00:02Z")
 	seed(t, idx, "s3", "c", "2026-01-01T00:00:03Z")
-	page := idx.ListSessions("", 2, "", false)
+	page := idx.ListSessions("", 2, "", false, false)
 	if len(page.Items) != 2 {
 		t.Fatalf("limit 2 should return 2 items, got %d", len(page.Items))
 	}
@@ -158,6 +158,30 @@ func TestListSessionsPagination(t *testing.T) {
 	// Newest-first: s3 then s2.
 	if page.Items[0].SessionID != "s3" {
 		t.Fatalf("expected newest-first ordering, got %s first", page.Items[0].SessionID)
+	}
+}
+
+func TestListSessionsExcludesSubagentsByDefault(t *testing.T) {
+	idx := newTestIndex(t)
+	seed(t, idx, "claude:parent", "main", "2026-01-01T00:00:01Z")
+	seed(t, idx, "claude:parent:subagent:agent-deadbeef", "sub", "2026-01-01T00:00:02Z")
+
+	page := idx.ListSessions("", 10, "", false, false)
+	for _, item := range page.Items {
+		if strings.Contains(item.SessionID, ":subagent:") {
+			t.Fatalf("default session list included subagent session %q", item.SessionID)
+		}
+	}
+
+	withSubagents := idx.ListSessions("", 10, "", false, true)
+	var found bool
+	for _, item := range withSubagents.Items {
+		if strings.Contains(item.SessionID, ":subagent:") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("includeSubagents=true should include subagent sessions")
 	}
 }
 

@@ -413,11 +413,15 @@ type SessionListResponse struct {
 	TotalFiltered *int          `json:"total_filtered"`
 }
 
-func (idx *Index) ListSessions(cursor string, limit int, projectDir string, includeHidden bool) SessionListResponse {
+func (idx *Index) ListSessions(cursor string, limit int, projectDir string, includeHidden bool, includeSubagents bool) SessionListResponse {
 	var where []string
 	var args []any
 	if !includeHidden {
 		where = append(where, "is_hidden = 0")
+	}
+	if !includeSubagents {
+		where = append(where, "session_id NOT LIKE ?")
+		args = append(args, "%:subagent:%")
 	}
 	if projectDir != "" {
 		where = append(where, "project_dir = ?")

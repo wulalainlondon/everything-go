@@ -146,6 +146,7 @@ func TestAppV1ParseCommandMapsOperationalFields(t *testing.T) {
 		"cursor":"cur",
 		"project_dir":"/repo",
 		"include_hidden":true,
+		"include_subagents":true,
 		"msg_uuid":"m1",
 		"around":7,
 		"sdp":"offer",
@@ -179,7 +180,7 @@ func TestAppV1ParseCommandMapsOperationalFields(t *testing.T) {
 	if cmd.Path != "/tmp" || cmd.Token != "fcm" || cmd.FileID != "f1" {
 		t.Fatalf("file fields not mapped: %+v", cmd)
 	}
-	if cmd.Query != "hello" || cmd.Offset != 5 || cmd.Cursor != "cur" || cmd.ProjectDir != "/repo" || !cmd.IncludeHidden || cmd.MsgUUID != "m1" || cmd.Around != 7 {
+	if cmd.Query != "hello" || cmd.Offset != 5 || cmd.Cursor != "cur" || cmd.ProjectDir != "/repo" || !cmd.IncludeHidden || !cmd.IncludeSubagents || cmd.MsgUUID != "m1" || cmd.Around != 7 {
 		t.Fatalf("search fields not mapped: %+v", cmd)
 	}
 	if cmd.Filters == nil || cmd.Filters.Role != "assistant" || cmd.Filters.MaxPerSession != 3 {

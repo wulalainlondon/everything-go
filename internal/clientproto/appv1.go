@@ -52,14 +52,15 @@ type Command struct {
 	ClientHash string
 	Token      string
 
-	Query         string
-	Offset        int
-	Filters       *protocol.SearchFilters
-	Cursor        string
-	ProjectDir    string
-	IncludeHidden bool
-	MsgUUID       string
-	Around        int
+	Query            string
+	Offset           int
+	Filters          *protocol.SearchFilters
+	Cursor           string
+	ProjectDir       string
+	IncludeHidden    bool
+	IncludeSubagents bool
+	MsgUUID          string
+	Around           int
 
 	SDP           string
 	Candidate     string
@@ -123,14 +124,15 @@ func (AppV1) ParseCommand(in protocol.Inbound) Command {
 		ClientHash: in.ClientHash,
 		Token:      in.Token,
 
-		Query:         in.Query,
-		Offset:        in.Offset,
-		Filters:       in.Filters,
-		Cursor:        in.Cursor,
-		ProjectDir:    in.ProjectDir,
-		IncludeHidden: in.IncludeHidden,
-		MsgUUID:       in.MsgUUID,
-		Around:        in.Around,
+		Query:            in.Query,
+		Offset:           in.Offset,
+		Filters:          in.Filters,
+		Cursor:           in.Cursor,
+		ProjectDir:       in.ProjectDir,
+		IncludeHidden:    in.IncludeHidden,
+		IncludeSubagents: in.IncludeSubagents,
+		MsgUUID:          in.MsgUUID,
+		Around:           in.Around,
 
 		SDP:           in.SDP,
 		Candidate:     in.Candidate,

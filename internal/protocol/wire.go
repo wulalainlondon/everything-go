@@ -57,14 +57,15 @@ type Inbound struct {
 	Token      string `json:"token"`
 
 	// search
-	Query         string         `json:"query"`
-	Offset        int            `json:"offset"`
-	Filters       *SearchFilters `json:"filters"`
-	Cursor        string         `json:"cursor"`
-	ProjectDir    string         `json:"project_dir"`
-	IncludeHidden bool           `json:"include_hidden"`
-	MsgUUID       string         `json:"msg_uuid"`
-	Around        int            `json:"around"`
+	Query            string         `json:"query"`
+	Offset           int            `json:"offset"`
+	Filters          *SearchFilters `json:"filters"`
+	Cursor           string         `json:"cursor"`
+	ProjectDir       string         `json:"project_dir"`
+	IncludeHidden    bool           `json:"include_hidden"`
+	IncludeSubagents bool           `json:"include_subagents"`
+	MsgUUID          string         `json:"msg_uuid"`
+	Around           int            `json:"around"`
 
 	// WebRTC signaling: webrtc_offer carries SDP; webrtc_ice carries a trickled
 	// candidate. SDPMLineIndex is a pointer because 0 is a valid index distinct
@@ -1039,10 +1040,10 @@ func NewInteractionResolved(requestID, sessionID, status string) InteractionReso
 // Media announces an image or video file found in the assistant's output.
 // media_type is "image" | "video".
 type Media struct {
-	Type      string `json:"type"`                  // "media"
+	Type      string `json:"type"` // "media"
 	SessionID string `json:"session_id"`
-	RequestID string `json:"request_id,omitempty"`  // mirrors the done event's request_id so app attaches to the right message
-	MediaType string `json:"media_type"`             // "image" | "video"
+	RequestID string `json:"request_id,omitempty"` // mirrors the done event's request_id so app attaches to the right message
+	MediaType string `json:"media_type"`           // "image" | "video"
 	Path      string `json:"path"`
 	URL       string `json:"url"`
 }
@@ -1050,9 +1051,9 @@ type Media struct {
 // Document announces a document file (pdf/html) found in the assistant's output.
 // doc_type is "pdf" | "html".
 type Document struct {
-	Type      string `json:"type"`                  // "document"
+	Type      string `json:"type"` // "document"
 	SessionID string `json:"session_id"`
-	RequestID string `json:"request_id,omitempty"`  // mirrors the done event's request_id
+	RequestID string `json:"request_id,omitempty"` // mirrors the done event's request_id
 	Path      string `json:"path"`
 	URL       string `json:"url"`
 	Title     string `json:"title"`

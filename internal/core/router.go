@@ -400,7 +400,7 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 			if h.search == nil {
 				return
 			}
-			c.enqueueEvent(h.search.ListSessions(cmd.Cursor, clampLimit(cmd.Limit, 30), cmd.ProjectDir, cmd.IncludeHidden))
+			c.enqueueEvent(h.search.ListSessions(cmd.Cursor, clampLimit(cmd.Limit, 30), cmd.ProjectDir, cmd.IncludeHidden, cmd.IncludeSubagents))
 		}()
 
 	case "request_search_context":

@@ -43,6 +43,16 @@ func TestParseInboundSearchFilters(t *testing.T) {
 	}
 }
 
+func TestParseInboundSessionListIncludeSubagents(t *testing.T) {
+	in, err := ParseInbound([]byte(`{"type":"request_session_list","include_subagents":true}`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if !in.IncludeSubagents {
+		t.Fatalf("include_subagents should parse true: %+v", in)
+	}
+}
+
 func TestParseInboundBadJSON(t *testing.T) {
 	if _, err := ParseInbound([]byte(`{not json`)); err == nil {
 		t.Fatal("expected error on malformed JSON")
