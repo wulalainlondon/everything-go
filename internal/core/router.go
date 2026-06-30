@@ -182,6 +182,57 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 			go h.registry.Persist()
 		}
 
+	case "codex_goal_set":
+		s, ok := h.registry.Get(cmd.SessionID)
+		if !ok {
+			c.enqueueEvent(h.client.Error(cmd.SessionID, "no_session", "unknown session"))
+			return
+		}
+		gc, ok := h.exec.(backend.GoalController)
+		if !ok {
+			c.enqueueEvent(h.client.Error(cmd.SessionID, "goal_not_supported", backend.ErrUnsupportedGoal.Error()))
+			return
+		}
+		go func() {
+			if err := gc.SetGoal(context.Background(), s, cmd.Objective, cmd.GoalStatus, cmd.TokenBudget); err != nil {
+				log.Printf("[%s] goal set error: %v", s.ID, err)
+			}
+		}()
+
+	case "codex_goal_get":
+		s, ok := h.registry.Get(cmd.SessionID)
+		if !ok {
+			c.enqueueEvent(h.client.Error(cmd.SessionID, "no_session", "unknown session"))
+			return
+		}
+		gc, ok := h.exec.(backend.GoalController)
+		if !ok {
+			c.enqueueEvent(h.client.Error(cmd.SessionID, "goal_not_supported", backend.ErrUnsupportedGoal.Error()))
+			return
+		}
+		go func() {
+			if err := gc.GetGoal(context.Background(), s); err != nil {
+				log.Printf("[%s] goal get error: %v", s.ID, err)
+			}
+		}()
+
+	case "codex_goal_clear":
+		s, ok := h.registry.Get(cmd.SessionID)
+		if !ok {
+			c.enqueueEvent(h.client.Error(cmd.SessionID, "no_session", "unknown session"))
+			return
+		}
+		gc, ok := h.exec.(backend.GoalController)
+		if !ok {
+			c.enqueueEvent(h.client.Error(cmd.SessionID, "goal_not_supported", backend.ErrUnsupportedGoal.Error()))
+			return
+		}
+		go func() {
+			if err := gc.ClearGoal(context.Background(), s); err != nil {
+				log.Printf("[%s] goal clear error: %v", s.ID, err)
+			}
+		}()
+
 	case "switch_session_config":
 		if s, ok := h.registry.Get(cmd.SessionID); ok {
 			s.ApplyConfig(cmd.Backend, cmd.Model, cmd.Sandbox)

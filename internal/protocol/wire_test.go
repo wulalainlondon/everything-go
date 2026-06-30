@@ -53,6 +53,19 @@ func TestParseInboundSessionListIncludeSubagents(t *testing.T) {
 	}
 }
 
+func TestParseInboundCodexGoalFields(t *testing.T) {
+	in, err := ParseInbound([]byte(`{"type":"codex_goal_set","session_id":"s1","objective":"ship","status":"active","token_budget":1234}`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if in.Objective != "ship" || in.Status != "active" {
+		t.Fatalf("goal strings not parsed: %+v", in)
+	}
+	if in.TokenBudget == nil || *in.TokenBudget != 1234 {
+		t.Fatalf("token_budget not parsed: %+v", in.TokenBudget)
+	}
+}
+
 func TestParseInboundBadJSON(t *testing.T) {
 	if _, err := ParseInbound([]byte(`{not json`)); err == nil {
 		t.Fatal("expected error on malformed JSON")
@@ -86,6 +99,8 @@ func TestOutboundEventSchemas(t *testing.T) {
 		{"done", NewDone("s1", "r1"), "done", []string{"type", "session_id", "request_id"}},
 		{"session_uuid", NewSessionUUID("s1", "uuid-x"), "session_uuid", []string{"type", "session_id", "claude_uuid"}},
 		{"tool_start", NewToolStart("s1", "r1", "t1", "Bash", "ls"), "tool_start", []string{"type", "session_id", "tool_use_id", "name", "command"}},
+		{"goal_update", NewGoalUpdate("s1", Goal{ThreadID: "t1", Objective: "ship", Status: "active"}), "goal_update", []string{"type", "session_id", "goal"}},
+		{"goal_cleared", NewGoalCleared("s1"), "goal_cleared", []string{"type", "session_id"}},
 		{"unclaim_ack", NewUnclaimAck(), "unclaim_ack", []string{"type", "is_locked"}},
 	}
 	for _, tc := range cases {

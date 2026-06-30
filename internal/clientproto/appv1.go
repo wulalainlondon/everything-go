@@ -33,9 +33,12 @@ type Command struct {
 	ResumeClaudeID string
 	Content        string
 
-	Effort string
-	Pinned *bool
-	Hidden *bool
+	Effort      string
+	Pinned      *bool
+	Hidden      *bool
+	Objective   string
+	GoalStatus  string
+	TokenBudget *int
 
 	Limit     int
 	KnownLast string
@@ -105,9 +108,12 @@ func (AppV1) ParseCommand(in protocol.Inbound) Command {
 		ResumeClaudeID: in.ResumeClaudeID,
 		Content:        in.Content,
 
-		Effort: in.Effort,
-		Pinned: in.Pinned,
-		Hidden: in.Hidden,
+		Effort:      in.Effort,
+		Pinned:      in.Pinned,
+		Hidden:      in.Hidden,
+		Objective:   in.Objective,
+		GoalStatus:  in.Status,
+		TokenBudget: in.TokenBudget,
 
 		Limit:     in.Limit,
 		KnownLast: in.KnownLast,

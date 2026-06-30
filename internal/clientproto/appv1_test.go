@@ -105,6 +105,9 @@ func TestAppV1ParseCommandMapsCoreFields(t *testing.T) {
 		"effort":"high",
 		"pinned":true,
 		"hidden":false,
+		"objective":"finish release",
+		"status":"active",
+		"token_budget":2048,
 		"images":[{"data":"abc","media_type":"image/png"}],
 		"files":[{"name":"a.txt","content":"x","media_type":"text/plain"}]
 	}`))
@@ -120,6 +123,9 @@ func TestAppV1ParseCommandMapsCoreFields(t *testing.T) {
 	}
 	if cmd.Effort != "high" || cmd.Pinned == nil || !*cmd.Pinned || cmd.Hidden == nil || *cmd.Hidden {
 		t.Fatalf("meta fields not mapped: %+v", cmd)
+	}
+	if cmd.Objective != "finish release" || cmd.GoalStatus != "active" || cmd.TokenBudget == nil || *cmd.TokenBudget != 2048 {
+		t.Fatalf("goal fields not mapped: %+v", cmd)
 	}
 	if len(cmd.Images) != 1 || len(cmd.Files) != 1 {
 		t.Fatalf("attachments not mapped: images=%d files=%d", len(cmd.Images), len(cmd.Files))

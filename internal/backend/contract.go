@@ -5,10 +5,13 @@ package backend
 
 import (
 	"context"
+	"errors"
 
 	"everything-go/internal/history"
 	"everything-go/internal/session"
 )
+
+var ErrUnsupportedGoal = errors.New("goal mode is only supported for Codex sessions")
 
 const (
 	Claude   = "claude"
@@ -82,4 +85,12 @@ type Executor interface {
 	Stop(ctx context.Context, s *session.Session) error
 	Clear(ctx context.Context, s *session.Session) error
 	Close(ctx context.Context, s *session.Session) error
+}
+
+// GoalController is an optional capability for Codex app-server backed
+// sessions. Implementations emit goal_update / goal_cleared through Sink.
+type GoalController interface {
+	SetGoal(ctx context.Context, s *session.Session, objective, status string, tokenBudget *int) error
+	GetGoal(ctx context.Context, s *session.Session) error
+	ClearGoal(ctx context.Context, s *session.Session) error
 }

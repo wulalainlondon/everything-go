@@ -43,6 +43,30 @@ func (m *Mux) Stop(ctx context.Context, s *session.Session) error  { return m.pi
 func (m *Mux) Clear(ctx context.Context, s *session.Session) error { return m.pick(s).Clear(ctx, s) }
 func (m *Mux) Close(ctx context.Context, s *session.Session) error { return m.pick(s).Close(ctx, s) }
 
+func (m *Mux) SetGoal(ctx context.Context, s *session.Session, objective, status string, tokenBudget *int) error {
+	gc, ok := m.pick(s).(backend.GoalController)
+	if !ok {
+		return backend.ErrUnsupportedGoal
+	}
+	return gc.SetGoal(ctx, s, objective, status, tokenBudget)
+}
+
+func (m *Mux) GetGoal(ctx context.Context, s *session.Session) error {
+	gc, ok := m.pick(s).(backend.GoalController)
+	if !ok {
+		return backend.ErrUnsupportedGoal
+	}
+	return gc.GetGoal(ctx, s)
+}
+
+func (m *Mux) ClearGoal(ctx context.Context, s *session.Session) error {
+	gc, ok := m.pick(s).(backend.GoalController)
+	if !ok {
+		return backend.ErrUnsupportedGoal
+	}
+	return gc.ClearGoal(ctx, s)
+}
+
 // ProviderFor returns the history provider backing this session's backend, if any.
 func (m *Mux) ProviderFor(s *session.Session) (backend.HistoryProvider, bool) {
 	hp, ok := m.pick(s).(backend.HistoryProvider)

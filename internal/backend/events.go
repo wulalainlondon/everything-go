@@ -14,6 +14,9 @@ type (
 	ToolEnd               = protocol.ToolEnd
 	TodoItem              = protocol.TodoItem
 	TodoUpdate            = protocol.TodoUpdate
+	Goal                  = protocol.Goal
+	GoalUpdate            = protocol.GoalUpdate
+	GoalCleared           = protocol.GoalCleared
 	Done                  = protocol.Done
 	Stopped               = protocol.Stopped
 	Error                 = protocol.Error
@@ -101,6 +104,14 @@ func NewToolEnd(sessionID, reqID, toolUseID string) ToolEnd {
 
 func NewTodoUpdate(sessionID, reqID string, todos []TodoItem) TodoUpdate {
 	return protocol.NewTodoUpdate(sessionID, reqID, todos)
+}
+
+func NewGoalUpdate(sessionID string, goal Goal) GoalUpdate {
+	return protocol.NewGoalUpdate(sessionID, goal)
+}
+
+func NewGoalCleared(sessionID string) GoalCleared {
+	return protocol.NewGoalCleared(sessionID)
 }
 
 func NewDone(sessionID, reqID string) Done {

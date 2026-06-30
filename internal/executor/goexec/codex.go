@@ -316,6 +316,7 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 		} `json:"error"`
 		TokenUsage codexTokenUsage `json:"tokenUsage"`
 		Usage      codexTokenUsage `json:"usage"`
+		Goal       backend.Goal    `json:"goal"`
 	}
 	_ = json.Unmarshal(m.Params, &p)
 
@@ -389,6 +390,14 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 		if todos := normalizeFullList(p.Plan, "step"); len(todos) > 0 {
 			c.sink.Emit(backend.NewTodoUpdate(s.ID, reqID, todosValue(todos)))
 		}
+
+	case "thread/goal/updated":
+		if p.Goal.ThreadID != "" {
+			c.sink.Emit(backend.NewGoalUpdate(s.ID, p.Goal))
+		}
+
+	case "thread/goal/cleared":
+		c.sink.Emit(backend.NewGoalCleared(s.ID))
 
 	case "turn/completed":
 		if p.Turn.Status == "failed" {
@@ -814,6 +823,102 @@ func (c *Codex) runCompact(st *codexState, timeout time.Duration) error {
 	return nil
 }
 
+func (c *Codex) SetGoal(ctx context.Context, s *session.Session, objective, status string, tokenBudget *int) error {
+	if err := c.ensureServer(); err != nil {
+		c.sink.Emit(backend.NewError(s.ID, "", backend.ErrProcessDied, "codex app-server failed: "+err.Error()))
+		return err
+	}
+	st := c.state(s.ID)
+	if err := c.ensureThread(s, st); err != nil {
+		c.sink.Emit(backend.NewError(s.ID, "", backend.ErrProcessDied, "failed to start codex thread: "+err.Error()))
+		return err
+	}
+	st.mu.Lock()
+	threadID := st.threadID
+	st.mu.Unlock()
+	params := map[string]any{"threadId": threadID}
+	if objective != "" {
+		params["objective"] = objective
+	}
+	if status != "" {
+		params["status"] = status
+	}
+	if tokenBudget != nil {
+		params["tokenBudget"] = *tokenBudget
+	}
+	raw, err := c.rpcCall("thread/goal/set", params, 30*time.Second)
+	if err != nil {
+		c.sink.Emit(backend.NewError(s.ID, "", backend.ErrTurn, "goal set failed: "+err.Error()))
+		return err
+	}
+	goal, ok := decodeCodexGoal(raw)
+	if !ok {
+		err := fmt.Errorf("thread/goal/set returned no goal")
+		c.sink.Emit(backend.NewError(s.ID, "", backend.ErrTurn, err.Error()))
+		return err
+	}
+	c.sink.Emit(backend.NewGoalUpdate(s.ID, goal))
+	return nil
+}
+
+func (c *Codex) GetGoal(ctx context.Context, s *session.Session) error {
+	if err := c.ensureServer(); err != nil {
+		c.sink.Emit(backend.NewError(s.ID, "", backend.ErrProcessDied, "codex app-server failed: "+err.Error()))
+		return err
+	}
+	st := c.state(s.ID)
+	if err := c.ensureThread(s, st); err != nil {
+		c.sink.Emit(backend.NewError(s.ID, "", backend.ErrProcessDied, "failed to start codex thread: "+err.Error()))
+		return err
+	}
+	st.mu.Lock()
+	threadID := st.threadID
+	st.mu.Unlock()
+	raw, err := c.rpcCall("thread/goal/get", map[string]any{"threadId": threadID}, 30*time.Second)
+	if err != nil {
+		c.sink.Emit(backend.NewError(s.ID, "", backend.ErrTurn, "goal get failed: "+err.Error()))
+		return err
+	}
+	goal, ok := decodeCodexGoal(raw)
+	if !ok {
+		c.sink.Emit(backend.NewGoalCleared(s.ID))
+		return nil
+	}
+	c.sink.Emit(backend.NewGoalUpdate(s.ID, goal))
+	return nil
+}
+
+func (c *Codex) ClearGoal(ctx context.Context, s *session.Session) error {
+	if err := c.ensureServer(); err != nil {
+		c.sink.Emit(backend.NewError(s.ID, "", backend.ErrProcessDied, "codex app-server failed: "+err.Error()))
+		return err
+	}
+	st := c.state(s.ID)
+	if err := c.ensureThread(s, st); err != nil {
+		c.sink.Emit(backend.NewError(s.ID, "", backend.ErrProcessDied, "failed to start codex thread: "+err.Error()))
+		return err
+	}
+	st.mu.Lock()
+	threadID := st.threadID
+	st.mu.Unlock()
+	if _, err := c.rpcCall("thread/goal/clear", map[string]any{"threadId": threadID}, 30*time.Second); err != nil {
+		c.sink.Emit(backend.NewError(s.ID, "", backend.ErrTurn, "goal clear failed: "+err.Error()))
+		return err
+	}
+	c.sink.Emit(backend.NewGoalCleared(s.ID))
+	return nil
+}
+
+func decodeCodexGoal(raw json.RawMessage) (backend.Goal, bool) {
+	var out struct {
+		Goal *backend.Goal `json:"goal"`
+	}
+	if json.Unmarshal(raw, &out) != nil || out.Goal == nil || out.Goal.ThreadID == "" {
+		return backend.Goal{}, false
+	}
+	return *out.Goal, true
+}
+
 func (c *Codex) shouldAutoCompact(st *codexState) bool {
 	st.mu.Lock()
 	defer st.mu.Unlock()
@@ -974,6 +1079,7 @@ func (c *Codex) Clear(ctx context.Context, s *session.Session) error {
 	}
 	s.SetResumeID("")
 	c.sink.Emit(backend.NewSessionWarning(s.ID, "Session history cleared."))
+	c.sink.Emit(backend.NewGoalCleared(s.ID))
 	return nil
 }
 

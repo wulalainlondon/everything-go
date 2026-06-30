@@ -44,6 +44,11 @@ type Inbound struct {
 	Pinned *bool  `json:"pinned"`
 	Hidden *bool  `json:"hidden"`
 
+	// Codex goal commands.
+	Objective   string `json:"objective"`
+	Status      string `json:"status"`
+	TokenBudget *int   `json:"token_budget"`
+
 	// runtime ops: shell / tasks / processes
 	ShellID string `json:"shell_id"`
 	Data    string `json:"data"`
@@ -433,6 +438,36 @@ func NewTodoUpdate(sessionID, reqID string, todos []TodoItem) TodoUpdate {
 		todos = []TodoItem{}
 	}
 	return TodoUpdate{Type: "todo_update", SessionID: sessionID, RequestID: reqID, Todos: todos}
+}
+
+type Goal struct {
+	ThreadID        string `json:"threadId"`
+	Objective       string `json:"objective"`
+	Status          string `json:"status"`
+	TokenBudget     *int   `json:"tokenBudget"`
+	TokensUsed      int    `json:"tokensUsed"`
+	TimeUsedSeconds int    `json:"timeUsedSeconds"`
+	CreatedAt       int64  `json:"createdAt"`
+	UpdatedAt       int64  `json:"updatedAt"`
+}
+
+type GoalUpdate struct {
+	Type      string `json:"type"`
+	SessionID string `json:"session_id"`
+	Goal      Goal   `json:"goal"`
+}
+
+func NewGoalUpdate(sessionID string, goal Goal) GoalUpdate {
+	return GoalUpdate{Type: "goal_update", SessionID: sessionID, Goal: goal}
+}
+
+type GoalCleared struct {
+	Type      string `json:"type"`
+	SessionID string `json:"session_id"`
+}
+
+func NewGoalCleared(sessionID string) GoalCleared {
+	return GoalCleared{Type: "goal_cleared", SessionID: sessionID}
 }
 
 type Done struct {
