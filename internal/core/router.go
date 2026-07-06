@@ -301,6 +301,12 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 	case "open_file":
 		go h.sendFileOpened(c, cmd)
 
+	case "scan_markdown_files":
+		go h.sendMarkdownFilesListing(c, cmd)
+
+	case "save_file":
+		go h.saveFile(c, cmd)
+
 	case "request_status":
 		c.enqueueEvent(h.statusResult(cmd.SessionID))
 

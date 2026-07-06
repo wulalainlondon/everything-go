@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -129,11 +130,12 @@ func (h *Hub) sendDirListing(c *Client, cmd clientproto.Command) {
 }
 
 const maxPreviewFileBytes = 256 * 1024
+const maxSaveFileBytes = 512 * 1024
 
 var previewTextExtensions = map[string]bool{
 	".c": true, ".cc": true, ".cpp": true, ".css": true, ".go": true,
 	".h": true, ".hpp": true, ".java": true, ".js": true,
-	".json": true, ".jsx": true, ".kt": true, ".log": true, ".md": true,
+	".json": true, ".jsx": true, ".kt": true, ".log": true, ".md": true, ".markdown": true,
 	".py": true, ".rb": true, ".rs": true, ".sh": true, ".sql": true,
 	".swift": true, ".toml": true, ".ts": true, ".tsx": true, ".txt": true,
 	".xml": true, ".yaml": true, ".yml": true,
@@ -152,7 +154,7 @@ var previewURLTypes = map[string]string{
 	".mp3": "audio/mpeg", ".wav": "audio/wav", ".aac": "audio/aac",
 	".ogg": "audio/ogg", ".m4a": "audio/mp4", ".flac": "audio/flac",
 	// documents rendered by browser
-	".pdf": "application/pdf",
+	".pdf":  "application/pdf",
 	".html": "text/html", ".htm": "text/html",
 }
 
@@ -171,7 +173,7 @@ func (h *Hub) sendFileOpened(c *Client, cmd clientproto.Command) {
 	ext := strings.ToLower(filepath.Ext(path))
 	if mimeType, ok := previewURLTypes[ext]; ok {
 		mediaURL := h.mediaScan.LocalURL(path)
-		c.enqueueEvent(protocol.NewFileOpened(path, name, "", mediaURL, info.Size(), mimeType, ""))
+		c.enqueueEvent(protocol.NewFileOpenedWithModified(path, name, "", mediaURL, info.Size(), info.ModTime().Unix(), mimeType, ""))
 		return
 	}
 	if info.Size() > maxPreviewFileBytes {
@@ -187,7 +189,77 @@ func (h *Hub) sendFileOpened(c *Client, cmd clientproto.Command) {
 		c.enqueueEvent(protocol.NewFileOpened(path, name, "", "", info.Size(), "text/plain", err.Error()))
 		return
 	}
-	c.enqueueEvent(protocol.NewFileOpened(path, name, string(data), "", info.Size(), "text/plain; charset=utf-8", ""))
+	c.enqueueEvent(protocol.NewFileOpenedWithModified(path, name, string(data), "", info.Size(), info.ModTime().Unix(), "text/plain; charset=utf-8", ""))
+}
+
+func (h *Hub) sendMarkdownFilesListing(c *Client, cmd clientproto.Command) {
+	roots := []string{}
+	files := []protocol.MarkdownFileEntry{}
+	errors := []protocol.MarkdownScanError{}
+	limit := cmd.Limit
+	if limit <= 0 || limit > rt.MaxMarkdownScanFiles {
+		limit = rt.MaxMarkdownScanFiles
+	}
+	for _, raw := range cmd.Paths {
+		if strings.TrimSpace(raw) == "" || len(files) >= limit {
+			continue
+		}
+		root := rt.ExpandPath(raw)
+		roots = append(roots, root)
+		found, err := rt.ScanMarkdownFiles(root, limit-len(files))
+		if err != nil {
+			errors = append(errors, protocol.MarkdownScanError{Path: raw, Error: err.Error()})
+			continue
+		}
+		files = append(files, found...)
+	}
+	sort.SliceStable(files, func(i, j int) bool {
+		if files[i].Modified != files[j].Modified {
+			return files[i].Modified > files[j].Modified
+		}
+		return strings.ToLower(files[i].RelativePath) < strings.ToLower(files[j].RelativePath)
+	})
+	c.enqueueEvent(protocol.NewMarkdownFilesListing(roots, files, errors))
+}
+
+func (h *Hub) saveFile(c *Client, cmd clientproto.Command) {
+	path := rt.ExpandPath(cmd.Path)
+	name := filepath.Base(path)
+	saveErr := func(content string, size, modified int64, msg string) {
+		c.enqueueEvent(protocol.NewFileSaved(path, name, content, size, modified, "text/plain; charset=utf-8", msg))
+	}
+	if len([]byte(cmd.Content)) > maxSaveFileBytes {
+		saveErr("", 0, 0, "file is too large to save from preview")
+		return
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		saveErr(cmd.Content, 0, 0, err.Error())
+		return
+	}
+	if info.IsDir() {
+		saveErr(cmd.Content, 0, 0, "path is a directory")
+		return
+	}
+	if !rt.IsMarkdownPath(path) {
+		saveErr(cmd.Content, info.Size(), info.ModTime().Unix(), "editing supports markdown files only")
+		return
+	}
+	modified := info.ModTime().Unix()
+	if cmd.ExpectedModified != nil && *cmd.ExpectedModified > 0 && *cmd.ExpectedModified != modified {
+		saveErr(cmd.Content, info.Size(), modified, "file changed on disk; reopen before saving")
+		return
+	}
+	if err := rt.WriteTextFileAtomic(path, cmd.Content); err != nil {
+		saveErr(cmd.Content, info.Size(), modified, err.Error())
+		return
+	}
+	updated, err := os.Stat(path)
+	if err != nil {
+		saveErr(cmd.Content, 0, 0, err.Error())
+		return
+	}
+	c.enqueueEvent(protocol.NewFileSaved(path, name, cmd.Content, updated.Size(), updated.ModTime().Unix(), "text/plain; charset=utf-8", ""))
 }
 
 func (h *Hub) activeSessionsForPath(path string) []protocol.DirSession {

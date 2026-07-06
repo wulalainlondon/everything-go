@@ -57,9 +57,11 @@ type Inbound struct {
 	Force   bool   `json:"force"` // kill_process SIGKILL
 
 	// file ops: browse_dir / open_file / fcm
-	Path       string `json:"path"`
-	ClientHash string `json:"client_hash"`
-	Token      string `json:"token"`
+	Path             string   `json:"path"`
+	Paths            []string `json:"paths"`
+	ClientHash       string   `json:"client_hash"`
+	ExpectedModified *int64   `json:"expected_modified"`
+	Token            string   `json:"token"`
 
 	// search
 	Query            string         `json:"query"`
@@ -775,11 +777,16 @@ type FileOpened struct {
 	Content  string `json:"content,omitempty"`
 	URL      string `json:"url,omitempty"`
 	Size     int64  `json:"size"`
+	Modified int64  `json:"modified,omitempty"`
 	MimeType string `json:"mime_type"`
 	Error    string `json:"error,omitempty"`
 }
 
 func NewFileOpened(path, name, content, mediaURL string, size int64, mimeType, errorMessage string) FileOpened {
+	return NewFileOpenedWithModified(path, name, content, mediaURL, size, 0, mimeType, errorMessage)
+}
+
+func NewFileOpenedWithModified(path, name, content, mediaURL string, size, modified int64, mimeType, errorMessage string) FileOpened {
 	return FileOpened{
 		Type:     "file_opened",
 		Path:     path,
@@ -787,8 +794,61 @@ func NewFileOpened(path, name, content, mediaURL string, size int64, mimeType, e
 		Content:  content,
 		URL:      mediaURL,
 		Size:     size,
+		Modified: modified,
 		MimeType: mimeType,
 		Error:    errorMessage,
+	}
+}
+
+type MarkdownFileEntry struct {
+	Path         string `json:"path"`
+	Root         string `json:"root"`
+	Name         string `json:"name"`
+	RelativePath string `json:"relative_path"`
+	Size         int64  `json:"size"`
+	Modified     int64  `json:"modified"`
+}
+
+type MarkdownScanError struct {
+	Path  string `json:"path"`
+	Error string `json:"error"`
+}
+
+type MarkdownFilesListing struct {
+	Type   string              `json:"type"`
+	Roots  []string            `json:"roots"`
+	Files  []MarkdownFileEntry `json:"files"`
+	Errors []MarkdownScanError `json:"errors"`
+}
+
+func NewMarkdownFilesListing(roots []string, files []MarkdownFileEntry, errors []MarkdownScanError) MarkdownFilesListing {
+	if roots == nil {
+		roots = []string{}
+	}
+	if files == nil {
+		files = []MarkdownFileEntry{}
+	}
+	if errors == nil {
+		errors = []MarkdownScanError{}
+	}
+	return MarkdownFilesListing{Type: "markdown_files_listing", Roots: roots, Files: files, Errors: errors}
+}
+
+type FileSaved struct {
+	Type     string `json:"type"`
+	Path     string `json:"path"`
+	Name     string `json:"name"`
+	Content  string `json:"content,omitempty"`
+	Size     int64  `json:"size"`
+	Modified int64  `json:"modified,omitempty"`
+	MimeType string `json:"mime_type"`
+	Error    string `json:"error,omitempty"`
+}
+
+func NewFileSaved(path, name, content string, size, modified int64, mimeType, errorMessage string) FileSaved {
+	return FileSaved{
+		Type: "file_saved", Path: path, Name: name, Content: content,
+		Size: size, Modified: modified, MimeType: mimeType, Error: errorMessage,
 	}
 }
 

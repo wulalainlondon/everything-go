@@ -13,6 +13,7 @@ import (
 )
 
 const maxEntries = 500
+const MaxMarkdownScanFiles = 300
 
 // skipDirs are never useful to browse in a file picker (mirrors file_ops.py).
 var skipDirs = map[string]bool{
@@ -23,6 +24,10 @@ var skipDirs = map[string]bool{
 	".venv": true, "venv": true, "env": true, ".env": true,
 	".idea": true, ".vscode": true,
 	"coverage": true, ".nyc_output": true,
+}
+
+var markdownExtensions = map[string]bool{
+	".md": true, ".markdown": true,
 }
 
 // ExpandPath resolves "~" and "~/..." to the user home, like Python's
@@ -91,6 +96,89 @@ func ListEntries(path string) []protocol.DirEntry {
 		return strings.ToLower(entries[i].Name) < strings.ToLower(entries[j].Name)
 	})
 	return entries
+}
+
+func IsMarkdownPath(path string) bool {
+	return markdownExtensions[strings.ToLower(filepath.Ext(path))]
+}
+
+func ScanMarkdownFiles(root string, remaining int) ([]protocol.MarkdownFileEntry, error) {
+	if remaining <= 0 {
+		return []protocol.MarkdownFileEntry{}, nil
+	}
+	info, err := os.Stat(root)
+	if err != nil {
+		return nil, err
+	}
+	if !info.IsDir() {
+		return []protocol.MarkdownFileEntry{}, nil
+	}
+	out := []protocol.MarkdownFileEntry{}
+	err = filepath.WalkDir(root, func(path string, de os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return nil
+		}
+		name := de.Name()
+		if de.IsDir() {
+			if path != root && (skipDirs[name] || strings.HasPrefix(name, ".") || strings.HasPrefix(name, "~")) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if strings.HasPrefix(name, ".") || strings.HasPrefix(name, "~") || !IsMarkdownPath(path) {
+			return nil
+		}
+		info, err := de.Info()
+		if err != nil {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			rel = name
+		}
+		out = append(out, protocol.MarkdownFileEntry{
+			Path: path, Root: root, Name: name, RelativePath: rel,
+			Size: info.Size(), Modified: info.ModTime().Unix(),
+		})
+		if len(out) >= remaining {
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Modified != out[j].Modified {
+			return out[i].Modified > out[j].Modified
+		}
+		return strings.ToLower(out[i].RelativePath) < strings.ToLower(out[j].RelativePath)
+	})
+	return out, err
+}
+
+func WriteTextFileAtomic(path, content string) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".tmp_bridge_*.md")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	ok := false
+	defer func() {
+		if !ok {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if _, err := tmp.WriteString(content); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	ok = true
+	return nil
 }
 
 // DirHash is a stable fingerprint of (name, is_dir, modified) tuples used by
