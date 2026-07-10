@@ -60,6 +60,22 @@ func TestCodexDetectsStaleThreadErrors(t *testing.T) {
 	}
 }
 
+func TestCodexTurnParamsForwardsSupportedEffort(t *testing.T) {
+	input := []map[string]any{{"type": "text", "text": "hello"}}
+	for _, effort := range []string{"low", "medium", "high", "xhigh", "max", "ultra"} {
+		params := codexTurnParams("thread-1", input, effort)
+		if params["effort"] != effort {
+			t.Fatalf("effort %q not forwarded: %+v", effort, params)
+		}
+	}
+	for _, effort := range []string{"", "auto", "invalid"} {
+		params := codexTurnParams("thread-1", input, effort)
+		if _, ok := params["effort"]; ok {
+			t.Fatalf("effort %q should use model default: %+v", effort, params)
+		}
+	}
+}
+
 func TestCodexInputIncludesFilesAndImages(t *testing.T) {
 	c := NewCodex(&capSink{}, "codex")
 	reg := session.NewRegistry()

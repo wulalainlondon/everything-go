@@ -929,7 +929,8 @@ func (c *Codex) shouldAutoCompact(st *codexState) bool {
 }
 
 func (c *Codex) startTurnWithStaleRetry(s *session.Session, st *codexState, threadID string, input []map[string]any) error {
-	err := c.startTurn(threadID, input)
+	effort := s.Snapshot().Effort
+	err := c.startTurn(threadID, input, effort)
 	if err == nil || !isStaleThreadError(err) {
 		return err
 	}
@@ -942,15 +943,24 @@ func (c *Codex) startTurnWithStaleRetry(s *session.Session, st *codexState, thre
 	st.mu.Lock()
 	newThreadID := st.threadID
 	st.mu.Unlock()
-	return c.startTurn(newThreadID, input)
+	return c.startTurn(newThreadID, input, effort)
 }
 
-func (c *Codex) startTurn(threadID string, input []map[string]any) error {
-	_, err := c.rpcCall("turn/start", map[string]any{
+func codexTurnParams(threadID string, input []map[string]any, effort string) map[string]any {
+	params := map[string]any{
 		"threadId":       threadID,
 		"input":          input,
 		"approvalPolicy": "never",
-	}, 30*time.Second)
+	}
+	switch effort {
+	case "low", "medium", "high", "xhigh", "max", "ultra":
+		params["effort"] = effort
+	}
+	return params
+}
+
+func (c *Codex) startTurn(threadID string, input []map[string]any, effort string) error {
+	_, err := c.rpcCall("turn/start", codexTurnParams(threadID, input, effort), 30*time.Second)
 	return err
 }
 
