@@ -27,7 +27,7 @@ import (
 )
 
 const (
-	codexDefaultModel     = "gpt-5.5"
+	codexDefaultModel     = "gpt-5.6-sol"
 	codexCompactThreshold = 0.80
 )
 

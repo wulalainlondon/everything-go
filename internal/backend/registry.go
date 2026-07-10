@@ -22,8 +22,16 @@ func DefaultRegistry(includeRemoteWS bool) []Definition {
 		{
 			ID:           Codex,
 			Label:        "Codex",
-			DefaultModel: "gpt-5.5",
-			Models:       []Model{{ID: "gpt-5.5", Label: "gpt-5.5"}},
+			DefaultModel: "gpt-5.6-sol",
+			Models: []Model{
+				{ID: "gpt-5.6-sol", Label: "gpt-5.6-sol"},
+				{ID: "gpt-5.6-terra", Label: "gpt-5.6-terra"},
+				{ID: "gpt-5.6-luna", Label: "gpt-5.6-luna"},
+				{ID: "gpt-5.5", Label: "gpt-5.5"},
+				{ID: "gpt-5.4", Label: "gpt-5.4"},
+				{ID: "gpt-5.4-mini", Label: "gpt-5.4-mini"},
+				{ID: "gpt-5.3-codex-spark", Label: "gpt-5.3-codex-spark"},
+			},
 			Capabilities: Capabilities{
 				History: true, Usage: true, Sandbox: true, Files: true,
 			},
