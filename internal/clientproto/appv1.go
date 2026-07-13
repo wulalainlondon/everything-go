@@ -24,6 +24,8 @@ type Command struct {
 	DeviceID   string
 	DeviceName string
 	AuthToken  string
+	ReplayAck  bool
+	BatchID    string
 
 	Name           string
 	Cwd            string
@@ -101,6 +103,8 @@ func (AppV1) ParseCommand(in protocol.Inbound) Command {
 		DeviceID:   in.DeviceID,
 		DeviceName: in.DeviceName,
 		AuthToken:  in.AuthToken,
+		ReplayAck:  in.ReplayAck,
+		BatchID:    in.BatchID,
 
 		Name:           in.Name,
 		Cwd:            in.Cwd,

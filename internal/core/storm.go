@@ -62,6 +62,7 @@ func (h *Hub) registerLatest(c *Client) {
 
 	if prev != nil && prev != c {
 		log.Printf("[storm] device=%s: newer client %s replaces %s", c.deviceID, c.clientID, prev.clientID)
+		h.releaseReplayLease(prev)
 		prev.shutdown()                                                 // stop write pump + cancel heavy work
 		go prev.conn.Close("replaced by newer client from same device") // unblock its read loop → serveConn cleanup
 	}

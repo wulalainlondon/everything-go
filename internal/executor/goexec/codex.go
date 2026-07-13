@@ -750,6 +750,11 @@ func (c *Codex) runTurn(s *session.Session, st *codexState, threadID string, inp
 		c.sink.Emit(backend.NewError(s.ID, st.reqID, backend.ErrTurn, turnErr))
 	default:
 		c.emitExtractedAskUserQuestion(s, st)
+		// Goal state is durable thread metadata, separate from turn/completed.
+		// Re-read it before emitting done so clients cannot miss a terminal goal
+		// transition when the app-server notification was dropped or arrived while
+		// they were reconnecting.
+		c.reconcileGoalAfterTurn(s, st)
 		c.sink.Emit(backend.NewDone(s.ID, st.reqID))
 		if c.shouldAutoCompact(st) {
 			go c.runAutoCompact(s, st)
@@ -886,6 +891,45 @@ func (c *Codex) GetGoal(ctx context.Context, s *session.Session) error {
 	}
 	c.sink.Emit(backend.NewGoalUpdate(s.ID, goal))
 	return nil
+}
+
+func (c *Codex) reconcileGoalAfterTurn(s *session.Session, st *codexState) {
+	st.mu.Lock()
+	threadID := st.threadID
+	st.mu.Unlock()
+	if threadID == "" {
+		return
+	}
+
+	raw, err := c.rpcCall("thread/goal/get", map[string]any{"threadId": threadID}, 3*time.Second)
+	if err != nil {
+		// A successful turn must remain successful even if this best-effort state
+		// reconciliation fails. The frontend also refreshes Goal unconditionally
+		// on done, and reconnect receives the durable bridge snapshot.
+		log.Printf("[%s] post-turn goal reconcile failed: %v", s.ID, err)
+		return
+	}
+
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		log.Printf("[%s] post-turn goal response invalid: %v", s.ID, err)
+		return
+	}
+	rawGoal, exists := envelope["goal"]
+	if !exists {
+		log.Printf("[%s] post-turn goal response missing goal", s.ID)
+		return
+	}
+	if string(rawGoal) == "null" {
+		c.sink.Emit(backend.NewGoalCleared(s.ID))
+		return
+	}
+	var goal backend.Goal
+	if err := json.Unmarshal(rawGoal, &goal); err != nil || goal.ThreadID == "" {
+		log.Printf("[%s] post-turn goal payload invalid", s.ID)
+		return
+	}
+	c.sink.Emit(backend.NewGoalUpdate(s.ID, goal))
 }
 
 func (c *Codex) ClearGoal(ctx context.Context, s *session.Session) error {

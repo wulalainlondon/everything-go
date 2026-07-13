@@ -56,6 +56,7 @@ type Hub struct {
 	pairing   *governance.Pairing
 	perms     *governance.PermissionManager
 	offline   *governance.OfflineBuffer
+	goals     *governance.GoalStateStore
 	search    *search.Index
 	fcm       *fcm.Notifier
 	feed      *feed.Store
@@ -98,6 +99,9 @@ type Hub struct {
 	// self-re-exec). nil → restart_bridge answers "not configured", mirroring
 	// Python's gate on an unset restart-trigger path.
 	restart func()
+
+	replayMu    sync.Mutex
+	replayLease *replayLease
 }
 
 func NewHub(reg *session.Registry, cfg Config, pairing *governance.Pairing, port int) *Hub {
@@ -105,6 +109,7 @@ func NewHub(reg *session.Registry, cfg Config, pairing *governance.Pairing, port
 		registry:       reg,
 		pairing:        pairing,
 		offline:        governance.NewOfflineBuffer(),
+		goals:          governance.NewGoalStateStore(goalSnapshotPath(cfg.DataDir)),
 		cfg:            cfg,
 		client:         clientproto.NewAppV1(),
 		gen:            randomID(),
@@ -273,6 +278,14 @@ func (h *Hub) connectedDeviceIDs(exclude string) []string {
 // concurrent use.
 func (h *Hub) Emit(event any) {
 	logOutbound(event)
+	if h.goals.Apply(event) {
+		switch e := event.(type) {
+		case protocol.GoalUpdate:
+			log.Printf("[goal] snapshot session=%s status=%s updated_at=%d", e.SessionID, e.Goal.Status, e.Goal.UpdatedAt)
+		case protocol.GoalCleared:
+			log.Printf("[goal] snapshot cleared session=%s", e.SessionID)
+		}
+	}
 
 	// The Hub is the single point every executor event flows through, so it is
 	// where session lifecycle state is driven: a terminal event ends the turn
@@ -314,13 +327,7 @@ func (h *Hub) Emit(event any) {
 // replayOffline flushes buffered events to a single reconnecting client, in
 // order. Mirrors bridge/offline_replay.py (called after sessions_list).
 func (h *Hub) replayOffline(c *Client) {
-	events := h.offline.Drain()
-	for _, e := range events {
-		c.enqueueEvent(e)
-	}
-	if len(events) > 0 {
-		log.Printf("client %s: replayed %d offline events", c.clientID, len(events))
-	}
+	h.startOfflineReplay(c)
 }
 
 // driveTurnState advances the session state machine off the executor's terminal
@@ -434,6 +441,14 @@ func (h *Hub) removeClient(c *Client) {
 		}
 		h.latestMu.Unlock()
 	}
+	h.releaseReplayLease(c)
+}
+
+func goalSnapshotPath(dataDir string) string {
+	if strings.TrimSpace(dataDir) == "" {
+		return ""
+	}
+	return filepath.Join(dataDir, "goal_snapshots.json")
 }
 
 func marshalEvent(event any) ([]byte, error) {

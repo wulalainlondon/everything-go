@@ -100,7 +100,8 @@ Verification levels:
 | protocol parse / outbound event schema | ✓ | **U** | ParseInbound, tristate pinned/hidden, nullable usage windows, never-null arrays |
 | pairing (claim/unclaim) | ✓ | **U** | single-owner lock + pairing.json persistence; claim-by-another rejected |
 | handshake/auth gate (enforced) | ✓ | **U** | first frame must be hello; locked bridge / BRIDGE_AUTH_TOKEN rejects bad token at handshake & never registers the client (httptest WS integration); mirrors connection.py + _is_auth_token_valid |
-| offline buffer + reconnect replay | ✓ | **U** | 0-client buffering, text_chunk merge, 10k cap, drain order; replay-after-hello U-tested (hub) |
+| offline buffer + reconnect replay | ✓ | **U** | 0-client buffering, text_chunk merge, 10k cap; clients negotiate `replay_ack`, receive bounded 64-event batches, and the bridge commits only after `offline_replay_ack`. Disconnect-before-ACK resends the batch; legacy clients are paced one event at a time. U-tested with 2,050 events (> old 1,024 send queue), reconnect mid-batch, and `-race` |
+| Codex Goal durable sync | ✓ | **U** | post-turn `thread/goal/get` reconciliation; atomic `goal_snapshots.json`; `goals_snapshot` on every hello; per-session offline goal updates coalesce to latest; app also refreshes unconditionally after `done` |
 | session state machine + per-session turn queue | ✓ | **U** | idle/streaming/stopping/closed transitions; turns serialized (no concurrent turn per session); close stops worker |
 | Search (SQLite FTS5 CJK) | ✓ | **U**+E+**A** | real-DB roundtrip: ASCII/CJK trigram, 1–2 char CJK LIKE fallback, context, pagination; real app `request_search` "宇宙" → 14 hits w/ CJK-LIKE-fallback notice. (`request_session_list` is wired but the app has no live UI caller — U-tested only) |
 | fcm summary shaping | ✓ | **U** | markdown strip, last-paragraph, first-sentence, 120-rune cap (Python-parity incl. CJK split) |
@@ -166,6 +167,7 @@ Go core defends in `internal/core/storm.go`:
   stale client drops results; **100 identical `request_history` → 1 `LoadHistory`**;
   **100 `get_resumable_sessions` → 1 provider scan**; overflow drops client, hub healthy.
 
-Deferred (round 2): #8 feed_list throttle (cheap + would starve reconnects),
-#13 per-session terminal-event dedup in offline replay (10k cap + text_chunk
-merge already present).
+Deferred (round 2): #8 feed_list throttle (cheap + would starve reconnects).
+Per-session Goal state is now coalesced and replay is application-ACKed; generic
+terminal-event dedup remains covered by client request/seq dedup plus history
+reconciliation.

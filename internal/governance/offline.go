@@ -35,6 +35,20 @@ func (b *OfflineBuffer) Append(event any) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
+	// Goal is durable state, not an animation stream. While offline, retain only
+	// the newest state transition for each session so frequent goal usage cannot
+	// grow the replay journal without bound.
+	if sid, ok := goalSession(event); ok {
+		kept := b.events[:0]
+		for _, existing := range b.events {
+			if existingSID, isGoal := goalSession(existing); isGoal && existingSID == sid {
+				continue
+			}
+			kept = append(kept, existing)
+		}
+		b.events = kept
+	}
+
 	if tc, ok := event.(protocol.TextChunk); ok && len(b.events) > 0 {
 		if last, ok := b.events[len(b.events)-1].(protocol.TextChunk); ok &&
 			last.SessionID == tc.SessionID && last.RequestID == tc.RequestID {
@@ -56,6 +70,17 @@ func (b *OfflineBuffer) Append(event any) {
 		b.events = b.events[1:]
 	}
 	b.events = append(b.events, event)
+}
+
+func goalSession(event any) (string, bool) {
+	switch e := event.(type) {
+	case protocol.GoalUpdate:
+		return e.SessionID, true
+	case protocol.GoalCleared:
+		return e.SessionID, true
+	default:
+		return "", false
+	}
 }
 
 // collapseTurnContent drops buffered streaming-content events for a turn that
@@ -123,6 +148,44 @@ func (b *OfflineBuffer) Drain() []any {
 	out := b.events
 	b.events = nil
 	return out
+}
+
+// Peek returns up to limit oldest events without removing them. Reliable
+// replay uses Peek + Commit so a disconnect before the client ACK cannot lose
+// the remainder of the journal.
+func (b *OfflineBuffer) Peek(limit int) []any {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(b.events) == 0 || limit <= 0 {
+		return nil
+	}
+	if limit > len(b.events) {
+		limit = len(b.events)
+	}
+	out := make([]any, limit)
+	copy(out, b.events[:limit])
+	return out
+}
+
+// Commit removes count oldest events after a replay ACK. It returns the number
+// actually removed (count is clamped defensively).
+func (b *OfflineBuffer) Commit(count int) int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if count <= 0 || len(b.events) == 0 {
+		return 0
+	}
+	if count > len(b.events) {
+		count = len(b.events)
+	}
+	oldLen := len(b.events)
+	copy(b.events, b.events[count:])
+	newLen := oldLen - count
+	for i := newLen; i < oldLen; i++ {
+		b.events[i] = nil
+	}
+	b.events = b.events[:newLen]
+	return count
 }
 
 // Len reports the number of buffered events.

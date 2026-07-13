@@ -21,6 +21,8 @@ type Inbound struct {
 	DeviceID   string `json:"device_id"`
 	DeviceName string `json:"device_name"`
 	AuthToken  string `json:"auth_token"`
+	ReplayAck  bool   `json:"replay_ack"`
+	BatchID    string `json:"batch_id"`
 
 	// new_session
 	Name           string `json:"name"`
@@ -466,6 +468,46 @@ func NewGoalUpdate(sessionID string, goal Goal) GoalUpdate {
 type GoalCleared struct {
 	Type      string `json:"type"`
 	SessionID string `json:"session_id"`
+}
+
+// GoalSnapshotItem is the latest durable Goal state for one bridge session.
+// Goal is nil when the latest operation cleared the goal. Revision is bridge-
+// monotonic and lets clients reject stale live events after a reconnect.
+type GoalSnapshotItem struct {
+	SessionID string `json:"session_id"`
+	Goal      *Goal  `json:"goal"`
+	Revision  uint64 `json:"revision"`
+}
+
+type GoalsSnapshot struct {
+	Type     string             `json:"type"`
+	Revision uint64             `json:"revision"`
+	Items    []GoalSnapshotItem `json:"items"`
+}
+
+func NewGoalsSnapshot(revision uint64, items []GoalSnapshotItem) GoalsSnapshot {
+	if items == nil {
+		items = []GoalSnapshotItem{}
+	}
+	return GoalsSnapshot{Type: "goals_snapshot", Revision: revision, Items: items}
+}
+
+// OfflineReplayBatch is application-acknowledged replay. Events remain in the
+// bridge journal until the client applies the whole batch and replies with
+// offline_replay_ack{batch_id}. Keeping the original events nested preserves
+// wire compatibility and the normal event router semantics.
+type OfflineReplayBatch struct {
+	Type      string `json:"type"`
+	BatchID   string `json:"batch_id"`
+	Events    []any  `json:"events"`
+	Remaining int    `json:"remaining"`
+}
+
+func NewOfflineReplayBatch(batchID string, events []any, remaining int) OfflineReplayBatch {
+	if events == nil {
+		events = []any{}
+	}
+	return OfflineReplayBatch{Type: "offline_replay_batch", BatchID: batchID, Events: events, Remaining: remaining}
 }
 
 func NewGoalCleared(sessionID string) GoalCleared {

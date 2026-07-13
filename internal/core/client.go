@@ -104,6 +104,11 @@ type Client struct {
 	clientID string
 	deviceID string
 
+	// supportsReplayAck is negotiated by hello{replay_ack:true}. New clients
+	// receive bounded offline_replay_batch frames; legacy clients use a throttled
+	// per-event fallback so they remain compatible without overflowing send.
+	supportsReplayAck bool
+
 	// rtc holds the answering peer connection negotiated over this client's
 	// signaling channel, if any. Set on webrtc_offer; consulted by webrtc_ice
 	// and torn down on disconnect (unless the DataChannel was promoted, in

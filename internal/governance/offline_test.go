@@ -127,6 +127,39 @@ func TestOfflineBufferDrainEmpty(t *testing.T) {
 	}
 }
 
+func TestOfflineBufferPeekCommitDoesNotLoseUnackedEvents(t *testing.T) {
+	b := NewOfflineBuffer()
+	for i := 0; i < 130; i++ {
+		b.Append(protocol.NewDone("s1", itoaTest(i)))
+	}
+	first := b.Peek(64)
+	if len(first) != 64 || b.Len() != 130 {
+		t.Fatalf("peek must be non-destructive: batch=%d remaining=%d", len(first), b.Len())
+	}
+	if removed := b.Commit(64); removed != 64 || b.Len() != 66 {
+		t.Fatalf("commit removed=%d remaining=%d", removed, b.Len())
+	}
+	next := b.Peek(64)
+	if got := next[0].(protocol.Done).RequestID; got != "64" {
+		t.Fatalf("next batch starts at %q, want 64", got)
+	}
+}
+
+func TestOfflineBufferCoalescesGoalStatePerSession(t *testing.T) {
+	b := NewOfflineBuffer()
+	b.Append(protocol.NewGoalUpdate("s1", protocol.Goal{ThreadID: "t1", Status: "active", UpdatedAt: 1}))
+	b.Append(protocol.NewDone("s1", "r1"))
+	b.Append(protocol.NewGoalUpdate("s1", protocol.Goal{ThreadID: "t1", Status: "complete", UpdatedAt: 2}))
+	b.Append(protocol.NewGoalUpdate("s2", protocol.Goal{ThreadID: "t2", Status: "active", UpdatedAt: 1}))
+	got := b.Drain()
+	if len(got) != 3 {
+		t.Fatalf("want done + newest s1 goal + s2 goal, got %d: %#v", len(got), got)
+	}
+	if goal, ok := got[1].(protocol.GoalUpdate); !ok || goal.Goal.Status != "complete" {
+		t.Fatalf("s1 should retain only complete goal, got %#v", got[1])
+	}
+}
+
 func itoaTest(n int) string {
 	if n == 0 {
 		return "0"

@@ -30,6 +30,7 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 	switch cmd.Kind {
 	case "hello":
 		c.deviceID = cmd.DeviceID
+		c.supportsReplayAck = cmd.ReplayAck
 		// Latest-device-wins: evict any older client from the same device so the
 		// half-disconnect storm can't pile up zombie clients (#1).
 		h.registerLatest(c)
@@ -50,6 +51,9 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		// while this (or the previous) client was offline — same ordering as the
 		// Python bridge so the app reconciles before replayed events arrive.
 		c.enqueueEvent(h.client.SessionsList(h.sessionSummaries()))
+		// Goal is durable state. Send the full latest snapshot before transient
+		// replay so a dropped historical goal_update cannot leave the UI stale.
+		c.enqueueEvent(h.goals.Snapshot())
 		h.replayOffline(c)
 		// Replay any file pushes this device hasn't acked yet (parity with the
 		// Python bridge, which re-emits pending file_push frames on hello).
@@ -84,6 +88,12 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 
 	case "request_sessions_list":
 		c.enqueueEvent(h.client.SessionsList(h.sessionSummaries()))
+
+	case "request_goals_snapshot":
+		c.enqueueEvent(h.goals.Snapshot())
+
+	case "offline_replay_ack":
+		h.ackOfflineReplay(c, cmd.BatchID)
 
 	case "get_all_sessions":
 		go h.handleGetAllSessions(c)

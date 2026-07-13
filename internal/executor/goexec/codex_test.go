@@ -6,10 +6,12 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"everything-go/internal/backend"
 	"everything-go/internal/history"
@@ -17,6 +19,86 @@ import (
 )
 
 type captureWriter struct{ bytes.Buffer }
+
+type rpcCaptureWriter struct{ writes chan []byte }
+
+func (w *rpcCaptureWriter) Write(p []byte) (int, error) {
+	copyOfP := append([]byte(nil), p...)
+	w.writes <- copyOfP
+	return len(p), nil
+}
+
+func TestCodexPostTurnGoalReconcileEmitsLatestState(t *testing.T) {
+	tests := []struct {
+		name       string
+		result     string
+		wantUpdate bool
+	}{
+		{
+			name:       "complete",
+			result:     `{"goal":{"threadId":"thread-1","objective":"ship","status":"complete","tokenBudget":null,"tokensUsed":42,"timeUsedSeconds":9,"createdAt":1,"updatedAt":2}}`,
+			wantUpdate: true,
+		},
+		{name: "cleared", result: `{"goal":null}`, wantUpdate: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			sink := &capSink{}
+			c := NewCodex(sink, "codex")
+			reg := session.NewRegistry()
+			s := reg.Create("s1", "codex", "/tmp", "codex", "", "", "")
+			st := c.state(s.ID)
+			st.threadID = "thread-1"
+			writer := &rpcCaptureWriter{writes: make(chan []byte, 1)}
+			c.rpc.setWriter(writer)
+
+			done := make(chan struct{})
+			go func() {
+				c.reconcileGoalAfterTurn(s, st)
+				close(done)
+			}()
+
+			var req struct {
+				ID     int            `json:"id"`
+				Method string         `json:"method"`
+				Params map[string]any `json:"params"`
+			}
+			select {
+			case raw := <-writer.writes:
+				if err := json.Unmarshal(raw, &req); err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("goal reconcile request not written")
+			}
+			if req.Method != "thread/goal/get" || req.Params["threadId"] != "thread-1" {
+				t.Fatalf("bad goal reconcile request: %+v", req)
+			}
+			c.rpc.dispatchResponse(json.RawMessage(fmt.Sprintf(`{"id":%d,"result":%s}`, req.ID, tc.result)))
+
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatal("goal reconcile did not finish")
+			}
+
+			if tc.wantUpdate {
+				if sink.count(func(e any) bool {
+					goal, ok := e.(backend.GoalUpdate)
+					return ok && goal.Goal.Status == "complete" && goal.Goal.TokensUsed == 42
+				}) != 1 {
+					t.Fatalf("complete goal update missing: %+v", sink.events)
+				}
+			} else if sink.count(func(e any) bool {
+				_, ok := e.(backend.GoalCleared)
+				return ok
+			}) != 1 {
+				t.Fatalf("goal cleared event missing: %+v", sink.events)
+			}
+		})
+	}
+}
 
 func TestCodexInvalidateLiveThreadsClearsAllSessionRoutes(t *testing.T) {
 	c := NewCodex(&capSink{}, "codex")

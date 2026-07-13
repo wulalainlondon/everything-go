@@ -363,6 +363,89 @@ func TestReconnectReplaysOfflineEvents(t *testing.T) {
 	}
 }
 
+func TestReliableReplayBatchesAndCommitsOnlyAfterAck(t *testing.T) {
+	h, _ := newTestHub(t)
+	for i := 0; i < 2050; i++ {
+		h.Emit(protocol.NewDone("s1", "r"+itoa(i)))
+	}
+	c := newTestClient(h)
+	c.deviceID = "phone"
+	c.supportsReplayAck = true
+	h.registerLatest(c)
+	h.startOfflineReplay(c)
+
+	batches := 0
+	for h.offline.Len() > 0 {
+		before := h.offline.Len()
+		batch := waitForType(t, c, "offline_replay_batch")
+		events, _ := batch["events"].([]any)
+		if len(events) == 0 || len(events) > replayBatchSize {
+			t.Fatalf("invalid replay batch size %d", len(events))
+		}
+		if h.offline.Len() != before {
+			t.Fatalf("journal changed before ACK: before=%d after=%d", before, h.offline.Len())
+		}
+		batchID, _ := batch["batch_id"].(string)
+		route(h, c, `{"type":"offline_replay_ack","batch_id":"`+batchID+`"}`)
+		batches++
+	}
+	if batches < 30 {
+		t.Fatalf("2050 events should require many bounded batches, got %d", batches)
+	}
+	select {
+	case <-c.quit:
+		t.Fatal("reliable replay must not overflow and drop the client")
+	default:
+	}
+}
+
+func TestReliableReplayDisconnectBeforeAckRetainsBatch(t *testing.T) {
+	h, _ := newTestHub(t)
+	h.Emit(protocol.NewDone("s1", "r1"))
+	c := newTestClient(h)
+	c.deviceID = "phone"
+	c.supportsReplayAck = true
+	h.registerLatest(c)
+	h.startOfflineReplay(c)
+	waitForType(t, c, "offline_replay_batch")
+	c.shutdown()
+	h.releaseReplayLease(c)
+	h.removeClient(c)
+	if h.offline.Len() != 1 {
+		t.Fatalf("unacked event was lost, remaining=%d", h.offline.Len())
+	}
+
+	next := newTestClient(h)
+	next.deviceID = "phone"
+	next.supportsReplayAck = true
+	h.registerLatest(next)
+	h.startOfflineReplay(next)
+	batch := waitForType(t, next, "offline_replay_batch")
+	if events, _ := batch["events"].([]any); len(events) != 1 {
+		t.Fatalf("reconnect should resend retained event: %v", batch)
+	}
+}
+
+func TestHelloSendsDurableGoalsSnapshotBeforeReplay(t *testing.T) {
+	h, _ := newTestHub(t)
+	h.Emit(protocol.NewGoalUpdate("s1", protocol.Goal{ThreadID: "t1", Objective: "ship", Status: "complete", UpdatedAt: 10}))
+	c := newTestClient(h)
+	route(h, c, `{"type":"hello","device_id":"phone","replay_ack":true}`)
+	waitForType(t, c, "hello_ack")
+	waitForType(t, c, "sessions_list")
+	snapshot := waitForType(t, c, "goals_snapshot")
+	items, _ := snapshot["items"].([]any)
+	if len(items) != 1 {
+		t.Fatalf("goals snapshot=%v", snapshot)
+	}
+	item := items[0].(map[string]any)
+	goal := item["goal"].(map[string]any)
+	if item["session_id"] != "s1" || goal["status"] != "complete" {
+		t.Fatalf("wrong goal snapshot item: %v", item)
+	}
+	waitForType(t, c, "offline_replay_batch")
+}
+
 // Two messages for the same session must not interleave: the second turn only
 // starts after the first emits done.
 func TestPerSessionTurnsSerialize(t *testing.T) {
