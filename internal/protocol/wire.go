@@ -40,11 +40,17 @@ type Inbound struct {
 	KnownLast string `json:"known_last_source_message_id"`
 	Mode      string `json:"mode"`
 	Before    string `json:"before_source_message_id"`
+	// Client opt-in for thinking blocks in history messages. Legacy clients
+	// never send it and keep receiving the Python-era text/tool_call-only shape.
+	IncludeThinking bool `json:"include_thinking"`
 
 	// rename / meta / effort
-	Effort string `json:"effort"`
-	Pinned *bool  `json:"pinned"`
-	Hidden *bool  `json:"hidden"`
+	Effort            *string `json:"effort"`
+	ServiceTier       *string `json:"service_tier"`
+	CollaborationMode *string `json:"collaboration_mode"`
+	Personality       *string `json:"personality"`
+	Pinned            *bool   `json:"pinned"`
+	Hidden            *bool   `json:"hidden"`
 
 	// Codex goal commands.
 	Objective   string `json:"objective"`
@@ -172,16 +178,38 @@ type HelloAck struct {
 // the app's new-session UI. It is intentionally wire-level and static per
 // bridge process; runtime status remains in sessions/tasks/usage events.
 type BackendDefinition struct {
-	ID           string              `json:"id"`
-	Label        string              `json:"label"`
-	DefaultModel string              `json:"default_model,omitempty"`
-	Models       []ModelDefinition   `json:"models,omitempty"`
-	Capabilities BackendCapabilities `json:"capabilities"`
+	ID                 string                        `json:"id"`
+	Label              string                        `json:"label"`
+	DefaultModel       string                        `json:"default_model,omitempty"`
+	Models             []ModelDefinition             `json:"models,omitempty"`
+	CollaborationModes []CollaborationModeDefinition `json:"collaboration_modes,omitempty"`
+	Capabilities       BackendCapabilities           `json:"capabilities"`
 }
 
 type ModelDefinition struct {
-	ID    string `json:"id"`
-	Label string `json:"label,omitempty"`
+	ID                        string                  `json:"id"`
+	Label                     string                  `json:"label,omitempty"`
+	Description               string                  `json:"description,omitempty"`
+	SupportedReasoningEfforts []string                `json:"supported_reasoning_efforts,omitempty"`
+	DefaultReasoningEffort    string                  `json:"default_reasoning_effort,omitempty"`
+	InputModalities           []string                `json:"input_modalities,omitempty"`
+	SupportsPersonality       bool                    `json:"supports_personality,omitempty"`
+	ServiceTiers              []ServiceTierDefinition `json:"service_tiers,omitempty"`
+	DefaultServiceTier        string                  `json:"default_service_tier,omitempty"`
+	IsDefault                 bool                    `json:"is_default,omitempty"`
+}
+
+type ServiceTierDefinition struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+}
+
+type CollaborationModeDefinition struct {
+	Name            string `json:"name"`
+	Mode            string `json:"mode,omitempty"`
+	Model           string `json:"model,omitempty"`
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 }
 
 type BackendCapabilities struct {
@@ -192,6 +220,18 @@ type BackendCapabilities struct {
 	Images       bool `json:"images,omitempty"`
 	Files        bool `json:"files,omitempty"`
 	Remote       bool `json:"remote,omitempty"`
+}
+
+type BackendRegistryUpdated struct {
+	Type     string              `json:"type"`
+	Backends []BackendDefinition `json:"backend_registry"`
+}
+
+func NewBackendRegistryUpdated(backends []BackendDefinition) BackendRegistryUpdated {
+	if backends == nil {
+		backends = []BackendDefinition{}
+	}
+	return BackendRegistryUpdated{Type: "backend_registry_updated", Backends: backends}
 }
 
 // --- Pairing acks -----------------------------------------------------------
@@ -229,18 +269,35 @@ type RecentMessage struct {
 
 // SessionSummary mirrors SessionSummarySchema.
 type SessionSummary struct {
-	ID             string          `json:"id"`
-	Name           string          `json:"name"`
-	IsStreaming    bool            `json:"is_streaming"`
-	CreatedAt      float64         `json:"created_at"`
-	LastActivity   float64         `json:"last_activity,omitempty"`
-	Cwd            string          `json:"cwd,omitempty"`
-	Model          string          `json:"model,omitempty"`
-	Backend        string          `json:"backend,omitempty"`
-	Sandbox        string          `json:"sandbox,omitempty"`
-	Pinned         bool            `json:"pinned"`
-	Hidden         bool            `json:"hidden"`
-	RecentMessages []RecentMessage `json:"recent_messages,omitempty"`
+	ID                string          `json:"id"`
+	Name              string          `json:"name"`
+	IsStreaming       bool            `json:"is_streaming"`
+	CreatedAt         float64         `json:"created_at"`
+	LastActivity      float64         `json:"last_activity,omitempty"`
+	Cwd               string          `json:"cwd,omitempty"`
+	Model             string          `json:"model,omitempty"`
+	Effort            string          `json:"effort,omitempty"`
+	ServiceTier       string          `json:"service_tier,omitempty"`
+	CollaborationMode string          `json:"collaboration_mode,omitempty"`
+	Personality       string          `json:"personality,omitempty"`
+	Backend           string          `json:"backend,omitempty"`
+	Sandbox           string          `json:"sandbox,omitempty"`
+	Pinned            bool            `json:"pinned"`
+	Hidden            bool            `json:"hidden"`
+	RecentMessages    []RecentMessage `json:"recent_messages,omitempty"`
+}
+
+// CodexLiveDiff carries the latest aggregated turn diff. Replacing rather than
+// appending makes it reconnect/idempotency safe.
+type CodexLiveDiff struct {
+	Type      string `json:"type"`
+	SessionID string `json:"session_id"`
+	RequestID string `json:"request_id,omitempty"`
+	Diff      string `json:"diff"`
+}
+
+func NewCodexLiveDiff(sessionID, requestID, diff string) CodexLiveDiff {
+	return CodexLiveDiff{Type: "codex_live_diff", SessionID: sessionID, RequestID: requestID, Diff: diff}
 }
 
 type SessionsList struct {
@@ -554,6 +611,42 @@ type SessionUUID struct {
 
 func NewSessionUUID(sessionID, claudeUUID string) SessionUUID {
 	return SessionUUID{Type: "session_uuid", SessionID: sessionID, ClaudeUUID: claudeUUID}
+}
+
+// MCPServerStatus is one entry of the CLI's system/init mcp_servers report.
+type MCPServerStatus struct {
+	Name   string `json:"name"`
+	Status string `json:"status"`
+}
+
+// SessionInitInfo surfaces the CLI's system/init capability report — available
+// tools, slash commands, MCP servers, and the session's permission mode — so
+// clients can build slash autocompletion and show the session's real surface.
+type SessionInitInfo struct {
+	Type           string            `json:"type"`
+	SessionID      string            `json:"session_id"`
+	Model          string            `json:"model,omitempty"`
+	PermissionMode string            `json:"permission_mode,omitempty"`
+	Tools          []string          `json:"tools"`
+	SlashCommands  []string          `json:"slash_commands"`
+	MCPServers     []MCPServerStatus `json:"mcp_servers"`
+}
+
+func NewSessionInitInfo(sessionID, model, permissionMode string, tools, slashCommands []string, mcpServers []MCPServerStatus) SessionInitInfo {
+	if tools == nil {
+		tools = []string{}
+	}
+	if slashCommands == nil {
+		slashCommands = []string{}
+	}
+	if mcpServers == nil {
+		mcpServers = []MCPServerStatus{}
+	}
+	return SessionInitInfo{
+		Type: "session_init_info", SessionID: sessionID,
+		Model: model, PermissionMode: permissionMode,
+		Tools: tools, SlashCommands: slashCommands, MCPServers: mcpServers,
+	}
 }
 
 // --- History ----------------------------------------------------------------

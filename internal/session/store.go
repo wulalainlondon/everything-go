@@ -13,17 +13,21 @@ import (
 // saved_sessions.json. Store writes known fields back into the original raw JSON
 // object so Python-only metadata survives Go updates.
 type savedEntry struct {
-	Name       string  `json:"name"`
-	ResumeID   string  `json:"resume_id"`
-	ClaudeUUID string  `json:"claude_uuid"`
-	LastUsed   int64   `json:"last_used"`
-	Cwd        string  `json:"cwd"`
-	Backend    string  `json:"backend"`
-	Model      string  `json:"model"`
-	Sandbox    string  `json:"sandbox"`
-	CreatedAt  float64 `json:"created_at"`
-	Pinned     bool    `json:"pinned,omitempty"`
-	Hidden     bool    `json:"hidden,omitempty"`
+	Name              string  `json:"name"`
+	ResumeID          string  `json:"resume_id"`
+	ClaudeUUID        string  `json:"claude_uuid"`
+	LastUsed          int64   `json:"last_used"`
+	Cwd               string  `json:"cwd"`
+	Backend           string  `json:"backend"`
+	Model             string  `json:"model"`
+	Sandbox           string  `json:"sandbox"`
+	Effort            string  `json:"effort,omitempty"`
+	ServiceTier       string  `json:"service_tier,omitempty"`
+	CollaborationMode string  `json:"collaboration_mode,omitempty"`
+	Personality       string  `json:"personality,omitempty"`
+	CreatedAt         float64 `json:"created_at"`
+	Pinned            bool    `json:"pinned,omitempty"`
+	Hidden            bool    `json:"hidden,omitempty"`
 }
 
 const (
@@ -92,6 +96,8 @@ func (st *Store) Save(sessions []*Session) error {
 			Name: snap.Name, ResumeID: snap.ResumeID, ClaudeUUID: snap.ResumeID,
 			LastUsed: lastUsed, Cwd: snap.Cwd, Backend: snap.Backend, Model: snap.Model,
 			Sandbox: snap.Sandbox, CreatedAt: snap.CreatedAt,
+			Effort:      snap.Effort,
+			ServiceTier: snap.ServiceTier, CollaborationMode: snap.CollaborationMode, Personality: snap.Personality,
 			Pinned: snap.Pinned, Hidden: snap.Hidden,
 		}
 		obj := raw[snap.ID]
@@ -186,6 +192,10 @@ func putKnownFields(obj map[string]json.RawMessage, entry savedEntry) {
 	put("backend", entry.Backend)
 	put("model", entry.Model)
 	put("sandbox", entry.Sandbox)
+	put("effort", entry.Effort)
+	put("service_tier", entry.ServiceTier)
+	put("collaboration_mode", entry.CollaborationMode)
+	put("personality", entry.Personality)
 	put("created_at", entry.CreatedAt)
 	if entry.Pinned {
 		put("pinned", true)
@@ -247,16 +257,20 @@ func entryFromRaw(obj map[string]json.RawMessage) savedEntry {
 		createdAt = float64(lastUsed)
 	}
 	return savedEntry{
-		Name:       rawString(obj, "name"),
-		ResumeID:   resumeID,
-		ClaudeUUID: claudeUUID,
-		LastUsed:   lastUsed,
-		Cwd:        rawString(obj, "cwd"),
-		Backend:    rawString(obj, "backend"),
-		Model:      rawString(obj, "model"),
-		Sandbox:    rawString(obj, "sandbox"),
-		CreatedAt:  createdAt,
-		Pinned:     rawBool(obj, "pinned"),
-		Hidden:     rawBool(obj, "hidden"),
+		Name:              rawString(obj, "name"),
+		ResumeID:          resumeID,
+		ClaudeUUID:        claudeUUID,
+		LastUsed:          lastUsed,
+		Cwd:               rawString(obj, "cwd"),
+		Backend:           rawString(obj, "backend"),
+		Model:             rawString(obj, "model"),
+		Sandbox:           rawString(obj, "sandbox"),
+		Effort:            rawString(obj, "effort"),
+		ServiceTier:       rawString(obj, "service_tier"),
+		CollaborationMode: rawString(obj, "collaboration_mode"),
+		Personality:       rawString(obj, "personality"),
+		CreatedAt:         createdAt,
+		Pinned:            rawBool(obj, "pinned"),
+		Hidden:            rawBool(obj, "hidden"),
 	}
 }

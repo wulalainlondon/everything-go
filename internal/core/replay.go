@@ -8,9 +8,10 @@ import (
 )
 
 const (
-	replayBatchSize  = 64
-	replayAckTimeout = 10 * time.Second
-	legacyReplayPace = 20 * time.Millisecond
+	replayBatchSize     = 64
+	replayBatchMaxBytes = 256 * 1024
+	replayAckTimeout    = 10 * time.Second
+	legacyReplayPace    = 20 * time.Millisecond
 )
 
 type replayLease struct {
@@ -50,7 +51,7 @@ func (h *Hub) startOfflineReplay(c *Client) {
 			return
 		}
 	}
-	events := h.offline.Peek(replayBatchSize)
+	events := h.offline.PeekSized(replayBatchSize, replayBatchMaxBytes)
 	if len(events) == 0 {
 		h.replayMu.Unlock()
 		return

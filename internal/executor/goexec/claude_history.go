@@ -61,6 +61,7 @@ type claudeRow struct {
 type claudeBlock struct {
 	Type      string          `json:"type"`
 	Text      string          `json:"text"`
+	Thinking  string          `json:"thinking"`
 	ID        string          `json:"id"`
 	Name      string          `json:"name"`
 	Input     json.RawMessage `json:"input"`
@@ -83,12 +84,18 @@ func (c *Claude) LoadHistory(resumeID string, opts history.Opts) (*history.Resul
 	key := history.FileKey{Path: path, MtimeNS: mtimeNS, Size: size}
 	cacheName := "claude:" + resumeID
 	if messages, ok := history.DefaultCache().Load(cacheName, key); ok {
+		if !opts.IncludeThinking {
+			messages = history.StripThinkingBlocks(messages)
+		}
 		return history.Slice(messages, opts), nil
 	}
 
 	messages, truncated := loadClaudeHistoryMessages(path, resumeID, fi.ModTime().UnixMilli())
 	if !truncated {
 		history.DefaultCache().SaveAsync(cacheName, key, messages)
+	}
+	if !opts.IncludeThinking {
+		messages = history.StripThinkingBlocks(messages)
 	}
 	return history.Slice(messages, opts), nil
 }
@@ -145,7 +152,18 @@ func loadClaudeHistoryMessages(path, resumeID string, fileMtimeMs int64) ([]map[
 			continue
 		}
 		text, blocks := buildClaudeBlocks(d.Message.Content, d.Type, toolOutputs)
-		if text == "" || strings.HasPrefix(text, "<") || strings.HasPrefix(text, "[Request interrupted") {
+		hasThinking := false
+		for _, b := range blocks {
+			if b["type"] == "thinking" {
+				hasThinking = true
+				break
+			}
+		}
+		// Text-less rows are dropped (tool_result user rows, meta rows, and —
+		// deliberately, for Python-shape parity — tool_use-only assistant rows),
+		// EXCEPT thinking rows, which clients need to keep the process fold
+		// visible after a history reload.
+		if (text == "" && !hasThinking) || strings.HasPrefix(text, "<") || strings.HasPrefix(text, "[Request interrupted") {
 			continue
 		}
 		if strings.HasPrefix(text, "Base directory for this skill:") {
@@ -194,6 +212,10 @@ func buildClaudeBlocks(content json.RawMessage, role string, toolOutputs map[str
 		case b.Type == "text" && b.Text != "":
 			textParts = append(textParts, b.Text)
 			out = append(out, map[string]any{"type": "text", "text": b.Text})
+		case b.Type == "thinking" && b.Thinking != "" && role == "assistant":
+			// Kept out of the joined text (content stays text-only, matching the
+			// Python shape) — clients render this as a collapsed thinking block.
+			out = append(out, map[string]any{"type": "thinking", "thinking": b.Thinking})
 		case b.Type == "tool_use" && role == "assistant":
 			out = append(out, map[string]any{
 				"type":        "tool_call",

@@ -35,17 +35,22 @@ type Command struct {
 	ResumeClaudeID string
 	Content        string
 
-	Effort      string
-	Pinned      *bool
-	Hidden      *bool
-	Objective   string
-	GoalStatus  string
-	TokenBudget *int
+	Effort            string
+	EffortSet         bool
+	ServiceTier       *string
+	CollaborationMode *string
+	Personality       *string
+	Pinned            *bool
+	Hidden            *bool
+	Objective         string
+	GoalStatus        string
+	TokenBudget       *int
 
-	Limit     int
-	KnownLast string
-	Mode      string
-	Before    string
+	Limit           int
+	KnownLast       string
+	Mode            string
+	Before          string
+	IncludeThinking bool
 
 	ShellID string
 	Data    string
@@ -114,17 +119,27 @@ func (AppV1) ParseCommand(in protocol.Inbound) Command {
 		ResumeClaudeID: in.ResumeClaudeID,
 		Content:        in.Content,
 
-		Effort:      in.Effort,
-		Pinned:      in.Pinned,
-		Hidden:      in.Hidden,
-		Objective:   in.Objective,
-		GoalStatus:  in.Status,
-		TokenBudget: in.TokenBudget,
+		Effort: func() string {
+			if in.Effort != nil {
+				return *in.Effort
+			}
+			return ""
+		}(),
+		EffortSet:         in.Effort != nil,
+		ServiceTier:       in.ServiceTier,
+		CollaborationMode: in.CollaborationMode,
+		Personality:       in.Personality,
+		Pinned:            in.Pinned,
+		Hidden:            in.Hidden,
+		Objective:         in.Objective,
+		GoalStatus:        in.Status,
+		TokenBudget:       in.TokenBudget,
 
-		Limit:     in.Limit,
-		KnownLast: in.KnownLast,
-		Mode:      in.Mode,
-		Before:    in.Before,
+		Limit:           in.Limit,
+		KnownLast:       in.KnownLast,
+		Mode:            in.Mode,
+		Before:          in.Before,
+		IncludeThinking: in.IncludeThinking,
 
 		ShellID: in.ShellID,
 		Data:    in.Data,
@@ -264,13 +279,28 @@ func backendDefinitionsToWire(defs []backend.Definition) []protocol.BackendDefin
 	for _, d := range defs {
 		models := make([]protocol.ModelDefinition, 0, len(d.Models))
 		for _, m := range d.Models {
-			models = append(models, protocol.ModelDefinition{ID: m.ID, Label: m.Label})
+			tiers := make([]protocol.ServiceTierDefinition, 0, len(m.ServiceTiers))
+			for _, tier := range m.ServiceTiers {
+				tiers = append(tiers, protocol.ServiceTierDefinition{ID: tier.ID, Name: tier.Name, Description: tier.Description})
+			}
+			models = append(models, protocol.ModelDefinition{
+				ID: m.ID, Label: m.Label, Description: m.Description,
+				SupportedReasoningEfforts: m.SupportedReasoningEfforts,
+				DefaultReasoningEffort:    m.DefaultReasoningEffort,
+				InputModalities:           m.InputModalities, SupportsPersonality: m.SupportsPersonality,
+				ServiceTiers: tiers, DefaultServiceTier: m.DefaultServiceTier, IsDefault: m.IsDefault,
+			})
+		}
+		modes := make([]protocol.CollaborationModeDefinition, 0, len(d.CollaborationModes))
+		for _, mode := range d.CollaborationModes {
+			modes = append(modes, protocol.CollaborationModeDefinition{Name: mode.Name, Mode: mode.Mode, Model: mode.Model, ReasoningEffort: mode.ReasoningEffort})
 		}
 		out = append(out, protocol.BackendDefinition{
-			ID:           d.ID,
-			Label:        d.Label,
-			DefaultModel: d.DefaultModel,
-			Models:       models,
+			ID:                 d.ID,
+			Label:              d.Label,
+			DefaultModel:       d.DefaultModel,
+			Models:             models,
+			CollaborationModes: modes,
 			Capabilities: protocol.BackendCapabilities{
 				History:      d.Capabilities.History,
 				Usage:        d.Capabilities.Usage,
@@ -283,6 +313,10 @@ func backendDefinitionsToWire(defs []backend.Definition) []protocol.BackendDefin
 		})
 	}
 	return out
+}
+
+func (AppV1) BackendRegistryUpdated(defs []backend.Definition) protocol.BackendRegistryUpdated {
+	return protocol.NewBackendRegistryUpdated(backendDefinitionsToWire(defs))
 }
 
 func (AppV1) SessionsList(sessions []protocol.SessionSummary) protocol.SessionsList {

@@ -23,6 +23,10 @@ type Opts struct {
 	KnownLast string // known_last_source_message_id
 	Mode      string // "auto" | "delta" | "snapshot"
 	Before    string // before_source_message_id
+	// IncludeThinking keeps assistant thinking blocks in the reply. Off by
+	// default: legacy clients validate history blocks with a strict
+	// text/tool_call union and would reject the whole event otherwise.
+	IncludeThinking bool
 }
 
 // Result is the output of Slice — either a snapshot or a delta page.
@@ -163,6 +167,67 @@ func Slice(messages []map[string]any, opts Opts) *Result {
 	}
 	return &Result{Kind: "snapshot", Messages: tail(messages, limit), SourceCount: count,
 		KnownIDFound: opts.KnownLast == "", SnapshotReason: reason, HasMoreBefore: count > limit}
+}
+
+// StripThinkingBlocks returns messages with assistant thinking blocks removed,
+// for clients that did not opt in via include_thinking. Cached message maps are
+// never mutated — a message whose blocks change is shallow-copied. Messages
+// left with no blocks and no content (thinking-only rows) are dropped entirely,
+// reproducing the legacy shape.
+func StripThinkingBlocks(messages []map[string]any) []map[string]any {
+	out := make([]map[string]any, 0, len(messages))
+	for _, m := range messages {
+		raw, has := m["blocks"]
+		if !has {
+			out = append(out, m)
+			continue
+		}
+		kept, removed := filterThinking(raw)
+		if !removed {
+			out = append(out, m)
+			continue
+		}
+		if len(kept) == 0 && asString(m["content"]) == "" {
+			continue
+		}
+		cp := make(map[string]any, len(m))
+		for k, v := range m {
+			cp[k] = v
+		}
+		if len(kept) == 0 {
+			delete(cp, "blocks")
+		} else {
+			cp["blocks"] = kept
+		}
+		out = append(out, cp)
+	}
+	return out
+}
+
+// filterThinking handles both block slice shapes: []map[string]any (freshly
+// built) and []any (round-tripped through the JSON cache).
+func filterThinking(raw any) (kept []any, removed bool) {
+	switch bs := raw.(type) {
+	case []map[string]any:
+		for _, b := range bs {
+			if asString(b["type"]) == "thinking" {
+				removed = true
+				continue
+			}
+			kept = append(kept, b)
+		}
+	case []any:
+		for _, b := range bs {
+			if bm, ok := b.(map[string]any); ok && asString(bm["type"]) == "thinking" {
+				removed = true
+				continue
+			}
+			kept = append(kept, b)
+		}
+	default:
+		kept = append(kept, raw)
+	}
+	return kept, removed
 }
 
 func indexOf(messages []map[string]any, sourceMessageID string) int {

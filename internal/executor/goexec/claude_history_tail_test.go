@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -32,7 +33,7 @@ func TestLoadClaudeHistoryBoundedPeakMemory(t *testing.T) {
 	fi, _ := os.Stat(path)
 	fileMB := float64(fi.Size()) / 1e6
 
-	var peak uint64
+	var peak atomic.Uint64
 	done := make(chan struct{})
 	go func() {
 		var ms runtime.MemStats
@@ -42,8 +43,7 @@ func TestLoadClaudeHistoryBoundedPeakMemory(t *testing.T) {
 				return
 			default:
 				runtime.ReadMemStats(&ms)
-				if ms.HeapInuse > peak {
-					peak = ms.HeapInuse
+				for old := peak.Load(); ms.HeapInuse > old && !peak.CompareAndSwap(old, ms.HeapInuse); old = peak.Load() {
 				}
 				time.Sleep(time.Millisecond)
 			}
@@ -51,7 +51,7 @@ func TestLoadClaudeHistoryBoundedPeakMemory(t *testing.T) {
 	}()
 	msgs, truncated := loadClaudeHistoryMessages(path, "abc", 0)
 	close(done)
-	peakMB := float64(peak) / 1e6
+	peakMB := float64(peak.Load()) / 1e6
 	t.Logf("file=%.0fMB peak_heap=%.0fMB messages=%d truncated=%v", fileMB, peakMB, len(msgs), truncated)
 
 	if !truncated {
@@ -82,7 +82,7 @@ func TestScanCwdAndNameBoundedMemory(t *testing.T) {
 	}
 	f.Close()
 
-	var peak uint64
+	var peak atomic.Uint64
 	done := make(chan struct{})
 	go func() {
 		var ms runtime.MemStats
@@ -92,8 +92,7 @@ func TestScanCwdAndNameBoundedMemory(t *testing.T) {
 				return
 			default:
 				runtime.ReadMemStats(&ms)
-				if ms.HeapInuse > peak {
-					peak = ms.HeapInuse
+				for old := peak.Load(); ms.HeapInuse > old && !peak.CompareAndSwap(old, ms.HeapInuse); old = peak.Load() {
 				}
 				time.Sleep(time.Millisecond)
 			}
@@ -101,7 +100,7 @@ func TestScanCwdAndNameBoundedMemory(t *testing.T) {
 	}()
 	cwd, name := scanCwdAndName(path)
 	close(done)
-	peakMB := float64(peak) / 1e6
+	peakMB := float64(peak.Load()) / 1e6
 	t.Logf("cwd=%q name=%q peak_heap=%.0fMB", cwd, name, peakMB)
 
 	if cwd != "/home/x/proj" || name != "first user message here" {

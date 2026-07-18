@@ -33,7 +33,7 @@ func DefaultRegistry(includeRemoteWS bool) []Definition {
 				{ID: "gpt-5.3-codex-spark", Label: "gpt-5.3-codex-spark"},
 			},
 			Capabilities: Capabilities{
-				History: true, Usage: true, Sandbox: true, Files: true,
+				History: true, Usage: true, Interactions: true, Sandbox: true, Images: true, Files: true,
 			},
 		},
 		{

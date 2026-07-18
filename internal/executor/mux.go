@@ -7,6 +7,28 @@ import (
 	"everything-go/internal/session"
 )
 
+// CatalogDefinitions overlays runtime catalogs on the bridge's static
+// fallback registry. A backend failure only leaves that backend on fallback.
+func (m *Mux) CatalogDefinitions(ctx context.Context, base []backend.Definition) []backend.Definition {
+	out := append([]backend.Definition(nil), base...)
+	for i := range out {
+		e, ok := m.byBackend[out[i].ID]
+		if !ok {
+			continue
+		}
+		cp, ok := e.(backend.CatalogProvider)
+		if !ok {
+			continue
+		}
+		if d, err := cp.Catalog(ctx); err == nil {
+			// Keep configured transport capabilities authoritative.
+			d.Capabilities = out[i].Capabilities
+			out[i] = d
+		}
+	}
+	return out
+}
+
 // Mux routes Executor calls to a per-backend implementation based on
 // Session.Backend (claude / codex / ollama / ...). This is how the single Go
 // connection core supports multiple AI runtimes simultaneously, mirroring the
@@ -65,6 +87,16 @@ func (m *Mux) ClearGoal(ctx context.Context, s *session.Session) error {
 		return backend.ErrUnsupportedGoal
 	}
 	return gc.ClearGoal(ctx, s)
+}
+
+func (m *Mux) UpdateSessionSettings(ctx context.Context, s *session.Session) error {
+	updater, ok := m.pick(s).(interface {
+		UpdateSessionSettings(context.Context, *session.Session) error
+	})
+	if !ok {
+		return nil
+	}
+	return updater.UpdateSessionSettings(ctx, s)
 }
 
 // ProviderFor returns the history provider backing this session's backend, if any.

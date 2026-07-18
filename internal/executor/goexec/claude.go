@@ -346,6 +346,9 @@ func claudeSpawnArgs(snap session.Snapshot, mcpURL string) []string {
 		"--input-format", "stream-json",
 		"--output-format", "stream-json",
 		"--verbose",
+		// Token-level streaming: emit stream_event deltas so clients render text
+		// as it generates instead of one block per assistant message.
+		"--include-partial-messages",
 	}
 	model := snap.Model
 	if model == "opusplan" {
@@ -405,6 +408,24 @@ type ndLine struct {
 		InputTokens              int `json:"input_tokens"`
 		CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 	} `json:"usage"`
+	// Non-empty on events produced inside a Task subagent. Those are internal
+	// to the subagent and must not pollute the main-chain stream.
+	ParentToolUseID string `json:"parent_tool_use_id"`
+	// stream_event payload (--include-partial-messages): the wrapped Anthropic
+	// SSE event. Only content_block_delta text/thinking deltas are consumed.
+	Event struct {
+		Type  string `json:"type"`
+		Delta struct {
+			Type     string `json:"type"`
+			Text     string `json:"text"`
+			Thinking string `json:"thinking"`
+		} `json:"delta"`
+	} `json:"event"`
+	// system/init capability surface forwarded to clients (A4).
+	Tools        []string          `json:"tools"`
+	SlashCmds    []string          `json:"slash_commands"`
+	PermissionMd string            `json:"permissionMode"`
+	MCPServers   []json.RawMessage `json:"mcp_servers"`
 }
 
 type block struct {
@@ -419,6 +440,11 @@ type block struct {
 func (c *Claude) readStdout(s *session.Session, p *proc, stdout interface{ Read([]byte) (int, error) }) {
 	sc := bufio.NewScanner(stdout)
 	sc.Buffer(make([]byte, 0, 64*1024), maxLine)
+	// True once this proc has emitted any stream_event: text/thinking then
+	// arrive as deltas, so the aggregate assistant blocks must be skipped to
+	// avoid double emission. Old CLIs without stream_event keep the aggregate
+	// path. readStdout is the proc's only reader, so a local is race-free.
+	sawStreamEvent := false
 	for sc.Scan() {
 		line := sc.Bytes()
 		if len(line) == 0 {
@@ -429,8 +455,26 @@ func (c *Claude) readStdout(s *session.Session, p *proc, stdout interface{ Read(
 			continue // non-JSON diagnostic line
 		}
 		p.touch()
+		if evt.ParentToolUseID != "" {
+			continue // Task-subagent internal event — keep it out of the main stream
+		}
 		reqID := p.currentReqID()
 		switch evt.Type {
+		case "stream_event":
+			sawStreamEvent = true
+			if evt.Event.Type != "content_block_delta" {
+				continue
+			}
+			switch evt.Event.Delta.Type {
+			case "text_delta":
+				if evt.Event.Delta.Text != "" {
+					c.sink.Emit(backend.NewTextChunk(s.ID, reqID, evt.Event.Delta.Text))
+				}
+			case "thinking_delta":
+				if evt.Event.Delta.Thinking != "" {
+					c.sink.Emit(backend.NewThinkingChunk(s.ID, reqID, evt.Event.Delta.Thinking))
+				}
+			}
 		case "assistant":
 			var askWaits []<-chan struct{}
 			for _, raw := range evt.Message.Content {
@@ -440,11 +484,11 @@ func (c *Claude) readStdout(s *session.Session, p *proc, stdout interface{ Read(
 				}
 				switch b.Type {
 				case "thinking":
-					if b.Thinking != "" {
+					if b.Thinking != "" && !sawStreamEvent {
 						c.sink.Emit(backend.NewThinkingChunk(s.ID, reqID, b.Thinking))
 					}
 				case "text":
-					if b.Text != "" {
+					if b.Text != "" && !sawStreamEvent {
 						c.sink.Emit(backend.NewTextChunk(s.ID, reqID, b.Text))
 					}
 				case "tool_use":
@@ -516,6 +560,16 @@ func (c *Claude) readStdout(s *session.Session, p *proc, stdout interface{ Read(
 				if first {
 					c.sink.Emit(backend.NewSessionUUID(s.ID, evt.SessionID))
 				}
+			}
+			if evt.Subtype == "init" && (len(evt.Tools) > 0 || len(evt.SlashCmds) > 0) {
+				var servers []backend.MCPServerStatus
+				for _, raw := range evt.MCPServers {
+					var srv backend.MCPServerStatus
+					if json.Unmarshal(raw, &srv) == nil && srv.Name != "" {
+						servers = append(servers, srv)
+					}
+				}
+				c.sink.Emit(backend.NewSessionInitInfo(s.ID, evt.Model, evt.PermissionMd, evt.Tools, evt.SlashCmds, servers))
 			}
 		}
 	}

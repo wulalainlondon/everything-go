@@ -22,6 +22,7 @@ import (
 
 	"everything-go/internal/backend"
 	"everything-go/internal/executor"
+	"everything-go/internal/protocol"
 	"everything-go/internal/runtime"
 	"everything-go/internal/session"
 )
@@ -29,6 +30,10 @@ import (
 const (
 	codexDefaultModel     = "gpt-5.6-sol"
 	codexCompactThreshold = 0.80
+	codexTurnTimeout      = 100 * time.Minute
+	codexStallWarnAfter   = 5 * time.Minute
+	codexStallAbortAfter  = 30 * time.Minute
+	codexStallCheckEvery  = 30 * time.Second
 )
 
 var codexAskUserRE = regexp.MustCompile("(?s)```(?:json)?\\s*(\\{[^`]*?\"(?:ask_user_question|AskUserQuestion)\"[^`]*?\\})\\s*```|(\\{[^{}]*\"(?:ask_user_question|AskUserQuestion)\"[^{}]*\\})")
@@ -51,10 +56,19 @@ type codexState struct {
 	compactActive   bool
 	compactErr      string
 	compactDone     chan struct{}
+	lastEventAt     time.Time
+	stallWarned     bool
+	agents          map[string]*codexAgent
+}
+
+type codexAgent struct {
+	id, agentType, description, parentID, output string
+	startMS, endMS                               *int64
+	tools                                        []protocol.AgentToolCall
 }
 
 func newCodexState() *codexState {
-	return &codexState{}
+	return &codexState{agents: make(map[string]*codexAgent)}
 }
 
 func (st *codexState) finishCompact(errStr string) {
@@ -81,12 +95,20 @@ func (st *codexState) finish(errStr string) {
 		return
 	}
 	st.turnActive = false
+	st.currentTurnID = ""
 	if st.turnErr == "" {
 		st.turnErr = errStr
 	}
 	if st.turnDone != nil {
 		close(st.turnDone)
 	}
+}
+
+func (st *codexState) touch(now time.Time) {
+	st.mu.Lock()
+	st.lastEventAt = now
+	st.stallWarned = false
+	st.mu.Unlock()
 }
 
 // Codex implements executor.Executor over the codex app-server.
@@ -102,16 +124,25 @@ type Codex struct {
 	proc    *exec.Cmd
 	stdin   io.WriteCloser
 
-	mu              sync.Mutex
-	states          map[string]*codexState
-	threadToSession map[string]*session.Session
-	interMu         sync.Mutex
-	interactions    map[string]codexInteraction
+	mu                 sync.Mutex
+	states             map[string]*codexState
+	threadToSession    map[string]*session.Session
+	interMu            sync.Mutex
+	interactions       map[string]codexInteraction
+	catalogMu          sync.RWMutex
+	catalog            backend.Definition
+	collaborationModes map[string]map[string]any
+	turnTimeout        time.Duration
+	stallWarnAfter     time.Duration
+	stallAbortAfter    time.Duration
+	stallCheckEvery    time.Duration
 }
 
 type codexInteraction struct {
-	payload backend.UserInputPayload
-	rpcID   int
+	payload      backend.UserInputPayload
+	rpcID        int
+	responseKind string
+	reqID        string
 }
 
 func NewCodex(sink executor.Sink, codexBin string) *Codex {
@@ -121,15 +152,20 @@ func NewCodex(sink executor.Sink, codexBin string) *Codex {
 	home, _ := os.UserHomeDir()
 	codexHome := filepath.Join(home, ".codex")
 	return &Codex{
-		sink:            sink,
-		tools:           newToolEmitter(sink),
-		codexBin:        codexBin,
-		sessionsRoot:    filepath.Join(codexHome, "sessions"),
-		indexPath:       filepath.Join(codexHome, "session_index.jsonl"),
-		rpc:             newRPCPlumber("codex"),
-		states:          make(map[string]*codexState),
-		threadToSession: make(map[string]*session.Session),
-		interactions:    make(map[string]codexInteraction),
+		sink:               sink,
+		tools:              newToolEmitter(sink),
+		codexBin:           codexBin,
+		sessionsRoot:       filepath.Join(codexHome, "sessions"),
+		indexPath:          filepath.Join(codexHome, "session_index.jsonl"),
+		rpc:                newRPCPlumber("codex"),
+		states:             make(map[string]*codexState),
+		threadToSession:    make(map[string]*session.Session),
+		interactions:       make(map[string]codexInteraction),
+		collaborationModes: make(map[string]map[string]any),
+		turnTimeout:        codexTurnTimeout,
+		stallWarnAfter:     codexStallWarnAfter,
+		stallAbortAfter:    codexStallAbortAfter,
+		stallCheckEvery:    codexStallCheckEvery,
 	}
 }
 
@@ -189,10 +225,118 @@ func (c *Codex) ensureServer() error {
 
 	if _, err := c.rpc.request("initialize", map[string]any{
 		"clientInfo": map[string]any{"name": "everything-go", "version": "1.0"},
+		"capabilities": map[string]any{
+			"experimentalApi":                true,
+			"requestAttestation":             false,
+			"mcpServerOpenaiFormElicitation": true,
+		},
 	}, 30*time.Second); err != nil {
 		return err
 	}
 	return c.rpc.notify("initialized", nil)
+}
+
+// Catalog reads the app-server catalog instead of duplicating model ids in the
+// bridge. The last successful result is retained for transient reconnects.
+func (c *Codex) Catalog(ctx context.Context) (backend.Definition, error) {
+	if err := c.ensureServer(); err != nil {
+		return backend.Definition{}, err
+	}
+	raw, err := c.rpcCall("model/list", map[string]any{"limit": 100, "includeHidden": false}, 20*time.Second)
+	if err != nil {
+		return backend.Definition{}, err
+	}
+	var response struct {
+		Data []struct {
+			ID          string `json:"id"`
+			Model       string `json:"model"`
+			DisplayName string `json:"displayName"`
+			Description string `json:"description"`
+			Hidden      bool   `json:"hidden"`
+			Supported   []struct {
+				Effort string `json:"reasoningEffort"`
+			} `json:"supportedReasoningEfforts"`
+			DefaultEffort       string   `json:"defaultReasoningEffort"`
+			InputModalities     []string `json:"inputModalities"`
+			SupportsPersonality bool     `json:"supportsPersonality"`
+			ServiceTiers        []struct {
+				ID          string `json:"id"`
+				Name        string `json:"name"`
+				Description string `json:"description"`
+			} `json:"serviceTiers"`
+			DefaultServiceTier *string `json:"defaultServiceTier"`
+			IsDefault          bool    `json:"isDefault"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &response); err != nil {
+		return backend.Definition{}, err
+	}
+	def := backend.Definition{ID: backend.Codex, Label: "Codex", Capabilities: backend.Capabilities{History: true, Usage: true, Interactions: true, Sandbox: true, Images: true, Files: true}}
+	for _, m := range response.Data {
+		if m.Hidden {
+			continue
+		}
+		id := firstNonEmpty(m.Model, m.ID)
+		bm := backend.Model{ID: id, Label: firstNonEmpty(m.DisplayName, id), Description: m.Description, DefaultReasoningEffort: m.DefaultEffort, InputModalities: m.InputModalities, SupportsPersonality: m.SupportsPersonality, IsDefault: m.IsDefault}
+		for _, e := range m.Supported {
+			bm.SupportedReasoningEfforts = append(bm.SupportedReasoningEfforts, e.Effort)
+		}
+		for _, t := range m.ServiceTiers {
+			bm.ServiceTiers = append(bm.ServiceTiers, backend.ServiceTier{ID: t.ID, Name: t.Name, Description: t.Description})
+		}
+		if m.DefaultServiceTier != nil {
+			bm.DefaultServiceTier = *m.DefaultServiceTier
+		}
+		def.Models = append(def.Models, bm)
+		if m.IsDefault {
+			def.DefaultModel = id
+		}
+	}
+	if def.DefaultModel == "" && len(def.Models) > 0 {
+		def.DefaultModel = def.Models[0].ID
+	}
+	if modesRaw, modeErr := c.rpcCall("collaborationMode/list", map[string]any{}, 10*time.Second); modeErr == nil {
+		var modes struct {
+			Data []struct {
+				Name   string  `json:"name"`
+				Mode   *string `json:"mode"`
+				Model  *string `json:"model"`
+				Effort *string `json:"reasoning_effort"`
+			} `json:"data"`
+		}
+		if json.Unmarshal(modesRaw, &modes) == nil {
+			modeMap := make(map[string]map[string]any)
+			for _, m := range modes.Data {
+				mode := "default"
+				if m.Mode != nil {
+					mode = *m.Mode
+				}
+				model := def.DefaultModel
+				if m.Model != nil {
+					model = *m.Model
+				}
+				effort := any(nil)
+				if m.Effort != nil {
+					effort = *m.Effort
+				}
+				def.CollaborationModes = append(def.CollaborationModes, backend.CollaborationMode{Name: m.Name, Mode: mode, Model: model, ReasoningEffort: func() string {
+					if m.Effort != nil {
+						return *m.Effort
+					}
+					return ""
+				}()})
+				modeMap[strings.ToLower(m.Name)] = map[string]any{"mode": mode, "settings": map[string]any{"model": model, "reasoning_effort": effort, "developer_instructions": nil}}
+				modeMap[strings.ToLower(mode)] = modeMap[strings.ToLower(m.Name)]
+			}
+			c.catalogMu.Lock()
+			c.collaborationModes = modeMap
+			c.catalogMu.Unlock()
+		}
+	}
+	c.catalogMu.Lock()
+	c.catalog = def
+	c.catalogMu.Unlock()
+	return def, nil
 }
 
 func (c *Codex) invalidateLiveThreads() {
@@ -287,6 +431,9 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 
 	var p struct {
 		ThreadID string            `json:"threadId"`
+		Diff     string            `json:"diff"`
+		Message  string            `json:"message"`
+		Changes  []map[string]any  `json:"changes"`
 		Delta    string            `json:"delta"`
 		Phase    string            `json:"phase"`
 		Text     string            `json:"text"`
@@ -304,12 +451,28 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 			} `json:"error"`
 		} `json:"turn"`
 		Item struct {
-			ID      string          `json:"id"`
-			Name    string          `json:"name"`
-			Type    string          `json:"type"`
-			Command json.RawMessage `json:"command"`
-			Output  json.RawMessage `json:"output"`
+			ID                string          `json:"id"`
+			Name              string          `json:"name"`
+			Type              string          `json:"type"`
+			Command           json.RawMessage `json:"command"`
+			Output            json.RawMessage `json:"output"`
+			Status            string          `json:"status"`
+			Tool              string          `json:"tool"`
+			SenderThreadID    string          `json:"senderThreadId"`
+			ReceiverThreadIDs []string        `json:"receiverThreadIds"`
+			Prompt            *string         `json:"prompt"`
+			Model             *string         `json:"model"`
+			AgentsStates      map[string]struct {
+				Status  string  `json:"status"`
+				Message *string `json:"message"`
+			} `json:"agentsStates"`
 		} `json:"item"`
+		Thread struct {
+			ID             string  `json:"id"`
+			ParentThreadID *string `json:"parentThreadId"`
+			AgentNickname  *string `json:"agentNickname"`
+			AgentRole      *string `json:"agentRole"`
+		} `json:"thread"`
 		WillRetry bool `json:"willRetry"`
 		Error     struct {
 			Message string `json:"message"`
@@ -319,18 +482,41 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 		Goal       backend.Goal    `json:"goal"`
 	}
 	_ = json.Unmarshal(m.Params, &p)
+	if p.ThreadID == "" {
+		p.ThreadID = p.Thread.ID
+	}
 
 	c.mu.Lock()
 	s := c.threadToSession[p.ThreadID]
+	if s == nil && p.Thread.ParentThreadID != nil {
+		s = c.threadToSession[*p.Thread.ParentThreadID]
+		if s != nil {
+			c.threadToSession[p.ThreadID] = s
+		}
+	}
 	c.mu.Unlock()
 	if s == nil {
 		return
 	}
 	st := c.state(s.ID)
+	st.touch(time.Now())
+	st.mu.Lock()
 	reqID := st.reqID
+	rootThreadID := st.threadID
+	st.mu.Unlock()
+	isRootThread := p.ThreadID == rootThreadID
 
 	switch m.Method {
+	case "thread/started":
+		if p.Thread.ParentThreadID != nil {
+			c.ensureCodexAgent(s, p.Thread.ID, *p.Thread.ParentThreadID, firstPtr(p.Thread.AgentRole, p.Thread.AgentNickname, "subagent"), "")
+			c.emitCodexAgentTree(s)
+		}
+
 	case "turn/started":
+		if !isRootThread {
+			return
+		}
 		st.mu.Lock()
 		st.currentTurnID = p.Turn.ID
 		st.mu.Unlock()
@@ -339,16 +525,25 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 		if p.Delta == "" {
 			return
 		}
+		if !isRootThread {
+			c.appendCodexAgentOutput(st, p.ThreadID, p.Delta)
+			c.emitCodexAgentTree(s)
+			return
+		}
 		if p.Phase == "commentary" {
 			c.sink.Emit(backend.NewThinkingChunk(s.ID, reqID, p.Delta))
 			return
 		}
+		c.appendCodexAgentOutput(st, p.ThreadID, p.Delta)
 		st.mu.Lock()
 		st.accumulatedText += p.Delta
 		st.mu.Unlock()
 		c.sink.Emit(backend.NewTextChunk(s.ID, reqID, p.Delta))
 
 	case "item/reasoning/textDelta":
+		if !isRootThread {
+			return
+		}
 		d := p.Delta
 		if d == "" {
 			d = p.Text
@@ -358,6 +553,9 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 		}
 
 	case "item/commandExecution/outputDelta", "item/fileChange/outputDelta", "item/commandExecution/terminalInteraction":
+		if !isRootThread {
+			return
+		}
 		itemID := firstNonEmpty(p.ItemID, p.CallID, "codex_item")
 		d := p.Delta
 		if d == "" {
@@ -368,6 +566,15 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 		}
 
 	case "item/started":
+		if p.Item.Type == "collabAgentToolCall" {
+			c.updateCodexCollabItem(s, st, p.Item.Tool, p.Item.SenderThreadID, p.Item.ReceiverThreadIDs, p.Item.Prompt, p.Item.Model, p.Item.AgentsStates, time.Now().UnixMilli())
+			return
+		}
+		c.recordCodexAgentTool(st, p.ThreadID, p.Item.Type, time.Now().UnixMilli())
+		if !isRootThread {
+			c.emitCodexAgentTree(s)
+			return
+		}
 		tool, ok := normalizeCodexLiveTool(m.Params)
 		if !ok {
 			return
@@ -375,6 +582,14 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 		c.tools.Start(s.ID, reqID, tool.ID, tool.Name, tool.Command)
 
 	case "item/completed":
+		if p.Item.Type == "collabAgentToolCall" {
+			c.updateCodexCollabItem(s, st, p.Item.Tool, p.Item.SenderThreadID, p.Item.ReceiverThreadIDs, p.Item.Prompt, p.Item.Model, p.Item.AgentsStates, time.Now().UnixMilli())
+			return
+		}
+		if !isRootThread {
+			c.emitCodexAgentTree(s)
+			return
+		}
 		itemID := firstNonEmpty(p.ItemID, p.Item.ID, "codex_item")
 		output := rawToString(p.Output)
 		if output == "" {
@@ -391,6 +606,17 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 			c.sink.Emit(backend.NewTodoUpdate(s.ID, reqID, todosValue(todos)))
 		}
 
+	case "turn/diff/updated":
+		c.sink.Emit(protocol.NewCodexLiveDiff(s.ID, reqID, p.Diff))
+
+	case "item/fileChange/patchUpdated":
+		itemID := firstNonEmpty(p.ItemID, "codex_patch")
+		c.tools.Delta(s.ID, reqID, itemID, codexJSON(p.Changes))
+
+	case "item/mcpToolCall/progress":
+		itemID := firstNonEmpty(p.ItemID, "codex_mcp")
+		c.tools.Delta(s.ID, reqID, itemID, p.Message+"\n")
+
 	case "thread/goal/updated":
 		if p.Goal.ThreadID != "" {
 			c.sink.Emit(backend.NewGoalUpdate(s.ID, p.Goal))
@@ -400,6 +626,11 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 		c.sink.Emit(backend.NewGoalCleared(s.ID))
 
 	case "turn/completed":
+		if !isRootThread {
+			c.finishCodexAgent(st, p.ThreadID, time.Now().UnixMilli())
+			c.emitCodexAgentTree(s)
+			return
+		}
 		if p.Turn.Status == "failed" {
 			if p.Turn.Error.Message == "" {
 				p.Turn.Error.Message = "turn failed"
@@ -421,6 +652,9 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 		st.finishCompact("")
 
 	case "thread/tokenUsage/updated":
+		if !isRootThread {
+			return
+		}
 		used, maxCtx := codexUsageValues(p.TokenUsage)
 		if used == 0 && maxCtx == 0 {
 			used, maxCtx = codexUsageValues(p.Usage)
@@ -435,6 +669,11 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 		st.mu.Unlock()
 
 	case "error":
+		if !isRootThread {
+			c.finishCodexAgent(st, p.ThreadID, time.Now().UnixMilli())
+			c.emitCodexAgentTree(s)
+			return
+		}
 		if !p.WillRetry {
 			msg := p.Error.Message
 			if msg == "" {
@@ -443,6 +682,165 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 			st.finish(msg)
 		}
 	}
+}
+
+func firstPtr(a, b *string, fallback string) string {
+	if a != nil && *a != "" {
+		return *a
+	}
+	if b != nil && *b != "" {
+		return *b
+	}
+	return fallback
+}
+
+func (c *Codex) ensureCodexAgent(s *session.Session, id, parentID, agentType, description string) {
+	if id == "" {
+		return
+	}
+	st := c.state(s.ID)
+	now := time.Now().UnixMilli()
+	st.mu.Lock()
+	a := st.agents[id]
+	if a == nil {
+		a = &codexAgent{id: id, startMS: &now}
+		st.agents[id] = a
+	}
+	if parentID != st.threadID {
+		a.parentID = parentID
+	}
+	if agentType != "" {
+		a.agentType = agentType
+	}
+	if description != "" {
+		a.description = description
+	}
+	st.mu.Unlock()
+	c.mu.Lock()
+	c.threadToSession[id] = s
+	c.mu.Unlock()
+}
+
+func (c *Codex) updateCodexCollabItem(s *session.Session, st *codexState, tool, sender string, receivers []string, prompt, model *string, states map[string]struct {
+	Status  string  `json:"status"`
+	Message *string `json:"message"`
+}, now int64) {
+	desc := firstPtr(prompt, nil, "")
+	kind := firstPtr(model, nil, "subagent")
+	for _, id := range receivers {
+		c.ensureCodexAgent(s, id, sender, kind, desc)
+	}
+	st.mu.Lock()
+	for id, state := range states {
+		a := st.agents[id]
+		if a == nil {
+			a = &codexAgent{id: id, agentType: kind, description: desc, startMS: &now}
+			st.agents[id] = a
+		}
+		if state.Message != nil && *state.Message != "" {
+			a.output = *state.Message
+		}
+		switch state.Status {
+		case "completed", "errored", "interrupted", "shutdown", "notFound":
+			end := now
+			a.endMS = &end
+		}
+	}
+	st.mu.Unlock()
+	if tool == "closeAgent" {
+		for _, id := range receivers {
+			st.mu.Lock()
+			if a := st.agents[id]; a != nil {
+				end := now
+				a.endMS = &end
+			}
+			st.mu.Unlock()
+		}
+	}
+	c.emitCodexAgentTree(s)
+}
+
+func (c *Codex) recordCodexAgentTool(st *codexState, threadID, name string, now int64) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if a := st.agents[threadID]; a != nil && name != "" {
+		ts := now
+		a.tools = append(a.tools, protocol.AgentToolCall{Name: name, TS: &ts})
+	}
+}
+
+func (c *Codex) appendCodexAgentOutput(st *codexState, threadID, delta string) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if a := st.agents[threadID]; a != nil {
+		a.output += delta
+		if len(a.output) > 1000 {
+			a.output = a.output[len(a.output)-1000:]
+		}
+	}
+}
+
+func (c *Codex) finishCodexAgent(st *codexState, threadID string, now int64) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if a := st.agents[threadID]; a != nil {
+		end := now
+		a.endMS = &end
+	}
+}
+
+func (c *Codex) emitCodexAgentTree(s *session.Session) {
+	total, tree := c.BuildAgentTree(s.ResumeID())
+	c.sink.Emit(protocol.NewAgentTree(s.ID, s.ResumeID(), total, tree))
+}
+
+// BuildAgentTree satisfies core.agentTreeBuilder for Codex and uses live
+// app-server lifecycle data instead of parsing Claude transcripts.
+func (c *Codex) BuildAgentTree(resumeID string) (int, []*protocol.AgentNode) {
+	c.mu.Lock()
+	var st *codexState
+	for _, candidate := range c.states {
+		candidate.mu.Lock()
+		match := candidate.threadID == resumeID
+		candidate.mu.Unlock()
+		if match {
+			st = candidate
+			break
+		}
+	}
+	c.mu.Unlock()
+	if st == nil {
+		return 0, []*protocol.AgentNode{}
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	children := map[string][]*codexAgent{}
+	for _, a := range st.agents {
+		children[a.parentID] = append(children[a.parentID], a)
+	}
+	var build func(*codexAgent) *protocol.AgentNode
+	build = func(a *codexAgent) *protocol.AgentNode {
+		n := &protocol.AgentNode{AgentID: a.id, AgentType: firstNonEmpty(a.agentType, "subagent"), Description: a.description, StartTS: a.startMS, EndTS: a.endMS, ToolCalls: append([]protocol.AgentToolCall{}, a.tools...), OutputPreview: a.output, Children: []*protocol.AgentNode{}}
+		if a.parentID != "" && a.parentID != st.threadID {
+			p := a.parentID
+			n.ParentAgentID = &p
+		}
+		if a.startMS != nil && a.endMS != nil {
+			d := *a.endMS - *a.startMS
+			n.DurationMS = &d
+		}
+		for _, child := range children[a.id] {
+			n.Children = append(n.Children, build(child))
+		}
+		return n
+	}
+	roots := []*protocol.AgentNode{}
+	for _, a := range st.agents {
+		if a.parentID == "" || a.parentID == st.threadID {
+			roots = append(roots, build(a))
+		}
+	}
+	return len(st.agents), roots
 }
 
 func (c *Codex) handleServerRequest(id int, method string, raw json.RawMessage) {
@@ -461,11 +859,17 @@ func (c *Codex) handleServerRequest(id int, method string, raw json.RawMessage) 
 		if !c.createUserInputRequest(id, raw) {
 			_ = c.rpc.write(map[string]any{"id": id, "result": map[string]any{"answers": []any{}}})
 		}
+	case method == "mcpServer/elicitation/request":
+		if !c.createMcpElicitationRequest(id, raw) {
+			_ = c.rpc.write(map[string]any{"id": id, "result": map[string]any{"action": "cancel", "content": nil, "_meta": nil}})
+		}
 	case method == "item/tool/call":
-		toolName := c.emitUnsupportedCodexTool(raw)
-		_ = c.rpc.write(map[string]any{"id": id, "error": map[string]any{
-			"code": -32000, "message": "Codex hosted tool '" + toolName + "' is not supported by this bridge",
-		}})
+		if !c.createDynamicToolRequest(id, raw) {
+			toolName := c.emitUnsupportedCodexTool(raw)
+			_ = c.rpc.write(map[string]any{"id": id, "error": map[string]any{"code": -32000, "message": "Codex hosted tool '" + toolName + "' is not supported by this bridge"}})
+		}
+	case method == "currentTime/read":
+		_ = c.rpc.write(map[string]any{"id": id, "result": map[string]any{"currentTimeAt": time.Now().Unix()}})
 	default:
 		_ = c.rpc.write(map[string]any{"id": id, "error": map[string]any{"code": -32601, "message": "unknown method: " + method}})
 	}
@@ -552,6 +956,96 @@ func (c *Codex) createUserInputRequest(rpcID int, raw json.RawMessage) bool {
 	c.interMu.Lock()
 	c.interactions[reqID] = codexInteraction{payload: payload, rpcID: rpcID}
 	c.interMu.Unlock()
+	c.sink.Emit(backend.NewUserInputRequest(payload))
+	return true
+}
+
+func (c *Codex) createMcpElicitationRequest(rpcID int, raw json.RawMessage) bool {
+	var p struct {
+		ThreadID        string         `json:"threadId"`
+		TurnID          string         `json:"turnId"`
+		ServerName      string         `json:"serverName"`
+		Mode            string         `json:"mode"`
+		Message         string         `json:"message"`
+		URL             string         `json:"url"`
+		ElicitationID   string         `json:"elicitationId"`
+		RequestedSchema map[string]any `json:"requestedSchema"`
+	}
+	if json.Unmarshal(raw, &p) != nil {
+		return false
+	}
+	c.mu.Lock()
+	s := c.threadToSession[p.ThreadID]
+	c.mu.Unlock()
+	if s == nil {
+		return false
+	}
+	questions := []backend.UserInputQuestion{}
+	if p.Mode == "url" {
+		questions = append(questions, backend.UserInputQuestion{QuestionID: "action", Text: p.Message + "\n" + p.URL, Header: p.ServerName, Type: "single_select", Options: []backend.UserInputOption{{ID: "accept", Label: "Open / Continue", Recommended: true}, {ID: "decline", Label: "Decline"}}})
+	} else if props, ok := p.RequestedSchema["properties"].(map[string]any); ok {
+		required := map[string]bool{}
+		if list, ok := p.RequestedSchema["required"].([]any); ok {
+			for _, v := range list {
+				required[codexAnyString(v)] = true
+			}
+		}
+		for key, value := range props {
+			schema, _ := value.(map[string]any)
+			text := firstNonEmpty(codexFirstString(schema, "title", "description"), key)
+			q := backend.UserInputQuestion{QuestionID: key, Text: text, Header: p.ServerName, Type: "text", FreeForm: true}
+			if enum, ok := schema["enum"].([]any); ok && len(enum) > 0 {
+				q.FreeForm = false
+				q.Type = "single_select"
+				for _, v := range enum {
+					id := codexAnyString(v)
+					q.Options = append(q.Options, backend.UserInputOption{ID: id, Label: id})
+				}
+			}
+			_ = required
+			questions = append(questions, q)
+		}
+	}
+	if len(questions) == 0 {
+		questions = []backend.UserInputQuestion{{QuestionID: "response", Text: firstNonEmpty(p.Message, "MCP server requests input"), Header: p.ServerName, Type: "text", FreeForm: true}}
+	}
+	reqID := "mcp_" + randHex(12)
+	payload := backend.UserInputPayload{RequestID: reqID, SessionID: s.ID, Source: "codex", Kind: "mcp_" + p.Mode, Header: firstNonEmpty(p.ServerName, "MCP request"), ToolUseID: p.ElicitationID, RequestingAgent: p.ServerName, Questions: questions, CreatedAt: time.Now().UnixMilli(), Status: "pending"}
+	c.interMu.Lock()
+	c.interactions[reqID] = codexInteraction{payload: payload, rpcID: rpcID, responseKind: "mcp"}
+	c.interMu.Unlock()
+	c.sink.Emit(backend.NewUserInputRequest(payload))
+	return true
+}
+
+func (c *Codex) createDynamicToolRequest(rpcID int, raw json.RawMessage) bool {
+	var p struct {
+		ThreadID  string  `json:"threadId"`
+		TurnID    string  `json:"turnId"`
+		CallID    string  `json:"callId"`
+		Tool      string  `json:"tool"`
+		Namespace *string `json:"namespace"`
+		Arguments any     `json:"arguments"`
+	}
+	if json.Unmarshal(raw, &p) != nil {
+		return false
+	}
+	c.mu.Lock()
+	s := c.threadToSession[p.ThreadID]
+	c.mu.Unlock()
+	if s == nil {
+		return false
+	}
+	name := p.Tool
+	if p.Namespace != nil && *p.Namespace != "" {
+		name = *p.Namespace + "/" + name
+	}
+	reqID := "tool_" + randHex(12)
+	payload := backend.UserInputPayload{RequestID: reqID, SessionID: s.ID, Source: "codex", Kind: "dynamic_tool", Header: "Tool input: " + name, ToolUseID: p.CallID, RequestingAgent: name, Questions: []backend.UserInputQuestion{{QuestionID: "result", Text: "Provide the tool result (arguments: " + codexJSON(p.Arguments) + ")", Header: name, Type: "text", FreeForm: true}}, CreatedAt: time.Now().UnixMilli(), Status: "pending"}
+	c.interMu.Lock()
+	c.interactions[reqID] = codexInteraction{payload: payload, rpcID: rpcID, responseKind: "dynamic_tool", reqID: c.state(s.ID).reqID}
+	c.interMu.Unlock()
+	c.tools.Start(s.ID, c.state(s.ID).reqID, p.CallID, name, codexJSON(p.Arguments))
 	c.sink.Emit(backend.NewUserInputRequest(payload))
 	return true
 }
@@ -717,6 +1211,9 @@ func (c *Codex) Send(ctx context.Context, s *session.Session, reqID, content str
 	st.turnDone = make(chan struct{})
 	st.accumulatedText = ""
 	st.askExtracted = false
+	st.currentTurnID = ""
+	st.lastEventAt = time.Now()
+	st.stallWarned = false
 	threadID := st.threadID
 	done := st.turnDone
 	st.mu.Unlock()
@@ -732,11 +1229,56 @@ func (c *Codex) runTurn(s *session.Session, st *codexState, threadID string, inp
 		st.finish("turn/start failed: " + err.Error())
 	}
 
-	select {
-	case <-done:
-	case <-time.After(6000 * time.Second):
-		st.finish("Codex turn timed out")
-		<-done
+	timeout := time.NewTimer(c.turnTimeout)
+	defer timeout.Stop()
+	stallTicker := time.NewTicker(c.stallCheckEvery)
+	defer stallTicker.Stop()
+
+	waiting := true
+	for waiting {
+		select {
+		case <-done:
+			waiting = false
+		case <-timeout.C:
+			// A request_user_input / MCP elicitation is an explicit hand-off to a
+			// human. Human think time must not consume the turn deadline: the app
+			// may be backgrounded or disconnected for hours and will recover the
+			// pending interaction when it reconnects. Re-arm the full execution
+			// window while any interaction for this session remains unresolved.
+			// Once the user answers (or explicitly cancels), the next deadline is
+			// again an ordinary execution deadline.
+			if c.deferTurnDeadlineForInput(s.ID, timeout) {
+				continue
+			}
+			c.interruptCodexTurn(st)
+			st.finish("Codex turn timed out")
+			<-done
+			waiting = false
+		case now := <-stallTicker.C:
+			st.mu.Lock()
+			lastEventAt := st.lastEventAt
+			warned := st.stallWarned
+			st.mu.Unlock()
+			action := codexLivenessActionAt(
+				now, lastEventAt, warned, c.hasPendingInteraction(s.ID),
+				c.stallWarnAfter, c.stallAbortAfter,
+			)
+			switch action {
+			case codexLivenessWarn:
+				st.mu.Lock()
+				st.stallWarned = true
+				st.mu.Unlock()
+				c.sink.Emit(backend.NewSessionWarning(s.ID, fmt.Sprintf(
+					"Codex has produced no events for %s; it is still running and will be interrupted after %s of inactivity.",
+					c.stallWarnAfter.Round(time.Second), c.stallAbortAfter.Round(time.Second),
+				)))
+			case codexLivenessAbort:
+				c.interruptCodexTurn(st)
+				st.finish(fmt.Sprintf("Codex turn stalled for %s and was interrupted", c.stallAbortAfter.Round(time.Second)))
+				<-done
+				waiting = false
+			}
+		}
 	}
 
 	st.mu.Lock()
@@ -759,6 +1301,59 @@ func (c *Codex) runTurn(s *session.Session, st *codexState, threadID string, inp
 		if c.shouldAutoCompact(st) {
 			go c.runAutoCompact(s, st)
 		}
+	}
+}
+
+func (c *Codex) deferTurnDeadlineForInput(sessionID string, timer *time.Timer) bool {
+	if !c.hasPendingInteraction(sessionID) {
+		return false
+	}
+	timer.Reset(c.turnTimeout)
+	return true
+}
+
+type codexLivenessAction uint8
+
+const (
+	codexLivenessNone codexLivenessAction = iota
+	codexLivenessWarn
+	codexLivenessAbort
+)
+
+func codexLivenessActionAt(now, lastEventAt time.Time, warned, waitingForInput bool, warnAfter, abortAfter time.Duration) codexLivenessAction {
+	if waitingForInput || lastEventAt.IsZero() {
+		return codexLivenessNone
+	}
+	idle := now.Sub(lastEventAt)
+	if abortAfter > 0 && idle >= abortAfter {
+		return codexLivenessAbort
+	}
+	if !warned && warnAfter > 0 && idle >= warnAfter {
+		return codexLivenessWarn
+	}
+	return codexLivenessNone
+}
+
+func (c *Codex) hasPendingInteraction(sessionID string) bool {
+	c.interMu.Lock()
+	defer c.interMu.Unlock()
+	for _, interaction := range c.interactions {
+		if interaction.payload.SessionID == sessionID {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Codex) interruptCodexTurn(st *codexState) {
+	st.mu.Lock()
+	threadID, turnID := st.threadID, st.currentTurnID
+	st.mu.Unlock()
+	if threadID == "" || turnID == "" {
+		return
+	}
+	if _, err := c.rpcCall("turn/interrupt", map[string]any{"threadId": threadID, "turnId": turnID}, 5*time.Second); err != nil {
+		log.Printf("[codex] turn interrupt failed thread=%s turn=%s: %v", threadID, turnID, err)
 	}
 }
 
@@ -973,8 +1568,8 @@ func (c *Codex) shouldAutoCompact(st *codexState) bool {
 }
 
 func (c *Codex) startTurnWithStaleRetry(s *session.Session, st *codexState, threadID string, input []map[string]any) error {
-	effort := s.Snapshot().Effort
-	err := c.startTurn(threadID, input, effort)
+	snap := s.Snapshot()
+	err := c.startTurn(threadID, input, snap)
 	if err == nil || !isStaleThreadError(err) {
 		return err
 	}
@@ -987,7 +1582,7 @@ func (c *Codex) startTurnWithStaleRetry(s *session.Session, st *codexState, thre
 	st.mu.Lock()
 	newThreadID := st.threadID
 	st.mu.Unlock()
-	return c.startTurn(newThreadID, input, effort)
+	return c.startTurn(newThreadID, input, snap)
 }
 
 func codexTurnParams(threadID string, input []map[string]any, effort string) map[string]any {
@@ -1003,9 +1598,33 @@ func codexTurnParams(threadID string, input []map[string]any, effort string) map
 	return params
 }
 
-func (c *Codex) startTurn(threadID string, input []map[string]any, effort string) error {
-	_, err := c.rpcCall("turn/start", codexTurnParams(threadID, input, effort), 30*time.Second)
+func (c *Codex) codexTurnParamsForSession(threadID string, input []map[string]any, snap session.Snapshot) map[string]any {
+	params := codexTurnParams(threadID, input, snap.Effort)
+	if snap.ServiceTier != "" {
+		params["serviceTier"] = snap.ServiceTier
+	}
+	if snap.Personality != "" {
+		params["personality"] = snap.Personality
+	}
+	if snap.CollaborationMode != "" {
+		params["collaborationMode"] = c.collaborationModeValue(snap)
+	}
+	return params
+}
+
+func (c *Codex) startTurn(threadID string, input []map[string]any, snap session.Snapshot) error {
+	_, err := c.rpcCall("turn/start", c.codexTurnParamsForSession(threadID, input, snap), 30*time.Second)
 	return err
+}
+
+func (c *Codex) collaborationModeValue(snap session.Snapshot) map[string]any {
+	c.catalogMu.RLock()
+	mode := c.collaborationModes[strings.ToLower(snap.CollaborationMode)]
+	c.catalogMu.RUnlock()
+	if mode != nil {
+		return mode
+	}
+	return map[string]any{"mode": strings.ToLower(snap.CollaborationMode), "settings": map[string]any{"model": snap.Model, "reasoning_effort": nil, "developer_instructions": nil}}
 }
 
 func (c *Codex) forgetThread(st *codexState, threadID string) {
@@ -1076,6 +1695,18 @@ func (c *Codex) ensureThread(s *session.Session, st *codexState) error {
 		raw, err := c.rpcCall("thread/start", map[string]any{
 			"model": model, "cwd": cwd, "ephemeral": false,
 			"approvalPolicy": "never", "sandbox": sandbox,
+			"serviceTier": func() any {
+				if snap.ServiceTier == "" {
+					return nil
+				}
+				return snap.ServiceTier
+			}(),
+			"personality": func() any {
+				if snap.Personality == "" {
+					return nil
+				}
+				return snap.Personality
+			}(),
 		}, 15*time.Second)
 		if err != nil {
 			return err
@@ -1097,6 +1728,32 @@ func (c *Codex) ensureThread(s *session.Session, st *codexState) error {
 	c.sink.Emit(backend.NewSessionUUID(s.ID, threadID))
 	log.Printf("[codex] session=%s thread=%s", s.ID, threadID)
 	return nil
+}
+
+func (c *Codex) UpdateSessionSettings(ctx context.Context, s *session.Session) error {
+	st := c.state(s.ID)
+	st.mu.Lock()
+	threadID := st.threadID
+	st.mu.Unlock()
+	if threadID == "" {
+		return nil
+	}
+	snap := s.Snapshot()
+	params := map[string]any{"threadId": threadID, "model": snap.Model, "serviceTier": nil, "personality": nil}
+	if snap.ServiceTier != "" {
+		params["serviceTier"] = snap.ServiceTier
+	}
+	if snap.Personality != "" {
+		params["personality"] = snap.Personality
+	}
+	if snap.Effort != "" {
+		params["effort"] = snap.Effort
+	}
+	if snap.CollaborationMode != "" {
+		params["collaborationMode"] = c.collaborationModeValue(snap)
+	}
+	_, err := c.rpcCall("thread/settings/update", params, 15*time.Second)
+	return err
 }
 
 func (c *Codex) Stop(ctx context.Context, s *session.Session) error {
@@ -1174,13 +1831,28 @@ func (c *Codex) RespondUserInput(id string, answers map[string]any, cancelled bo
 		answers = map[string]any{}
 	}
 	if ci.rpcID != 0 {
-		_ = c.rpc.write(map[string]any{
-			"id": ci.rpcID,
-			"result": map[string]any{
-				"answers":   answers,
-				"cancelled": cancelled,
-			},
-		})
+		var result any
+		switch ci.responseKind {
+		case "mcp":
+			action := "accept"
+			if cancelled {
+				action = "cancel"
+			} else if v := codexAnyString(answers["action"]); v == "decline" {
+				action = "decline"
+			}
+			content := any(answers)
+			if action != "accept" {
+				content = nil
+			}
+			result = map[string]any{"action": action, "content": content, "_meta": nil}
+		case "dynamic_tool":
+			text := codexAnyString(answers["result"])
+			result = map[string]any{"contentItems": []any{map[string]any{"type": "inputText", "text": text}}, "success": !cancelled}
+			c.tools.ResultEnd(ci.payload.SessionID, ci.reqID, ci.payload.ToolUseID, text)
+		default:
+			result = map[string]any{"answers": answers, "cancelled": cancelled}
+		}
+		_ = c.rpc.write(map[string]any{"id": ci.rpcID, "result": result})
 	}
 	status := "resolved"
 	if cancelled {

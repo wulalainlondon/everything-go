@@ -22,8 +22,29 @@ const (
 
 // Model describes one selectable model for a backend.
 type Model struct {
-	ID    string
-	Label string
+	ID                        string
+	Label                     string
+	Description               string
+	SupportedReasoningEfforts []string
+	DefaultReasoningEffort    string
+	InputModalities           []string
+	SupportsPersonality       bool
+	ServiceTiers              []ServiceTier
+	DefaultServiceTier        string
+	IsDefault                 bool
+}
+
+type ServiceTier struct {
+	ID          string
+	Name        string
+	Description string
+}
+
+type CollaborationMode struct {
+	Name            string
+	Mode            string
+	Model           string
+	ReasoningEffort string
 }
 
 // Capabilities declares what the core and app may ask this backend to do.
@@ -43,11 +64,19 @@ type Capabilities struct {
 // neutral source of truth; clientproto adapters translate it to their wire
 // representation.
 type Definition struct {
-	ID           string
-	Label        string
-	DefaultModel string
-	Models       []Model
-	Capabilities Capabilities
+	ID                 string
+	Label              string
+	DefaultModel       string
+	Models             []Model
+	Capabilities       Capabilities
+	CollaborationModes []CollaborationMode
+}
+
+// CatalogProvider returns the runtime model catalog exposed by a backend.
+// Implementations may start their local protocol server, so callers should use
+// it off the connection read loop and retain the static registry as fallback.
+type CatalogProvider interface {
+	Catalog(context.Context) (Definition, error)
 }
 
 // ImageAttachment is an image attached to a user message. Data is raw base64;

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"time"
 
 	"everything-go/internal/backend"
 	"everything-go/internal/clientproto"
@@ -47,6 +48,9 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 			TunnelURL: tunnelURL,
 			Backends:  h.cfg.Backends,
 		}))
+		// Runtime catalogs require app-server initialization. Refresh them after
+		// the cheap hello response so reconnection latency is unaffected.
+		go h.sendBackendCatalog(c)
 		// Proactively push the session list, then recover any events buffered
 		// while this (or the previous) client was offline — same ordering as the
 		// Python bridge so the app reconciles before replayed events arrive.
@@ -89,6 +93,9 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 	case "request_sessions_list":
 		c.enqueueEvent(h.client.SessionsList(h.sessionSummaries()))
 
+	case "request_backend_catalog":
+		go h.sendBackendCatalog(c)
+
 	case "request_goals_snapshot":
 		c.enqueueEvent(h.goals.Snapshot())
 
@@ -108,6 +115,10 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		// consistent — the app sends a literal "~" as the default cwd.
 		cwd := runtime.ExpandPath(cmd.Cwd)
 		s := h.registry.Create(cmd.SessionID, cmd.Name, cwd, cmd.Backend, cmd.Model, cmd.Sandbox, cmd.ResumeClaudeID)
+		if cmd.EffortSet {
+			s.SetEffort(cmd.Effort)
+		}
+		s.ApplyCodexSettings(cmd.ServiceTier, cmd.CollaborationMode, cmd.Personality)
 		snap := s.Snapshot()
 		c.enqueueEvent(h.client.SessionCreated(clientproto.SessionCreatedInput{
 			ID: snap.ID, Name: snap.Name, CreatedAt: snap.CreatedAt, Cwd: snap.Cwd,
@@ -246,6 +257,15 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 	case "switch_session_config":
 		if s, ok := h.registry.Get(cmd.SessionID); ok {
 			s.ApplyConfig(cmd.Backend, cmd.Model, cmd.Sandbox)
+			if cmd.EffortSet {
+				s.SetEffort(cmd.Effort)
+			}
+			s.ApplyCodexSettings(cmd.ServiceTier, cmd.CollaborationMode, cmd.Personality)
+			if updater, ok := h.exec.(interface {
+				UpdateSessionSettings(context.Context, *session.Session) error
+			}); ok && s.Backend() == backend.Codex {
+				go func() { _ = updater.UpdateSessionSettings(context.Background(), s) }()
+			}
 			go h.registry.Persist()
 		}
 
@@ -516,10 +536,15 @@ func (h *Hub) sendHistory(c *Client, s *session.Session, cmd clientproto.Command
 	}
 	// Coalesce + cache identical history requests so a reconnect burst triggers
 	// LoadHistory (JSONL parse) at most once per key within the TTL (#4/#5).
-	key := c.deviceID + "|" + s.ID + "|" + resumeID + "|" + cmd.Mode + "|" + cmd.Before + "|" + cmd.KnownLast + "|" + itoa(cmd.Limit)
+	thinkFlag := "0"
+	if cmd.IncludeThinking {
+		thinkFlag = "1"
+	}
+	key := c.deviceID + "|" + s.ID + "|" + resumeID + "|" + cmd.Mode + "|" + cmd.Before + "|" + cmd.KnownLast + "|" + itoa(cmd.Limit) + "|" + thinkFlag
 	v := h.coalesce(&h.storm.histSF, h.storm.histCache, key, historyCacheTTL, func() any {
 		res, err := provider.LoadHistory(resumeID, history.Opts{
 			Limit: cmd.Limit, KnownLast: cmd.KnownLast, Mode: cmd.Mode, Before: cmd.Before,
+			IncludeThinking: cmd.IncludeThinking,
 		})
 		if err != nil {
 			return nil
@@ -602,12 +627,25 @@ func (h *Hub) sessionSummaries() []protocol.SessionSummary {
 		out = append(out, protocol.SessionSummary{
 			ID: snap.ID, Name: snap.Name, IsStreaming: snap.Streaming,
 			CreatedAt: snap.CreatedAt, LastActivity: lastActivity,
-			Cwd: snap.Cwd, Model: snap.Model, Backend: snap.Backend,
+			Cwd: snap.Cwd, Model: snap.Model, Effort: snap.Effort, Backend: snap.Backend,
+			ServiceTier: snap.ServiceTier, CollaborationMode: snap.CollaborationMode, Personality: snap.Personality,
 			Sandbox: snap.Sandbox, Pinned: snap.Pinned, Hidden: snap.Hidden,
 			RecentMessages: recent,
 		})
 	}
 	return out
+}
+
+func (h *Hub) sendBackendCatalog(c *Client) {
+	defs := h.cfg.Backends
+	if cp, ok := h.exec.(interface {
+		CatalogDefinitions(context.Context, []backend.Definition) []backend.Definition
+	}); ok {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		defs = cp.CatalogDefinitions(ctx, defs)
+	}
+	c.enqueueEvent(h.client.BackendRegistryUpdated(defs))
 }
 
 // enqueueEvent marshals + enqueues a reply to this specific client.

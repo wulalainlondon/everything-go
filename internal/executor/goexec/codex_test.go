@@ -15,6 +15,7 @@ import (
 
 	"everything-go/internal/backend"
 	"everything-go/internal/history"
+	"everything-go/internal/protocol"
 	"everything-go/internal/session"
 )
 
@@ -26,6 +27,122 @@ func (w *rpcCaptureWriter) Write(p []byte) (int, error) {
 	copyOfP := append([]byte(nil), p...)
 	w.writes <- copyOfP
 	return len(p), nil
+}
+
+func TestCodexMultiAgentLifecycleBuildsLiveTreeWithoutFinishingRootTurn(t *testing.T) {
+	sink := &capSink{}
+	c := NewCodex(sink, "codex")
+	reg := session.NewRegistry()
+	s := reg.Create("s1", "codex", "/tmp", "codex", "gpt-5.6-sol", "", "")
+	st := c.state(s.ID)
+	st.threadID = "root"
+	st.turnActive = true
+	st.turnDone = make(chan struct{})
+	c.threadToSession["root"] = s
+	s.SetResumeID("root")
+	c.dispatch(json.RawMessage(`{"method":"item/started","params":{"threadId":"root","turnId":"t1","item":{"type":"collabAgentToolCall","id":"i1","tool":"spawnAgent","status":"inProgress","senderThreadId":"root","receiverThreadIds":["child"],"prompt":"inspect tests","model":"gpt-5.6-sol","agentsStates":{"child":{"status":"running","message":null}}}}}`))
+	c.dispatch(json.RawMessage(`{"method":"thread/started","params":{"thread":{"id":"child","parentThreadId":"root","agentNickname":"Scout","agentRole":"explorer"}}}`))
+	c.dispatch(json.RawMessage(`{"method":"item/agentMessage/delta","params":{"threadId":"child","turnId":"ct","itemId":"m","delta":"found it","phase":"final"}}`))
+	c.dispatch(json.RawMessage(`{"method":"turn/completed","params":{"threadId":"child","turn":{"id":"ct","status":"completed"}}}`))
+	st.mu.Lock()
+	active := st.turnActive
+	st.mu.Unlock()
+	if !active {
+		t.Fatal("child completion finished root turn")
+	}
+	total, tree := c.BuildAgentTree("root")
+	if total != 1 || len(tree) != 1 || tree[0].AgentID != "child" || tree[0].EndTS == nil || !strings.Contains(tree[0].OutputPreview, "found it") {
+		t.Fatalf("bad tree total=%d tree=%+v", total, tree)
+	}
+	if sink.count(func(e any) bool { _, ok := e.(protocol.TextChunk); return ok }) != 0 {
+		t.Fatal("child output leaked into root assistant text")
+	}
+}
+
+func TestCodexRootTurnCompletionFinishesTheOwningSession(t *testing.T) {
+	sink := &capSink{}
+	c := NewCodex(sink, "codex")
+	reg := session.NewRegistry()
+	s := reg.Create("s1", "codex", "/tmp", "codex", "gpt-5.6-sol", "", "")
+	st := c.state(s.ID)
+	st.threadID = "root"
+	st.turnActive = true
+	st.turnDone = make(chan struct{})
+	c.threadToSession["root"] = s
+
+	c.dispatch(json.RawMessage(`{"method":"turn/completed","params":{"threadId":"root","turn":{"id":"t1","status":"completed"}}}`))
+
+	select {
+	case <-st.turnDone:
+	case <-time.After(time.Second):
+		t.Fatal("root turn/completed did not release the owning session")
+	}
+	st.mu.Lock()
+	active, turnErr := st.turnActive, st.turnErr
+	st.mu.Unlock()
+	if active || turnErr != "" {
+		t.Fatalf("root completion left stale state active=%v err=%q", active, turnErr)
+	}
+}
+
+func TestCodexMcpAndDynamicToolElicitationsReturnProtocolResponses(t *testing.T) {
+	sink := &capSink{}
+	c := NewCodex(sink, "codex")
+	reg := session.NewRegistry()
+	s := reg.Create("s1", "codex", "/tmp", "codex", "", "", "")
+	st := c.state(s.ID)
+	st.threadID = "root"
+	st.reqID = "r1"
+	c.threadToSession["root"] = s
+	w := &captureWriter{}
+	c.rpc.setWriter(w)
+	c.handleServerRequest(7, "mcpServer/elicitation/request", json.RawMessage(`{"threadId":"root","turnId":"t","serverName":"github","mode":"url","message":"Authorize","url":"https://example.test/auth","elicitationId":"e1"}`))
+	if got := c.PendingInteractions("s1"); len(got) != 1 || got[0].Kind != "mcp_url" || !strings.Contains(got[0].Questions[0].Text, "https://example.test/auth") {
+		t.Fatalf("bad MCP interaction: %+v", got)
+	}
+	if !c.RespondUserInput("e1", map[string]any{"action": "accept"}, false) {
+		t.Fatal("MCP response not matched")
+	}
+	var mcpReply map[string]any
+	if json.Unmarshal(bytes.TrimSpace(w.Bytes()), &mcpReply) != nil || mcpReply["id"].(float64) != 7 {
+		t.Fatalf("bad MCP reply %s", w.String())
+	}
+	w.Reset()
+	c.handleServerRequest(8, "item/tool/call", json.RawMessage(`{"threadId":"root","turnId":"t","callId":"call1","namespace":"custom","tool":"lookup","arguments":{"q":"x"}}`))
+	if !c.RespondUserInput("call1", map[string]any{"result": "ok"}, false) {
+		t.Fatal("dynamic tool response not matched")
+	}
+	var toolReply struct {
+		ID     int `json:"id"`
+		Result struct {
+			Success bool `json:"success"`
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"contentItems"`
+		} `json:"result"`
+	}
+	if json.Unmarshal(bytes.TrimSpace(w.Bytes()), &toolReply) != nil || toolReply.ID != 8 || !toolReply.Result.Success || len(toolReply.Result.Content) != 1 || toolReply.Result.Content[0].Text != "ok" {
+		t.Fatalf("bad tool reply %s", w.String())
+	}
+}
+
+func TestCodexLiveDiffNotificationIsForwarded(t *testing.T) {
+	sink := &capSink{}
+	c := NewCodex(sink, "codex")
+	reg := session.NewRegistry()
+	s := reg.Create("s1", "codex", "/tmp", "codex", "", "", "")
+	st := c.state(s.ID)
+	st.threadID = "root"
+	st.reqID = "r1"
+	c.threadToSession["root"] = s
+	c.dispatch(json.RawMessage(`{"method":"turn/diff/updated","params":{"threadId":"root","turnId":"t","diff":"--- a/x\n+++ b/x"}}`))
+	if sink.count(func(e any) bool {
+		d, ok := e.(protocol.CodexLiveDiff)
+		return ok && strings.Contains(d.Diff, "+++ b/x")
+	}) != 1 {
+		t.Fatalf("missing live diff: %+v", sink.events)
+	}
 }
 
 func TestCodexPostTurnGoalReconcileEmitsLatestState(t *testing.T) {
@@ -139,6 +256,80 @@ func TestCodexDetectsStaleThreadErrors(t *testing.T) {
 	}
 	if isStaleThreadError(errors.New("permission denied")) {
 		t.Fatal("unrelated errors must not be treated as stale thread")
+	}
+}
+
+func TestCodexTurnLivenessPolicy(t *testing.T) {
+	now := time.Unix(10_000, 0)
+	warnAfter := 5 * time.Minute
+	abortAfter := 30 * time.Minute
+	tests := []struct {
+		name            string
+		last            time.Time
+		warned          bool
+		waitingForInput bool
+		want            codexLivenessAction
+	}{
+		{name: "recent activity", last: now.Add(-time.Minute), want: codexLivenessNone},
+		{name: "warn once", last: now.Add(-6 * time.Minute), want: codexLivenessWarn},
+		{name: "do not repeat warning", last: now.Add(-6 * time.Minute), warned: true, want: codexLivenessNone},
+		{name: "abort", last: now.Add(-31 * time.Minute), warned: true, want: codexLivenessAbort},
+		{name: "user input may wait indefinitely", last: now.Add(-time.Hour), waitingForInput: true, want: codexLivenessNone},
+		{name: "uninitialized", want: codexLivenessNone},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := codexLivenessActionAt(now, tc.last, tc.warned, tc.waitingForInput, warnAfter, abortAfter)
+			if got != tc.want {
+				t.Fatalf("action=%v want=%v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCodexTurnDeadlineWaitsIndefinitelyForUserInput(t *testing.T) {
+	c := NewCodex(&capSink{}, "codex")
+	c.turnTimeout = 20 * time.Millisecond
+	c.interactions["ui_1"] = codexInteraction{payload: backend.UserInputPayload{
+		RequestID: "ui_1",
+		SessionID: "s1",
+		Status:    "pending",
+	}}
+
+	// Model the runTurn deadline branch: the timer has fired, but a pending
+	// interaction must re-arm it instead of allowing the turn to be aborted.
+	timer := time.NewTimer(time.Millisecond)
+	<-timer.C
+	if !c.deferTurnDeadlineForInput("s1", timer) {
+		t.Fatal("pending user input should defer the turn deadline")
+	}
+	select {
+	case <-timer.C:
+		// Re-arming is the expected behavior. Repeating this branch for as long
+		// as the interaction stays pending makes the wait unbounded.
+	case <-time.After(time.Second):
+		t.Fatal("deferred turn deadline was not re-armed")
+	}
+	if !c.deferTurnDeadlineForInput("s1", timer) {
+		t.Fatal("unanswered input should continue deferring every deadline")
+	}
+
+	c.interMu.Lock()
+	delete(c.interactions, "ui_1")
+	c.interMu.Unlock()
+	if c.deferTurnDeadlineForInput("s1", timer) {
+		t.Fatal("resolved input must restore the ordinary turn deadline")
+	}
+	timer.Stop()
+}
+
+func TestCodexStateActivityResetsStallWarning(t *testing.T) {
+	st := newCodexState()
+	st.stallWarned = true
+	now := time.Unix(123, 0)
+	st.touch(now)
+	if !st.lastEventAt.Equal(now) || st.stallWarned {
+		t.Fatalf("touch did not reset liveness state: %+v", st)
 	}
 }
 

@@ -30,6 +30,8 @@ type (
 	UserInputPayload      = protocol.UserInputRequestPayload
 	UserInputRequest      = protocol.UserInputRequestEvent
 	InteractionResolved   = protocol.InteractionResolved
+	SessionInitInfo       = protocol.SessionInitInfo
+	MCPServerStatus       = protocol.MCPServerStatus
 )
 
 // UsageWindow is one quota window reported by a backend. Utilization is a
@@ -128,6 +130,10 @@ func NewError(sessionID, reqID, code, message string) Error {
 
 func NewSessionUUID(sessionID, resumeID string) SessionUUID {
 	return protocol.NewSessionUUID(sessionID, resumeID)
+}
+
+func NewSessionInitInfo(sessionID, model, permissionMode string, tools, slashCommands []string, mcpServers []MCPServerStatus) SessionInitInfo {
+	return protocol.NewSessionInitInfo(sessionID, model, permissionMode, tools, slashCommands, mcpServers)
 }
 
 func NewSessionWarning(sessionID, message string) SessionWarning {

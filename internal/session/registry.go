@@ -31,15 +31,18 @@ type Session struct {
 	ID        string
 	CreatedAt float64 // unix seconds (matches Python time.time())
 
-	name     string
-	cwd      string
-	backend  string
-	model    string
-	sandbox  string
-	effort   string
-	resumeID string // AI-runtime conversation handle (Claude UUID / Codex thread id)
-	pinned   bool
-	hidden   bool
+	name              string
+	cwd               string
+	backend           string
+	model             string
+	sandbox           string
+	effort            string
+	serviceTier       string
+	collaborationMode string
+	personality       string
+	resumeID          string // AI-runtime conversation handle (Claude UUID / Codex thread id)
+	pinned            bool
+	hidden            bool
 
 	lastActivity float64
 	contextUsed  int
@@ -60,22 +63,25 @@ type Session struct {
 // Snapshot is an immutable, lock-free copy of a session's fields for callers
 // that need several at once (summaries, task listings, spawn argument building).
 type Snapshot struct {
-	ID           string
-	Name         string
-	Cwd          string
-	Backend      string
-	Model        string
-	Sandbox      string
-	Effort       string
-	ResumeID     string
-	CreatedAt    float64
-	LastActivity float64
-	ContextUsed  int
-	ContextMax   int
-	Pinned       bool
-	Hidden       bool
-	Streaming    bool
-	State        State
+	ID                string
+	Name              string
+	Cwd               string
+	Backend           string
+	Model             string
+	Sandbox           string
+	Effort            string
+	ServiceTier       string
+	CollaborationMode string
+	Personality       string
+	ResumeID          string
+	CreatedAt         float64
+	LastActivity      float64
+	ContextUsed       int
+	ContextMax        int
+	Pinned            bool
+	Hidden            bool
+	Streaming         bool
+	State             State
 }
 
 func nowSeconds() float64 { return float64(time.Now().UnixNano()) / 1e9 }
@@ -91,6 +97,7 @@ func (s *Session) snapshotLocked() Snapshot {
 	return Snapshot{
 		ID: s.ID, Name: s.name, Cwd: s.cwd, Backend: s.backend,
 		Model: s.model, Sandbox: s.sandbox, Effort: s.effort, ResumeID: s.resumeID,
+		ServiceTier: s.serviceTier, CollaborationMode: s.collaborationMode, Personality: s.personality,
 		CreatedAt: s.CreatedAt, LastActivity: s.lastActivity,
 		ContextUsed: s.contextUsed, ContextMax: s.contextMax,
 		Pinned: s.pinned, Hidden: s.hidden,
@@ -126,6 +133,23 @@ func (s *Session) SetName(name string) {
 func (s *Session) SetEffort(effort string) {
 	s.mu.Lock()
 	s.effort = effort
+	s.mu.Unlock()
+}
+
+// ApplyCodexSettings stores app-server thread settings. Empty values are
+// meaningful for service tier/personality/mode (they clear an override), so
+// callers pass pointers to distinguish omission from clearing.
+func (s *Session) ApplyCodexSettings(serviceTier, collaborationMode, personality *string) {
+	s.mu.Lock()
+	if serviceTier != nil {
+		s.serviceTier = *serviceTier
+	}
+	if collaborationMode != nil {
+		s.collaborationMode = *collaborationMode
+	}
+	if personality != nil {
+		s.personality = *personality
+	}
 	s.mu.Unlock()
 }
 
@@ -218,6 +242,8 @@ func (r *Registry) AttachStore(store *Store) {
 			ID: id, CreatedAt: created,
 			name: e.Name, cwd: e.Cwd, backend: e.Backend,
 			model: e.Model, sandbox: e.Sandbox, resumeID: resume,
+			effort:      e.Effort,
+			serviceTier: e.ServiceTier, collaborationMode: e.CollaborationMode, personality: e.Personality,
 			pinned: e.Pinned, hidden: e.Hidden,
 			lastActivity: float64(e.LastUsed),
 			state:        Idle,

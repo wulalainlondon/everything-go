@@ -84,6 +84,54 @@ func TestOfflineBufferMergesTextChunks(t *testing.T) {
 	}
 }
 
+func TestOfflineBufferMergesInterleavedTextAndThinkingChunks(t *testing.T) {
+	b := NewOfflineBuffer()
+	b.Append(protocol.NewTextChunk("s1", "r1", "Hello "))
+	b.Append(protocol.NewToolStart("s1", "r1", "t1", "Bash", "sleep 1"))
+	b.Append(protocol.NewThinkingChunk("s1", "r1", "first "))
+	b.Append(protocol.NewTextChunk("s1", "r1", "world"))
+	b.Append(protocol.NewThinkingChunk("s1", "r1", "second"))
+	got := b.Drain()
+	if len(got) != 3 {
+		t.Fatalf("want tool + merged text + merged thinking, got %d: %#v", len(got), got)
+	}
+	if text, ok := got[1].(protocol.TextChunk); !ok || text.Content != "Hello world" {
+		t.Fatalf("merged text = %#v", got[1])
+	}
+	if thinking, ok := got[2].(protocol.ThinkingChunk); !ok || thinking.Content != "first second" {
+		t.Fatalf("merged thinking = %#v", got[2])
+	}
+}
+
+func TestOfflineBufferCoalescesToolResultsAndDropsCompletedTool(t *testing.T) {
+	b := NewOfflineBuffer()
+	b.Append(protocol.NewToolStart("s1", "r1", "t1", "Bash", "long command"))
+	b.Append(protocol.NewToolResult("s1", "r1", "t1", "first"))
+	b.Append(protocol.NewToolResult("s1", "r1", "t1", "first\nsecond"))
+	if got := b.Peek(10); len(got) != 2 {
+		t.Fatalf("running tool should retain start + latest result, got %d: %#v", len(got), got)
+	}
+	b.Append(protocol.NewToolEnd("s1", "r1", "t1"))
+	if b.Len() != 0 {
+		t.Fatalf("completed tool transport events should be recoverable from history, got %#v", b.Drain())
+	}
+}
+
+func TestOfflineBufferKeepsOnlyLatestTodoAndUsageSnapshots(t *testing.T) {
+	b := NewOfflineBuffer()
+	b.Append(protocol.NewTodoUpdate("s1", "r1", []protocol.TodoItem{{Content: "old"}}))
+	b.Append(protocol.NewTodoUpdate("s1", "r1", []protocol.TodoItem{{Content: "new"}}))
+	b.Append(protocol.NewUsageReport(nil, nil, nil))
+	b.Append(protocol.NewUsageReport(&protocol.UsageWindow{}, nil, nil))
+	got := b.Drain()
+	if len(got) != 2 {
+		t.Fatalf("want latest todo + usage snapshots, got %d: %#v", len(got), got)
+	}
+	if todo := got[0].(protocol.TodoUpdate); todo.Todos[0].Content != "new" {
+		t.Fatalf("todo snapshot = %#v", todo)
+	}
+}
+
 func TestOfflineBufferDoesNotMergeAcrossSessionOrRequest(t *testing.T) {
 	b := NewOfflineBuffer()
 	b.Append(protocol.NewTextChunk("s1", "r1", "a"))
@@ -107,16 +155,52 @@ func TestOfflineBufferCapDropsOldest(t *testing.T) {
 	b := NewOfflineBuffer()
 	// Append cap+5 distinct (non-mergeable) events; oldest must be evicted.
 	for i := 0; i < offlineCap+5; i++ {
-		b.Append(protocol.NewToolEnd("s1", "r1", "tool-"+itoaTest(i)))
+		b.Append(protocol.Error{Type: "error", SessionID: "s1", RequestID: "r" + itoaTest(i), Message: "failure"})
 	}
 	if b.Len() != offlineCap {
 		t.Fatalf("buffer should cap at %d, got %d", offlineCap, b.Len())
 	}
 	got := b.Drain()
-	first := got[0].(protocol.ToolEnd)
+	first := got[0].(protocol.Error)
 	// The first 5 (tool-0..tool-4) were evicted; oldest survivor is tool-5.
-	if first.ToolUseID != "tool-5" {
-		t.Fatalf("oldest survivor = %q, want tool-5", first.ToolUseID)
+	if first.RequestID != "r5" {
+		t.Fatalf("oldest survivor = %q, want r5", first.RequestID)
+	}
+}
+
+func TestOfflineBufferPeekSizedBoundsEncodedPayload(t *testing.T) {
+	b := NewOfflineBuffer()
+	for i := 0; i < 10; i++ {
+		b.Append(protocol.Error{Type: "error", RequestID: itoaTest(i), Message: "1234567890"})
+	}
+	got := b.PeekSized(10, 140)
+	if len(got) == 0 || len(got) >= 10 {
+		t.Fatalf("byte-bounded batch should contain some but not all events, got %d", len(got))
+	}
+	if b.Len() != 10 {
+		t.Fatal("PeekSized must be non-destructive")
+	}
+
+	huge := NewOfflineBuffer()
+	huge.Append(protocol.Error{Type: "error", Message: string(make([]byte, 1024))})
+	if got := huge.PeekSized(10, 10); len(got) != 1 {
+		t.Fatalf("oversized head event must still make progress, got %d", len(got))
+	}
+}
+
+func TestOfflineBufferLongGoalToolStreamStaysBounded(t *testing.T) {
+	b := NewOfflineBuffer()
+	for i := 0; i < 2000; i++ {
+		id := "tool-" + itoaTest(i)
+		b.Append(protocol.NewTextChunk("s1", "r1", "x"))
+		b.Append(protocol.NewToolStart("s1", "r1", id, "Bash", "command"))
+		for delta := 0; delta < 5; delta++ {
+			b.Append(protocol.NewToolResult("s1", "r1", id, "cumulative output"))
+		}
+		b.Append(protocol.NewToolEnd("s1", "r1", id))
+	}
+	if b.Len() != 1 {
+		t.Fatalf("completed tools should not fill replay; want merged text only, got %d", b.Len())
 	}
 }
 
