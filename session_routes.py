@@ -13,9 +13,6 @@ from task_manager import cancel_owner
 from utils.path_jail import resolve_jailed, JailEscape
 
 log = logging.getLogger(__name__)
-CODEX_MODEL = "gpt-5.5"
-
-
 def _spawn_session_task(ctx: Any, name: str, make_coro, session_id: str) -> Any:
     try:
         params = inspect.signature(ctx.spawn_task).parameters
@@ -54,8 +51,6 @@ async def handle_session_message(
         backend_name = ctx.normalize_backend_name(msg.get("backend"))
         effort = msg.get("effort", "")
         model = str(msg.get("model") or "")
-        if backend_name == "codex":
-            model = CODEX_MODEL
         sandbox = str(msg.get("sandbox") or "danger-full-access")
         image_dir = str(msg.get("image_dir") or "")
         if image_dir:
@@ -305,6 +300,46 @@ async def handle_session_message(
         ctx.spawn_task(f"session-restart-effort:{sid}", _restart_effort(session))
         return True
 
+    if mtype in {"codex_goal_set", "codex_goal_get", "codex_goal_clear"}:
+        sid = msg.get("session_id", "")
+        session = ctx.sessions.get(sid)
+        if not session:
+            await safe_send_json(ws, ctx.msg_error(f"Unknown session: {sid}", sid))
+            return True
+        session.ws_ref = ws
+        backend = ctx.session_backend(session)
+        if session.backend_name != "codex" or not all(
+            hasattr(backend, name) for name in ("set_goal", "get_goal", "clear_goal")
+        ):
+            await ctx.send_event(session, ctx.evt_error("Goal mode is only supported for Codex sessions.", "goal_not_supported"))
+            return True
+
+        async def _run_goal_command() -> None:
+            try:
+                if mtype == "codex_goal_get":
+                    await backend.get_goal(session)
+                    return
+                if mtype == "codex_goal_clear":
+                    await backend.clear_goal(session)
+                    return
+                raw_budget = msg.get("token_budget")
+                token_budget = None
+                if raw_budget is not None and raw_budget != "":
+                    token_budget = max(0, int(raw_budget))
+                objective = str(msg.get("objective")) if "objective" in msg else None
+                status = str(msg.get("status")) if "status" in msg else None
+                await backend.set_goal(
+                    session,
+                    objective=objective,
+                    status=status,
+                    token_budget=token_budget,
+                )
+            except Exception as exc:
+                await ctx.send_event(session, ctx.evt_error(f"Goal command failed: {exc}", "goal_error"))
+
+        ctx.spawn_task(f"codex-goal:{mtype}:{sid}", _run_goal_command())
+        return True
+
     if mtype == "switch_session_config":
         sid = msg.get("session_id", "")
         source = ctx.sessions.get(sid)
@@ -317,8 +352,6 @@ async def handle_session_message(
 
         target_backend = ctx.normalize_backend_name(msg.get("backend") or source.backend_name)
         target_model = str(msg.get("model") or source.model or "")
-        if target_backend == "codex":
-            target_model = CODEX_MODEL
         target_effort = str(msg.get("effort") if "effort" in msg else source.effort or "")
         requested_sandbox = str(msg.get("sandbox") or "")
         target_sandbox = requested_sandbox or source.sandbox or "danger-full-access"

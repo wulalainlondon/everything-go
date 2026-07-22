@@ -45,6 +45,7 @@ class SearchHit:
 @dataclass
 class SearchFilters:
     project_dir: str | None = None
+    root_dir: str | None = None             # server-enforced cwd jail
     since: str | None = None          # ISO8601 string
     role: str | None = None           # 'user' | 'assistant'
     exclude_subagents: bool = False
@@ -192,6 +193,10 @@ def _run_like_fallback(
 
     extra_where = ""
     extra_params: list = []
+    if filters.root_dir is not None:
+        root = filters.root_dir.rstrip("/")
+        extra_where += " AND (s.cwd = ? OR s.cwd LIKE ?)"
+        extra_params.extend([root, root + "/%"])
     if filters.since is not None:
         extra_where += " AND m.ts >= ?"
         extra_params.append(filters.since)
@@ -242,6 +247,10 @@ def _run_like_fallback(
     # Python-side post-filters (mirrors _run_search)
     if filters.project_dir is not None:
         rows = [r for r in rows if r[3] == filters.project_dir]
+    if filters.root_dir is not None:
+        root = filters.root_dir.rstrip("/")
+        prefix = root + "/"
+        rows = [r for r in rows if (r[2] == root or str(r[2] or "").startswith(prefix))]
     if filters.role is not None:
         rows = [r for r in rows if r[8] == filters.role]
     if filters.exclude_subagents:
@@ -311,6 +320,10 @@ def _run_search(
     where_clauses = ["messages_fts MATCH ?"]
 
     # since-filter applies uniformly across all rows so it is safe in SQL.
+    if filters.root_dir is not None:
+        root = filters.root_dir.rstrip("/")
+        where_clauses.append("(s.cwd = ? OR s.cwd LIKE ?)")
+        params.extend([root, root + "/%"])
     if filters.since is not None:
         where_clauses.append("m.ts >= ?")
         params.append(filters.since)
@@ -370,6 +383,10 @@ def _run_search(
     # Apply post-MATCH filters in Python to avoid the OFFSET skipping bug.
     if filters.project_dir is not None:
         rows = [r for r in rows if r[3] == filters.project_dir]
+    if filters.root_dir is not None:
+        root = filters.root_dir.rstrip("/")
+        prefix = root + "/"
+        rows = [r for r in rows if (r[2] == root or str(r[2] or "").startswith(prefix))]
     if filters.role is not None:
         rows = [r for r in rows if r[8] == filters.role]
     if filters.exclude_subagents:

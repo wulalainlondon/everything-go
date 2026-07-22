@@ -39,6 +39,8 @@ def _run_list_sessions(
     limit: int,
     project_dir: str | None,
     include_hidden: bool,
+    include_subagents: bool,
+    root_dir: str | None,
 ) -> tuple[list[tuple], int | None]:
     """Synchronous query; run inside asyncio.to_thread."""
     params: list = []
@@ -47,9 +49,18 @@ def _run_list_sessions(
     if not include_hidden:
         where_parts.append("is_hidden = 0")
 
+    if not include_subagents:
+        where_parts.append("session_id NOT LIKE ?")
+        params.append("%:subagent:%")
+
     if project_dir is not None:
         where_parts.append("project_dir = ?")
         params.append(project_dir)
+
+    if root_dir is not None:
+        root = root_dir.rstrip("/")
+        where_parts.append("(cwd = ? OR cwd LIKE ?)")
+        params.extend([root, root + "/%"])
 
     if cursor is not None:
         # Cursor encodes last_ts of the previous page's last item.
@@ -94,11 +105,13 @@ async def list_sessions(
     limit: int = 30,
     project_dir: str | None = None,
     include_hidden: bool = False,
+    include_subagents: bool = False,
+    root_dir: str | None = None,
 ) -> SessionListPage:
     """Return a page of sessions sorted by pinned-first, then newest-first."""
     async with conn_pool.borrow() as conn:
         rows, total_filtered = await asyncio.to_thread(
-            _run_list_sessions, conn, cursor, limit, project_dir, include_hidden
+            _run_list_sessions, conn, cursor, limit, project_dir, include_hidden, include_subagents, root_dir
         )
 
     has_more = len(rows) > limit

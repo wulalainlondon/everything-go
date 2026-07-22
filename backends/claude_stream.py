@@ -506,6 +506,26 @@ class _ClaudeProcessMixin:
 
         await state.proc.wait()
 
+        # Compact cleanup must run on EVERY exit path, including a stop-triggered
+        # one (the is_stopping early-return below would otherwise skip it, leaving
+        # compact_in_progress wedged True and the frontend's CompactingBanner
+        # pinned). Guarded on the flag so it fires at most once even if
+        # claude_cli.stop() also clears it.
+        if state.compact_in_progress:
+            state.compact_in_progress = False
+            if self._broadcast_fn is not None:
+                task_manager.spawn(
+                    f"claude-compact-process-exited:{session.session_id}",
+                    self._broadcast_fn({
+                        "type": "session_command_failed",
+                        "session_id": session.session_id,
+                        "request_id": f"compact_{session.session_id}",
+                        "message": "Process exited during compact",
+                        "queue_length": 0,
+                    }),
+                    owner=f"session:{session.session_id}",
+                )
+
         if session.is_stopping:
             return
 
@@ -530,22 +550,6 @@ class _ClaudeProcessMixin:
             if state.tree_poll_task and not state.tree_poll_task.done():
                 state.tree_poll_task.cancel()
                 state.tree_poll_task = None
-
-        # If compact was in progress when the proc died, clear the flag and notify frontend.
-        if state.compact_in_progress:
-            state.compact_in_progress = False
-            if self._broadcast_fn is not None:
-                task_manager.spawn(
-                    f"claude-compact-process-exited:{session.session_id}",
-                    self._broadcast_fn({
-                        "type": "session_command_failed",
-                        "session_id": session.session_id,
-                        "request_id": f"compact_{session.session_id}",
-                        "message": "Process exited during compact",
-                        "queue_length": 0,
-                    }),
-                    owner=f"session:{session.session_id}",
-                )
 
         if state.bad_resume:
             state.bad_resume = False

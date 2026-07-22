@@ -48,6 +48,7 @@ async def handle_search_message(
     msg: dict,
     *,
     pool: ConnectionPool,
+    root_dir: str = "",
 ) -> None:
     """
     Inspect msg['type'] and dispatch to the appropriate query function.
@@ -85,6 +86,7 @@ async def handle_search_message(
                 exclude_subagents=bool(raw_filters.get("exclude_subagents", False)),
                 source=raw_filters.get("source"),
                 max_per_session=int(raw_filters.get("max_per_session", 3)),
+                root_dir=root_dir or None,
             )
 
             result = await search(pool, query_str, filters=filters, limit=limit, offset=offset)
@@ -99,6 +101,7 @@ async def handle_search_message(
             limit = int(msg.get("limit", 30))
             project_dir: str | None = msg.get("project_dir")
             include_hidden: bool = bool(msg.get("include_hidden", False))
+            include_subagents: bool = bool(msg.get("include_subagents", False))
 
             result = await list_sessions(
                 pool,
@@ -106,6 +109,8 @@ async def handle_search_message(
                 limit=limit,
                 project_dir=project_dir,
                 include_hidden=include_hidden,
+                include_subagents=include_subagents,
+                root_dir=root_dir or None,
             )
             await send({"type": "session_list", **_to_dict(result)})
 
@@ -114,7 +119,13 @@ async def handle_search_message(
             ctx_msg_uuid: str = msg.get("msg_uuid", "")
             ctx_around: int = max(1, min(30, int(msg.get("around", 10))))
 
-            result = await get_search_context(pool, ctx_session_id, ctx_msg_uuid, ctx_around)
+            result = await get_search_context(
+                pool,
+                ctx_session_id,
+                ctx_msg_uuid,
+                ctx_around,
+                root_dir=root_dir or None,
+            )
             await send({"type": "search_context", **_to_dict(result)})
 
     except Exception as exc:

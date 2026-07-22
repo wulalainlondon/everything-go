@@ -120,6 +120,17 @@ class OpenFileMsg(TypedDict):
     type: Literal["open_file"]
     path: str
 
+class SaveFileMsg(TypedDict):
+    type: Literal["save_file"]
+    path: str
+    content: str
+    expected_modified: NotRequired[int]
+
+class ScanMarkdownFilesMsg(TypedDict):
+    type: Literal["scan_markdown_files"]
+    paths: list[str]
+    limit: NotRequired[int]
+
 
 class ScanArtifactsMsg(TypedDict):
     type: Literal["scan_artifacts"]
@@ -139,6 +150,7 @@ class HelloMsg(TypedDict):
     device_id: NotRequired[str]
     device_name: NotRequired[str]
     auth_token: NotRequired[str]
+    replay_ack: NotRequired[bool]
 
 
 class SetSessionMetaMsg(TypedDict):
@@ -188,6 +200,8 @@ _INBOUND_REQUIRED: dict[str, list[tuple[str, type]]] = {
     "kill_process": [("pid", int)],
     "browse_dir": [],
     "open_file": [("path", str)],
+    "save_file": [("path", str), ("content", str)],
+    "scan_markdown_files": [("paths", list)],
     "scan_artifacts": [],
     "youtube_task": [("url", str)],
     "request_history": [("session_id", str)],
@@ -220,6 +234,10 @@ _INBOUND_REQUIRED: dict[str, list[tuple[str, type]]] = {
     "get_agent_tree": [("session_id", str)],
     "fork_session": [("session_id", str)],
     "get_git_diff": [("session_id", str)],
+    "codex_goal_set": [("session_id", str)],
+    "codex_goal_get": [("session_id", str)],
+    "codex_goal_clear": [("session_id", str)],
+    "offline_replay_ack": [("batch_id", str)],
     "feed_push": [("title", str), ("html", str)],  # content_type optional
     "feed_fetch": [("feed_id", str)],
     "feed_mark_read": [("feed_id", str)],
@@ -236,7 +254,7 @@ _KNOWN_MSG_TYPES: frozenset[str] = frozenset({
     "rename_session", "clear_session", "get_usage", "get_resumable_sessions",
     "shell_create", "shell_input", "shell_close", "get_tasks", "kill_task",
     "get_processes", "kill_process",
-    "fcm_token", "tunnel_url_ack", "request_sessions_list", "browse_dir", "open_file", "scan_artifacts", "youtube_task", "request_history",
+    "fcm_token", "tunnel_url_ack", "request_sessions_list", "browse_dir", "open_file", "save_file", "scan_markdown_files", "scan_artifacts", "youtube_task", "request_history",
     "set_effort", "hello", "set_session_meta", "switch_session_config",
     "permission_response",
     "user_input_response", "request_user_input_response", "choice_response",
@@ -257,6 +275,8 @@ _KNOWN_MSG_TYPES: frozenset[str] = frozenset({
     "get_agent_tree",
     "fork_session",
     "get_git_diff",
+    "codex_goal_set", "codex_goal_get", "codex_goal_clear",
+    "offline_replay_ack", "request_goals_snapshot",
     "feed_push",
     "feed_list_request",
     "feed_fetch",

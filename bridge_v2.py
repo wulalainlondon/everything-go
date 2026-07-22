@@ -73,7 +73,8 @@ from handlers.webrtc_signaling import (
 )
 from handlers.interactions_ws import handle_interaction_message, send_pending_interactions
 from message_router import RouterContext, handle_low_coupling_message
-from offline_replay import replay_offline_buffers
+from offline_replay import ack_offline_replay, replay_offline_buffers
+from goal_state import configure as configure_goal_state, snapshot as goals_snapshot
 from queue_runner import log_prompt_lifecycle as _log_prompt_lifecycle
 from queue_runner import run_session_queue as _run_session_queue_impl
 from task_manager import cancel_all as _cancel_tasks
@@ -310,7 +311,10 @@ async def _dispatch_ws_message(ws, msg: dict) -> bool:
     if t not in SEARCH_MESSAGE_TYPES:
         return False
     try:
-        await handle_search_message(ws, msg, pool=_search_pool)
+        kwargs = {"pool": _search_pool}
+        if _ROOT_DIR:
+            kwargs["root_dir"] = _ROOT_DIR
+        await handle_search_message(ws, msg, **kwargs)
     except Exception as e:
         log.exception("[search] handler raised on %s", t)
         try:
@@ -934,6 +938,7 @@ async def main(port: int, tunnel: bool = False,
         else os.environ.get("BRIDGE_DATA_DIR", "") or BRIDGE_DIR
     )
     _init_paths(resolved_data_dir)
+    configure_goal_state(os.path.join(_DATA_DIR, "goal_snapshots.json"))
 
     # Load tunnel URL from external file if cloudflared is managed by launchd.
     global _TUNNEL_URL_FILE

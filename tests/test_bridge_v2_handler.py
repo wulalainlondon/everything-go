@@ -70,7 +70,12 @@ def clean_bridge_state(monkeypatch, tmp_path):
     monkeypatch.setattr(bridge_v2, "_is_cloudflared_running", lambda: True)
     monkeypatch.setattr(bridge_v2, "get_current_tunnel_url", lambda: "https://tunnel.example")
     monkeypatch.setattr(bridge_v2, "build_sessions_list", lambda: {"type": "sessions_list", "sessions": []})
-    monkeypatch.setattr(bridge_v2, "replay_offline_buffers", lambda ws, sessions: _async_none())
+    monkeypatch.setattr(bridge_v2, "replay_offline_buffers", lambda ws, sessions, **kwargs: _async_none())
+    monkeypatch.setattr(
+        bridge_v2,
+        "goals_snapshot",
+        lambda: {"type": "goals_snapshot", "revision": 0, "items": []},
+    )
     monkeypatch.setattr(bridge_v2, "pending_file_push_items", lambda *args, **kwargs: [])
     monkeypatch.setattr(bridge_v2, "_send_unread_snapshot_deferred", lambda ws, client: _async_none())
     monkeypatch.setattr(bridge_v2, "_spawn_task", lambda name, coro: coro.close())
@@ -125,7 +130,20 @@ async def test_handler_sends_hello_ack_and_disconnects_cleanly():
 
     await bridge_v2.handler(ws)
 
-    assert ws.sent[0] == {
+    hello_ack = dict(ws.sent[0])
+    backend_registry = hello_ack.pop("backend_registry")
+    assert [backend["id"] for backend in backend_registry] == ["claude", "codex", "ollama", "gemini"]
+    codex = next(backend for backend in backend_registry if backend["id"] == "codex")
+    assert [model["id"] for model in codex["models"]] == [
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "gpt-5.5",
+        "gpt-5.4",
+        "gpt-5.4-mini",
+        "gpt-5.3-codex-spark",
+    ]
+    assert hello_ack == {
         "type": "hello_ack",
         "instance_id": "b_test",
         "gen": ws.sent[0]["gen"],
@@ -163,6 +181,38 @@ async def test_handler_background_hydration_sends_sessions_list(monkeypatch):
 
     assert ws.sent[0]["type"] == "hello_ack"
     assert {"type": "sessions_list", "sessions": []} in ws.sent
+    assert {"type": "goals_snapshot", "revision": 0, "items": []} in ws.sent
+
+
+@pytest.mark.asyncio
+async def test_handler_negotiates_replay_ack_and_accepts_snapshot_commands(monkeypatch):
+    tasks: list[asyncio.Task] = []
+    replay_capabilities: list[bool] = []
+
+    def spawn_task(name, coro, owner=None):
+        task = asyncio.create_task(coro)
+        tasks.append(task)
+        return task
+
+    async def replay(ws, sessions, *, supports_ack=False, client=None):
+        replay_capabilities.append(supports_ack)
+        return 0
+
+    monkeypatch.setattr(bridge_v2, "_spawn_task", spawn_task)
+    monkeypatch.setattr(bridge_v2, "replay_offline_buffers", replay)
+    monkeypatch.setattr(bridge_v2, "ack_offline_replay", lambda ws, batch_id: batch_id == "batch-1")
+    ws = YieldingFakeWebSocket([
+        {"type": "hello", "device_id": "dev1", "replay_ack": True},
+        {"type": "request_goals_snapshot"},
+        {"type": "offline_replay_ack", "batch_id": "batch-1"},
+    ])
+
+    await bridge_v2.handler(ws)
+    if tasks:
+        await asyncio.gather(*tasks)
+
+    assert replay_capabilities == [True]
+    assert [event["type"] for event in ws.sent].count("goals_snapshot") >= 1
 
 
 @pytest.mark.asyncio

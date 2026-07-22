@@ -155,6 +155,15 @@ def test_codex_backend_uses_jsonrpc_plumber():
     assert isinstance(b._rpc_plumber, JsonRpcPlumber)
 
 
+def test_codex_turn_start_params_forward_supported_efforts():
+    from backends.codex_appserver import _turn_start_params
+
+    for effort in ("low", "medium", "high", "xhigh", "max", "ultra"):
+        assert _turn_start_params("thread-1", [], effort)["effort"] == effort
+    for effort in ("", "auto", "invalid"):
+        assert "effort" not in _turn_start_params("thread-1", [], effort)
+
+
 def test_gemini_state_uses_jsonrpc_plumber():
     """_GeminiState must hold a JsonRpcPlumber on .plumber."""
     from backends.gemini_cli import _GeminiState

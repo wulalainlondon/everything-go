@@ -27,12 +27,20 @@ from .events import (
     send_event, stream_text,
     _evt_session_warning, _evt_session_closed,
     _evt_thinking_chunk,
-    _evt_todo_update, _msg_session_uuid, _msg_usage_report,
+    _evt_todo_update, _evt_goal_update, _evt_goal_cleared,
+    _msg_session_uuid, _msg_usage_report,
 )
 from .todo_state import normalize_full_list
 from .turn_lifecycle import emit_turn_done, emit_turn_error, emit_turn_stopped, settle_turn_state
 from .history import complete_history_message, clamp_history_limit, load_indexed_jsonl_messages, slice_history, _JSONL_HISTORY_CACHE, DEFAULT_HISTORY_LIMIT
 from interactions import REGISTRY as INTERACTIONS, normalize_questions
+from mcp_elicitation import (
+    BrowserOriginPolicy,
+    browser_origin_request,
+    ensure_browser_elicitation_routing,
+    elicitation_questions,
+    elicitation_response,
+)
 from push_registry import notify_fcm_user_input as _notify_fcm_user_input
 import client_manager
 import task_manager
@@ -50,7 +58,19 @@ _COMPACT_THRESHOLD = 0.80
 # Errors that mean the Codex thread no longer exists on the server side
 # (e.g. app-server restarted). Detected here so we can respawn silently.
 _STALE_THREAD_RE = re.compile(r"(?:Unknown session|thread not found)", re.IGNORECASE)
-CODEX_MODEL = "gpt-5.5"
+CODEX_MODEL = "gpt-5.6-sol"
+_CODEX_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max", "ultra"})
+
+
+def _turn_start_params(thread_id: str, user_input: list[dict], effort: str = "") -> dict:
+    params = {
+        "threadId": thread_id,
+        "input": user_input,
+        "approvalPolicy": "never",
+    }
+    if effort in _CODEX_EFFORTS:
+        params["effort"] = effort
+    return params
 
 # Matches a JSON block (in a fenced code block or inline) containing ask_user_question.
 _ASK_USER_RE = re.compile(
@@ -177,6 +197,8 @@ class CodexAppServerBackend(Backend, _StatesMixin, _CodexNativeSessionMixin, _Co
             if self._proc is not None and self._proc.returncode is None:
                 return  # already running
 
+            if ensure_browser_elicitation_routing(self._codex_home):
+                log.info("[codex-appserver] Browser Use elicitations routed through bridge policy")
             log.info("[codex-appserver] spawning codex app-server")
             self._proc = await asyncio.create_subprocess_exec(
                 self._codex_bin, "app-server",
@@ -193,7 +215,16 @@ class CodexAppServerBackend(Backend, _StatesMixin, _CodexNativeSessionMixin, _Co
 
             try:
                 result = await self._rpc("initialize", {
-                    "clientInfo": {"name": "claude-bridge", "version": "1.0"}
+                    "clientInfo": {
+                        "name": "claude-bridge",
+                        "title": "Averything Bridge",
+                        "version": "1.0",
+                    },
+                    "capabilities": {
+                        "experimentalApi": True,
+                        "requestAttestation": False,
+                        "mcpServerOpenaiFormElicitation": True,
+                    },
                 }, timeout=30.0)
                 await self._send_notification("initialized")
                 log.info("[codex-appserver] initialized: %s", result.get("userAgent", "?"))
@@ -344,6 +375,20 @@ class CodexAppServerBackend(Backend, _StatesMixin, _CodexNativeSessionMixin, _Co
             except Exception:
                 pass
 
+        elif method == "thread/goal/updated" and session:
+            goal = params.get("goal")
+            if isinstance(goal, dict):
+                try:
+                    await send_event(session, _evt_goal_update(goal))
+                except Exception:
+                    pass
+
+        elif method == "thread/goal/cleared" and session:
+            try:
+                await send_event(session, _evt_goal_cleared())
+            except Exception:
+                pass
+
         elif method == "item/commandExecution/terminalInteraction" and session:
             item_id = str(params.get("itemId") or params.get("callId") or "codex_terminal")
             text = params.get("text") or params.get("input") or params.get("message") or ""
@@ -444,6 +489,9 @@ class CodexAppServerBackend(Backend, _StatesMixin, _CodexNativeSessionMixin, _Co
             else:
                 await self._create_jsonrpc_user_input_request(request_id, session, params)
                 return
+        elif method == "mcpServer/elicitation/request":
+            await self._handle_mcp_elicitation_request(request_id, session, params)
+            return
         elif method == "item/tool/call":
             await self._emit_unsupported_tool_call(session, params)
             await self._rpc_plumber.write(self._proc, {
@@ -466,6 +514,60 @@ class CodexAppServerBackend(Backend, _StatesMixin, _CodexNativeSessionMixin, _Co
             return
 
         await self._rpc_plumber.write(self._proc, {"id": request_id, "result": result})
+
+    async def _handle_mcp_elicitation_request(self, request_id, session, params: dict) -> None:
+        """Resolve MCP form elicitations automatically or through the phone UI."""
+        policy = BrowserOriginPolicy.from_env()
+        automatic = policy.decide(params)
+        browser_request = browser_origin_request(params)
+        if automatic is not None:
+            log.info(
+                "[codex-appserver] MCP elicitation auto-%s: server=%s origin=%s reason=%s",
+                automatic.action,
+                params.get("serverName", ""),
+                browser_request[1] if browser_request else "",
+                automatic.reason,
+            )
+            await self._rpc_plumber.write(self._proc, {
+                "id": request_id,
+                "result": automatic.to_rpc_result(),
+            })
+            return
+
+        # A server request must always receive a JSON-RPC response. If there is
+        # no associated bridge session/client, fail closed instead of leaving
+        # the Codex turn hanging indefinitely.
+        if session is None or self._broadcast_fn is None:
+            await self._rpc_plumber.write(self._proc, {
+                "id": request_id,
+                "result": {"action": "decline", "content": None, "_meta": None},
+            })
+            return
+
+        questions = elicitation_questions(params)
+        connector_name = str(
+            params.get("serverName")
+            or next((q.get("header") for q in questions if q.get("header")), "")
+            or "External tool"
+        )
+        command = dict(params)
+
+        async def _resolve_jsonrpc(interaction, response: dict) -> None:
+            result = elicitation_response(command, response)
+            await self._rpc_plumber.write(self._proc, {"id": request_id, "result": result})
+
+        await INTERACTIONS.create(
+            session_id=session.session_id,
+            source="codex",
+            kind="mcp_elicitation",
+            questions=questions,
+            header=str(params.get("message") or "External tool permission"),
+            tool_use_id=str(request_id),
+            requesting_agent=connector_name,
+            raw_command={**command, "codex_jsonrpc_request_id": request_id},
+            resolve_callback=_resolve_jsonrpc,
+            broadcast_json=self._broadcast_fn,
+        )
 
     async def _emit_approval_event(self, session, method: str, params: dict) -> None:
         environment_id = str(params.get("environmentId") or params.get("environment_id") or "")
@@ -671,15 +773,92 @@ class CodexAppServerBackend(Backend, _StatesMixin, _CodexNativeSessionMixin, _Co
         }, ensure_ascii=False)
         await self.send(session, f"Structured user input response:\n{payload}")
 
+    async def set_goal(
+        self,
+        session: "Session",
+        *,
+        objective: str | None = None,
+        status: str | None = None,
+        token_budget: int | None = None,
+    ) -> dict:
+        await self._ensure_server()
+        state = self._get_state(session)
+        if state.thread_id is None:
+            await self.spawn(session)
+        params: dict = {"threadId": state.thread_id}
+        if objective is not None:
+            params["objective"] = objective
+        if status is not None:
+            params["status"] = status
+        if token_budget is not None:
+            params["tokenBudget"] = token_budget
+        result = await self._rpc("thread/goal/set", params, timeout=30.0)
+        goal = result.get("goal")
+        if not isinstance(goal, dict):
+            raise RuntimeError("thread/goal/set returned no goal")
+        await send_event(session, _evt_goal_update(goal))
+        return goal
+
+    async def get_goal(self, session: "Session") -> dict | None:
+        await self._ensure_server()
+        state = self._get_state(session)
+        if state.thread_id is None:
+            await self.spawn(session)
+        result = await self._rpc("thread/goal/get", {"threadId": state.thread_id}, timeout=30.0)
+        goal = result.get("goal")
+        if isinstance(goal, dict):
+            await send_event(session, _evt_goal_update(goal))
+            return goal
+        await send_event(session, _evt_goal_cleared())
+        return None
+
+    async def _reconcile_goal_after_turn(
+        self,
+        session: "Session",
+        state: _AppServerState,
+    ) -> None:
+        """Refresh goal metadata without changing a successful turn outcome."""
+        if not state.thread_id:
+            return
+        try:
+            result = await self._rpc(
+                "thread/goal/get",
+                {"threadId": state.thread_id},
+                timeout=3.0,
+            )
+            goal = result.get("goal")
+            if isinstance(goal, dict):
+                await send_event(session, _evt_goal_update(goal))
+            else:
+                await send_event(session, _evt_goal_cleared())
+        except Exception as exc:
+            # A successful turn must remain successful if this best-effort
+            # metadata refresh fails. Frontends also refresh known goals on done.
+            log.warning(
+                "[codex-appserver] post-turn goal reconcile failed session=%s: %s",
+                session.session_id[:8],
+                exc,
+            )
+
+    async def clear_goal(self, session: "Session") -> bool:
+        await self._ensure_server()
+        state = self._get_state(session)
+        if state.thread_id is None:
+            await self.spawn(session)
+        result = await self._rpc("thread/goal/clear", {"threadId": state.thread_id}, timeout=30.0)
+        cleared = bool(result.get("cleared"))
+        await send_event(session, _evt_goal_cleared())
+        return cleared
+
     async def _run_turn(self, session: "Session", state: _AppServerState,
                         user_input: list[dict]) -> None:
         try:
             try:
-                await self._rpc("turn/start", {
-                    "threadId": state.thread_id,
-                    "input": user_input,
-                    "approvalPolicy": "never",
-                }, timeout=30.0)
+                await self._rpc(
+                    "turn/start",
+                    _turn_start_params(state.thread_id, user_input, session.effort),
+                    timeout=30.0,
+                )
             except RuntimeError as rpc_exc:
                 if not _STALE_THREAD_RE.search(str(rpc_exc)):
                     raise
@@ -690,11 +869,11 @@ class CodexAppServerBackend(Backend, _StatesMixin, _CodexNativeSessionMixin, _Co
                 self._thread_to_session.pop(state.thread_id or "", None)
                 state.thread_id = None
                 await self.spawn(session)
-                await self._rpc("turn/start", {
-                    "threadId": state.thread_id,
-                    "input": user_input,
-                    "approvalPolicy": "never",
-                }, timeout=30.0)
+                await self._rpc(
+                    "turn/start",
+                    _turn_start_params(state.thread_id, user_input, session.effort),
+                    timeout=30.0,
+                )
 
             # Wait until turn completes or timeout.
             try:
@@ -713,11 +892,11 @@ class CodexAppServerBackend(Backend, _StatesMixin, _CodexNativeSessionMixin, _Co
                 state.turn_done_event.clear()
                 state.turn_active = True
                 await self.spawn(session)
-                await self._rpc("turn/start", {
-                    "threadId": state.thread_id,
-                    "input": user_input,
-                    "approvalPolicy": "never",
-                }, timeout=30.0)
+                await self._rpc(
+                    "turn/start",
+                    _turn_start_params(state.thread_id, user_input, session.effort),
+                    timeout=30.0,
+                )
                 try:
                     await asyncio.wait_for(state.turn_done_event.wait(), timeout=6000.0)
                 except asyncio.TimeoutError:
@@ -769,6 +948,10 @@ class CodexAppServerBackend(Backend, _StatesMixin, _CodexNativeSessionMixin, _Co
                         self._notify_fcm_fn(session.name, session.accumulated_text or "", session.session_id),
                         owner=f"session:{session.session_id}",
                     )
+                # Goal state is durable thread metadata, separate from
+                # turn/completed. Reconcile it before done so a missed
+                # app-server notification cannot leave clients stuck on active.
+                await self._reconcile_goal_after_turn(session, state)
                 await emit_turn_done(session, tool_lifecycle=state.tool_lifecycle)
                 if session.ws_ref is not None:
                     task_manager.spawn(
@@ -915,6 +1098,7 @@ class CodexAppServerBackend(Backend, _StatesMixin, _CodexNativeSessionMixin, _Co
         session.resume_id = None
         state.turn_done_event.clear()
         await send_event(session, _evt_session_warning("Session history cleared."))
+        await send_event(session, _evt_goal_cleared())
 
     async def close(self, session: "Session") -> None:
         await self.stop(session)

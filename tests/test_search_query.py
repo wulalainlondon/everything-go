@@ -344,6 +344,20 @@ def test_list_sessions_hidden_excluded(db_path: Path) -> None:
     assert any(i.session_id == "hidden" for i in page_all.items)
 
 
+def test_list_sessions_subagents_excluded_by_default(db_path: Path) -> None:
+    conn = open_connection(db_path)
+    _insert_session(conn, session_id="claude:parent-session")
+    _insert_session(conn, session_id="claude:parent-session:subagent:agent-deadbeef")
+    conn.close()
+
+    pool = ConnectionPool(db_path, max_size=2)
+    page = asyncio.run(list_sessions(pool))
+    assert not any(":subagent:" in i.session_id for i in page.items)
+
+    page_all = asyncio.run(list_sessions(pool, include_subagents=True))
+    assert any(":subagent:" in i.session_id for i in page_all.items)
+
+
 # ---------------------------------------------------------------------------
 # WebSocket handler tests
 # ---------------------------------------------------------------------------

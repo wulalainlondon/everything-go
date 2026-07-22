@@ -113,11 +113,16 @@ rsync -a --delete \
   --exclude '.git' \
   --exclude '__pycache__' \
   --exclude 'venv/' \
+  --exclude '.bridge_images/' \
+  --exclude '.claude/' \
   --exclude 'saved_sessions*.json' \
+  --exclude 'saved_sessions*.json.lock' \
   --exclude 'session_meta.json' \
   --exclude 'read_cursors.json' \
   --exclude 'path_overrides.json' \
+  --exclude 'pairing.json' \
   --exclude 'fcm_token.txt' \
+  --exclude 'fcm_token.txt.invalid' \
   --exclude 'serviceAccountKey.json' \
   --exclude 'bridge_v2.log' \
   --exclude 'bridge.log' \
@@ -130,6 +135,10 @@ rsync -a --delete \
   --exclude 'search.db' \
   --exclude 'search.db-shm' \
   --exclude 'search.db-wal' \
+  --exclude 'bridge_history_cache.db' \
+  --exclude 'bridge_history_cache.db-shm' \
+  --exclude 'bridge_history_cache.db-wal' \
+  --exclude '.tmp_*.json' \
   --exclude 'launchd-wrapper.log' \
   --exclude 'instances.json' \
   --exclude 'install.sh' \
@@ -180,9 +189,8 @@ echo "==> Setup virtualenv and deps"
 if [[ ! -d venv ]]; then
   python3 -m venv venv
 fi
-# shellcheck disable=SC1091
-source venv/bin/activate
-pip install --upgrade pip --quiet
+VENV_PYTHON="$RUNTIME_DIR/venv/bin/python"
+"$VENV_PYTHON" -m pip install --upgrade pip --quiet
 
 REQ_HASH_FILE="$RUNTIME_DIR/.requirements.sha256"
 REQ_HASH_NEW="$(shasum -a 256 requirements.txt | awk '{print $1}')"
@@ -190,12 +198,12 @@ REQ_HASH_OLD="$(cat "$REQ_HASH_FILE" 2>/dev/null || echo '')"
 
 if [[ "$REQ_HASH_NEW" != "$REQ_HASH_OLD" ]]; then
   echo "    requirements.txt changed, reinstalling deps"
-  pip install -r requirements.txt --quiet --force-reinstall
+  "$VENV_PYTHON" -m pip install -r requirements.txt --quiet --force-reinstall
   echo "$REQ_HASH_NEW" > "$REQ_HASH_FILE"
 else
   echo "    requirements.txt unchanged, skipping reinstall"
   # Still run a normal install in case venv is missing something
-  pip install -r requirements.txt --quiet
+  "$VENV_PYTHON" -m pip install -r requirements.txt --quiet
 fi
 
 chmod +x run_bridge.sh bridge_supervisor.sh supervisor_instance.sh bridge_healthcheck.py bridge_launch.sh restart_agent.sh cloudflared_launcher.sh
@@ -267,6 +275,9 @@ cat > "$PLIST_TMP" <<PLIST
     <key>BRIDGE_DISABLE_MDNS</key><string>0</string>
     <key>BRIDGE_AUTO_TUNNEL</key><string>0</string>
     <key>BRIDGE_TUNNEL_URL_FILE</key><string>$RUNTIME_DIR/tunnel_url.txt</string>
+    <key>BRIDGE_BROWSER_ORIGIN_MODE</key><string>${BRIDGE_BROWSER_ORIGIN_MODE:-ask}</string>
+    <key>BRIDGE_BROWSER_ALLOWED_ORIGINS</key><string>${BRIDGE_BROWSER_ALLOWED_ORIGINS:-}</string>
+    <key>BRIDGE_BROWSER_MANAGE_AUTO_REVIEW</key><string>${BRIDGE_BROWSER_MANAGE_AUTO_REVIEW:-1}</string>
   </dict>
   <key>SoftResourceLimits</key>
   <dict>

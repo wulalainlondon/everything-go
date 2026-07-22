@@ -715,7 +715,7 @@ def test_router_switch_session_config_creates_handoff_session():
         ctx.load_session_history_for_transfer = load_transfer
         handled = await handle_low_coupling_message(
             mtype="switch_session_config",
-            msg={"type": "switch_session_config", "session_id": "s1", "model": "gpt-5.1", "effort": "high"},
+            msg={"type": "switch_session_config", "session_id": "s1", "model": "gpt-5.6-terra", "effort": "high"},
             ws=ws,
             client=_Client(),
             ctx=ctx,
@@ -728,7 +728,7 @@ def test_router_switch_session_config_creates_handoff_session():
     assert handled is True
     assert new_session.name == "One (switch)"
     assert new_session.resume_id is None
-    assert new_session.model == "gpt-5.5"
+    assert new_session.model == "gpt-5.6-terra"
     assert new_session.effort == "high"
     assert new_session.queue[0].content == "handoff"
     assert sent[-1]["type"] == "session_switched"

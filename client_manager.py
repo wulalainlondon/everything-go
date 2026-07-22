@@ -25,6 +25,7 @@ class ClientConn:
     connected_at: float
     last_seen: float
     generation: int = 0
+    supports_replay_ack: bool = False
 
 
 CLIENTS: dict[Any, ClientConn] = {}

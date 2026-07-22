@@ -1,26 +1,81 @@
 """
 WebSocket connection handler — the per-connection entry point.
 
-Extracted verbatim from bridge_v2.py (zero behaviour change). All bridge_v2
-module state and helpers are accessed through `bv.` so they resolve to the live
-values that main()/_init_paths() assign at runtime; bridge_v2 re-exports
-`handler` from here (bottom-of-file import) so `bridge_v2.handler` is unchanged.
+Extracted from bridge_v2.py. All bridge_v2 module state and helpers are accessed
+through `bv.` so they resolve to the live values that main()/_init_paths() assign
+at runtime; bridge_v2 re-exports `handler` from here (bottom-of-file import) so
+`bridge_v2.handler` is unchanged.
 
-`import bridge_v2` is deferred into the handler body (not module top-level):
-when bridge_v2 runs as __main__ (`python bridge_v2.py`), a top-level import here
-would re-import bridge_v2 under its real name and hit a partially-initialized
-circular import. Deferring to call time avoids the cycle entirely.
+When bridge_v2 runs as __main__ (`python bridge_v2.py`), importing `bridge_v2`
+from here would create a second module with default globals, bypassing runtime
+state such as _ROOT_DIR. Resolve the live __main__ module first, and fall back to
+`import bridge_v2` for tests/imported-module use.
 """
 
 import inspect
+import sys
 
 from command_dispatcher import dispatch_bridge_command
 from command_runtime import build_command_dispatch_context
 from transport import BridgeTransport, transport_remote_address, transport_user_agent
 
 
-async def handler(ws: BridgeTransport) -> None:
+BACKEND_REGISTRY = [
+    {
+        "id": "claude",
+        "label": "Claude",
+        "default_model": "opus",
+        "models": [
+            {"id": "sonnet"},
+            {"id": "opus"},
+            {"id": "opusplan", "label": "opus · plan"},
+            {"id": "fable"},
+        ],
+        "capabilities": {"history": True, "usage": True, "interactions": True, "sandbox": True, "images": True, "files": True},
+    },
+    {
+        "id": "codex",
+        "label": "Codex",
+        "default_model": "gpt-5.6-sol",
+        "models": [
+            {"id": "gpt-5.6-sol"},
+            {"id": "gpt-5.6-terra"},
+            {"id": "gpt-5.6-luna"},
+            {"id": "gpt-5.5"},
+            {"id": "gpt-5.4"},
+            {"id": "gpt-5.4-mini"},
+            {"id": "gpt-5.3-codex-spark"},
+        ],
+        "capabilities": {"history": True, "usage": True, "sandbox": True, "files": True},
+    },
+    {
+        "id": "ollama",
+        "label": "Ollama",
+        "default_model": "qwen2.5:7b",
+        "models": [{"id": model} for model in ("qwen2.5:7b", "llama3.2", "llama3.1", "gemma3", "qwen3", "mistral", "deepseek-r1", "phi4")],
+        "capabilities": {},
+    },
+    {"id": "gemini", "label": "Gemini", "models": [], "capabilities": {}},
+]
+
+
+def _bridge_module():
+    """Return the live bridge_v2 module, including when bridge_v2.py runs as __main__."""
+    main_mod = sys.modules.get("__main__")
+    if (
+        main_mod is not None
+        and hasattr(main_mod, "_ROOT_DIR")
+        and hasattr(main_mod, "build_sessions_list")
+        and hasattr(main_mod, "client_manager")
+    ):
+        return main_mod
+
     import bridge_v2 as bv
+    return bv
+
+
+async def handler(ws: BridgeTransport) -> None:
+    bv = _bridge_module()
 
     # Liveness probe short-circuit.  The supervisor's bridge_healthcheck.py
     # opens a WS every 3s, sends a control PING, then closes.  Without this
@@ -93,6 +148,7 @@ async def handler(ws: BridgeTransport) -> None:
         client.device_id = first_msg["device_id"].strip()
     if isinstance(first_msg.get("device_name"), str) and first_msg.get("device_name", "").strip():
         client.device_name = first_msg["device_name"].strip()
+    client.supports_replay_ack = first_msg.get("replay_ack") is True
 
     bv.client_manager.register(ws, client)
     await bv.client_manager.close_duplicate_device_clients(ws, client.device_id)
@@ -123,6 +179,7 @@ async def handler(ws: BridgeTransport) -> None:
             "instance_name": bv._INSTANCE_NAME,
             "root_dir": bv._ROOT_DIR,
             "data_dir": bv._DATA_DIR,
+            "backend_registry": BACKEND_REGISTRY,
             **({"lan_ip": bv._LAN_IP} if bv._LAN_IP else {}),
             **({"tunnel_url": tunnel_url} if tunnel_url else {}),
         }, client)
@@ -133,10 +190,16 @@ async def handler(ws: BridgeTransport) -> None:
             if not bv.client_manager.is_current(ws, client):
                 return
             await bv.client_manager.send_json(ws, bv.build_sessions_list(), client)
+            await bv.client_manager.send_json(ws, bv.goals_snapshot(), client)
 
             # Replay offline buffers AFTER sessions_list so the frontend has
             # hydrated its session state before it processes buffered events.
-            await bv.replay_offline_buffers(ws, bv._SESSIONS.values())
+            await bv.replay_offline_buffers(
+                ws,
+                bv._scoped_sessions().values(),
+                supports_ack=client.supports_replay_ack,
+                client=client,
+            )
             if not bv.client_manager.is_current(ws, client):
                 return
             await bv._send_unread_snapshot_deferred(ws, client)
@@ -194,6 +257,12 @@ async def handler(ws: BridgeTransport) -> None:
 
             msg = command.payload
             bv.log.debug("Received: %s", bv._summarize_client_msg(msg, raw_len))
+            if command.type == "offline_replay_ack":
+                bv.ack_offline_replay(ws, msg["batch_id"])
+                continue
+            if command.type == "request_goals_snapshot":
+                await bv.client_manager.send_json(ws, bv.goals_snapshot(), client)
+                continue
             await dispatch_bridge_command(dispatch_ctx, command, op_started=op_started)
 
     except Exception as exc:

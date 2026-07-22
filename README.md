@@ -137,6 +137,40 @@ $env:BRIDGE_AUTH_TOKEN="replace-with-a-long-random-string"
 
 When set, the mobile app must include the token in its first `hello` message.
 
+## Chrome domain approvals
+
+When the Codex Chrome plugin asks for permission to access a browser origin,
+the bridge can answer automatically or forward the choice to the mobile app.
+The default is `ask`, which shows **Allow once**, **Always allow**, and
+**Deny** on the connected phone.
+
+```bash
+# Ask on the phone for every new origin (default).
+export BRIDGE_BROWSER_ORIGIN_MODE=ask
+
+# Automatically allow only listed origins. Host-only wildcard entries match
+# subdomains but not the bare domain.
+export BRIDGE_BROWSER_ORIGIN_MODE=allowlist
+export BRIDGE_BROWSER_ALLOWED_ORIGINS="https://studio.youtube.com,*.canva.com"
+
+# Automatically allow every valid HTTP(S) origin.
+export BRIDGE_BROWSER_ORIGIN_MODE=allow_all
+
+# Reject every browser-origin request.
+export BRIDGE_BROWSER_ORIGIN_MODE=deny
+```
+
+Automatic approval applies only to ordinary `access_browser_origin` requests.
+Raw CDP, browser history, file transfer, credentials, payments, destructive
+actions, and other sensitive elicitations are always sent to the phone for an
+explicit response.
+
+Before app-server starts, the bridge also writes `disable_auto_review = true`
+to `~/.codex/browser/config.toml`. This is required so Codex forwards browser
+consent to the bridge instead of deciding first with its built-in reviewer.
+Set `BRIDGE_BROWSER_MANAGE_AUTO_REVIEW=0` only when that built-in reviewer
+should remain authoritative.
+
 ## Optional Push Notifications
 
 Push notifications need a Firebase service account key at:

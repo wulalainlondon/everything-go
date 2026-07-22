@@ -840,6 +840,7 @@ class TestBuildSessionsListNoSpawn:
 
         backend = CodexAppServerBackend("codex")
         backend._native_sessions_root = str(tmp_path / "sessions")
+        backend._native_session_index_path = str(tmp_path / "session_index.jsonl")
 
         sessions = backend._load_native_codex_sessions(limit=10)
         assert sessions[0]["resume_id"] == uid
@@ -1150,6 +1151,19 @@ async def test_codex_turn_start_retries_thread_not_found(monkeypatch):
             state.turn_error = None
             state.turn_done_event.set()
             return {}
+        if method == "thread/goal/get" and params and params.get("threadId") == "new-thread":
+            return {
+                "goal": {
+                    "threadId": "new-thread",
+                    "objective": "finish",
+                    "status": "complete",
+                    "tokenBudget": None,
+                    "tokensUsed": 10,
+                    "timeUsedSeconds": 2,
+                    "createdAt": 1,
+                    "updatedAt": 2,
+                }
+            }
         raise AssertionError(f"unexpected rpc call: {method} {params}")
 
     monkeypatch.setattr(backend, "spawn", fake_spawn)
@@ -1164,5 +1178,6 @@ async def test_codex_turn_start_retries_thread_not_found(monkeypatch):
         if method == "turn/start" and params is not None
     ]
     assert turn_threads == ["old-thread", "new-thread"]
+    assert any(method == "thread/goal/get" for method, _params in calls)
     assert "old-thread" not in backend._thread_to_session
     assert backend._thread_to_session["new-thread"] is session

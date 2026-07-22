@@ -10,6 +10,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -42,6 +43,7 @@ def _run_get_context(
     session_id: str,
     msg_uuid: str,
     around: int,
+    root_dir: Optional[str],
 ) -> tuple[Optional[dict], list[tuple]]:
     """
     Synchronous part — runs in asyncio.to_thread.
@@ -56,6 +58,16 @@ def _run_get_context(
         "SELECT display_name, cwd, backend FROM sessions WHERE session_id = ? LIMIT 1",
         (session_id,),
     ).fetchone()
+    if root_dir is not None:
+        cwd = sess_row[1] if sess_row else ""
+        root = root_dir.rstrip("/")
+        try:
+            real_cwd = os.path.realpath(os.path.expanduser(cwd or ""))
+            real_root = os.path.realpath(os.path.expanduser(root))
+        except Exception:
+            return sess_row, []
+        if real_cwd != real_root and not real_cwd.startswith(real_root + os.sep):
+            return sess_row, []
 
     # 2. Find the rowid of the target message
     target_row = conn.execute(
@@ -89,6 +101,7 @@ async def get_search_context(
     session_id: str,
     msg_uuid: str,
     around: int = 10,
+    root_dir: Optional[str] = None,
 ) -> SearchContextResponse:
     """
     Return up to `around*2 + 1` messages centred on `msg_uuid` within `session_id`.
@@ -99,7 +112,7 @@ async def get_search_context(
 
     async with pool.borrow() as conn:
         sess_row, rows = await asyncio.to_thread(
-            _run_get_context, conn, session_id, msg_uuid, around
+            _run_get_context, conn, session_id, msg_uuid, around, root_dir
         )
 
     display_name: Optional[str] = sess_row[0] if sess_row else None

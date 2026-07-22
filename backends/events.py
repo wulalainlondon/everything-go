@@ -13,6 +13,8 @@ import sys
 import contextlib
 from typing import TYPE_CHECKING, Awaitable, Callable
 
+from goal_state import apply_goal_event
+
 if TYPE_CHECKING:
     from bridge_v2 import Session
 
@@ -94,6 +96,12 @@ def _evt_tool_end(tool_use_id: str) -> dict:
 # the full current list (full replace each emit). Item: {id, content, status, activeForm}.
 def _evt_todo_update(todos: list) -> dict:
     return {"type": "todo_update", "todos": todos}
+
+def _evt_goal_update(goal: dict) -> dict:
+    return {"type": "goal_update", "goal": goal}
+
+def _evt_goal_cleared() -> dict:
+    return {"type": "goal_cleared"}
 
 def _evt_media(media_type: str, path: str, url: str) -> dict:
     return {"type": "media", "media_type": media_type, "path": path, "url": url}
@@ -348,6 +356,17 @@ def _append_offline(session: "Session", payload: dict) -> None:
         and payload.get("request_id")
     ):
         _collapse_completed_turn(session, payload["session_id"], payload["request_id"])
+    if payload.get("type") in {"goal_update", "goal_cleared"}:
+        # Goal events are full snapshots. Keep only the newest one per session so
+        # frequent goal refreshes cannot crowd useful terminal events out of the
+        # bounded offline journal.
+        session.offline_buffer[:] = [
+            event for event in session.offline_buffer
+            if not (
+                event.get("type") in {"goal_update", "goal_cleared"}
+                and event.get("session_id") == payload.get("session_id")
+            )
+        ]
     if len(session.offline_buffer) >= OFFLINE_BUFFER_MAX:
         if payload.get("type") == "text_chunk":
             # Merge into the most recent text_chunk rather than dropping either event.
@@ -478,6 +497,7 @@ async def send_event(session: "Session", event: dict) -> None:
     session._event_seq += 1
     payload["seq"] = session._event_seq
     payload["gen"] = _GENERATION
+    apply_goal_event(payload)
     if getattr(session, "event_sink", None) is None and _EVENT_DISPATCHER is None and session.ws_ref is None:
         _append_offline(session, payload)
         return

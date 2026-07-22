@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import sys
 import time
@@ -129,6 +130,101 @@ def test_replay_offline_buffers_batches_one_session_without_live_interleaving():
 
     assert replayed == 2
     assert contents == ["old-1", "old-2", "live"]
+
+
+def test_ack_replay_batches_2050_events_without_early_commit():
+    import offline_replay
+
+    async def run():
+        offline_replay.reset_for_tests()
+        session = _session("s1")
+        session.offline_buffer = [
+            {"type": "done", "session_id": "s1", "seq": index, "gen": "g1"}
+            for index in range(2050)
+        ]
+        ws = _Ws()
+        task = asyncio.create_task(
+            offline_replay.replay_offline_buffers(ws, [session], supports_ack=True)
+        )
+        handled = 0
+        first_buffer_size = None
+        while not task.done():
+            await asyncio.sleep(0)
+            batches = [event for event in ws.sent if event.get("type") == "offline_replay_batch"]
+            while handled < len(batches):
+                batch = batches[handled]
+                if first_buffer_size is None:
+                    first_buffer_size = len(session.offline_buffer)
+                assert 1 <= len(batch["events"]) <= 64
+                assert offline_replay.ack_offline_replay(ws, batch["batch_id"])
+                handled += 1
+        replayed = await task
+        offline_replay.reset_for_tests()
+        return replayed, handled, first_buffer_size, session.offline_buffer
+
+    replayed, batch_count, first_buffer_size, remaining = asyncio.run(run())
+
+    assert replayed == 2050
+    assert batch_count == 33
+    assert first_buffer_size == 2050
+    assert remaining == []
+
+
+def test_ack_replay_disconnect_before_ack_retains_and_resends_batch():
+    import offline_replay
+
+    async def wait_for_batch(ws):
+        while not ws.sent:
+            await asyncio.sleep(0)
+        return ws.sent[0]
+
+    async def run():
+        offline_replay.reset_for_tests()
+        session = _session("s1")
+        session.offline_buffer = [
+            {"type": "goal_update", "session_id": "s1", "seq": 1, "gen": "g1", "goal": {"status": "complete"}},
+            {"type": "done", "session_id": "s1", "seq": 2, "gen": "g1"},
+        ]
+
+        first_ws = _Ws()
+        first_task = asyncio.create_task(
+            offline_replay.replay_offline_buffers(first_ws, [session], supports_ack=True)
+        )
+        first_batch = await wait_for_batch(first_ws)
+        first_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await first_task
+        retained = list(session.offline_buffer)
+
+        second_ws = _Ws()
+        second_task = asyncio.create_task(
+            offline_replay.replay_offline_buffers(second_ws, [session], supports_ack=True)
+        )
+        second_batch = await wait_for_batch(second_ws)
+        assert offline_replay.ack_offline_replay(second_ws, second_batch["batch_id"])
+        replayed = await second_task
+        offline_replay.reset_for_tests()
+        return first_batch, second_batch, retained, replayed, session.offline_buffer
+
+    first, second, retained, replayed, remaining = asyncio.run(run())
+
+    assert first["batch_id"] != second["batch_id"]
+    assert first["events"] == second["events"]
+    assert len(retained) == 2
+    assert replayed == 2
+    assert remaining == []
+
+
+def test_goal_offline_events_coalesce_to_latest_snapshot():
+    from backends.events import _append_offline
+
+    session = _session("s1")
+    _append_offline(session, {"type": "goal_update", "session_id": "s1", "goal": {"status": "active"}})
+    _append_offline(session, {"type": "done", "session_id": "s1"})
+    _append_offline(session, {"type": "goal_update", "session_id": "s1", "goal": {"status": "complete"}})
+
+    assert [event["type"] for event in session.offline_buffer] == ["done", "goal_update"]
+    assert session.offline_buffer[-1]["goal"]["status"] == "complete"
 
 
 def test_dispatch_event_returns_false_when_all_registered_clients_are_dead(monkeypatch):

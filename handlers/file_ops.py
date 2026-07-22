@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import os
+import tempfile
 import time
 
 from utils.path_jail import resolve_jailed, JailEscape
@@ -70,12 +71,74 @@ _SKIP_PREFIXES = (".", "~")
 
 _MAX_ENTRIES = 500
 _MAX_PREVIEW_FILE_BYTES = 256 * 1024
+_MAX_SAVE_FILE_BYTES = 512 * 1024
+_MAX_MARKDOWN_SCAN_FILES = 300
 _PREVIEW_TEXT_EXTS = frozenset({
     ".c", ".cc", ".cpp", ".css", ".go", ".h", ".hpp", ".html", ".java",
-    ".js", ".json", ".jsx", ".kt", ".log", ".md", ".py", ".rb", ".rs",
+    ".js", ".json", ".jsx", ".kt", ".log", ".md", ".markdown", ".py", ".rb", ".rs",
     ".sh", ".sql", ".swift", ".toml", ".ts", ".tsx", ".txt", ".xml",
     ".yaml", ".yml",
 })
+_MARKDOWN_EXTS = frozenset({".md", ".markdown"})
+
+
+def _is_preview_text_path(path: str) -> bool:
+    return os.path.splitext(path)[1].lower() in _PREVIEW_TEXT_EXTS
+
+
+def _is_markdown_path(path: str) -> bool:
+    return os.path.splitext(path)[1].lower() in _MARKDOWN_EXTS
+
+
+def _markdown_entry(path: str, root: str) -> dict:
+    stat = os.stat(path)
+    return {
+        "path": path,
+        "root": root,
+        "name": os.path.basename(path),
+        "relative_path": os.path.relpath(path, root),
+        "size": stat.st_size,
+        "modified": int(stat.st_mtime),
+    }
+
+
+def _scan_markdown_files(root: str, remaining: int) -> list[dict]:
+    entries: list[dict] = []
+    if remaining <= 0 or not os.path.isdir(root):
+        return entries
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [
+            d for d in dirnames
+            if d not in _SKIP_DIRS and not d.startswith(_SKIP_PREFIXES)
+        ]
+        for name in filenames:
+            if name.startswith(_SKIP_PREFIXES):
+                continue
+            full_path = os.path.join(dirpath, name)
+            if not _is_markdown_path(full_path):
+                continue
+            try:
+                entries.append(_markdown_entry(full_path, root))
+            except Exception as exc:
+                log.debug("_scan_markdown_files: stat failed for %r: %s", full_path, exc)
+            if len(entries) >= remaining:
+                return entries
+    return entries
+
+
+def _write_text_file_atomic(path: str, content: str) -> None:
+    dir_name = os.path.dirname(path) or "."
+    fd, tmp_path = tempfile.mkstemp(dir=dir_name, prefix=".tmp_bridge_", suffix=".md")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+            f.write(content)
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+        raise
 
 
 def _list_entries_cached(path: str) -> list[dict]:
@@ -192,6 +255,38 @@ async def handle_file_msg(mtype: str, msg: dict, ws, ctx: dict) -> bool:
     if mtype in {"scan_artifacts", "youtube_task"}:
         return await handle_artifact_msg(mtype, msg, ws, ctx)
 
+    if mtype == "scan_markdown_files":
+        req_paths = msg.get("paths")
+        if not isinstance(req_paths, list):
+            req_paths = []
+        root_dir = ctx.get("root_dir", "")
+        roots: list[str] = []
+        files: list[dict] = []
+        errors: list[dict] = []
+        limit = int(msg.get("limit") or _MAX_MARKDOWN_SCAN_FILES)
+        limit = max(1, min(limit, _MAX_MARKDOWN_SCAN_FILES))
+        for raw in req_paths:
+            if not isinstance(raw, str) or not raw.strip():
+                continue
+            if len(files) >= limit:
+                break
+            try:
+                root = resolve_jailed(raw, root_dir)
+            except JailEscape as e:
+                errors.append({"path": raw, "error": f"Path outside instance root: {raw}"})
+                log.warning("[jail] scan_markdown_files escape: req=%r resolved=%r root=%r", e.req_path, e.resolved, e.root_dir)
+                continue
+            roots.append(root)
+            files.extend(_scan_markdown_files(root, limit - len(files)))
+        files.sort(key=lambda item: (-int(item.get("modified") or 0), str(item.get("relative_path") or "").lower()))
+        await ws.send(json.dumps({
+            "type": "markdown_files_listing",
+            "roots": roots,
+            "files": files[:limit],
+            "errors": errors,
+        }))
+        return True
+
     if mtype == "browse_dir":
         req_path = msg.get("path") or "~"
         root_dir = ctx.get("root_dir", "")
@@ -284,16 +379,92 @@ async def handle_file_msg(mtype: str, msg: dict, ws, ctx: dict) -> bool:
             if stat.st_size > _MAX_PREVIEW_FILE_BYTES:
                 await ws.send(_payload(size=stat.st_size, error="file is too large to preview"))
                 return True
-            ext = os.path.splitext(path)[1].lower()
-            if ext not in _PREVIEW_TEXT_EXTS:
+            if not _is_preview_text_path(path):
                 await ws.send(_payload(size=stat.st_size, mime_type="application/octet-stream", error="preview supports text files only"))
                 return True
             with open(path, "r", encoding="utf-8", errors="replace") as f:
                 content = f.read()
-            await ws.send(_payload(content=content, size=stat.st_size, mime_type="text/plain; charset=utf-8"))
+            payload = json.loads(_payload(content=content, size=stat.st_size, mime_type="text/plain; charset=utf-8"))
+            payload["modified"] = int(stat.st_mtime)
+            await ws.send(json.dumps(payload))
         except Exception as exc:
             try:
                 await ws.send(_payload(error=str(exc)))
+            except Exception:
+                pass
+        return True
+
+    if mtype == "save_file":
+        req_path = msg.get("path") or ""
+        content = msg.get("content")
+        expected_modified = msg.get("expected_modified")
+        root_dir = ctx.get("root_dir", "")
+
+        def _save_payload(path_value: str, name_value: str, content_value: str = "", size: int = 0, modified: int = 0, error: str = "") -> str:
+            data = {
+                "type": "file_saved",
+                "path": path_value,
+                "name": name_value,
+                "content": content_value,
+                "size": size,
+                "modified": modified,
+                "mime_type": "text/plain; charset=utf-8",
+            }
+            if error:
+                data["error"] = error
+            return json.dumps(data)
+
+        try:
+            path = resolve_jailed(req_path, root_dir)
+        except JailEscape as e:
+            try:
+                await ws.send(_save_payload(req_path, os.path.basename(req_path), error=f"Path outside instance root: {req_path}"))
+            except Exception:
+                pass
+            log.warning("[jail] save_file escape: req=%r resolved=%r root=%r", e.req_path, e.resolved, e.root_dir)
+            return True
+
+        name = os.path.basename(path)
+        try:
+            if not isinstance(content, str):
+                await ws.send(_save_payload(path, name, error="content must be a string"))
+                return True
+            if len(content.encode("utf-8")) > _MAX_SAVE_FILE_BYTES:
+                await ws.send(_save_payload(path, name, error="file is too large to save from preview"))
+                return True
+            if os.path.isdir(path):
+                await ws.send(_save_payload(path, name, error="path is a directory"))
+                return True
+            if not _is_markdown_path(path):
+                await ws.send(_save_payload(path, name, error="editing supports markdown files only"))
+                return True
+
+            current_stat = os.stat(path)
+            current_modified = int(current_stat.st_mtime)
+            if isinstance(expected_modified, int) and expected_modified > 0 and expected_modified != current_modified:
+                await ws.send(_save_payload(
+                    path,
+                    name,
+                    content_value=content,
+                    size=current_stat.st_size,
+                    modified=current_modified,
+                    error="file changed on disk; reopen before saving",
+                ))
+                return True
+
+            _write_text_file_atomic(path, content)
+            _ENTRIES_CACHE.pop(os.path.dirname(path), None)
+            updated_stat = os.stat(path)
+            await ws.send(_save_payload(
+                path,
+                name,
+                content_value=content,
+                size=updated_stat.st_size,
+                modified=int(updated_stat.st_mtime),
+            ))
+        except Exception as exc:
+            try:
+                await ws.send(_save_payload(path, name, content_value=content if isinstance(content, str) else "", error=str(exc)))
             except Exception:
                 pass
         return True

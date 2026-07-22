@@ -218,6 +218,23 @@ class ClaudeCliBackend(_StatesMixin, _ClaudeHistoryMixin, _ClaudeProcessMixin, _
             ev.set()
         state.tool_waiting_events.clear()
         state.tool_waiting_interactions.clear()
+        # If a /compact turn was in flight when we stopped, reset the flag and tell
+        # the frontend so its CompactingBanner doesn't stay pinned. Guarded so the
+        # _watch_proc exit path doesn't double-broadcast the same terminal event.
+        if state.compact_in_progress:
+            state.compact_in_progress = False
+            if self._broadcast_fn is not None:
+                task_manager.spawn(
+                    f"claude-compact-stopped:{session.session_id}",
+                    self._broadcast_fn({
+                        "type": "session_command_failed",
+                        "session_id": session.session_id,
+                        "request_id": f"compact_{session.session_id}",
+                        "message": "Compact interrupted by stop",
+                        "queue_length": 0,
+                    }),
+                    owner=f"session:{session.session_id}",
+                )
         await self._spawn_proc(session)
 
     async def clear(self, session: "Session") -> None:

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Bridge instance on port 9453, no directory jail.
+# Bridge instance on port 9453, jailed to ~/Desktop/Esteban.
 set -euo pipefail
 
 BRIDGE_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -15,7 +15,7 @@ export BRIDGE_TUNNEL_URL_FILE="${DATA_DIR}/tunnel_url.txt"
 mkdir -p "$DATA_DIR"
 ulimit -n 65536 2>/dev/null || ulimit -n 8192 2>/dev/null || true
 
-echo "[esteban-bridge] $(date '+%F %T') starting on port $PORT (no jail)" >> "$LOG_FILE"
+echo "[esteban-bridge] $(date '+%F %T') starting on port $PORT (root=${HOME}/Desktop/Esteban)" >> "$LOG_FILE"
 
 exec "$BRIDGE_DIR/venv/bin/python" "$BRIDGE_DIR/bridge_v2.py" \
   --port "$PORT" \
