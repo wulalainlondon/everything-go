@@ -5,6 +5,7 @@ package goexec
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -36,7 +37,15 @@ const (
 	codexStallCheckEvery  = 30 * time.Second
 )
 
-var codexAskUserRE = regexp.MustCompile("(?s)```(?:json)?\\s*(\\{[^`]*?\"(?:ask_user_question|AskUserQuestion)\"[^`]*?\\})\\s*```|(\\{[^{}]*\"(?:ask_user_question|AskUserQuestion)\"[^{}]*\\})")
+var (
+	codexAskUserRE     = regexp.MustCompile("(?s)```(?:json)?\\s*(\\{[^`]*?\"(?:ask_user_question|AskUserQuestion)\"[^`]*?\\})\\s*```|(\\{[^{}]*\"(?:ask_user_question|AskUserQuestion)\"[^{}]*\\})")
+	codexInlineImageRE = regexp.MustCompile(`"type"\s*:\s*"input_image"`)
+	// Image generation tool results contain an inline input_image data URL plus
+	// a compact text block naming the durable file under ~/.codex/generated_images.
+	// Extract only that managed path; never forward the multi-megabyte base64
+	// payload to the mobile tool card.
+	codexGeneratedImagePathRE = regexp.MustCompile(`(/[^\s"'<>]*\.codex/generated_images/[^\s"'<>]+\.(?:png|jpe?g|webp|gif))`)
+)
 
 type codexState struct {
 	mu sync.Mutex
@@ -140,9 +149,10 @@ type Codex struct {
 
 type codexInteraction struct {
 	payload      backend.UserInputPayload
-	rpcID        int
+	rpcID        any
 	responseKind string
 	reqID        string
+	mcpParams    json.RawMessage
 }
 
 func NewCodex(sink executor.Sink, codexBin string) *Codex {
@@ -189,7 +199,12 @@ func (c *Codex) ensureServer() error {
 	}
 
 	log.Printf("[codex] spawning codex app-server")
-	cmd := exec.Command(c.codexBin, "--enable", "default_mode_request_user_input", "app-server")
+	if changed, err := ensureBrowserElicitationRouting(filepath.Dir(c.sessionsRoot)); err != nil {
+		log.Printf("[codex] browser elicitation routing config failed: %v", err)
+	} else if changed {
+		log.Printf("[codex] Browser Use elicitations routed through bridge policy")
+	}
+	cmd := exec.Command(c.codexBin, "app-server")
 	stdinPipe, err := cmd.StdinPipe()
 	if err != nil {
 		return err
@@ -224,7 +239,11 @@ func (c *Codex) ensureServer() error {
 	}()
 
 	if _, err := c.rpc.request("initialize", map[string]any{
-		"clientInfo": map[string]any{"name": "everything-go", "version": "1.0"},
+		"clientInfo": map[string]any{
+			"name":    "claude-bridge",
+			"title":   "Averything Bridge",
+			"version": "1.0",
+		},
 		"capabilities": map[string]any{
 			"experimentalApi":                true,
 			"requestAttestation":             false,
@@ -404,7 +423,7 @@ func trimLineEnd(line []byte) int {
 }
 
 type codexMsg struct {
-	ID     *int            `json:"id"`
+	ID     json.RawMessage `json:"id"`
 	Method string          `json:"method"`
 	Params json.RawMessage `json:"params"`
 }
@@ -424,8 +443,10 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 		return
 	}
 	// Server→client request (has id + method, no result/error).
-	if m.ID != nil && m.Method != "" {
-		c.handleServerRequest(*m.ID, m.Method, m.Params)
+	if len(m.ID) > 0 && string(m.ID) != "null" && m.Method != "" {
+		// Keep the request ID as raw JSON so app-server string IDs and numeric
+		// IDs are echoed with their original type and value.
+		c.handleServerRequest(m.ID, m.Method, m.Params)
 		return
 	}
 
@@ -591,14 +612,29 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 			return
 		}
 		itemID := firstNonEmpty(p.ItemID, p.Item.ID, "codex_item")
-		output := rawToString(p.Output)
-		if output == "" {
-			output = rawToString(p.Item.Output)
+		rawOutput := p.Output
+		if len(rawOutput) == 0 || string(rawOutput) == "null" {
+			rawOutput = p.Item.Output
+		}
+		generatedPaths := codexGeneratedImagePaths(rawOutput)
+		output := rawToString(rawOutput)
+		if codexHasInlineImage(rawOutput) {
+			if len(generatedPaths) > 0 {
+				output = "Generated image:\n" + strings.Join(generatedPaths, "\n")
+			} else {
+				output = "Generated image completed, but no saved file path was returned."
+			}
 		}
 		if output != "" {
 			c.tools.Result(s.ID, reqID, itemID, output)
 		}
 		c.tools.End(s.ID, reqID, itemID)
+		for _, path := range generatedPaths {
+			c.sink.Emit(protocol.Media{
+				Type: "media", SessionID: s.ID, RequestID: reqID,
+				MediaType: "image", Path: path,
+			})
+		}
 
 	case "turn/plan/updated":
 		// Codex update_plan → normalized todo panel. Full replace; step→content.
@@ -682,6 +718,34 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 			st.finish(msg)
 		}
 	}
+}
+
+func codexHasInlineImage(raw json.RawMessage) bool {
+	return codexInlineImageRE.Match(bytes.TrimSpace(raw))
+}
+
+func codexGeneratedImagePaths(raw json.RawMessage) []string {
+	if !codexHasInlineImage(raw) {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var paths []string
+	for _, match := range codexGeneratedImagePathRE.FindAllSubmatch(raw, -1) {
+		if len(match) < 2 {
+			continue
+		}
+		path := strings.ReplaceAll(string(match[1]), `\/`, "/")
+		if seen[path] {
+			continue
+		}
+		info, err := os.Stat(path)
+		if err != nil || info.IsDir() {
+			continue
+		}
+		seen[path] = true
+		paths = append(paths, path)
+	}
+	return paths
 }
 
 func firstPtr(a, b *string, fallback string) string {
@@ -843,7 +907,7 @@ func (c *Codex) BuildAgentTree(resumeID string) (int, []*protocol.AgentNode) {
 	return len(st.agents), roots
 }
 
-func (c *Codex) handleServerRequest(id int, method string, raw json.RawMessage) {
+func (c *Codex) handleServerRequest(id any, method string, raw json.RawMessage) {
 	approval := map[string]bool{
 		"item/commandExecution/requestApproval": true,
 		"item/fileChange/requestApproval":       true,
@@ -860,7 +924,9 @@ func (c *Codex) handleServerRequest(id int, method string, raw json.RawMessage) 
 			_ = c.rpc.write(map[string]any{"id": id, "result": map[string]any{"answers": []any{}}})
 		}
 	case method == "mcpServer/elicitation/request":
-		if !c.createMcpElicitationRequest(id, raw) {
+		if result, handled := mcpAutomaticResponse(raw); handled {
+			_ = c.rpc.write(map[string]any{"id": id, "result": result})
+		} else if !c.createMcpElicitationRequest(id, raw) {
 			_ = c.rpc.write(map[string]any{"id": id, "result": map[string]any{"action": "cancel", "content": nil, "_meta": nil}})
 		}
 	case method == "item/tool/call":
@@ -908,7 +974,7 @@ func (c *Codex) emitUnsupportedCodexTool(raw json.RawMessage) string {
 	return toolName
 }
 
-func (c *Codex) createUserInputRequest(rpcID int, raw json.RawMessage) bool {
+func (c *Codex) createUserInputRequest(rpcID any, raw json.RawMessage) bool {
 	var p struct {
 		ThreadID  string                     `json:"threadId"`
 		ItemID    string                     `json:"itemId"`
@@ -960,7 +1026,7 @@ func (c *Codex) createUserInputRequest(rpcID int, raw json.RawMessage) bool {
 	return true
 }
 
-func (c *Codex) createMcpElicitationRequest(rpcID int, raw json.RawMessage) bool {
+func (c *Codex) createMcpElicitationRequest(rpcID any, raw json.RawMessage) bool {
 	var p struct {
 		ThreadID        string         `json:"threadId"`
 		TurnID          string         `json:"turnId"`
@@ -980,45 +1046,18 @@ func (c *Codex) createMcpElicitationRequest(rpcID int, raw json.RawMessage) bool
 	if s == nil {
 		return false
 	}
-	questions := []backend.UserInputQuestion{}
-	if p.Mode == "url" {
-		questions = append(questions, backend.UserInputQuestion{QuestionID: "action", Text: p.Message + "\n" + p.URL, Header: p.ServerName, Type: "single_select", Options: []backend.UserInputOption{{ID: "accept", Label: "Open / Continue", Recommended: true}, {ID: "decline", Label: "Decline"}}})
-	} else if props, ok := p.RequestedSchema["properties"].(map[string]any); ok {
-		required := map[string]bool{}
-		if list, ok := p.RequestedSchema["required"].([]any); ok {
-			for _, v := range list {
-				required[codexAnyString(v)] = true
-			}
-		}
-		for key, value := range props {
-			schema, _ := value.(map[string]any)
-			text := firstNonEmpty(codexFirstString(schema, "title", "description"), key)
-			q := backend.UserInputQuestion{QuestionID: key, Text: text, Header: p.ServerName, Type: "text", FreeForm: true}
-			if enum, ok := schema["enum"].([]any); ok && len(enum) > 0 {
-				q.FreeForm = false
-				q.Type = "single_select"
-				for _, v := range enum {
-					id := codexAnyString(v)
-					q.Options = append(q.Options, backend.UserInputOption{ID: id, Label: id})
-				}
-			}
-			_ = required
-			questions = append(questions, q)
-		}
-	}
-	if len(questions) == 0 {
-		questions = []backend.UserInputQuestion{{QuestionID: "response", Text: firstNonEmpty(p.Message, "MCP server requests input"), Header: p.ServerName, Type: "text", FreeForm: true}}
-	}
+	params := decodeObject(raw)
+	questions := mcpElicitationQuestions(params)
 	reqID := "mcp_" + randHex(12)
 	payload := backend.UserInputPayload{RequestID: reqID, SessionID: s.ID, Source: "codex", Kind: "mcp_" + p.Mode, Header: firstNonEmpty(p.ServerName, "MCP request"), ToolUseID: p.ElicitationID, RequestingAgent: p.ServerName, Questions: questions, CreatedAt: time.Now().UnixMilli(), Status: "pending"}
 	c.interMu.Lock()
-	c.interactions[reqID] = codexInteraction{payload: payload, rpcID: rpcID, responseKind: "mcp"}
+	c.interactions[reqID] = codexInteraction{payload: payload, rpcID: rpcID, responseKind: "mcp", mcpParams: append(json.RawMessage(nil), raw...)}
 	c.interMu.Unlock()
 	c.sink.Emit(backend.NewUserInputRequest(payload))
 	return true
 }
 
-func (c *Codex) createDynamicToolRequest(rpcID int, raw json.RawMessage) bool {
+func (c *Codex) createDynamicToolRequest(rpcID any, raw json.RawMessage) bool {
 	var p struct {
 		ThreadID  string  `json:"threadId"`
 		TurnID    string  `json:"turnId"`
@@ -1587,9 +1626,10 @@ func (c *Codex) startTurnWithStaleRetry(s *session.Session, st *codexState, thre
 
 func codexTurnParams(threadID string, input []map[string]any, effort string) map[string]any {
 	params := map[string]any{
-		"threadId":       threadID,
-		"input":          input,
-		"approvalPolicy": "never",
+		"threadId":          threadID,
+		"input":             input,
+		"approvalPolicy":    "never",
+		"approvalsReviewer": "user",
 	}
 	switch effort {
 	case "low", "medium", "high", "xhigh", "max", "ultra":
@@ -1673,13 +1713,13 @@ func (c *Codex) ensureThread(s *session.Session, st *codexState) error {
 	if fi, err := os.Stat(cwd); err != nil || !fi.IsDir() {
 		cwd, _ = os.UserHomeDir()
 	}
-	sandbox := codexSandbox(snap.Sandbox)
+	sandbox := codexSandboxForSession(snap)
 
 	var threadID string
 	if snap.ResumeID != "" {
 		raw, err := c.rpcCall("thread/resume", map[string]any{
 			"threadId": snap.ResumeID, "cwd": cwd,
-			"approvalPolicy": "never", "sandbox": sandbox,
+			"approvalPolicy": "never", "approvalsReviewer": "user", "sandbox": sandbox,
 		}, 15*time.Second)
 		if err == nil {
 			threadID = extractThreadID(raw, snap.ResumeID)
@@ -1694,7 +1734,7 @@ func (c *Codex) ensureThread(s *session.Session, st *codexState) error {
 		}
 		raw, err := c.rpcCall("thread/start", map[string]any{
 			"model": model, "cwd": cwd, "ephemeral": false,
-			"approvalPolicy": "never", "sandbox": sandbox,
+			"approvalPolicy": "never", "approvalsReviewer": "user", "sandbox": sandbox,
 			"serviceTier": func() any {
 				if snap.ServiceTier == "" {
 					return nil
@@ -1830,21 +1870,11 @@ func (c *Codex) RespondUserInput(id string, answers map[string]any, cancelled bo
 	if answers == nil {
 		answers = map[string]any{}
 	}
-	if ci.rpcID != 0 {
+	if ci.rpcID != nil {
 		var result any
 		switch ci.responseKind {
 		case "mcp":
-			action := "accept"
-			if cancelled {
-				action = "cancel"
-			} else if v := codexAnyString(answers["action"]); v == "decline" {
-				action = "decline"
-			}
-			content := any(answers)
-			if action != "accept" {
-				content = nil
-			}
-			result = map[string]any{"action": action, "content": content, "_meta": nil}
+			result = mcpElicitationResponse(ci.mcpParams, answers, cancelled)
 		case "dynamic_tool":
 			text := codexAnyString(answers["result"])
 			result = map[string]any{"contentItems": []any{map[string]any{"type": "inputText", "text": text}}, "success": !cancelled}
@@ -2078,6 +2108,22 @@ func codexSandbox(s string) string {
 	default:
 		return "workspace-write"
 	}
+}
+
+// Browser Use reads its approval configuration through Codex's privileged
+// runtime and needs outbound network access. Current Codex builds only expose
+// both reliably through danger-full-access. Match the Python bridge for an
+// unset sandbox when browser networking is enabled, while preserving every
+// explicit sandbox choice and the network opt-out.
+func codexSandboxForSession(snap session.Snapshot) string {
+	base := codexSandbox(snap.Sandbox)
+	if strings.TrimSpace(snap.Sandbox) != "" || strings.EqualFold(strings.TrimSpace(os.Getenv("BRIDGE_BROWSER_ORIGIN_MODE")), "deny") {
+		return base
+	}
+	if disabled := strings.ToLower(strings.TrimSpace(os.Getenv("BRIDGE_BROWSER_ENABLE_NETWORK"))); disabled == "0" || disabled == "false" || disabled == "no" || disabled == "off" {
+		return base
+	}
+	return "danger-full-access"
 }
 
 func extractThreadID(raw json.RawMessage, fallback string) string {

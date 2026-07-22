@@ -85,6 +85,61 @@ func TestCodexRootTurnCompletionFinishesTheOwningSession(t *testing.T) {
 	}
 }
 
+func TestCodexCompletedImageToolEmitsMediaWithoutBase64(t *testing.T) {
+	sink := &capSink{}
+	c := NewCodex(sink, "codex")
+	reg := session.NewRegistry()
+	dir := filepath.Join(t.TempDir(), ".codex", "generated_images", "thread")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	imagePath := filepath.Join(dir, "generated.png")
+	if err := os.WriteFile(imagePath, []byte("png"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := reg.Create("s1", "codex", "/tmp", "codex", "", "", "")
+	st := c.state(s.ID)
+	st.threadID = "root"
+	st.reqID = "r1"
+	c.threadToSession["root"] = s
+
+	params, err := json.Marshal(map[string]any{
+		"threadId": "root",
+		"itemId":   "image-tool",
+		"item":     map[string]any{"id": "image-tool", "type": "dynamicToolCall"},
+		"output": []map[string]any{
+			{"type": "input_image", "image_url": "data:image/png;base64,VERY_LARGE_BASE64"},
+			{"type": "input_text", "text": "Generated images are saved as " + imagePath},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, err := json.Marshal(map[string]any{"method": "item/completed", "params": json.RawMessage(params)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.dispatch(message)
+
+	var media protocol.Media
+	foundMedia := false
+	var result protocol.ToolResult
+	for _, event := range sink.events {
+		switch e := event.(type) {
+		case protocol.Media:
+			media, foundMedia = e, true
+		case protocol.ToolResult:
+			result = e
+		}
+	}
+	if !foundMedia || media.Path != imagePath || media.SessionID != "s1" || media.RequestID != "r1" {
+		t.Fatalf("bad generated media event: %+v", media)
+	}
+	if strings.Contains(result.Output, "VERY_LARGE_BASE64") || !strings.Contains(result.Output, imagePath) {
+		t.Fatalf("tool output was not compacted: %q", result.Output)
+	}
+}
+
 func TestCodexMcpAndDynamicToolElicitationsReturnProtocolResponses(t *testing.T) {
 	sink := &capSink{}
 	c := NewCodex(sink, "codex")
@@ -704,6 +759,47 @@ func TestCodexGzipRolloutRegistersAndLoadsHistory(t *testing.T) {
 	}
 	if len(hist.Messages) != 2 || hist.Messages[0]["content"] != "檢查壓縮 rollout" || hist.Messages[1]["content"] != "可以讀取" {
 		t.Fatalf("bad codex history: %+v", hist.Messages)
+	}
+}
+
+func TestCodexResumableSessionsRejectsSubagentsAndKeepsUserForks(t *testing.T) {
+	root := t.TempDir()
+	day := filepath.Join(root, "2026", "07", "20")
+	if err := os.MkdirAll(day, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	parentID := "019f541f-63b6-7e53-a4e2-dd36d875a7c2"
+	subagentID := "019f7ddf-17c7-7a53-a5c5-e6e81bd52d7b"
+	legacySubagentID := "019f7333-b3ed-7762-9776-c0948bf285bd"
+	userForkID := "019f7ddf-318d-7360-ac6b-617bebd1c195"
+	writeJSONL(t, filepath.Join(day, "rollout-2026-07-20T12-53-20-"+subagentID+".jsonl"), []map[string]any{
+		{"type": "session_meta", "payload": map[string]any{
+			"id": subagentID, "cwd": "/repo", "thread_source": "subagent", "parent_thread_id": parentID,
+			"source": map[string]any{"subagent": map[string]any{"depth": 1}},
+		}},
+		{"type": "response_item", "payload": map[string]any{"type": "message", "role": "user", "content": []any{map[string]any{"text": "worker task"}}}},
+	})
+	writeJSONL(t, filepath.Join(day, "rollout-2026-07-20T12-53-40-"+legacySubagentID+".jsonl"), []map[string]any{
+		{"type": "session_meta", "payload": map[string]any{
+			"id": legacySubagentID, "cwd": "/repo", "source": map[string]any{"subagent": map[string]any{"depth": 1}},
+		}},
+		{"type": "response_item", "payload": map[string]any{"type": "message", "role": "user", "content": []any{map[string]any{"text": "legacy worker task"}}}},
+	})
+	writeJSONL(t, filepath.Join(day, "rollout-2026-07-20T12-54-00-"+userForkID+".jsonl"), []map[string]any{
+		{"type": "session_meta", "payload": map[string]any{
+			"id": userForkID, "cwd": "/repo", "forked_from_id": parentID, "thread_source": "user", "source": "exec",
+		}},
+		{"type": "response_item", "payload": map[string]any{"type": "message", "role": "user", "content": []any{map[string]any{"text": "user fork"}}}},
+	})
+
+	c := NewCodex(&capSink{}, "codex")
+	c.sessionsRoot = root
+	sessions, err := c.ResumableSessions(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 || sessions[0].ClaudeUUID != userForkID || sessions[0].Name != "user fork" {
+		t.Fatalf("want only user fork, got %+v", sessions)
 	}
 }
 

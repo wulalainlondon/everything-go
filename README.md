@@ -130,6 +130,43 @@ Verification levels:
 | **feed (read + write)** | ✓ | **U**+E+**A** | `internal/feed` — full port of feed_ops.py: `feed_push` (store HTML/markdown article ≤5 MB to feed/articles/, dedup by client_dedup_key, index.json) → `feed_ack` + broadcast `feed_new` + FCM `NotifyFeedNew`; `feed_list_request`→`feed_list` (newest-first, dedup key stripped, GC of >7-day soft-deletes); `feed_fetch`→`feed_detail`; `feed_mark_read`/`feed_delete`→broadcast `feed_updated`. **U**: push/dedup/list/fetch/mark/delete/oversize/persist (`-race`). **E**: WS round-trip (CJK title + HTML). **A**: pushed to Go bridge → showed on real **Galaxy S10+** 收件匣→訂閱 feed (card "📰 郵報 #2 · POCKET_GAMER · Just now"), tapped → HTML article rendered ("即時測試" h1 + body). This is the LINE→feed product target. |
 | instances / inbox (read) | ✓ | **U**+**A** | the app polls `list_instances`/`get_inbox` on connect; Go answers valid empty instances plus persisted inbox items. Instance *write* ops (start/stop/upsert/delete) are still unbuilt |
 | permission approval | ✓ | **U**+E | `governance/permission.go` — port of permission_manager.py. Gates `kill_process` + `shell_input`: `Request` broadcasts `permission_request`, blocks on the user's `permission_response` (or TTL→deny), returns the decision; device-bound (only the requester can approve); modes off/warn/enforce via `BRIDGE_PERMISSION_MODE` (default enforce). Run in a goroutine so the read loop keeps handling the response (no deadlock — the exact hazard runtime_ops.py warns of). **U**: off/warn/enforce, approve/deny, device-mismatch, timeout (`-race`). **E**: WS — `kill_process` → permission_request → approve/deny → result, read loop never blocked |
+
+### Chrome browser-origin approvals
+
+Codex Browser Use requests access through `mcpServer/elicitation/request`. The Go
+bridge can forward those prompts to the app or apply a controlled policy:
+
+```bash
+# Ask on the phone (default)
+BRIDGE_BROWSER_ORIGIN_MODE=ask bash install.sh
+
+# Allow only exact origins/hosts and wildcard subdomains
+BRIDGE_BROWSER_ORIGIN_MODE=allowlist \
+BRIDGE_BROWSER_ALLOWED_ORIGINS='https://studio.youtube.com,*.canva.com' \
+bash install.sh
+
+# Automatically allow every valid HTTP(S) origin for the current Codex session
+BRIDGE_BROWSER_ORIGIN_MODE=allow_all bash install.sh
+```
+
+`deny` rejects ordinary origin access. Automatic approval never covers raw CDP
+or other sensitive Chrome capabilities; those remain explicit, deny-by-default
+phone prompts. Choosing “always allow” manually persists the browser permission,
+while automatic approvals use session scope only.
+
+Before app-server starts, the bridge atomically sets
+`disable_auto_review = true` in `~/.codex/browser/config.toml`. This makes Codex
+forward browser consent to the bridge instead of deciding first with its
+built-in reviewer. Set `BRIDGE_BROWSER_MANAGE_AUTO_REVIEW=0` only when that
+built-in reviewer should remain authoritative.
+
+Current Codex builds require `danger-full-access` for Browser Use to read its
+approval configuration and reach external origins. When no sandbox is selected,
+the bridge therefore matches the Python backend and uses that mode while browser
+networking is enabled. An explicitly selected sandbox is always preserved. Set
+`BRIDGE_BROWSER_ENABLE_NETWORK=0` to retain the network-isolated
+`workspace-write` default; external Chrome navigation will then be rejected
+before an origin prompt can be answered.
 | WebRTC P2P (Pion DataChannel) | ✓ | **U**+**A** | `internal/core/webrtc.go` — bridge is the answerer (bakes ICE into the SDP answer like aiortc, no outbound trickle); `webrtc_offer`→`webrtc_answer`, applies the app's trickled `webrtc_ice`; on DataChannel "bridge" open it promotes the channel to a full client (`serveConn` runs the same handshake+route loop over a `dcConn` wireConn) and emits `webrtc_ready`. A promoted PC detaches from the signaling client's lifecycle (connection.py:422 intent). **U**: in-process Pion-client ↔ bridge negotiation + DataChannel promotion + hello/hello_ack over the DC, `-race`. **A**: real Galaxy Note20 app over **4G cellular** — `pc state connecting→connected` (real CGNAT NAT traversal, STUN-only sufficed), DataChannel opened, promoted to `connected (webrtc)`, app commands flowed P2P. Found+fixed a process-crashing bug (background `sendHistory` enqueue after disconnect → send-on-closed-channel panic; now never closes `send`, gates on a `quit` channel — mirrors the mailbox fix). NB an **app**-side bug surfaced: on cellular the tunnel candidate URL is `tunnelUrl.trim()` but `adoptWinner(ws, ws.url)` passes the browser-normalized `ws.url` (trailing slash), so `winnerUrl === tunnelUrl` fails and the upgrade never starts unless the stored tunnelUrl carries the trailing slash |
 
 ### What "E" does NOT yet cover

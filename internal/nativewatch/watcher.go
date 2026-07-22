@@ -324,7 +324,10 @@ func parseCodex(path string) (NativeSession, bool) {
 	if !uuidRE.MatchString(uid) {
 		return NativeSession{}, false
 	}
-	cwd, title := scanCodexCwdTitle(path)
+	cwd, title, isSubagent := scanCodexCwdTitle(path)
+	if isSubagent {
+		return NativeSession{}, false
+	}
 	if title == "" {
 		title = shortID(uid)
 	}
@@ -380,10 +383,10 @@ func scanClaudeCwdTitle(path string) (string, string) {
 	return cwd, trimTitle(title)
 }
 
-func scanCodexCwdTitle(path string) (string, string) {
+func scanCodexCwdTitle(path string) (string, string, bool) {
 	r, closeFn, err := openText(path)
 	if err != nil {
-		return "", ""
+		return "", "", false
 	}
 	defer closeFn()
 	sc := bufio.NewScanner(r)
@@ -397,28 +400,48 @@ func scanCodexCwdTitle(path string) (string, string) {
 		if json.Unmarshal(sc.Bytes(), &row) != nil {
 			continue
 		}
-		if row.Type == "session_meta" && cwd == "" {
-			if v, ok := row.Payload["cwd"].(string); ok {
-				cwd = strings.TrimSpace(v)
-			} else if v, ok := row.Payload["workingDirectory"].(string); ok {
-				cwd = strings.TrimSpace(v)
+		if row.Type == "session_meta" {
+			if codexMetaIsSubagent(row.Payload) {
+				return "", "", true
+			}
+			if cwd == "" {
+				if v, ok := row.Payload["cwd"].(string); ok {
+					cwd = strings.TrimSpace(v)
+				} else if v, ok := row.Payload["workingDirectory"].(string); ok {
+					cwd = strings.TrimSpace(v)
+				}
 			}
 		}
 		if row.Type == "event_msg" {
 			if row.Payload["type"] == "user_message" {
 				if msg, ok := row.Payload["message"].(string); ok && !isTitleNoise(msg) {
-					return cwd, trimTitle(msg)
+					return cwd, trimTitle(msg), false
 				}
 			}
 		}
 		if row.Type == "response_item" && row.Payload["role"] == "user" {
 			title := firstText(row.Payload["content"])
 			if title != "" && !isTitleNoise(title) {
-				return cwd, trimTitle(title)
+				return cwd, trimTitle(title), false
 			}
 		}
 	}
-	return cwd, ""
+	return cwd, "", false
+}
+
+func codexMetaIsSubagent(payload map[string]any) bool {
+	if payload["thread_source"] == "subagent" {
+		return true
+	}
+	if parent, ok := payload["parent_thread_id"].(string); ok && strings.TrimSpace(parent) != "" {
+		return true
+	}
+	source, ok := payload["source"].(map[string]any)
+	if !ok {
+		return false
+	}
+	_, ok = source["subagent"]
+	return ok
 }
 
 func openText(path string) (*bufio.Reader, func(), error) {

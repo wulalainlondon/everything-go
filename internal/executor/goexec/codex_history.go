@@ -54,6 +54,12 @@ func (c *Codex) ResumableSessions(limit int) ([]history.ResumableSession, error)
 		if len(out) >= limit {
 			break
 		}
+		// Codex multi-agent workers have their own rollout files, but app-server
+		// deliberately rejects direct turn/start input for those child threads.
+		// They belong in the live agent tree, not in the resumable-session picker.
+		if codexRolloutIsSubagent(path) {
+			continue
+		}
 		uid := codexRolloutUID(filepath.Base(path))
 		if uid == "" || seen[uid] {
 			continue
@@ -73,6 +79,42 @@ func (c *Codex) ResumableSessions(limit int) ([]history.ResumableSession, error)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].LastUsed > out[j].LastUsed })
 	return out, nil
+}
+
+// codexRolloutIsSubagent inspects the rollout's session_meta record. Newer
+// Codex versions expose both thread_source and source.subagent; older versions
+// may expose only one of them. parent_thread_id is also specific to an agent
+// child. Deliberately do not classify forked_from_id alone as a sub-agent:
+// user-created resumable forks may legitimately carry that field.
+func codexRolloutIsSubagent(path string) bool {
+	r, closeFn, err := openCodexRollout(path)
+	if err != nil {
+		return false
+	}
+	defer closeFn()
+
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 0, 64*1024), maxLine)
+	for i := 0; i < 8 && sc.Scan(); i++ {
+		var row codexHistoryRow
+		if json.Unmarshal(sc.Bytes(), &row) != nil || row.Type != "session_meta" {
+			continue
+		}
+		var meta struct {
+			ThreadSource   string          `json:"thread_source"`
+			ParentThreadID string          `json:"parent_thread_id"`
+			Source         json.RawMessage `json:"source"`
+		}
+		if json.Unmarshal(row.Payload, &meta) != nil {
+			return false
+		}
+		if meta.ThreadSource == "subagent" || meta.ParentThreadID != "" {
+			return true
+		}
+		var source map[string]json.RawMessage
+		return json.Unmarshal(meta.Source, &source) == nil && source["subagent"] != nil
+	}
+	return false
 }
 
 // TranscriptPath returns the on-disk .jsonl rollout file for a resume id, used

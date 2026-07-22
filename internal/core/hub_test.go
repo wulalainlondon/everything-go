@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -125,6 +126,22 @@ func TestEnqueueAfterShutdownDoesNotPanic(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("enqueue after shutdown blocked")
+	}
+}
+
+func TestHubResolvesLocalGeneratedMediaURL(t *testing.T) {
+	h, _ := newTestHub(t)
+	c := newTestClient(h)
+	path := filepath.Join(t.TempDir(), "generated image.png")
+	h.Emit(protocol.Media{
+		Type: "media", SessionID: "s1", RequestID: "r1",
+		MediaType: "image", Path: path,
+	})
+
+	event := waitForType(t, c, "media")
+	url, _ := event["url"].(string)
+	if url == "" || !strings.Contains(url, "/media/") || !strings.Contains(url, "generated%20image.png") {
+		t.Fatalf("local media URL was not resolved: %q", url)
 	}
 }
 

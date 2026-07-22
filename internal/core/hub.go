@@ -277,6 +277,13 @@ func (h *Hub) connectedDeviceIDs(exclude string) []string {
 // event for replay on the next reconnect (the offline-recovery path). Safe for
 // concurrent use.
 func (h *Hub) Emit(event any) {
+	// Backends may discover a local generated image before the core has enough
+	// network context to construct a phone-reachable URL. Resolve it at the Hub,
+	// which owns the media server and tunnel/Tailscale/LAN address selection.
+	if mediaEvent, ok := event.(protocol.Media); ok && mediaEvent.URL == "" && mediaEvent.Path != "" {
+		mediaEvent.URL = h.mediaScan.LocalURL(mediaEvent.Path)
+		event = mediaEvent
+	}
 	logOutbound(event)
 	if h.goals.Apply(event) {
 		switch e := event.(type) {

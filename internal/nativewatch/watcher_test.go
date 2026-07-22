@@ -76,3 +76,42 @@ func TestParseCodexPath(t *testing.T) {
 		t.Fatalf("bad metadata: %+v", ns)
 	}
 }
+
+func TestParseCodexPathRejectsSubagent(t *testing.T) {
+	root := t.TempDir()
+	day := filepath.Join(root, "2026", "07", "20")
+	if err := os.MkdirAll(day, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	id := "019f7ddf-17c7-7a53-a5c5-e6e81bd52d7b"
+	path := filepath.Join(day, "rollout-2026-07-20T12-53-20-"+id+".jsonl")
+	// Older Codex rollouts may identify workers only through source.subagent.
+	body := `{"type":"session_meta","payload":{"id":"` + id + `","cwd":"/repo/codex","source":{"subagent":{"depth":1}}}}` + "\n" +
+		`{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"text","text":"worker task"}]}}` + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if ns, ok := ParsePath(path, Options{CodexSessionsDir: root}); ok {
+		t.Fatalf("sub-agent rollout must not be imported: %+v", ns)
+	}
+}
+
+func TestParseCodexPathKeepsUserFork(t *testing.T) {
+	root := t.TempDir()
+	day := filepath.Join(root, "2026", "07", "20")
+	if err := os.MkdirAll(day, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	id := "019f7ddf-318d-7360-ac6b-617bebd1c195"
+	path := filepath.Join(day, "rollout-2026-07-20T12-54-00-"+id+".jsonl")
+	body := `{"type":"session_meta","payload":{"id":"` + id + `","cwd":"/repo/codex","forked_from_id":"019f541f-63b6-7e53-a4e2-dd36d875a7c2","thread_source":"user","source":"exec"}}` + "\n" +
+		`{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"text","text":"user fork"}]}}` + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if ns, ok := ParsePath(path, Options{CodexSessionsDir: root}); !ok || ns.Name != "user fork" {
+		t.Fatalf("user-created fork must remain resumable: ok=%v session=%+v", ok, ns)
+	}
+}
