@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -113,7 +114,13 @@ type Client struct {
 	// signaling channel, if any. Set on webrtc_offer; consulted by webrtc_ice
 	// and torn down on disconnect (unless the DataChannel was promoted, in
 	// which case the DC's own lifecycle owns the PC).
-	rtc *webrtcPeer
+	rtc     *webrtcPeer
+	uploads *attachmentUploads
+	// uploadActive suppresses transport pings while a large inbound attachment
+	// is queued on the same TCP stream. A pong can otherwise sit behind several
+	// megabytes of binary frames and look like a dead client on slower mobile
+	// links even though upload bytes are still arriving.
+	uploadActive atomic.Bool
 }
 
 func (c *Client) enqueue(data []byte) {
@@ -188,6 +195,9 @@ func (c *Client) pingLoopEvery(ctx context.Context, interval, timeout time.Durat
 		case <-ctx.Done():
 			return
 		case <-t.C:
+			if c.uploadActive.Load() {
+				continue
+			}
 			pctx, cancel := context.WithTimeout(ctx, timeout)
 			err := p.Ping(pctx)
 			cancel()
@@ -237,6 +247,7 @@ func (h *Hub) serveConn(ctx context.Context, conn wireConn) {
 		cancel:   cancel,
 		clientID: randomID(),
 	}
+	c.uploads = newAttachmentUploads(c, h.cfg.DataDir)
 
 	// Governance boundary: the first frame MUST be a valid hello carrying an
 	// accepted auth token (when the bridge is locked or BRIDGE_AUTH_TOKEN is
@@ -266,6 +277,7 @@ func (h *Hub) serveConn(ctx context.Context, conn wireConn) {
 	h.removeClient(c)
 	h.cleanupWebRTC(c) // drop the answering PC unless its DataChannel was promoted
 	c.shutdown()       // stop the write pump; background enqueuers now drop silently
+	c.uploads.close()
 	conn.Close("")
 	log.Printf("[conn] disconnected client=%s kind=%s device=%s addr=%s reason=%v", c.clientID, conn.Kind(), c.deviceID, c.remoteAddr(), closeReason)
 }
@@ -331,6 +343,9 @@ func (c *Client) readLoop(ctx context.Context) error {
 		data, err := c.conn.Read(ctx)
 		if err != nil {
 			return err
+		}
+		if c.uploads.writeFrame(data) {
+			continue
 		}
 		in, err := protocol.ParseInbound(data)
 		if err != nil {

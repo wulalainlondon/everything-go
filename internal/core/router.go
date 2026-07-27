@@ -66,6 +66,15 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 	case "ping":
 		c.enqueueEvent(h.client.Pong())
 
+	case "attachment_upload_init":
+		c.uploads.init(cmd.SessionID, cmd.UploadRequestID, cmd.Name, cmd.MediaType, cmd.SizeBytes)
+
+	case "attachment_upload_finish":
+		c.uploads.finish(cmd.UploadID)
+
+	case "attachment_upload_cancel":
+		c.uploads.cancel(cmd.UploadID)
+
 	case "tunnel_url_ack":
 		// App sends tunnel URL acknowledgements (FCM de-dup handshake).
 		// The Python bridge uses this to stop resend retries; Go currently
@@ -138,6 +147,11 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		// The turn outlives this connection, so it gets its own context.
 		reqID, content := cmd.RequestID, cmd.Content
 		images, files := cmd.Images, cmd.Files
+		content, files, err := h.resolveUploadedVideos(cmd.SessionID, content, files)
+		if err != nil {
+			h.Emit(h.client.Error(cmd.SessionID, "invalid_attachment", err.Error()))
+			return
+		}
 		if !s.Submit(func() {
 			if err := h.exec.Send(context.Background(), s, reqID, content, images, files); err != nil {
 				log.Printf("[%s] send error: %v", s.ID, err)

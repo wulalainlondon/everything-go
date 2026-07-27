@@ -35,6 +35,12 @@ type Inbound struct {
 	// message
 	Content string `json:"content"`
 
+	// binary video upload control frames
+	UploadRequestID string `json:"upload_request_id"`
+	UploadID        string `json:"upload_id"`
+	MediaType       string `json:"media_type"`
+	SizeBytes       int64  `json:"size_bytes"`
+
 	// request_history
 	Limit     int    `json:"limit"`
 	KnownLast string `json:"known_last_source_message_id"`
@@ -131,9 +137,11 @@ type InboundImage struct {
 
 // InboundFile is one attached file on a message.
 type InboundFile struct {
-	Name      string `json:"name"`
-	Content   string `json:"content"`
-	MediaType string `json:"media_type"`
+	Name       string `json:"name"`
+	Content    string `json:"content"`
+	MediaType  string `json:"media_type"`
+	RemotePath string `json:"remote_path"`
+	SizeBytes  int64  `json:"size_bytes"`
 }
 
 // SearchFilters mirrors the nested `filters` object on request_search.

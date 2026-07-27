@@ -27,13 +27,17 @@ type Command struct {
 	ReplayAck  bool
 	BatchID    string
 
-	Name           string
-	Cwd            string
-	Backend        string
-	Model          string
-	Sandbox        string
-	ResumeClaudeID string
-	Content        string
+	Name            string
+	Cwd             string
+	Backend         string
+	Model           string
+	Sandbox         string
+	ResumeClaudeID  string
+	Content         string
+	UploadRequestID string
+	UploadID        string
+	MediaType       string
+	SizeBytes       int64
 
 	Effort            string
 	EffortSet         bool
@@ -111,13 +115,17 @@ func (AppV1) ParseCommand(in protocol.Inbound) Command {
 		ReplayAck:  in.ReplayAck,
 		BatchID:    in.BatchID,
 
-		Name:           in.Name,
-		Cwd:            in.Cwd,
-		Backend:        in.Backend,
-		Model:          in.Model,
-		Sandbox:        in.Sandbox,
-		ResumeClaudeID: in.ResumeClaudeID,
-		Content:        in.Content,
+		Name:            in.Name,
+		Cwd:             in.Cwd,
+		Backend:         in.Backend,
+		Model:           in.Model,
+		Sandbox:         in.Sandbox,
+		ResumeClaudeID:  in.ResumeClaudeID,
+		Content:         in.Content,
+		UploadRequestID: in.UploadRequestID,
+		UploadID:        in.UploadID,
+		MediaType:       in.MediaType,
+		SizeBytes:       in.SizeBytes,
 
 		Effort: func() string {
 			if in.Effort != nil {
@@ -210,9 +218,11 @@ func inboundFilesToBackend(files []protocol.InboundFile) []backend.FileAttachmen
 	out := make([]backend.FileAttachment, 0, len(files))
 	for _, f := range files {
 		out = append(out, backend.FileAttachment{
-			Name:      f.Name,
-			Content:   f.Content,
-			MediaType: f.MediaType,
+			Name:       f.Name,
+			Content:    f.Content,
+			MediaType:  f.MediaType,
+			RemotePath: f.RemotePath,
+			SizeBytes:  f.SizeBytes,
 		})
 	}
 	return out

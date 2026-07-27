@@ -90,9 +90,11 @@ type ImageAttachment struct {
 // FileAttachment is a file attached to a user message. Content is the
 // adapter-normalized payload used by the backend implementation.
 type FileAttachment struct {
-	Name      string
-	Content   string
-	MediaType string
+	Name       string
+	Content    string
+	MediaType  string
+	RemotePath string
+	SizeBytes  int64
 }
 
 // HistoryProvider is the optional backend capability for loading persisted
