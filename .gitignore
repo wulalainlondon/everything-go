@@ -16,3 +16,6 @@ supervisor.pid
 bridge_v2.log
 bridge.err
 path_overrides.json
+
+# Local recovery snapshots created during backend experiments.
+*.backup-record2-*
