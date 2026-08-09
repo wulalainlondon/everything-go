@@ -1,8 +1,10 @@
 package goexec
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -27,6 +29,54 @@ func (w *rpcCaptureWriter) Write(p []byte) (int, error) {
 	copyOfP := append([]byte(nil), p...)
 	w.writes <- copyOfP
 	return len(p), nil
+}
+
+func TestCodexSteerUsesExpectedActiveTurnAndClientMessageID(t *testing.T) {
+	c := NewCodex(&capSink{}, "codex")
+	reg := session.NewRegistry()
+	s := reg.Create("s1", "codex", t.TempDir(), backend.Codex, "", "", "")
+	st := c.state(s.ID)
+	st.threadID = "thread-1"
+	st.currentTurnID = "turn-1"
+	st.reqID = "r-active"
+	st.turnActive = true
+
+	writer := &rpcCaptureWriter{writes: make(chan []byte, 1)}
+	c.rpc.setWriter(writer)
+	go func() {
+		request := <-writer.writes
+		var frame struct {
+			ID     int            `json:"id"`
+			Method string         `json:"method"`
+			Params map[string]any `json:"params"`
+		}
+		if err := json.Unmarshal(request, &frame); err != nil {
+			t.Errorf("decode steer request: %v", err)
+			return
+		}
+		if frame.Method != "turn/steer" || frame.Params["threadId"] != "thread-1" || frame.Params["expectedTurnId"] != "turn-1" || frame.Params["clientUserMessageId"] != "r-steer" {
+			t.Errorf("unexpected steer frame: %+v", frame)
+		}
+		response := json.RawMessage(fmt.Sprintf(`{"id":%d,"result":{"turnId":"turn-1"}}`, frame.ID))
+		c.rpc.dispatchResponse(response)
+	}()
+
+	result, err := c.steerActiveTurn(s, "r-steer", "change direction", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.TurnID != "turn-1" || result.RequestID != "r-active" {
+		t.Fatalf("unexpected steer result: %+v", result)
+	}
+}
+
+func TestCodexSteerRejectsWithoutActiveTurn(t *testing.T) {
+	c := NewCodex(&capSink{}, "codex")
+	reg := session.NewRegistry()
+	s := reg.Create("s1", "codex", t.TempDir(), backend.Codex, "", "", "")
+	if _, err := c.steerActiveTurn(s, "r-steer", "change direction", nil, nil); !errors.Is(err, backend.ErrNoActiveTurn) {
+		t.Fatalf("steer error = %v, want ErrNoActiveTurn", err)
+	}
 }
 
 func TestCodexMultiAgentLifecycleBuildsLiveTreeWithoutFinishingRootTurn(t *testing.T) {
@@ -82,6 +132,94 @@ func TestCodexRootTurnCompletionFinishesTheOwningSession(t *testing.T) {
 	st.mu.Unlock()
 	if active || turnErr != "" {
 		t.Fatalf("root completion left stale state active=%v err=%q", active, turnErr)
+	}
+}
+
+func TestCodexActiveTurnRouteCannotBeStolenByDuplicateSession(t *testing.T) {
+	sink := &capSink{}
+	c := NewCodex(sink, "codex")
+	reg := session.NewRegistry()
+	owner := reg.Create("s_owner", "owner", "/tmp", "codex", "", "", "root")
+	duplicate := reg.Create("s_duplicate", "duplicate", "/tmp", "codex", "", "", "root")
+	ownerState := c.state(owner.ID)
+	ownerState.threadID = "root"
+	ownerState.reqID = "r-owner"
+	ownerState.turnActive = true
+	ownerState.turnDone = make(chan struct{})
+	duplicateState := c.state(duplicate.ID)
+	duplicateState.threadID = "root"
+	duplicateState.reqID = "r-duplicate"
+	duplicateState.turnActive = true
+	duplicateState.turnDone = make(chan struct{})
+
+	c.threadToSession["root"] = duplicate // legacy route was overwritten
+	c.activeThreadOwner["root"] = owner   // active turn remains authoritative
+
+	c.dispatch(json.RawMessage(`{"method":"item/agentMessage/delta","params":{"threadId":"root","delta":"correct owner","phase":"final"}}`))
+	c.dispatch(json.RawMessage(`{"method":"turn/completed","params":{"threadId":"root","turn":{"id":"t1","status":"completed"}}}`))
+
+	select {
+	case <-ownerState.turnDone:
+	case <-time.After(time.Second):
+		t.Fatal("terminal event did not reach the active owner")
+	}
+	select {
+	case <-duplicateState.turnDone:
+		t.Fatal("terminal event leaked to the duplicate session")
+	default:
+	}
+	if sink.count(func(e any) bool {
+		chunk, ok := e.(protocol.TextChunk)
+		return ok && chunk.SessionID == owner.ID && chunk.RequestID == "r-owner" && chunk.Content == "correct owner"
+	}) != 1 {
+		t.Fatalf("live content was not routed to active owner: %+v", sink.events)
+	}
+}
+
+func TestCodexRejectsConcurrentTurnsOnOneThread(t *testing.T) {
+	c := NewCodex(&capSink{}, "codex")
+	reg := session.NewRegistry()
+	owner := reg.Create("s_owner", "owner", "/tmp", "codex", "", "", "root")
+	duplicate := reg.Create("s_duplicate", "duplicate", "/tmp", "codex", "", "", "root")
+
+	if err := c.claimActiveThread("root", owner); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.claimActiveThread("root", duplicate); err == nil {
+		t.Fatal("duplicate session claimed an already-active Codex thread")
+	}
+	c.releaseActiveThreads(owner)
+	if err := c.claimActiveThread("root", duplicate); err != nil {
+		t.Fatalf("thread was not reusable after the owner completed: %v", err)
+	}
+}
+
+func TestCodexDuplicateDetachCannotDeleteCanonicalThreadRoute(t *testing.T) {
+	c := NewCodex(&capSink{}, "codex")
+	reg := session.NewRegistry()
+	owner := reg.Create("s_owner", "owner", "/tmp", "codex", "", "", "root")
+	duplicate := reg.Create("s_duplicate", "duplicate", "/tmp", "codex", "", "", "root")
+	c.state(owner.ID).threadID = "root"
+	c.state(duplicate.ID).threadID = "root"
+	c.threadToSession["root"] = owner
+	c.activeThreadOwner["root"] = owner
+
+	if err := c.Close(context.Background(), duplicate); err != nil {
+		t.Fatal(err)
+	}
+	if c.threadToSession["root"] != owner || c.activeThreadOwner["root"] != owner {
+		t.Fatal("closing a legacy duplicate deleted the canonical active route")
+	}
+
+	// Clear must likewise detach only the duplicate. Because another owner is
+	// present it must not attempt thread/archive (the test has no RPC writer).
+	c.states[duplicate.ID] = newCodexState()
+	c.states[duplicate.ID].threadID = "root"
+	if err := c.Clear(context.Background(), duplicate); err != nil {
+		t.Fatal(err)
+	}
+	if c.threadToSession["root"] != owner || c.activeThreadOwner["root"] != owner {
+		t.Fatal("clearing a legacy duplicate deleted the canonical active route")
 	}
 }
 
@@ -285,11 +423,15 @@ func TestCodexInvalidateLiveThreadsClearsAllSessionRoutes(t *testing.T) {
 	st2.currentTurnID = "turn-2"
 	c.threadToSession["thread-1"] = s1
 	c.threadToSession["thread-2"] = s2
+	c.activeThreadOwner["thread-1"] = s1
 
 	c.invalidateLiveThreads()
 
 	if len(c.threadToSession) != 0 {
 		t.Fatalf("threadToSession not cleared: %+v", c.threadToSession)
+	}
+	if len(c.activeThreadOwner) != 0 {
+		t.Fatalf("activeThreadOwner not cleared: %+v", c.activeThreadOwner)
 	}
 	if st1.threadID != "" || st1.currentTurnID != "" {
 		t.Fatalf("state1 not invalidated: %+v", st1)
@@ -312,6 +454,151 @@ func TestCodexDetectsStaleThreadErrors(t *testing.T) {
 	if isStaleThreadError(errors.New("permission denied")) {
 		t.Fatal("unrelated errors must not be treated as stale thread")
 	}
+}
+
+func TestCodexAuthFingerprintChangesOnlyWithContent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "auth.json")
+	if got, err := codexAuthFingerprint(path); err != nil || got != "missing" {
+		t.Fatalf("missing auth fingerprint = %q, %v", got, err)
+	}
+	if err := os.WriteFile(path, []byte(`{"tokens":{"account_id":"one"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	first, err := codexAuthFingerprint(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, time.Now().Add(time.Minute), time.Now().Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	same, err := codexAuthFingerprint(path)
+	if err != nil || same != first {
+		t.Fatalf("mtime-only change altered fingerprint: first=%q same=%q err=%v", first, same, err)
+	}
+	if err := os.WriteFile(path, []byte(`{"tokens":{"account_id":"two"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := codexAuthFingerprint(path)
+	if err != nil || changed == first {
+		t.Fatalf("credential content change was not detected: first=%q changed=%q err=%v", first, changed, err)
+	}
+}
+
+func TestCodexAuthReloadWaitsForActiveWork(t *testing.T) {
+	c := NewCodex(&capSink{}, "codex")
+	st := c.state("s1")
+	st.mu.Lock()
+	st.turnActive = true
+	st.mu.Unlock()
+	if !c.hasActiveWork() {
+		t.Fatal("active turn was not detected")
+	}
+	st.mu.Lock()
+	st.turnActive = false
+	st.compactActive = true
+	st.mu.Unlock()
+	if !c.hasActiveWork() {
+		t.Fatal("active compact was not detected")
+	}
+	st.mu.Lock()
+	st.compactActive = false
+	st.mu.Unlock()
+	if c.hasActiveWork() {
+		t.Fatal("idle Codex state reported active work")
+	}
+}
+
+func TestCodexAuthChangeRestartsAppServerWhenIdle(t *testing.T) {
+	if os.Getenv("GO_WANT_CODEX_AUTH_HELPER") == "1" {
+		t.Fatal("helper process entered the parent test")
+	}
+	testBin, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmp := t.TempDir()
+	marker := filepath.Join(tmp, "starts.log")
+	wrapper := filepath.Join(tmp, "codex")
+	script := fmt.Sprintf("#!/bin/sh\nGO_WANT_CODEX_AUTH_HELPER=1 CODEX_AUTH_HELPER_MARKER=%q exec %q -test.run='^TestCodexAuthHelperProcess$'\n", marker, testBin)
+	if err := os.WriteFile(wrapper, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	authPath := filepath.Join(tmp, "auth.json")
+	if err := os.WriteFile(authPath, []byte(`{"tokens":{"account_id":"one"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	c := NewCodex(&capSink{}, wrapper)
+	c.authPath = authPath
+	if err := c.ensureServer(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		c.startMu.Lock()
+		_ = c.stopServerLocked()
+		c.startMu.Unlock()
+	})
+	if got := helperStartCount(t, marker); got != 1 {
+		t.Fatalf("initial app-server starts = %d, want 1", got)
+	}
+
+	st := c.state("busy")
+	st.mu.Lock()
+	st.turnActive = true
+	st.mu.Unlock()
+	if err := os.WriteFile(authPath, []byte(`{"tokens":{"account_id":"two"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.ensureServer(); err != nil {
+		t.Fatal(err)
+	}
+	if got := helperStartCount(t, marker); got != 1 {
+		t.Fatalf("busy app-server restarted early: starts=%d", got)
+	}
+
+	st.mu.Lock()
+	st.turnActive = false
+	st.mu.Unlock()
+	deadline := time.Now().Add(5 * time.Second)
+	for helperStartCount(t, marker) < 2 && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if got := helperStartCount(t, marker); got != 2 {
+		t.Fatalf("automatic idle app-server starts = %d, want 2", got)
+	}
+}
+
+func helperStartCount(t *testing.T, marker string) int {
+	t.Helper()
+	b, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Count(string(b), "start\n")
+}
+
+func TestCodexAuthHelperProcess(t *testing.T) {
+	if os.Getenv("GO_WANT_CODEX_AUTH_HELPER") != "1" {
+		return
+	}
+	marker := os.Getenv("CODEX_AUTH_HELPER_MARKER")
+	f, err := os.OpenFile(marker, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		os.Exit(2)
+	}
+	_, _ = f.WriteString("start\n")
+	_ = f.Close()
+
+	scanner := bufio.NewScanner(os.Stdin)
+	for scanner.Scan() {
+		var request struct {
+			ID *int `json:"id"`
+		}
+		if json.Unmarshal(scanner.Bytes(), &request) == nil && request.ID != nil {
+			fmt.Printf("{\"id\":%d,\"result\":{}}\n", *request.ID)
+		}
+	}
+	os.Exit(0)
 }
 
 func TestCodexTurnLivenessPolicy(t *testing.T) {
@@ -877,6 +1164,100 @@ func TestCodexHistoryReplaysToolBlocks(t *testing.T) {
 	patch := hist.Messages[2]["blocks"].([]map[string]any)[0]
 	if patch["name"] != "ApplyPatch" || !strings.Contains(patch["command"].(string), "*** Add File: x.txt") || patch["output"] != "Success\n" {
 		t.Fatalf("bad patch block: %+v", patch)
+	}
+}
+
+func TestCodexHistoryPreservesCommentaryAsThinkingWhenRequested(t *testing.T) {
+	uid := "123e4567-e89b-12d3-a456-426614174003"
+	root := t.TempDir()
+	day := filepath.Join(root, "2026", "07", "31")
+	if err := os.MkdirAll(day, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(day, "rollout-2026-07-31T00-00-00-"+uid+".jsonl")
+	records := []map[string]any{
+		{"timestamp": "2026-07-31T00:00:00.000Z", "type": "response_item", "payload": map[string]any{
+			"type": "message", "role": "user", "content": []any{map[string]any{"type": "input_text", "text": "run tools"}},
+		}},
+		{"timestamp": "2026-07-31T00:00:01.000Z", "type": "response_item", "payload": map[string]any{
+			"type": "message", "role": "assistant", "phase": "commentary",
+			"content": []any{map[string]any{"type": "output_text", "text": "先檢查目前狀態"}},
+		}},
+		{"timestamp": "2026-07-31T00:00:01.500Z", "type": "response_item", "payload": map[string]any{
+			"type": "message", "role": "assistant", "phase": "commentary",
+			"content": []any{map[string]any{"type": "output_text", "text": "接著檢查工作目錄"}},
+		}},
+		{"timestamp": "2026-07-31T00:00:02.000Z", "type": "response_item", "payload": map[string]any{
+			"type": "function_call", "name": "exec_command", "arguments": `{"cmd":"pwd"}`, "call_id": "call_1",
+		}},
+		{"timestamp": "2026-07-31T00:00:03.000Z", "type": "response_item", "payload": map[string]any{
+			"type": "function_call_output", "call_id": "call_1", "output": "/tmp\n",
+		}},
+		{"timestamp": "2026-07-31T00:00:04.000Z", "type": "response_item", "payload": map[string]any{
+			"type": "message", "role": "assistant", "phase": "final",
+			"content": []any{map[string]any{"type": "output_text", "text": "完成"}},
+		}},
+	}
+	writeJSONL(t, path, records)
+
+	c := NewCodex(&capSink{}, "codex")
+	c.sessionsRoot = root
+
+	withThinking, err := c.LoadHistory(uid, history.Opts{Limit: 20, Mode: "snapshot", IncludeThinking: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(withThinking.Messages) != 3 {
+		t.Fatalf("want user + merged commentary/tool + final, got %+v", withThinking.Messages)
+	}
+	commentaryBlocks, ok := withThinking.Messages[1]["blocks"].([]map[string]any)
+	if !ok || len(commentaryBlocks) != 2 || commentaryBlocks[0]["type"] != "thinking" ||
+		commentaryBlocks[0]["thinking"] != "先檢查目前狀態\n\n接著檢查工作目錄" ||
+		commentaryBlocks[1]["type"] != "tool_call" {
+		t.Fatalf("commentary was not preserved as thinking: %+v", withThinking.Messages[1])
+	}
+	if withThinking.Messages[1]["content"] != "pwd" {
+		t.Fatalf("commentary should not replace tool content: %+v", withThinking.Messages[1])
+	}
+
+	withoutThinking, err := c.LoadHistory(uid, history.Opts{Limit: 20, Mode: "snapshot"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(withoutThinking.Messages) != 3 {
+		t.Fatalf("legacy history should omit commentary, got %+v", withoutThinking.Messages)
+	}
+	for _, message := range withoutThinking.Messages {
+		switch blocks := message["blocks"].(type) {
+		case []map[string]any:
+			for _, block := range blocks {
+				if block["type"] == "thinking" {
+					t.Fatalf("legacy history leaked thinking block: %+v", message)
+				}
+			}
+		case []any:
+			for _, raw := range blocks {
+				if block, ok := raw.(map[string]any); ok && block["type"] == "thinking" {
+					t.Fatalf("legacy cached history leaked thinking block: %+v", message)
+				}
+			}
+		}
+	}
+
+	limited, err := c.LoadHistory(uid, history.Opts{Limit: 2, Mode: "snapshot", IncludeThinking: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(limited.Messages) != 2 || limited.Messages[0]["content"] != "pwd" || limited.Messages[1]["content"] != "完成" {
+		t.Fatalf("commentary must not consume history page slots: %+v", limited.Messages)
+	}
+}
+
+func TestAppendCodexHistoryThinkingKeepsBoundedLatestProgress(t *testing.T) {
+	old := strings.Repeat("舊", codexHistoryThinkingMaxRunes)
+	got := appendCodexHistoryThinking(old, "最新進度")
+	if len([]rune(got)) != codexHistoryThinkingMaxRunes || !strings.HasPrefix(got, "…") || !strings.HasSuffix(got, "最新進度") {
+		t.Fatalf("bounded thinking did not preserve latest progress: runes=%d suffix=%q", len([]rune(got)), got[len(got)-12:])
 	}
 }
 

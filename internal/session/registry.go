@@ -13,6 +13,7 @@ package session
 
 import (
 	"log"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -228,7 +229,10 @@ func NewRegistry() *Registry {
 // AttachStore wires persistence and restores any previously saved sessions.
 func (r *Registry) AttachStore(store *Store) {
 	r.store = store
-	for id, e := range store.Load() {
+	loaded := store.Load()
+	canonicalIDs := canonicalSavedSessionIDs(loaded)
+	for _, id := range canonicalIDs {
+		e := loaded[id]
 		resume := e.ResumeID
 		if resume == "" {
 			resume = e.ClaudeUUID
@@ -250,6 +254,81 @@ func (r *Registry) AttachStore(store *Store) {
 		}
 		r.mu.Unlock()
 	}
+	if len(canonicalIDs) != len(loaded) {
+		if err := store.Save(r.List()); err != nil {
+			log.Printf("duplicate session migration persist failed: %v", err)
+		} else {
+			log.Printf("collapsed %d duplicate saved session(s) by resume id", len(loaded)-len(canonicalIDs))
+		}
+	}
+}
+
+// canonicalSavedSessionIDs collapses legacy duplicate rows that point at the
+// same native Claude/Codex conversation. Older bridge builds allowed two app
+// session IDs to retain one resume ID, which is unsafe for single-thread
+// runtimes and also produces duplicate dashboard rows. Prefer explicit app
+// sessions over native-watcher jl_ aliases, then pinned and most-recent rows.
+// Store.Load already records every loaded ID as known, so the next Persist
+// removes discarded duplicates from disk as part of the migration.
+func canonicalSavedSessionIDs(loaded map[string]savedEntry) []string {
+	ids := make([]string, 0, len(loaded))
+	for id := range loaded {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	chosen := make(map[string]string)
+	keep := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		e := loaded[id]
+		resumeID := firstNonEmptyRegistry(e.ResumeID, e.ClaudeUUID)
+		if resumeID == "" {
+			keep[id] = true
+			continue
+		}
+		if previousID, ok := chosen[resumeID]; !ok {
+			chosen[resumeID] = id
+			keep[id] = true
+		} else if preferSavedSession(id, e, previousID, loaded[previousID]) {
+			delete(keep, previousID)
+			chosen[resumeID] = id
+			keep[id] = true
+		}
+	}
+
+	out := make([]string, 0, len(keep))
+	for id := range keep {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func preferSavedSession(id string, e savedEntry, previousID string, previous savedEntry) bool {
+	appSession := !strings.HasPrefix(id, "jl_")
+	previousAppSession := !strings.HasPrefix(previousID, "jl_")
+	if appSession != previousAppSession {
+		return appSession
+	}
+	if e.Pinned != previous.Pinned {
+		return e.Pinned
+	}
+	if e.LastUsed != previous.LastUsed {
+		return e.LastUsed > previous.LastUsed
+	}
+	if e.CreatedAt != previous.CreatedAt {
+		return e.CreatedAt > previous.CreatedAt
+	}
+	return id < previousID
+}
+
+func firstNonEmptyRegistry(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 // Persist writes the current sessions to the attached store (no-op if none).
@@ -261,6 +340,28 @@ func (r *Registry) Persist() {
 	if err := r.store.Save(r.List()); err != nil {
 		log.Printf("session persist failed: %v", err)
 	}
+}
+
+// PruneCodexSessions removes persisted and in-memory Codex rows excluded by
+// source policy. Native transcript files remain untouched.
+func (r *Registry) PruneCodexSessions(ignore func(cwd, name string) bool) int {
+	if ignore == nil {
+		return 0
+	}
+	r.mu.Lock()
+	removed := 0
+	for id, s := range r.sessions {
+		snap := s.Snapshot()
+		if snap.Backend == "codex" && ignore(snap.Cwd, snap.Name) {
+			delete(r.sessions, id)
+			removed++
+		}
+	}
+	r.mu.Unlock()
+	if removed > 0 {
+		r.Persist()
+	}
+	return removed
 }
 
 // Create registers a session under the client-supplied id. If the id already
@@ -286,17 +387,36 @@ func (r *Registry) Create(id, name, cwd, backend, model, sandbox, resumeID strin
 // HasResumeID reports whether any registered session already represents the
 // native runtime conversation handle.
 func (r *Registry) HasResumeID(resumeID string) bool {
+	_, ok := r.FindByResumeID(resumeID)
+	return ok
+}
+
+// FindByResumeID returns the canonical registered session for a native runtime
+// conversation handle. It lets command routing make resume idempotent instead
+// of creating a second bridge session that would compete for the same thread.
+func (r *Registry) FindByResumeID(resumeID string) (*Session, bool) {
 	if resumeID == "" {
-		return false
+		return nil, false
 	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	var best *Session
 	for _, s := range r.sessions {
-		if s.ResumeID() == resumeID {
-			return true
+		if s.ResumeID() != resumeID {
+			continue
+		}
+		if best == nil {
+			best = s
+			continue
+		}
+		current := s.Snapshot()
+		previous := best.Snapshot()
+		if current.LastActivity > previous.LastActivity ||
+			(current.LastActivity == previous.LastActivity && current.ID < previous.ID) {
+			best = s
 		}
 	}
-	return false
+	return best, best != nil
 }
 
 // UpsertExternal registers or refreshes a session discovered from the native

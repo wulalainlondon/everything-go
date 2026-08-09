@@ -65,6 +65,14 @@ func (m *Mux) Stop(ctx context.Context, s *session.Session) error  { return m.pi
 func (m *Mux) Clear(ctx context.Context, s *session.Session) error { return m.pick(s).Clear(ctx, s) }
 func (m *Mux) Close(ctx context.Context, s *session.Session) error { return m.pick(s).Close(ctx, s) }
 
+func (m *Mux) Steer(ctx context.Context, s *session.Session, clientUserMessageID, content string, images []backend.ImageAttachment, files []backend.FileAttachment) (backend.SteerResult, error) {
+	steerer, ok := m.pick(s).(backend.SteeringExecutor)
+	if !ok {
+		return backend.SteerResult{}, backend.ErrUnsupportedSteer
+	}
+	return steerer.Steer(ctx, s, clientUserMessageID, content, images, files)
+}
+
 func (m *Mux) SetGoal(ctx context.Context, s *session.Session, objective, status string, tokenBudget *int) error {
 	gc, ok := m.pick(s).(backend.GoalController)
 	if !ok {

@@ -81,6 +81,9 @@ type Hub struct {
 	turnMu   sync.Mutex
 	turnText map[string]*strings.Builder // session_id -> assistant text this turn
 
+	steerMu      sync.Mutex
+	steerResults map[string]protocol.SteerResult // session_id/request_id -> terminal acknowledgement
+
 	storm *stormGuards // dedupe/throttle/semaphore for heavy handlers
 
 	// nativeDirty is set by the native-session watcher when an import changes
@@ -116,6 +119,7 @@ func NewHub(reg *session.Registry, cfg Config, pairing *governance.Pairing, port
 		clients:        make(map[*Client]struct{}),
 		latestByDevice: make(map[string]*Client),
 		turnText:       make(map[string]*strings.Builder),
+		steerResults:   make(map[string]protocol.SteerResult),
 		iceServers:     stunServers,
 		storm:          newStormGuards(),
 		mediaScan:      media.NewScanner(port),

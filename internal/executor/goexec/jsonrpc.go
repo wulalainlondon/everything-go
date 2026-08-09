@@ -130,3 +130,9 @@ func (p *rpcPlumber) failAll(err error) {
 	}
 	p.mu.Unlock()
 }
+
+func (p *rpcPlumber) pendingCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.pending)
+}

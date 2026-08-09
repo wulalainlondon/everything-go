@@ -15,6 +15,21 @@ import (
 	"everything-go/internal/history"
 )
 
+const codexHistoryThinkingMaxRunes = 16_000
+
+func appendCodexHistoryThinking(current, next string) string {
+	if current != "" {
+		current += "\n\n"
+	}
+	current += next
+	runes := []rune(current)
+	if len(runes) <= codexHistoryThinkingMaxRunes {
+		return current
+	}
+	// Keep the most recent progress because it best describes the current state.
+	return "…" + string(runes[len(runes)-codexHistoryThinkingMaxRunes+1:])
+}
+
 func (c *Codex) LoadHistory(resumeID string, opts history.Opts) (*history.Result, error) {
 	path := c.findCodexSessionFile(resumeID)
 	if path == "" {
@@ -24,6 +39,9 @@ func (c *Codex) LoadHistory(resumeID string, opts history.Opts) (*history.Result
 		key := history.FileKey{Path: path, MtimeNS: fi.ModTime().UnixNano(), Size: fi.Size()}
 		cacheName := "codex:" + resumeID
 		if messages, ok := history.DefaultCache().Load(cacheName, key); ok {
+			if !opts.IncludeThinking {
+				messages = history.StripThinkingBlocks(messages)
+			}
 			return history.Slice(messages, opts), nil
 		}
 		messages, truncated, err := c.readCodexHistory(path, resumeID)
@@ -33,11 +51,17 @@ func (c *Codex) LoadHistory(resumeID string, opts history.Opts) (*history.Result
 		if !truncated {
 			history.DefaultCache().SaveAsync(cacheName, key, messages)
 		}
+		if !opts.IncludeThinking {
+			messages = history.StripThinkingBlocks(messages)
+		}
 		return history.Slice(messages, opts), nil
 	}
 	messages, _, err := c.readCodexHistory(path, resumeID)
 	if err != nil {
 		return history.Slice(nil, opts), nil
+	}
+	if !opts.IncludeThinking {
+		messages = history.StripThinkingBlocks(messages)
 	}
 	return history.Slice(messages, opts), nil
 }
@@ -191,11 +215,37 @@ func (c *Codex) readCodexHistory(path, resumeID string) ([]map[string]any, bool,
 		}
 	}
 
+	pendingThinking := ""
+	pendingThinkingLine := 0
+	var pendingThinkingTS int64
+	flushPendingThinking := func() {
+		if pendingThinking == "" {
+			return
+		}
+		messages = append(messages, history.CompleteMsg(
+			"codex", resumeID, "codex:"+resumeID+":line:"+itoa(pendingThinkingLine),
+			"assistant", "", pendingThinkingTS,
+			[]map[string]any{{"type": "thinking", "thinking": pendingThinking}},
+		))
+		pendingThinking = ""
+	}
+	attachPendingThinking := func(blocks []map[string]any) []map[string]any {
+		if pendingThinking == "" {
+			return blocks
+		}
+		merged := make([]map[string]any, 0, len(blocks)+1)
+		merged = append(merged, map[string]any{"type": "thinking", "thinking": pendingThinking})
+		merged = append(merged, blocks...)
+		pendingThinking = ""
+		return merged
+	}
+
 	for _, rc := range records {
 		if tool, ok := normalizeCodexResponseTool(rc.row.Payload, toolOutputs[codexPayloadCallID(rc.row.Payload)]); ok {
+			blocks := attachPendingThinking([]map[string]any{tool.historyBlock()})
 			messages = append(messages, history.CompleteMsg(
 				"codex", resumeID, "codex:"+resumeID+":line:"+itoa(rc.lineNo),
-				"assistant", firstNonEmpty(tool.Command, tool.Name), parseCodexISOms(rc.row.Timestamp), []map[string]any{tool.historyBlock()},
+				"assistant", firstNonEmpty(tool.Command, tool.Name), parseCodexISOms(rc.row.Timestamp), blocks,
 			))
 			continue
 		}
@@ -207,19 +257,32 @@ func (c *Codex) readCodexHistory(path, resumeID string) ([]map[string]any, bool,
 		if role != "user" && role != "assistant" {
 			continue
 		}
-		if role == "assistant" && payload.Phase == "commentary" {
-			continue
-		}
 		text := extractCodexText(payload.Content)
 		if text == "" || (role == "user" && isCodexBootstrapText(text)) {
 			continue
 		}
 		ts := parseCodexISOms(rc.row.Timestamp)
+		if role == "assistant" && payload.Phase == "commentary" {
+			pendingThinking = appendCodexHistoryThinking(pendingThinking, text)
+			pendingThinkingLine = rc.lineNo
+			pendingThinkingTS = ts
+			continue
+		}
+		if role == "user" {
+			// An unfinished prior turn may end with commentary only. Preserve it
+			// before starting the next user turn instead of attaching it across turns.
+			flushPendingThinking()
+		}
+		blocks := []map[string]any{{"type": "text", "text": text}}
+		if role == "assistant" {
+			blocks = attachPendingThinking(blocks)
+		}
 		messages = append(messages, history.CompleteMsg(
 			"codex", resumeID, "codex:"+resumeID+":line:"+itoa(rc.lineNo),
-			role, text, ts, []map[string]any{{"type": "text", "text": text}},
+			role, text, ts, blocks,
 		))
 	}
+	flushPendingThinking()
 	return messages, truncated, nil
 }
 

@@ -2,8 +2,11 @@ package search
 
 import (
 	"database/sql"
+	"log"
 	"sync"
 	"time"
+
+	"everything-go/internal/sourcepolicy"
 )
 
 // Index owns the search database. One Index is shared by the whole bridge and
@@ -53,7 +56,105 @@ func New(dbPath string) (*Index, error) {
 // number of messages added. It is the body of the `--mode=index` child: a
 // short-lived process that does the heap-heavy parse and then exits, handing all
 // of its memory back to the OS so the resident bridge stays lightweight.
-func (idx *Index) RunOnce() int { return idx.ingestAll() }
+func (idx *Index) RunOnce() int {
+	if removed, err := idx.pruneExcludedCodexSessions(); err != nil {
+		log.Printf("[search] prune excluded Codex sessions: %v", err)
+	} else if removed > 0 {
+		log.Printf("[search] pruned %d excluded Codex session(s)", removed)
+	}
+	if removed, err := idx.pruneFrameworkNoiseMessages(); err != nil {
+		log.Printf("[search] prune framework-noise messages: %v", err)
+	} else if removed > 0 {
+		log.Printf("[search] pruned %d framework-noise message(s)", removed)
+	}
+	return idx.ingestAll()
+}
+
+func (idx *Index) pruneFrameworkNoiseMessages() (int64, error) {
+	tx, err := idx.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	result, err := tx.Exec(`
+		DELETE FROM messages
+		WHERE role='user'
+		  AND session_id IN (SELECT session_id FROM sessions WHERE source='codex')
+		  AND lower(ltrim(content)) LIKE '<recommended_plugins>%'`)
+	if err != nil {
+		return 0, err
+	}
+	removed, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if _, err := tx.Exec(`
+		UPDATE sessions
+		SET msg_count=(SELECT COUNT(*) FROM messages WHERE messages.session_id=sessions.session_id)
+		WHERE source='codex'`); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return removed, nil
+}
+
+func (idx *Index) pruneExcludedCodexSessions() (int, error) {
+	cwdGlobs := sourcepolicy.CodexIgnoreCWDGlobs()
+	namePrefixes := sourcepolicy.CodexIgnoreNamePrefixes()
+	if len(cwdGlobs) == 0 && len(namePrefixes) == 0 {
+		return 0, nil
+	}
+	rows, err := idx.db.Query(
+		"SELECT session_id, source_path, COALESCE(cwd,''), COALESCE(display_name,'') FROM sessions WHERE source='codex'",
+	)
+	if err != nil {
+		return 0, err
+	}
+	type excludedRow struct {
+		sessionID, sourcePath string
+	}
+	var excluded []excludedRow
+	for rows.Next() {
+		var sessionID, sourcePath, cwd, name string
+		if err := rows.Scan(&sessionID, &sourcePath, &cwd, &name); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		if sourcepolicy.IgnoreCodexSession(cwd, name, cwdGlobs, namePrefixes) {
+			excluded = append(excluded, excludedRow{sessionID: sessionID, sourcePath: sourcePath})
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return 0, err
+	}
+	if len(excluded) == 0 {
+		return 0, nil
+	}
+	tx, err := idx.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	for _, row := range excluded {
+		if _, err := tx.Exec("DELETE FROM messages WHERE session_id=?", row.sessionID); err != nil {
+			return 0, err
+		}
+		if _, err := tx.Exec("DELETE FROM sessions WHERE session_id=?", row.sessionID); err != nil {
+			return 0, err
+		}
+		if row.sourcePath != "" {
+			if _, err := tx.Exec("DELETE FROM ingest_state WHERE source_path=?", row.sourcePath); err != nil {
+				return 0, err
+			}
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return len(excluded), nil
+}
 
 // MarkReady marks the index queryable. The bridge calls it after the first
 // successful child indexer run; Health also derives readiness from the DB.

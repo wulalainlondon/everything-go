@@ -77,6 +77,28 @@ func TestParseCodexPath(t *testing.T) {
 	}
 }
 
+func TestParseCodexPathAppliesIsolationPolicy(t *testing.T) {
+	root := t.TempDir()
+	day := filepath.Join(root, "2026", "07", "24")
+	if err := os.MkdirAll(day, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	id := "12345678-1234-4234-9234-123456789abc"
+	path := filepath.Join(day, "rollout-2026-07-24T01-02-03-"+id+".jsonl")
+	body := `{"type":"session_meta","payload":{"cwd":"/Users/test/project"}}` + "\n" +
+		`{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<recommended_plugins>\nnoise"}]}}` + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	opts := Options{
+		CodexSessionsDir:        root,
+		CodexIgnoreNamePrefixes: []string{"<recommended_plugins>"},
+	}
+	if _, ok := ParsePath(path, opts); ok {
+		t.Fatal("expected evaluation session to be excluded")
+	}
+}
+
 func TestParseCodexPathRejectsSubagent(t *testing.T) {
 	root := t.TempDir()
 	day := filepath.Join(root, "2026", "07", "20")

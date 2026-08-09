@@ -39,6 +39,7 @@ import (
 	"everything-go/internal/netsvc"
 	"everything-go/internal/search"
 	"everything-go/internal/session"
+	"everything-go/internal/sourcepolicy"
 )
 
 //go:embed keys/fcm_service_account.json
@@ -90,6 +91,16 @@ func main() {
 
 	reg := session.NewRegistry()
 	reg.AttachStore(session.NewStore(sessionStorePath))
+	if removed := reg.PruneCodexSessions(func(cwd, name string) bool {
+		return sourcepolicy.IgnoreCodexSession(
+			cwd,
+			name,
+			sourcepolicy.CodexIgnoreCWDGlobs(),
+			sourcepolicy.CodexIgnoreNamePrefixes(),
+		)
+	}); removed > 0 {
+		log.Printf("[source-policy] pruned %d persisted Codex session(s)", removed)
+	}
 
 	pairing := governance.NewPairing(filepath.Join(*dataDir, "pairing.json"))
 	cfg := core.Config{
@@ -283,7 +294,7 @@ func runPermissionCheck(dataDir, sessionStorePath, extraPaths string) error {
 	paths := []string{
 		dataDir,
 		filepath.Join(home, ".claude", "projects"),
-		filepath.Join(home, ".codex", "sessions"),
+		sourcepolicy.CodexSessionsDir(),
 	}
 	if sessionStorePath != "" {
 		paths = append(paths, sessionStorePath)

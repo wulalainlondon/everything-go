@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"everything-go/internal/sourcepolicy"
 )
 
 // searchableMessage is the normalized unit indexed into the messages table.
@@ -249,11 +251,18 @@ func (c claudeSource) sessionMeta(path string) sessionMeta {
 
 // --- Codex source -----------------------------------------------------------
 
-type codexSource struct{ root string }
+type codexSource struct {
+	root               string
+	ignoreCWDGlobs     []string
+	ignoreNamePrefixes []string
+}
 
 func newCodexSource() codexSource {
-	home, _ := os.UserHomeDir()
-	return codexSource{root: filepath.Join(home, ".codex", "sessions")}
+	return codexSource{
+		root:               sourcepolicy.CodexSessionsDir(),
+		ignoreCWDGlobs:     sourcepolicy.CodexIgnoreCWDGlobs(),
+		ignoreNamePrefixes: sourcepolicy.CodexIgnoreNamePrefixes(),
+	}
 }
 
 func (c codexSource) name() string { return "codex" }
@@ -265,7 +274,19 @@ func (c codexSource) enabled() bool {
 
 func (c codexSource) discover() []string {
 	matches, _ := filepath.Glob(filepath.Join(c.root, "*", "*", "*", "rollout-*.jsonl"))
-	return matches
+	filtered := make([]string, 0, len(matches))
+	for _, path := range matches {
+		meta := c.sessionMeta(path)
+		if !sourcepolicy.IgnoreCodexSession(
+			meta.Cwd,
+			meta.DisplayName,
+			c.ignoreCWDGlobs,
+			c.ignoreNamePrefixes,
+		) {
+			filtered = append(filtered, path)
+		}
+	}
+	return filtered
 }
 
 func (c codexSource) headSignature(path string) string { return headSig(path) }
@@ -328,7 +349,7 @@ func (c codexSource) iterMessages(path string, startOffset int64) ([]searchableM
 		if text == "" {
 			return
 		}
-		if pl.Role == "user" && isCodexBootstrap(text) {
+		if pl.Role == "user" && (isCodexBootstrap(text) || isFrameworkNoise(text)) {
 			return
 		}
 		msgUUID := rec.UUID

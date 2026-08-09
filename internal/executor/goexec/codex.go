@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -26,6 +27,7 @@ import (
 	"everything-go/internal/protocol"
 	"everything-go/internal/runtime"
 	"everything-go/internal/session"
+	"everything-go/internal/sourcepolicy"
 )
 
 const (
@@ -129,13 +131,19 @@ type Codex struct {
 	indexPath    string
 	rpc          *rpcPlumber
 
-	startMu sync.Mutex
-	proc    *exec.Cmd
-	stdin   io.WriteCloser
+	startMu               sync.Mutex
+	proc                  *exec.Cmd
+	stdin                 io.WriteCloser
+	procDone              chan struct{}
+	authPath              string
+	serverAuthFingerprint string
+	authReloadDeferred    bool
+	authWatchOnce         sync.Once
 
 	mu                 sync.Mutex
 	states             map[string]*codexState
 	threadToSession    map[string]*session.Session
+	activeThreadOwner  map[string]*session.Session
 	interMu            sync.Mutex
 	interactions       map[string]codexInteraction
 	catalogMu          sync.RWMutex
@@ -159,17 +167,18 @@ func NewCodex(sink executor.Sink, codexBin string) *Codex {
 	if codexBin == "" {
 		codexBin = "codex"
 	}
-	home, _ := os.UserHomeDir()
-	codexHome := filepath.Join(home, ".codex")
+	codexHome := sourcepolicy.CodexHome()
 	return &Codex{
 		sink:               sink,
 		tools:              newToolEmitter(sink),
 		codexBin:           codexBin,
 		sessionsRoot:       filepath.Join(codexHome, "sessions"),
 		indexPath:          filepath.Join(codexHome, "session_index.jsonl"),
+		authPath:           filepath.Join(codexHome, "auth.json"),
 		rpc:                newRPCPlumber("codex"),
 		states:             make(map[string]*codexState),
 		threadToSession:    make(map[string]*session.Session),
+		activeThreadOwner:  make(map[string]*session.Session),
 		interactions:       make(map[string]codexInteraction),
 		collaborationModes: make(map[string]map[string]any),
 		turnTimeout:        codexTurnTimeout,
@@ -190,14 +199,40 @@ func (c *Codex) state(id string) *codexState {
 	return st
 }
 
-// ensureServer spawns and initializes the singleton app-server if needed.
+// ensureServer spawns and initializes the singleton app-server if needed. It
+// also reloads the process when Codex credentials change on disk. codex
+// app-server reads auth.json at startup and otherwise keeps the old account in
+// memory, so an external `codex login` cannot take effect without this restart.
 func (c *Codex) ensureServer() error {
 	c.startMu.Lock()
 	defer c.startMu.Unlock()
-	if c.proc != nil && c.proc.ProcessState == nil {
-		return nil // running
-	}
+	if c.serverRunningLocked() {
+		fingerprint, err := codexAuthFingerprint(c.authPath)
+		if err != nil {
+			log.Printf("[codex] auth credential check failed: %v", err)
+			return nil
+		}
+		if fingerprint == c.serverAuthFingerprint {
+			c.authReloadDeferred = false
+			return nil
+		}
+		if c.hasActiveWork() || c.rpc.pendingCount() > 0 {
+			if !c.authReloadDeferred {
+				log.Printf("[codex] auth credentials changed; reload deferred until Codex is idle")
+				c.authReloadDeferred = true
+			}
+			return nil
+		}
 
+		log.Printf("[codex] auth credentials changed; restarting codex app-server")
+		if err := c.stopServerLocked(); err != nil {
+			return err
+		}
+	}
+	return c.startServerLocked()
+}
+
+func (c *Codex) startServerLocked() error {
 	log.Printf("[codex] spawning codex app-server")
 	if changed, err := ensureBrowserElicitationRouting(filepath.Dir(c.sessionsRoot)); err != nil {
 		log.Printf("[codex] browser elicitation routing config failed: %v", err)
@@ -205,6 +240,7 @@ func (c *Codex) ensureServer() error {
 		log.Printf("[codex] Browser Use elicitations routed through bridge policy")
 	}
 	cmd := exec.Command(c.codexBin, "app-server")
+	cmd.Env = append(os.Environ(), "CODEX_HOME="+filepath.Dir(c.sessionsRoot))
 	stdinPipe, err := cmd.StdinPipe()
 	if err != nil {
 		return err
@@ -220,23 +256,37 @@ func (c *Codex) ensureServer() error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
+	authFingerprint, err := codexAuthFingerprint(c.authPath)
+	if err != nil {
+		_ = cmd.Process.Kill()
+		return fmt.Errorf("read Codex credentials: %w", err)
+	}
+	done := make(chan struct{})
 	c.proc = cmd
 	c.stdin = stdinPipe
+	c.procDone = done
+	c.serverAuthFingerprint = authFingerprint
+	c.authReloadDeferred = false
 	// Write raw to the pipe (line-delimited JSON, one syscall per line, serialized
 	// by the plumber's write mutex) so no flush step can be skipped.
 	c.rpc.setWriter(stdinPipe)
 
 	go c.readLoop(stdoutPipe)
 	go drainStderr("codex", stderrPipe)
-	go func() {
+	go func(started *exec.Cmd, exited chan struct{}) {
 		_ = cmd.Wait()
 		c.rpc.failAll(errProcDead)
 		c.invalidateLiveThreads()
+		close(exited)
 		c.startMu.Lock()
-		c.proc = nil
-		c.stdin = nil
+		if c.proc == started {
+			c.proc = nil
+			c.stdin = nil
+			c.procDone = nil
+			c.rpc.setWriter(nil)
+		}
 		c.startMu.Unlock()
-	}()
+	}(cmd, done)
 
 	if _, err := c.rpc.request("initialize", map[string]any{
 		"clientInfo": map[string]any{
@@ -252,7 +302,120 @@ func (c *Codex) ensureServer() error {
 	}, 30*time.Second); err != nil {
 		return err
 	}
-	return c.rpc.notify("initialized", nil)
+	if err := c.rpc.notify("initialized", nil); err != nil {
+		return err
+	}
+	c.startAuthWatcher()
+	return nil
+}
+
+func codexAuthFingerprint(path string) (string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "missing", nil
+		}
+		return "", err
+	}
+	sum := sha256.Sum256(b)
+	return fmt.Sprintf("sha256:%x", sum), nil
+}
+
+func (c *Codex) startAuthWatcher() {
+	c.authWatchOnce.Do(func() {
+		go func() {
+			ticker := time.NewTicker(2 * time.Second)
+			defer ticker.Stop()
+			for range ticker.C {
+				if c.authCredentialsChanged() {
+					if err := c.ensureServer(); err != nil {
+						log.Printf("[codex] automatic auth reload failed: %v", err)
+					}
+				}
+			}
+		}()
+	})
+}
+
+func (c *Codex) authCredentialsChanged() bool {
+	fingerprint, err := codexAuthFingerprint(c.authPath)
+	if err != nil {
+		return false
+	}
+	c.startMu.Lock()
+	defer c.startMu.Unlock()
+	return c.serverRunningLocked() && fingerprint != c.serverAuthFingerprint
+}
+
+func (c *Codex) serverRunningLocked() bool {
+	if c.proc == nil {
+		return false
+	}
+	if c.procDone == nil {
+		return true
+	}
+	select {
+	case <-c.procDone:
+		return false
+	default:
+		return true
+	}
+}
+
+func (c *Codex) hasActiveWork() bool {
+	c.mu.Lock()
+	states := make([]*codexState, 0, len(c.states))
+	for _, st := range c.states {
+		states = append(states, st)
+	}
+	c.mu.Unlock()
+
+	for _, st := range states {
+		st.mu.Lock()
+		active := st.turnActive || st.compactActive
+		st.mu.Unlock()
+		if active {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Codex) stopServerLocked() error {
+	cmd := c.proc
+	if cmd == nil || !c.serverRunningLocked() {
+		c.proc = nil
+		c.stdin = nil
+		c.procDone = nil
+		c.rpc.setWriter(nil)
+		return nil
+	}
+
+	done := c.procDone
+	if c.stdin != nil {
+		_ = c.stdin.Close()
+	}
+	if done != nil {
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			_ = cmd.Process.Kill()
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				return fmt.Errorf("timed out stopping codex app-server")
+			}
+		}
+	} else {
+		_ = cmd.Process.Kill()
+	}
+	if c.proc == cmd {
+		c.proc = nil
+		c.stdin = nil
+		c.procDone = nil
+		c.rpc.setWriter(nil)
+	}
+	return nil
 }
 
 // Catalog reads the app-server catalog instead of duplicating model ids in the
@@ -290,7 +453,7 @@ func (c *Codex) Catalog(ctx context.Context) (backend.Definition, error) {
 	if err := json.Unmarshal(raw, &response); err != nil {
 		return backend.Definition{}, err
 	}
-	def := backend.Definition{ID: backend.Codex, Label: "Codex", Capabilities: backend.Capabilities{History: true, Usage: true, Interactions: true, Sandbox: true, Images: true, Files: true}}
+	def := backend.Definition{ID: backend.Codex, Label: "Codex", Capabilities: backend.Capabilities{History: true, Usage: true, Interactions: true, Sandbox: true, Images: true, Files: true, Steering: true}}
 	for _, m := range response.Data {
 		if m.Hidden {
 			continue
@@ -361,6 +524,7 @@ func (c *Codex) Catalog(ctx context.Context) (backend.Definition, error) {
 func (c *Codex) invalidateLiveThreads() {
 	c.mu.Lock()
 	c.threadToSession = make(map[string]*session.Session)
+	c.activeThreadOwner = make(map[string]*session.Session)
 	states := make([]*codexState, 0, len(c.states))
 	for _, st := range c.states {
 		states = append(states, st)
@@ -508,9 +672,15 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 	}
 
 	c.mu.Lock()
-	s := c.threadToSession[p.ThreadID]
+	s := c.activeThreadOwner[p.ThreadID]
+	if s == nil {
+		s = c.threadToSession[p.ThreadID]
+	}
 	if s == nil && p.Thread.ParentThreadID != nil {
-		s = c.threadToSession[*p.Thread.ParentThreadID]
+		s = c.activeThreadOwner[*p.Thread.ParentThreadID]
+		if s == nil {
+			s = c.threadToSession[*p.Thread.ParentThreadID]
+		}
 		if s != nil {
 			c.threadToSession[p.ThreadID] = s
 		}
@@ -997,9 +1167,7 @@ func (c *Codex) createUserInputRequest(rpcID any, raw json.RawMessage) bool {
 		_ = json.Unmarshal(p.Thread["id"], &id)
 		threadID = id
 	}
-	c.mu.Lock()
-	s := c.threadToSession[threadID]
-	c.mu.Unlock()
+	s := c.sessionForThread(threadID)
 	if s == nil {
 		return false
 	}
@@ -1040,9 +1208,7 @@ func (c *Codex) createMcpElicitationRequest(rpcID any, raw json.RawMessage) bool
 	if json.Unmarshal(raw, &p) != nil {
 		return false
 	}
-	c.mu.Lock()
-	s := c.threadToSession[p.ThreadID]
-	c.mu.Unlock()
+	s := c.sessionForThread(p.ThreadID)
 	if s == nil {
 		return false
 	}
@@ -1069,9 +1235,7 @@ func (c *Codex) createDynamicToolRequest(rpcID any, raw json.RawMessage) bool {
 	if json.Unmarshal(raw, &p) != nil {
 		return false
 	}
-	c.mu.Lock()
-	s := c.threadToSession[p.ThreadID]
-	c.mu.Unlock()
+	s := c.sessionForThread(p.ThreadID)
 	if s == nil {
 		return false
 	}
@@ -1163,8 +1327,15 @@ func (c *Codex) sessionForCodexParams(params map[string]any) *session.Session {
 			threadID = codexAnyString(thread["id"])
 		}
 	}
+	return c.sessionForThread(threadID)
+}
+
+func (c *Codex) sessionForThread(threadID string) *session.Session {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if s := c.activeThreadOwner[threadID]; s != nil {
+		return s
+	}
 	return c.threadToSession[threadID]
 }
 
@@ -1257,9 +1428,57 @@ func (c *Codex) Send(ctx context.Context, s *session.Session, reqID, content str
 	done := st.turnDone
 	st.mu.Unlock()
 
+	if err := c.claimActiveThread(threadID, s); err != nil {
+		st.finish(err.Error())
+		return err
+	}
 	input := c.codexInput(s, reqID, content, images, files, st)
 	go c.runTurn(s, st, threadID, input, done)
 	return nil
+}
+
+// Steer injects another user message into the currently active Codex turn.
+// The app-server validates expectedTurnId atomically, so a turn that finishes
+// between the local snapshot and the RPC is safely rejected instead of being
+// attached to the next turn.
+func (c *Codex) Steer(ctx context.Context, s *session.Session, clientUserMessageID, content string, images []backend.ImageAttachment, files []backend.FileAttachment) (backend.SteerResult, error) {
+	if err := c.ensureServer(); err != nil {
+		return backend.SteerResult{}, err
+	}
+	return c.steerActiveTurn(s, clientUserMessageID, content, images, files)
+}
+
+func (c *Codex) steerActiveTurn(s *session.Session, clientUserMessageID, content string, images []backend.ImageAttachment, files []backend.FileAttachment) (backend.SteerResult, error) {
+	st := c.state(s.ID)
+	st.mu.Lock()
+	active := st.turnActive
+	threadID := st.threadID
+	turnID := st.currentTurnID
+	activeRequestID := st.reqID
+	st.mu.Unlock()
+	if !active || threadID == "" || turnID == "" {
+		return backend.SteerResult{}, backend.ErrNoActiveTurn
+	}
+
+	input := c.codexInput(s, clientUserMessageID, content, images, files, st)
+	params := map[string]any{
+		"threadId":            threadID,
+		"expectedTurnId":      turnID,
+		"input":               input,
+		"clientUserMessageId": clientUserMessageID,
+	}
+	raw, err := c.rpcCall("turn/steer", params, 15*time.Second)
+	if err != nil {
+		return backend.SteerResult{}, err
+	}
+	var response struct {
+		TurnID string `json:"turnId"`
+	}
+	if json.Unmarshal(raw, &response) != nil || response.TurnID == "" {
+		response.TurnID = turnID
+	}
+	st.touch(time.Now())
+	return backend.SteerResult{TurnID: response.TurnID, RequestID: activeRequestID}, nil
 }
 
 func (c *Codex) runTurn(s *session.Session, st *codexState, threadID string, input []map[string]any, done chan struct{}) {
@@ -1323,6 +1542,12 @@ func (c *Codex) runTurn(s *session.Session, st *codexState, threadID string, inp
 	st.mu.Lock()
 	stopping, turnErr := st.stopping, st.turnErr
 	st.mu.Unlock()
+
+	// Release before emitting the terminal event. Hub.Emit(done/error/stopped)
+	// immediately unlocks the per-session queue, so a deferred release could
+	// race the next turn from the same session and delete its newly acquired
+	// route.
+	c.releaseActiveThreads(s)
 
 	switch {
 	case stopping || turnErr == "stopped":
@@ -1614,14 +1839,61 @@ func (c *Codex) startTurnWithStaleRetry(s *session.Session, st *codexState, thre
 	}
 
 	log.Printf("[codex] stale thread on turn/start session=%s thread=%s, respawning", s.ID, threadID)
-	c.forgetThread(st, threadID)
+	c.forgetThread(s, st, threadID)
 	if err := c.ensureThread(s, st); err != nil {
 		return err
 	}
 	st.mu.Lock()
 	newThreadID := st.threadID
 	st.mu.Unlock()
+	if err := c.moveActiveThreadClaim(threadID, newThreadID, s); err != nil {
+		return err
+	}
 	return c.startTurn(newThreadID, input, snap)
+}
+
+func (c *Codex) claimActiveThread(threadID string, s *session.Session) error {
+	if threadID == "" {
+		return errNoThreadID
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if owner := c.activeThreadOwner[threadID]; owner != nil && owner.ID != s.ID {
+		return fmt.Errorf("Codex thread %s already has an active turn in session %s", threadID, owner.ID)
+	}
+	c.activeThreadOwner[threadID] = s
+	// Keep the idle/fallback route aligned too. Notifications for an active turn
+	// always prefer activeThreadOwner, so another duplicate session cannot steal
+	// tool, text, interaction, or terminal events by merely resuming the thread.
+	c.threadToSession[threadID] = s
+	return nil
+}
+
+func (c *Codex) moveActiveThreadClaim(oldThreadID, newThreadID string, s *session.Session) error {
+	if newThreadID == "" {
+		return errNoThreadID
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if owner := c.activeThreadOwner[newThreadID]; owner != nil && owner.ID != s.ID {
+		return fmt.Errorf("Codex thread %s already has an active turn in session %s", newThreadID, owner.ID)
+	}
+	if owner := c.activeThreadOwner[oldThreadID]; owner == s {
+		delete(c.activeThreadOwner, oldThreadID)
+	}
+	c.activeThreadOwner[newThreadID] = s
+	c.threadToSession[newThreadID] = s
+	return nil
+}
+
+func (c *Codex) releaseActiveThreads(s *session.Session) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for threadID, owner := range c.activeThreadOwner {
+		if owner == s {
+			delete(c.activeThreadOwner, threadID)
+		}
+	}
 }
 
 func codexTurnParams(threadID string, input []map[string]any, effort string) map[string]any {
@@ -1667,7 +1939,7 @@ func (c *Codex) collaborationModeValue(snap session.Snapshot) map[string]any {
 	return map[string]any{"mode": strings.ToLower(snap.CollaborationMode), "settings": map[string]any{"model": snap.Model, "reasoning_effort": nil, "developer_instructions": nil}}
 }
 
-func (c *Codex) forgetThread(st *codexState, threadID string) {
+func (c *Codex) forgetThread(s *session.Session, st *codexState, threadID string) {
 	st.mu.Lock()
 	if st.threadID == threadID {
 		st.threadID = ""
@@ -1675,7 +1947,12 @@ func (c *Codex) forgetThread(st *codexState, threadID string) {
 	st.currentTurnID = ""
 	st.mu.Unlock()
 	c.mu.Lock()
-	delete(c.threadToSession, threadID)
+	if c.threadToSession[threadID] == s {
+		delete(c.threadToSession, threadID)
+	}
+	if c.activeThreadOwner[threadID] == s {
+		delete(c.activeThreadOwner, threadID)
+	}
 	c.mu.Unlock()
 }
 
@@ -1823,10 +2100,24 @@ func (c *Codex) Clear(ctx context.Context, s *session.Session) error {
 	st.mu.Unlock()
 	c.tools.ResetSession(s.ID)
 	if threadID != "" {
-		_, _ = c.rpcCall("thread/archive", map[string]any{"threadId": threadID}, 5*time.Second)
 		c.mu.Lock()
-		delete(c.threadToSession, threadID)
+		fallbackOwner := c.threadToSession[threadID]
+		activeOwner := c.activeThreadOwner[threadID]
+		ownedElsewhere := (fallbackOwner != nil && fallbackOwner != s) ||
+			(activeOwner != nil && activeOwner != s)
+		if fallbackOwner == s {
+			delete(c.threadToSession, threadID)
+		}
+		if activeOwner == s {
+			delete(c.activeThreadOwner, threadID)
+		}
 		c.mu.Unlock()
+		// A legacy duplicate session may still share this native thread. Detach
+		// only the cleared bridge row; archiving would destroy the canonical
+		// session's history and can interrupt its active turn.
+		if !ownedElsewhere {
+			_, _ = c.rpcCall("thread/archive", map[string]any{"threadId": threadID}, 5*time.Second)
+		}
 	}
 	s.SetResumeID("")
 	c.sink.Emit(backend.NewSessionWarning(s.ID, "Session history cleared."))
@@ -1842,7 +2133,12 @@ func (c *Codex) Close(ctx context.Context, s *session.Session) error {
 	c.mu.Lock()
 	delete(c.states, s.ID)
 	if threadID != "" {
-		delete(c.threadToSession, threadID)
+		if c.threadToSession[threadID] == s {
+			delete(c.threadToSession, threadID)
+		}
+		if c.activeThreadOwner[threadID] == s {
+			delete(c.activeThreadOwner, threadID)
+		}
 	}
 	c.mu.Unlock()
 	return nil

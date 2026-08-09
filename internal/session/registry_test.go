@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -16,6 +17,29 @@ func TestCreateIsIdempotent(t *testing.T) {
 	}
 	if a.Name() != "first" {
 		t.Fatalf("idempotent Create must not overwrite fields, got name %q", a.Name())
+	}
+}
+
+func TestPruneCodexSessions(t *testing.T) {
+	r := NewRegistry()
+	r.Create("daily", "Daily work", "/Users/test/project", "codex", "", "", "")
+	r.Create("evaluation", "<recommended_plugins>\nnoise", "/Users/test/project", "codex", "", "", "")
+	r.Create("claude", "<recommended_plugins>\nkeep", "/tmp", "claude", "", "", "")
+
+	removed := r.PruneCodexSessions(func(_ string, name string) bool {
+		return strings.HasPrefix(name, "<recommended_plugins>")
+	})
+	if removed != 1 {
+		t.Fatalf("removed=%d want 1", removed)
+	}
+	if _, ok := r.Get("evaluation"); ok {
+		t.Fatal("excluded Codex session remains")
+	}
+	if _, ok := r.Get("daily"); !ok {
+		t.Fatal("daily Codex session was removed")
+	}
+	if _, ok := r.Get("claude"); !ok {
+		t.Fatal("non-Codex session was removed")
 	}
 }
 
@@ -59,6 +83,85 @@ func TestPersistRestartRoundTrip(t *testing.T) {
 	}
 	if got.State() != Idle {
 		t.Fatalf("restored session should be Idle, got %s", got.State())
+	}
+}
+
+func TestAttachStoreCollapsesDuplicateResumeIDs(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "saved_sessions.json")
+	initial := `{
+  "jl_native": {
+    "name": "native alias",
+    "resume_id": "thread-dup",
+    "last_used": 300,
+    "cwd": "/work",
+    "backend": "codex"
+  },
+  "s_old": {
+    "name": "old app row",
+    "resume_id": "thread-dup",
+    "last_used": 100,
+    "cwd": "/work",
+    "backend": "codex"
+  },
+  "s_new": {
+    "name": "canonical app row",
+    "resume_id": "thread-dup",
+    "last_used": 200,
+    "cwd": "/work",
+    "backend": "codex"
+  },
+  "s_other": {
+    "name": "other",
+    "resume_id": "thread-other",
+    "last_used": 50,
+    "cwd": "/work",
+    "backend": "codex"
+  }
+}`
+	if err := os.WriteFile(path, []byte(initial), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r := NewRegistry()
+	r.AttachStore(NewStore(path))
+
+	if _, ok := r.Get("s_new"); !ok {
+		t.Fatal("most-recent explicit app session should be canonical")
+	}
+	if _, ok := r.Get("s_old"); ok {
+		t.Fatal("older duplicate app session survived migration")
+	}
+	if _, ok := r.Get("jl_native"); ok {
+		t.Fatal("native watcher alias must not replace an explicit app session")
+	}
+	if got := len(r.List()); got != 2 {
+		t.Fatalf("registry has %d sessions after dedupe, want 2", got)
+	}
+
+	var persisted map[string]json.RawMessage
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, &persisted); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := persisted["s_old"]; ok {
+		t.Fatal("older duplicate remained persisted")
+	}
+	if _, ok := persisted["jl_native"]; ok {
+		t.Fatal("native duplicate remained persisted")
+	}
+}
+
+func TestFindByResumeIDReturnsCanonicalSession(t *testing.T) {
+	r := NewRegistry()
+	want := r.Create("s1", "one", "/work", "codex", "", "", "thread-1")
+	if got, ok := r.FindByResumeID("thread-1"); !ok || got != want {
+		t.Fatalf("FindByResumeID = (%v, %v), want (%v, true)", got, ok, want)
+	}
+	if _, ok := r.FindByResumeID(""); ok {
+		t.Fatal("empty resume id must never match")
 	}
 }
 

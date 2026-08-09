@@ -1,0 +1,8 @@
+#!/bin/bash
+set -euo pipefail
+
+export CODEX_HOME="${CODEX_EVAL_HOME:-$HOME/.codex-eval}"
+export PATH="$HOME/.npm-global/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:${PATH:-}"
+CODEX_BIN="${CODEX_EVAL_BIN:-$(command -v codex)}"
+mkdir -p "$CODEX_HOME/sessions"
+exec "$CODEX_BIN" "$@"

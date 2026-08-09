@@ -19,8 +19,9 @@ import (
 // injectable onSend so a test decides what a "turn" emits (a full turn with
 // done, or a long-running turn that emits nothing until stopped).
 type fakeExec struct {
-	sink   executor.Sink
-	onSend func(s *session.Session, reqID, content string)
+	sink    executor.Sink
+	onSend  func(s *session.Session, reqID, content string)
+	onSteer func(s *session.Session, reqID, content string) (backend.SteerResult, error)
 }
 
 func (f *fakeExec) Send(_ context.Context, s *session.Session, reqID, content string, _ []backend.ImageAttachment, _ []backend.FileAttachment) error {
@@ -41,6 +42,13 @@ func (f *fakeExec) Clear(_ context.Context, s *session.Session) error {
 }
 
 func (f *fakeExec) Close(_ context.Context, s *session.Session) error { return nil }
+
+func (f *fakeExec) Steer(_ context.Context, s *session.Session, reqID, content string, _ []backend.ImageAttachment, _ []backend.FileAttachment) (backend.SteerResult, error) {
+	if f.onSteer == nil {
+		return backend.SteerResult{}, backend.ErrUnsupportedSteer
+	}
+	return f.onSteer(s, reqID, content)
+}
 
 func newTestHub(t *testing.T) (*Hub, *fakeExec) {
 	t.Helper()
@@ -161,6 +169,44 @@ func TestPendingInteractionsListEmptyWhenUnsupported(t *testing.T) {
 	}
 }
 
+func TestSteerMessageBypassesTurnQueueAndAcknowledgesAcceptedTurn(t *testing.T) {
+	h, fe := newTestHub(t)
+	c := newTestClient(h)
+	sessionUnderTest := h.registry.Create("s1", "codex", t.TempDir(), backend.Codex, "", "", "")
+	called := make(chan struct{}, 1)
+	callCount := 0
+	fe.onSteer = func(s *session.Session, reqID, content string) (backend.SteerResult, error) {
+		callCount++
+		if s.ID != "s1" || reqID != "r-steer" || content != "change direction" {
+			t.Fatalf("unexpected steer args session=%s req=%s content=%q", s.ID, reqID, content)
+		}
+		called <- struct{}{}
+		return backend.SteerResult{TurnID: "turn-1", RequestID: "r-active"}, nil
+	}
+
+	route(h, c, `{"type":"steer_message","session_id":"s1","request_id":"r-steer","content":"change direction"}`)
+	event := waitForType(t, c, "steer_result")
+	if event["status"] != "accepted" || event["turn_id"] != "turn-1" || event["active_request_id"] != "r-active" {
+		t.Fatalf("unexpected steer result: %+v", event)
+	}
+	select {
+	case <-called:
+	case <-time.After(time.Second):
+		t.Fatal("steer executor was not called")
+	}
+	if sessionUnderTest.QueueLen() != 0 {
+		t.Fatal("steer command entered the ordinary turn queue")
+	}
+
+	// Re-sending the same command after a reconnect/ack loss must replay the
+	// cached accepted result instead of injecting the user message twice.
+	route(h, c, `{"type":"steer_message","session_id":"s1","request_id":"r-steer","content":"change direction"}`)
+	replayed := waitForType(t, c, "steer_result")
+	if replayed["status"] != "accepted" || callCount != 1 {
+		t.Fatalf("duplicate steer was not deduplicated: event=%+v calls=%d", replayed, callCount)
+	}
+}
+
 // The Phase 5 read commands the app polls on connect must return valid empty
 // lists (arrays, never null) so the app's z.array schemas accept them, instead
 // of being left unhandled.
@@ -200,6 +246,26 @@ func TestNewSessionBroadcastsSessionsList(t *testing.T) {
 	ss, _ := sessions[0].(map[string]any)
 	if ss["id"] != "s1" {
 		t.Fatalf("sessions_list id = %v, want s1", ss["id"])
+	}
+}
+
+func TestNewSessionResumeReusesCanonicalSession(t *testing.T) {
+	h, _ := newTestHub(t)
+	existing := h.registry.Create("s_existing", "Existing", "/work", "codex", "", "", "thread-1")
+	c := newTestClient(h)
+
+	route(h, c, `{"type":"new_session","session_id":"s_duplicate","name":"Duplicate","backend":"codex","resume_claude_id":"thread-1"}`)
+
+	created := waitForType(t, c, "session_created")
+	if created["session_id"] != existing.ID {
+		t.Fatalf("session_created id = %v, want canonical %s", created["session_id"], existing.ID)
+	}
+	closed := waitForType(t, c, "session_closed")
+	if closed["session_id"] != "s_duplicate" {
+		t.Fatalf("session_closed id = %v, want optimistic duplicate", closed["session_id"])
+	}
+	if _, ok := h.registry.Get("s_duplicate"); ok {
+		t.Fatal("duplicate resume created a second registry session")
 	}
 }
 

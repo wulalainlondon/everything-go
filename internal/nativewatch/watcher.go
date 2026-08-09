@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"everything-go/internal/sourcepolicy"
 	"github.com/fsnotify/fsnotify"
 )
 
@@ -40,21 +41,25 @@ type NativeSession struct {
 }
 
 type Options struct {
-	ClaudeProjectsDir string
-	CodexSessionsDir  string
-	PollInterval      time.Duration
-	Debounce          time.Duration
-	InitialLookback   time.Duration
+	ClaudeProjectsDir       string
+	CodexSessionsDir        string
+	CodexIgnoreCWDGlobs     []string
+	CodexIgnoreNamePrefixes []string
+	PollInterval            time.Duration
+	Debounce                time.Duration
+	InitialLookback         time.Duration
 }
 
 func DefaultOptions() Options {
 	home, _ := os.UserHomeDir()
 	return Options{
-		ClaudeProjectsDir: filepath.Join(home, ".claude", "projects"),
-		CodexSessionsDir:  filepath.Join(home, ".codex", "sessions"),
-		PollInterval:      30 * time.Second,
-		Debounce:          900 * time.Millisecond,
-		InitialLookback:   30 * 24 * time.Hour,
+		ClaudeProjectsDir:       filepath.Join(home, ".claude", "projects"),
+		CodexSessionsDir:        sourcepolicy.CodexSessionsDir(),
+		CodexIgnoreCWDGlobs:     sourcepolicy.CodexIgnoreCWDGlobs(),
+		CodexIgnoreNamePrefixes: sourcepolicy.CodexIgnoreNamePrefixes(),
+		PollInterval:            30 * time.Second,
+		Debounce:                900 * time.Millisecond,
+		InitialLookback:         30 * 24 * time.Hour,
 	}
 }
 
@@ -291,7 +296,16 @@ func isCandidate(path string) bool {
 func ParsePath(path string, opts Options) (NativeSession, bool) {
 	name := filepath.Base(path)
 	if isCodexFileName(name) && opts.CodexSessionsDir != "" && inside(path, opts.CodexSessionsDir) {
-		return parseCodex(path)
+		session, ok := parseCodex(path)
+		if ok && sourcepolicy.IgnoreCodexSession(
+			session.Cwd,
+			session.Name,
+			opts.CodexIgnoreCWDGlobs,
+			opts.CodexIgnoreNamePrefixes,
+		) {
+			return NativeSession{}, false
+		}
+		return session, ok
 	}
 	if strings.HasSuffix(name, ".jsonl") && opts.ClaudeProjectsDir != "" && inside(path, opts.ClaudeProjectsDir) {
 		return parseClaude(path)

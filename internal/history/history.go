@@ -95,6 +95,10 @@ func ContentHash(role, content string, blocks []map[string]any) string {
 				"command":     asString(b["command"]),
 				"output":      normalizeText(asString(b["output"])),
 			})
+		case "thinking":
+			normBlocks = append(normBlocks, map[string]any{
+				"type": "thinking", "thinking": normalizeText(asString(b["thinking"])),
+			})
 		}
 	}
 	payload := map[string]any{

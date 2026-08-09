@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -123,6 +124,21 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		// Storing the resolved path keeps get_git_diff / get_tasks / spawn all
 		// consistent — the app sends a literal "~" as the default cwd.
 		cwd := runtime.ExpandPath(cmd.Cwd)
+		if existing, ok := h.registry.FindByResumeID(cmd.ResumeClaudeID); ok && existing.ID != cmd.SessionID {
+			snap := existing.Snapshot()
+			// Resuming an already-registered native thread is idempotent. Older
+			// clients may optimistically create a fresh local row first, so close
+			// that requested stub and return the canonical session plus a fresh
+			// authoritative list. This prevents two bridge session IDs from ever
+			// competing for one Codex thread.
+			c.enqueueEvent(h.client.SessionCreated(clientproto.SessionCreatedInput{
+				ID: snap.ID, Name: snap.Name, CreatedAt: snap.CreatedAt, Cwd: snap.Cwd,
+				Backend: snap.Backend, Model: snap.Model, Sandbox: snap.Sandbox,
+			}))
+			c.enqueueEvent(h.client.SessionClosed(cmd.SessionID))
+			c.enqueueEvent(h.client.SessionsList(h.sessionSummaries()))
+			return
+		}
 		s := h.registry.Create(cmd.SessionID, cmd.Name, cwd, cmd.Backend, cmd.Model, cmd.Sandbox, cmd.ResumeClaudeID)
 		if cmd.EffortSet {
 			s.SetEffort(cmd.Effort)
@@ -159,6 +175,58 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		}) {
 			h.Emit(h.client.Error(cmd.SessionID, "session_closed", "session is closed"))
 		}
+
+	case "steer_message":
+		cacheKey := cmd.SessionID + "\x00" + cmd.RequestID
+		h.steerMu.Lock()
+		cached, cachedOK := h.steerResults[cacheKey]
+		h.steerMu.Unlock()
+		if cachedOK {
+			c.enqueueEvent(cached)
+			return
+		}
+		s, ok := h.registry.Get(cmd.SessionID)
+		if !ok {
+			c.enqueueEvent(protocol.NewSteerResult(cmd.SessionID, cmd.RequestID, "retained", "", "", "unknown session"))
+			return
+		}
+		steerer, ok := h.exec.(backend.SteeringExecutor)
+		if !ok {
+			c.enqueueEvent(protocol.NewSteerResult(cmd.SessionID, cmd.RequestID, "unsupported", "", "", backend.ErrUnsupportedSteer.Error()))
+			return
+		}
+		content, files, err := h.resolveUploadedVideos(cmd.SessionID, cmd.Content, cmd.Files)
+		if err != nil {
+			c.enqueueEvent(protocol.NewSteerResult(cmd.SessionID, cmd.RequestID, "retained", "", "", err.Error()))
+			return
+		}
+		// Do not enter the session turn queue: steering must reach the backend
+		// while the current Send call is still occupying that queue.
+		go func() {
+			result, steerErr := steerer.Steer(context.Background(), s, cmd.RequestID, content, cmd.Images, files)
+			var event protocol.SteerResult
+			if steerErr != nil {
+				status := "retained"
+				if errors.Is(steerErr, backend.ErrUnsupportedSteer) {
+					status = "unsupported"
+				}
+				event = protocol.NewSteerResult(cmd.SessionID, cmd.RequestID, status, "", "", steerErr.Error())
+			} else {
+				event = protocol.NewSteerResult(cmd.SessionID, cmd.RequestID, "accepted", result.TurnID, result.RequestID, "")
+			}
+			if event.Status == "accepted" || event.Status == "unsupported" {
+				h.steerMu.Lock()
+				if len(h.steerResults) >= 4096 {
+					for key := range h.steerResults {
+						delete(h.steerResults, key)
+						break
+					}
+				}
+				h.steerResults[cacheKey] = event
+				h.steerMu.Unlock()
+			}
+			h.Emit(event)
+		}()
 
 	case "stop":
 		if s, ok := h.registry.Get(cmd.SessionID); ok {

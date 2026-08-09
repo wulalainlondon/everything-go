@@ -228,6 +228,27 @@ type BackendCapabilities struct {
 	Images       bool `json:"images,omitempty"`
 	Files        bool `json:"files,omitempty"`
 	Remote       bool `json:"remote,omitempty"`
+	Steering     bool `json:"steering,omitempty"`
+}
+
+// SteerResult is a direct acknowledgement for a steer_message command. A
+// rejected command is never enqueued by the server; the client keeps its local
+// queued item and can send it as the next ordinary turn.
+type SteerResult struct {
+	Type            string `json:"type"`
+	SessionID       string `json:"session_id"`
+	RequestID       string `json:"request_id"`
+	Status          string `json:"status"`
+	TurnID          string `json:"turn_id,omitempty"`
+	ActiveRequestID string `json:"active_request_id,omitempty"`
+	Message         string `json:"message,omitempty"`
+}
+
+func NewSteerResult(sessionID, requestID, status, turnID, activeRequestID, message string) SteerResult {
+	return SteerResult{
+		Type: "steer_result", SessionID: sessionID, RequestID: requestID,
+		Status: status, TurnID: turnID, ActiveRequestID: activeRequestID, Message: message,
+	}
 }
 
 type BackendRegistryUpdated struct {

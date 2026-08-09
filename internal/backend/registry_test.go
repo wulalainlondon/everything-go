@@ -43,3 +43,18 @@ func TestDefaultRegistryOllamaUsesInstalledSmokeModel(t *testing.T) {
 		t.Fatalf("ollama models = %+v", ollama.Models)
 	}
 }
+
+func TestDefaultRegistryAdvertisesSteeringOnlyForCodex(t *testing.T) {
+	for _, definition := range DefaultRegistry(false) {
+		switch definition.ID {
+		case Codex:
+			if !definition.Capabilities.Steering {
+				t.Fatal("Codex must advertise same-turn steering")
+			}
+		case Claude, Ollama:
+			if definition.Capabilities.Steering {
+				t.Fatalf("%s must not advertise unsupported steering", definition.ID)
+			}
+		}
+	}
+}

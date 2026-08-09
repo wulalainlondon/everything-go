@@ -41,6 +41,7 @@ var noisePrefixes = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)^<local-command-stdout>`),
 	regexp.MustCompile(`(?i)^<local-command-stderr>`),
 	regexp.MustCompile(`(?i)^<system-reminder>`),
+	regexp.MustCompile(`(?i)^<recommended_plugins>`),
 	regexp.MustCompile(`(?i)^Caveat:`),
 }
 

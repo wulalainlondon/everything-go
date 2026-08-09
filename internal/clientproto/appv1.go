@@ -319,6 +319,7 @@ func backendDefinitionsToWire(defs []backend.Definition) []protocol.BackendDefin
 				Images:       d.Capabilities.Images,
 				Files:        d.Capabilities.Files,
 				Remote:       d.Capabilities.Remote,
+				Steering:     d.Capabilities.Steering,
 			},
 		})
 	}

@@ -12,6 +12,10 @@ import (
 )
 
 var ErrUnsupportedGoal = errors.New("goal mode is only supported for Codex sessions")
+var (
+	ErrUnsupportedSteer = errors.New("same-turn steering is not supported by this backend")
+	ErrNoActiveTurn     = errors.New("there is no active turn to steer")
+)
 
 const (
 	Claude   = "claude"
@@ -58,6 +62,7 @@ type Capabilities struct {
 	Images       bool
 	Files        bool
 	Remote       bool
+	Steering     bool
 }
 
 // Definition is the backend registry entry advertised by the bridge. It is the
@@ -116,6 +121,20 @@ type Executor interface {
 	Stop(ctx context.Context, s *session.Session) error
 	Clear(ctx context.Context, s *session.Session) error
 	Close(ctx context.Context, s *session.Session) error
+}
+
+// SteerResult identifies the active turn that accepted a same-turn user
+// message. RequestID is the original request that owns the turn; clients use it
+// to keep subsequent streaming events attached to the same lifecycle.
+type SteerResult struct {
+	TurnID    string
+	RequestID string
+}
+
+// SteeringExecutor is an optional capability implemented by backends that can
+// inject additional user input into an already-running turn.
+type SteeringExecutor interface {
+	Steer(ctx context.Context, s *session.Session, clientUserMessageID, content string, images []ImageAttachment, files []FileAttachment) (SteerResult, error)
 }
 
 // GoalController is an optional capability for Codex app-server backed
