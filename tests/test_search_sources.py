@@ -270,6 +270,19 @@ def test_codex_iter_only_yields_response_item_messages(tmp_path):
     assert msgs[0].source == 'codex'
 
 
+def test_codex_iter_skips_recommended_plugins_injection(tmp_path):
+    f = tmp_path / 'rollout-plugin-noise.jsonl'
+    _write_jsonl(f, [
+        _codex_session_meta(),
+        _codex_msg('user', '<recommended_plugins>\nFramework-injected list', uuid='noise'),
+        _codex_msg('user', 'real user message', uuid='real'),
+    ])
+
+    src = CodexSessionSource()
+    msgs = [m for m, _ in src.iter_messages(f)]
+    assert [m.text for m in msgs] == ['real user message']
+
+
 # ---------------------------------------------------------------------------
 # CodexSessionSource — survives unknown schema shape
 # ---------------------------------------------------------------------------
@@ -285,6 +298,23 @@ def test_codex_iter_survives_unknown_schema_shape(tmp_path):
     msgs = [m for m, _ in src.iter_messages(f)]
     assert len(msgs) == 1
     assert msgs[0].text == 'good message'
+
+
+def test_codex_discover_uses_configured_root_and_excludes_matching_cwd(tmp_path):
+    sessions_root = tmp_path / "daily-home" / "sessions"
+    kept = sessions_root / "2026" / "07" / "24" / "rollout-kept.jsonl"
+    excluded = sessions_root / "2026" / "07" / "24" / "rollout-excluded.jsonl"
+    _write_jsonl(kept, [_codex_session_meta("/Users/test/project"), _codex_msg()])
+    _write_jsonl(excluded, [_codex_session_meta("/private/tmp/evaluator-1"), _codex_msg()])
+
+    src = CodexSessionSource(
+        sessions_dir=sessions_root,
+        ignore_cwd_globs=("/private/tmp/**",),
+        ignore_name_prefixes=("<recommended_plugins>",),
+    )
+
+    assert src.watch_root == sessions_root.resolve()
+    assert list(src.discover()) == [kept.resolve()]
 
 
 # ---------------------------------------------------------------------------

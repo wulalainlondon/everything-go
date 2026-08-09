@@ -41,6 +41,8 @@ class SourcesConfig:
     codex_sessions_dir: Path = field(
         default_factory=lambda: Path("~/.codex/sessions").expanduser()
     )
+    codex_ignore_cwd_globs: tuple[str, ...] = ()
+    codex_ignore_name_prefixes: tuple[str, ...] = ()
     ollama_enabled: Literal["auto", "yes", "no"] = "no"
 
 

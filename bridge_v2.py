@@ -164,6 +164,9 @@ CODEX_SAVED_SESSIONS_FILE = os.path.join(BRIDGE_DIR, "saved_sessions_codex.json"
 SESSION_META_FILE     = os.path.join(BRIDGE_DIR, "session_meta.json")
 READ_CURSOR_FILE      = os.path.join(BRIDGE_DIR, "read_cursors.json")
 CLAUDE_PROJECTS_DIR   = str(Path.home() / ".claude" / "projects")
+CODEX_SESSIONS_DIR    = str(Path.home() / ".codex" / "sessions")
+CODEX_IGNORE_CWD_GLOBS: tuple[str, ...] = ()
+CODEX_IGNORE_NAME_PREFIXES: tuple[str, ...] = ()
 PAIRING_FILE          = os.path.join(BRIDGE_DIR, "pairing.json")
 
 _DATA_DIR: str = ""  # set by _init_paths() in main()
@@ -411,6 +414,9 @@ def _get_or_create_backend(name: str) -> "Backend":
             broadcast_fn=_broadcast_json,
             notify_fcm_fn=notify_fcm,
             persist_session_fn=_persist_session,
+            codex_sessions_dir=CODEX_SESSIONS_DIR,
+            codex_ignore_cwd_globs=CODEX_IGNORE_CWD_GLOBS,
+            codex_ignore_name_prefixes=CODEX_IGNORE_NAME_PREFIXES,
         )
     elif backend_name == "ollama":
         from backends.ollama import OllamaBackend
@@ -606,6 +612,8 @@ def _restore_sessions_from_disk() -> None:
         log_info=log.info,
         log_warning=log.warning,
         root_dir=_ROOT_DIR,
+        codex_ignore_cwd_globs=CODEX_IGNORE_CWD_GLOBS,
+        codex_ignore_name_prefixes=CODEX_IGNORE_NAME_PREFIXES,
     )
 
 
@@ -786,31 +794,31 @@ async def _session_cache_refresher() -> None:
 
 
 async def _warmup_history_cache_background() -> None:
-    """啟動後延遲 8 秒，趁空閒預建所有 session 的 history index。
+    """Optionally warm a small, scoped set of recent history indexes.
 
-    依 last_activity 排序（最近用的先跑），用 semaphore 控制 4 路並行，
-    讓重連後 request_history 能直接命中記憶體 cache，無須重新解析 JSONL。
+    The former implementation parsed every discovered session and retained
+    every resulting message list. On machines with years of Claude/Codex
+    JSONL data this consumed gigabytes at startup. Warmup is now opt-in,
+    strictly scoped to the instance jail, sequential, and still constrained
+    by the bounded LRU in ``backends.history``.
     """
     await asyncio.sleep(8)
+    try:
+        configured_max = int(os.environ.get("BRIDGE_HISTORY_WARMUP_SESSIONS", "0"))
+    except ValueError:
+        configured_max = 0
+    max_sessions = max(0, min(configured_max, 32))
+    if max_sessions == 0:
+        log.info("history-cache-warmup: disabled (on-demand bounded cache)")
+        return
 
-    # Legacy per-backend warmup (each backend's own get_resumable_sessions call)
-    for name, backend in _BACKENDS.items():
-        if not hasattr(backend, "warmup_history_cache"):
-            continue
-        try:
-            await backend.warmup_history_cache()
-        except Exception as exc:
-            log.warning("warmup_history_cache_background [%s] failed: %s", name, exc)
-
-    # Extended warmup: cover ALL sessions in _SESSIONS (not just the 30 from Claude CLI)
     from backends.history import _JSONL_HISTORY_CACHE
     sessions_sorted = sorted(
-        _SESSIONS.values(),
+        _scoped_sessions().values(),
         key=lambda s: s.last_activity,
         reverse=True,
-    )
+    )[:max_sessions]
     loop = asyncio.get_running_loop()
-    sem = asyncio.Semaphore(4)
     warmed = skipped = 0
 
     async def _warm_one(session: "Session") -> None:
@@ -831,25 +839,24 @@ async def _warmup_history_cache_background() -> None:
                         session.latest_source_line = lsl
             skipped += 1
             return
-        async with sem:
-            try:
-                await loop.run_in_executor(
-                    None,
-                    backend._load_session_history_sync,
-                    session.resume_id, DEFAULT_HISTORY_LIMIT, "", "snapshot", "",
-                )
-                warmed += 1
-                # Back-fill latest_source_line from freshly built cache entry.
-                idx = _JSONL_HISTORY_CACHE.get(cache_key)
-                if idx and idx.messages:
-                    lsl = str(idx.messages[-1].get("source_message_id") or "")
-                    if lsl:
-                        session.latest_source_line = lsl
-                await asyncio.sleep(0.02)
-            except Exception:
-                pass
+        try:
+            await loop.run_in_executor(
+                None,
+                backend._load_session_history_sync,
+                session.resume_id, DEFAULT_HISTORY_LIMIT, "", "snapshot", "",
+            )
+            warmed += 1
+            idx = _JSONL_HISTORY_CACHE.get(cache_key)
+            if idx and idx.messages:
+                lsl = str(idx.messages[-1].get("source_message_id") or "")
+                if lsl:
+                    session.latest_source_line = lsl
+            await asyncio.sleep(0.02)
+        except Exception:
+            pass
 
-    await asyncio.gather(*[_warm_one(s) for s in sessions_sorted], return_exceptions=True)
+    for session in sessions_sorted:
+        await _warm_one(session)
     if warmed or skipped:
         log.info("history-cache-warmup: warmed=%d skipped=%d of %d sessions", warmed, skipped, len(sessions_sorted))
 
@@ -931,6 +938,7 @@ async def main(port: int, tunnel: bool = False,
                root_dir: str = "",
                instance_name: str = "") -> None:
     global CLAUDE_BIN, CODEX_BIN, BUN_BIN, _DEFAULT_BACKEND_NAME, _DEFAULT_OLLAMA_MODEL, _OLLAMA_HOST, _PERMISSION_MANAGER
+    global CLAUDE_PROJECTS_DIR, CODEX_SESSIONS_DIR, CODEX_IGNORE_CWD_GLOBS, CODEX_IGNORE_NAME_PREFIXES
 
     resolved_data_dir = (
         os.path.realpath(os.path.expanduser(data_dir))
@@ -939,6 +947,16 @@ async def main(port: int, tunnel: bool = False,
     )
     _init_paths(resolved_data_dir)
     configure_goal_state(os.path.join(_DATA_DIR, "goal_snapshots.json"))
+    source_config = get_config().sources
+    CLAUDE_PROJECTS_DIR = str(source_config.claude_projects_dir)
+    CODEX_SESSIONS_DIR = str(source_config.codex_sessions_dir)
+    CODEX_IGNORE_CWD_GLOBS = tuple(source_config.codex_ignore_cwd_globs)
+    CODEX_IGNORE_NAME_PREFIXES = tuple(source_config.codex_ignore_name_prefixes)
+    from handlers.fork_ops import configure_source_dirs
+    configure_source_dirs(
+        claude_projects_dir=CLAUDE_PROJECTS_DIR,
+        codex_sessions_dir=CODEX_SESSIONS_DIR,
+    )
 
     # Load tunnel URL from external file if cloudflared is managed by launchd.
     global _TUNNEL_URL_FILE
@@ -982,12 +1000,16 @@ async def main(port: int, tunnel: bool = False,
         sessions=_SESSIONS,
         default_cwd=DEFAULT_CWD,
         claude_projects_dir=CLAUDE_PROJECTS_DIR,
+        codex_sessions_dir=CODEX_SESSIONS_DIR,
+        codex_ignore_cwd_globs=CODEX_IGNORE_CWD_GLOBS,
+        codex_ignore_name_prefixes=CODEX_IGNORE_NAME_PREFIXES,
         session_backend=_session_backend,
         broadcast_json=_broadcast_json,
         build_sessions_list=build_sessions_list,
         dispatch_event=_dispatch_event,
         evt_done=_evt_done,
         log=log,
+        root_dir=_ROOT_DIR,
     )
     _ensure_local_session_dirs()
     _PERMISSION_MANAGER = PermissionManager(

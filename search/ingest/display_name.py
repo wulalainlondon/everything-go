@@ -24,6 +24,7 @@ _NOISE_PATTERNS = [
     re.compile(r'^<local-command-stdout>', re.IGNORECASE),
     re.compile(r'^<local-command-stderr>', re.IGNORECASE),
     re.compile(r'^<system-reminder>', re.IGNORECASE),
+    re.compile(r'^<recommended_plugins>', re.IGNORECASE),
     re.compile(r'^Caveat:', re.IGNORECASE),
 ]
 

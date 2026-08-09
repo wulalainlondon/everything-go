@@ -433,6 +433,8 @@ def restore_sessions_from_disk(
     log_info: Callable[..., None] | None = None,
     log_warning: Callable[..., None] | None = None,
     root_dir: str = "",
+    codex_ignore_cwd_globs: tuple[str, ...] = (),
+    codex_ignore_name_prefixes: tuple[str, ...] = (),
 ) -> int:
     """Load saved_sessions.json into sessions so sessions survive bridge restarts."""
     from auto_register import prune_old_saved_sessions
@@ -444,11 +446,28 @@ def restore_sessions_from_disk(
     for sid, data in list(saved.items()):
         backend = data.get("backend", "claude")
         claude_uuid = data.get("resume_id") or data.get("claude_uuid", "") or ""
-        if backend in ("claude", "codex") and claude_uuid and not is_valid_uuid(claude_uuid):
+        invalid_uuid = (
+            backend in ("claude", "codex")
+            and claude_uuid
+            and not is_valid_uuid(claude_uuid)
+        )
+        excluded_codex = False
+        if normalize_backend(backend) == "codex":
+            from utils.session_source_policy import codex_session_is_ignored
+            excluded_codex = codex_session_is_ignored(
+                data.get("cwd") or default_cwd,
+                data.get("name"),
+                codex_ignore_cwd_globs,
+                codex_ignore_name_prefixes,
+            )
+        if invalid_uuid or excluded_codex:
             dropped.append(sid)
             del saved[sid]
             if log_info:
-                log_info("dropping saved session %s: invalid UUID %r", sid, claude_uuid)
+                if invalid_uuid:
+                    log_info("dropping saved session %s: invalid UUID %r", sid, claude_uuid)
+                else:
+                    log_info("dropping saved Codex session %s: matches source ignore policy", sid)
     if dropped:
         try:
             with _saved_sessions_file_lock(saved_sessions_file):
@@ -466,6 +485,20 @@ def restore_sessions_from_disk(
         try:
             saved_last_used = float(data.get("last_used") or time.time())
             cwd = os.path.expanduser(data.get("cwd") or default_cwd)
+            if normalize_backend(data.get("backend")) == "codex":
+                from utils.session_source_policy import codex_session_is_ignored
+                if codex_session_is_ignored(
+                    cwd,
+                    data.get("name"),
+                    codex_ignore_cwd_globs,
+                    codex_ignore_name_prefixes,
+                ):
+                    if log_info:
+                        log_info(
+                            "Skipping restored Codex session %s: cwd=%r matches source ignore policy",
+                            sid, cwd,
+                        )
+                    continue
             if root_dir:
                 from utils.path_jail import is_inside_jail
                 real_cwd = os.path.realpath(cwd)

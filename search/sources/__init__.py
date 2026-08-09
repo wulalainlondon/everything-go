@@ -19,7 +19,12 @@ def registered_sources(config: 'BridgeConfig | None' = None) -> List[SearchSourc
     root_dir = getattr(config, 'root_dir', '') if config is not None else ''
     candidates = [
         ClaudeJsonlSource(root_dir=root_dir),
-        CodexSessionSource(root_dir=root_dir),
+        CodexSessionSource(
+            root_dir=root_dir,
+            sessions_dir=getattr(config.sources, 'codex_sessions_dir', None) if config is not None else None,
+            ignore_cwd_globs=getattr(config.sources, 'codex_ignore_cwd_globs', ()) if config is not None else (),
+            ignore_name_prefixes=getattr(config.sources, 'codex_ignore_name_prefixes', ()) if config is not None else (),
+        ),
         OllamaSource(),
     ]
 

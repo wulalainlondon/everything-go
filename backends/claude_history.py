@@ -162,111 +162,111 @@ class _ClaudeHistoryMixin:
                 return "\n".join(p for p in parts if p)
             return ""
 
-        # Single pass: collect all records, then derive tool_outputs and build messages.
-        raw_records: list[tuple[int, dict]] = []  # (line_no, parsed_dict)
+        # Pass 1 collects only bounded tool outputs. Keeping every parsed JSONL
+        # record alive at once caused very large transient heaps for long sessions.
+        tool_outputs: dict[str, str] = {}
         try:
             with open(path, encoding="utf-8", errors="ignore") as f:
-                for line_no, raw in enumerate(f, start=1):
+                for raw in f:
                     try:
                         d = json.loads(raw)
-                        raw_records.append((line_no, d))
                     except Exception:
-                        pass
-        except Exception as exc:
-            log.warning("Failed to load session history: %s", exc)
-            return []
-
-        # Derive tool_use_id -> output mapping (equivalent to former Pass 1)
-        tool_outputs: dict = {}
-        for _ln, d in raw_records:
-            content = d.get("message", {}).get("content", "")
-            if not isinstance(content, list):
-                continue
-            for blk in content:
-                if not isinstance(blk, dict):
-                    continue
-                if blk.get("type") == "tool_result":
-                    tid = blk.get("tool_use_id", "")
-                    if tid:
+                        continue
+                    content = d.get("message", {}).get("content", "")
+                    if not isinstance(content, list):
+                        continue
+                    for blk in content:
+                        if not isinstance(blk, dict) or blk.get("type") != "tool_result":
+                            continue
+                        tid = blk.get("tool_use_id", "")
+                        if not tid:
+                            continue
                         output = _flatten_tool_result_content(blk.get("content", ""))
                         if len(output) > _MAX_OUTPUT:
                             output = output[:_MAX_OUTPUT] + "\n…(truncated)"
                         tool_outputs[tid] = output
+        except Exception as exc:
+            log.warning("Failed to load session history: %s", exc)
+            return []
 
-        # Build message list with blocks (equivalent to former Pass 2)
+        # Pass 2 builds only user-visible messages.
         messages = []
         try:
             file_mtime_ms = int(os.path.getmtime(path) * 1000)
         except Exception:
             file_mtime_ms = int(time.time() * 1000)
-        for line_no, d in raw_records:
-            try:
-                if (
-                    d.get("isSidechain")
-                    or d.get("type") not in ("user", "assistant")
-                    or d.get("isCompactSummary")
-                    or d.get("isVisibleInTranscriptOnly")
-                ):
-                    continue
-                role = d["type"]
-                content = d.get("message", {}).get("content", "")
-                text = ""
-                blocks = []
-                if isinstance(content, str):
-                    text = content
-                elif isinstance(content, list):
-                    text_parts = []
-                    for blk in content:
-                        if not isinstance(blk, dict):
-                            continue
-                        btype = blk.get("type")
-                        if btype == "text":
-                            t = blk.get("text", "")
-                            if t:
-                                text_parts.append(t)
-                                blocks.append({"type": "text", "text": t})
-                        elif btype == "tool_use" and role == "assistant":
-                            tid = blk.get("id", "")
-                            name = blk.get("name", "")
-                            inp = blk.get("input", {})
-                            command = inp.get("command", json.dumps(inp)) if isinstance(inp, dict) else json.dumps(inp)
-                            output = tool_outputs.get(tid, "")
-                            blocks.append({
-                                "type": "tool_call",
-                                "tool_use_id": tid,
-                                "name": name,
-                                "command": command,
-                                "output": output,
-                            })
-                    text = "\n".join(text_parts)
-                if not text or text.startswith("<") or text.startswith("[Request interrupted"):
-                    continue
-                # Filter system-injected skill instructions (injected as user text by Claude Code harness).
-                if text.startswith("Base directory for this skill:"):
-                    continue
-                # If no blocks built (e.g. plain-string content), synthesise a text block
-                if not blocks:
-                    blocks = [{"type": "text", "text": text}]
-                ts_ms = 0
-                ts_str = d.get("timestamp", "")
-                if ts_str:
+        try:
+            with open(path, encoding="utf-8", errors="ignore") as f:
+                for line_no, raw in enumerate(f, start=1):
                     try:
-                        ts_ms = int(datetime.datetime.fromisoformat(ts_str.replace("Z", "+00:00")).timestamp() * 1000)
+                        d = json.loads(raw)
+                        if (
+                            d.get("isSidechain")
+                            or d.get("type") not in ("user", "assistant")
+                            or d.get("isCompactSummary")
+                            or d.get("isVisibleInTranscriptOnly")
+                        ):
+                            continue
+                        role = d["type"]
+                        content = d.get("message", {}).get("content", "")
+                        text = ""
+                        blocks = []
+                        if isinstance(content, str):
+                            text = content
+                        elif isinstance(content, list):
+                            text_parts = []
+                            for blk in content:
+                                if not isinstance(blk, dict):
+                                    continue
+                                btype = blk.get("type")
+                                if btype == "text":
+                                    t = blk.get("text", "")
+                                    if t:
+                                        text_parts.append(t)
+                                        blocks.append({"type": "text", "text": t})
+                                elif btype == "tool_use" and role == "assistant":
+                                    tid = blk.get("id", "")
+                                    name = blk.get("name", "")
+                                    inp = blk.get("input", {})
+                                    command = inp.get("command", json.dumps(inp)) if isinstance(inp, dict) else json.dumps(inp)
+                                    output = tool_outputs.get(tid, "")
+                                    blocks.append({
+                                        "type": "tool_call",
+                                        "tool_use_id": tid,
+                                        "name": name,
+                                        "command": command,
+                                        "output": output,
+                                    })
+                            text = "\n".join(text_parts)
+                        if not text or text.startswith("<") or text.startswith("[Request interrupted"):
+                            continue
+                        if text.startswith("Base directory for this skill:"):
+                            continue
+                        if not blocks:
+                            blocks = [{"type": "text", "text": text}]
+                        ts_ms = 0
+                        ts_str = d.get("timestamp", "")
+                        if ts_str:
+                            try:
+                                ts_ms = int(datetime.datetime.fromisoformat(ts_str.replace("Z", "+00:00")).timestamp() * 1000)
+                            except Exception:
+                                pass
+                        if not ts_ms:
+                            ts_ms = file_mtime_ms
+                        messages.append(complete_history_message(
+                            source="claude",
+                            source_session_id=resume_id,
+                            source_message_id=f"claude:{resume_id}:line:{line_no}",
+                            role=role,
+                            content=text,
+                            timestamp=ts_ms,
+                            blocks=blocks,
+                        ))
                     except Exception:
                         pass
-                if not ts_ms:
-                    ts_ms = file_mtime_ms
-                messages.append(complete_history_message(
-                    source="claude",
-                    source_session_id=resume_id,
-                    source_message_id=f"claude:{resume_id}:line:{line_no}",
-                    role=role,
-                    content=text,
-                    timestamp=ts_ms,
-                    blocks=blocks,
-                ))
-            except Exception:
-                pass
+        except Exception as exc:
+            log.warning("Failed to build session history: %s", exc)
+            return []
 
         if cache_key is not None:
             import time as _time

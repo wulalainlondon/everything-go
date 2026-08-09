@@ -17,6 +17,7 @@ from typing import Any, Optional
 
 from .defaults import DEFAULTS
 from .schema import BridgeConfig, SearchConfig, SourcesConfig, ServerConfig
+from utils.session_source_policy import normalize_globs
 
 log = logging.getLogger(__name__)
 
@@ -220,6 +221,8 @@ def _dict_to_config(data: dict, config_file_path: Optional[Path]) -> BridgeConfi
         claude_projects_dir=Path(_safe_claude_dir).expanduser(),
         codex_enabled=src.get("codex_enabled", "auto"),
         codex_sessions_dir=Path(_safe_codex_dir).expanduser(),
+        codex_ignore_cwd_globs=normalize_globs(src.get("codex_ignore_cwd_globs")),
+        codex_ignore_name_prefixes=normalize_globs(src.get("codex_ignore_name_prefixes")),
         ollama_enabled=src.get("ollama_enabled", "no"),
     )
 

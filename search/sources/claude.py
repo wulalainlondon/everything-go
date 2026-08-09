@@ -72,6 +72,14 @@ class ClaudeJsonlSource:
         """Return the root directory this source watches (respects module-level override)."""
         return _CLAUDE_ROOT
 
+    @property
+    def watch_roots(self) -> list[Path]:
+        """Watch the parent so a jailed project's first session is detected."""
+        return [_CLAUDE_ROOT]
+
+    def should_index_path(self, path: Path) -> bool:
+        return self._path_matches(path)
+
     def is_enabled(self) -> bool:
         return _CLAUDE_ROOT.is_dir()
 

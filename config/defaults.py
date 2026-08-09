@@ -26,6 +26,8 @@ DEFAULTS: dict = {
         "claude_projects_dir": str(Path("~/.claude/projects").expanduser()),
         "codex_enabled": "auto",
         "codex_sessions_dir": str(Path("~/.codex/sessions").expanduser()),
+        "codex_ignore_cwd_globs": [],
+        "codex_ignore_name_prefixes": [],
         "ollama_enabled": "no",
     },
     "server": {

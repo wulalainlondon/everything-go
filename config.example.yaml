@@ -1,0 +1,14 @@
+search:
+  ingest_startup_delay_sec: 15.0
+  ingest_bulk_pause_every_files: 25
+  ingest_bulk_pause_sec: 0.05
+
+sources:
+  # Bridge's daily Codex store. Evaluation tools should use another CODEX_HOME.
+  codex_sessions_dir: ~/.codex/sessions
+  codex_ignore_cwd_globs:
+    - /private/tmp/**
+    - /tmp/**
+  codex_ignore_name_prefixes:
+    - <recommended_plugins>
+    - "[bridge-eval]"

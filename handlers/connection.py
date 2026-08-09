@@ -15,6 +15,7 @@ state such as _ROOT_DIR. Resolve the live __main__ module first, and fall back t
 import inspect
 import sys
 
+from attachment_upload import ConnectionUploadManager
 from command_dispatcher import dispatch_bridge_command
 from command_runtime import build_command_dispatch_context
 from transport import BridgeTransport, transport_remote_address, transport_user_agent
@@ -240,9 +241,17 @@ async def handler(ws: BridgeTransport) -> None:
             handler_func=handler,
             spawn_client_task=_spawn_client_task,
         )
+        upload_manager = ConnectionUploadManager(bv._DATA_DIR, bv._SESSIONS, client.device_id)
+
+        async def _send_upload(payload):
+            await bv.client_manager.send_json(ws, payload, client)
+
         async for raw in ws:
             op_started = bv.time.perf_counter()
             bv._mark_client_activity()
+            if isinstance(raw, bytes):
+                await upload_manager.binary(raw, _send_upload)
+                continue
             raw_text = str(raw)
             raw_len = len(raw_text.encode("utf-8", errors="ignore"))
 
@@ -257,6 +266,15 @@ async def handler(ws: BridgeTransport) -> None:
 
             msg = command.payload
             bv.log.debug("Received: %s", bv._summarize_client_msg(msg, raw_len))
+            if command.type == "attachment_upload_init":
+                await upload_manager.init(msg, _send_upload)
+                continue
+            if command.type == "attachment_upload_finish":
+                await upload_manager.finish(msg, _send_upload)
+                continue
+            if command.type == "attachment_upload_cancel":
+                await upload_manager.cancel(msg, _send_upload)
+                continue
             if command.type == "offline_replay_ack":
                 bv.ack_offline_replay(ws, msg["batch_id"])
                 continue
@@ -272,6 +290,8 @@ async def handler(ws: BridgeTransport) -> None:
         else:
             bv.log.exception("Unhandled error in handler: %s", exc)
     finally:
+        if "upload_manager" in locals():
+            upload_manager.close()
         bv._cancel_client_tasks(client.client_id)
         bv.client_manager.remove(ws)
         for session in list(bv._SESSIONS.values()):

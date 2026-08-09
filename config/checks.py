@@ -191,7 +191,8 @@ def check_claude_projects_exists() -> CheckResult:
 
 
 def check_codex_sessions_exists() -> CheckResult:
-    sessions_dir = Path("~/.codex/sessions").expanduser()
+    from config import get_config
+    sessions_dir = get_config().sources.codex_sessions_dir
     if sessions_dir.exists() and sessions_dir.is_dir():
         try:
             file_count = sum(1 for _ in sessions_dir.rglob("*") if _.is_file())

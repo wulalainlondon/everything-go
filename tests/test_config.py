@@ -332,3 +332,28 @@ def test_legitimate_path_under_tmp_accepted(tmp_path):
     assert str(cfg.search.index_path) == tmp_subpath, (
         f"/tmp path should be accepted, got: {cfg.search.index_path}"
     )
+
+
+def test_codex_source_root_and_ignore_globs_load_from_env(tmp_path):
+    sessions_dir = tmp_path / "daily-codex" / "sessions"
+    with mock.patch("bridge.config.loader._DEFAULT_CONFIG_PATH", tmp_path / "absent.yaml"):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "BRIDGE_SOURCES__CODEX_SESSIONS_DIR": str(sessions_dir),
+                "BRIDGE_SOURCES__CODEX_IGNORE_CWD_GLOBS": "/private/tmp/**,/tmp/evals/**",
+                "BRIDGE_SOURCES__CODEX_IGNORE_NAME_PREFIXES": "<recommended_plugins>,[bridge-eval]",
+            },
+            clear=False,
+        ):
+            cfg = load_config()
+
+    assert cfg.sources.codex_sessions_dir == sessions_dir
+    assert cfg.sources.codex_ignore_cwd_globs == (
+        "/private/tmp/**",
+        "/tmp/evals/**",
+    )
+    assert cfg.sources.codex_ignore_name_prefixes == (
+        "<recommended_plugins>",
+        "[bridge-eval]",
+    )

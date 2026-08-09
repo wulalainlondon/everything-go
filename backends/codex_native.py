@@ -118,6 +118,8 @@ class _CodexNativeSessionMixin:
             return 0
 
     def _load_native_codex_sessions(self, limit: int = 200) -> list[dict]:
+        from utils.session_source_policy import codex_session_is_ignored
+
         out: list[dict] = []
         seen_ids: set[str] = set()
 
@@ -138,13 +140,21 @@ class _CodexNativeSessionMixin:
                             continue
                         seen_ids.add(sid)
                         raw_name = str(row.get("thread_name") or sid[:8])
+                        cwd = self._read_native_session_cwd(sid)
+                        if codex_session_is_ignored(
+                            cwd,
+                            raw_name,
+                            self._codex_ignore_cwd_globs,
+                            self._codex_ignore_name_prefixes,
+                        ):
+                            continue
                         out.append({
                             "id": f"native_{sid[:12]}",
                             "name": _sanitize_session_name(raw_name, sid[:8]),
                             "claude_uuid": sid,
                             "resume_id": sid,
                             "last_used": self._parse_iso_to_epoch(str(row.get("updated_at") or "")),
-                            "cwd": self._read_native_session_cwd(sid),
+                            "cwd": cwd,
                         })
             except Exception:
                 pass
@@ -234,6 +244,13 @@ class _CodexNativeSessionMixin:
 
                 seen_ids.add(uid)
                 collected += 1
+                if codex_session_is_ignored(
+                    cwd,
+                    name,
+                    self._codex_ignore_cwd_globs,
+                    self._codex_ignore_name_prefixes,
+                ):
+                    continue
                 out.append({
                     "id": f"native_{uid[:12]}",
                     "name": _sanitize_session_name(name, uid[:8]),

@@ -15,6 +15,13 @@ _CLAUDE_PROJECTS_DIR = os.path.join(os.path.expanduser("~"), ".claude", "project
 _CODEX_SESSIONS_DIR = os.path.join(os.path.expanduser("~"), ".codex", "sessions")
 
 
+def configure_source_dirs(*, claude_projects_dir: str, codex_sessions_dir: str) -> None:
+    """Configure the same source roots used by discovery and resume."""
+    global _CLAUDE_PROJECTS_DIR, _CODEX_SESSIONS_DIR
+    _CLAUDE_PROJECTS_DIR = os.path.realpath(os.path.expanduser(claude_projects_dir))
+    _CODEX_SESSIONS_DIR = os.path.realpath(os.path.expanduser(codex_sessions_dir))
+
+
 def _resolve_jsonl_path(session: Any) -> str | None:
     """Return the absolute .jsonl path for *session*, or None if unsupported / not found."""
     backend = getattr(session, "backend_name", "claude")

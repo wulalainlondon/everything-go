@@ -48,6 +48,10 @@ def test_is_framework_noise_recognizes_system_reminder():
     assert is_framework_noise("<system-reminder>\nRemember to use tools carefully.\n</system-reminder>") is True
 
 
+def test_is_framework_noise_recognizes_recommended_plugins():
+    assert is_framework_noise("<recommended_plugins>\nFramework-injected plugin list") is True
+
+
 def test_is_framework_noise_recognizes_command_name():
     assert is_framework_noise("<command-name>bash</command-name>") is True
 

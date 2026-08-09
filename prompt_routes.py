@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from route_utils import safe_send_json
+from attachment_upload import append_video_context, resolve_uploaded_videos
 
 _AT_FILE_RE = re.compile(r'(?<!\S)@((?:\.\.?/|/)?[\w][\w.\-/]*\.\w+)')
 _MAX_INJECT_BYTES = 100 * 1024
@@ -66,6 +67,19 @@ async def handle_prompt_message(
 
         images = msg.get("images")
         files = msg.get("files")
+        try:
+            files, uploaded_videos = resolve_uploaded_videos(
+                files,
+                session_id=sid,
+                data_dir=ctx.data_dir,
+            )
+            content = append_video_context(content, uploaded_videos)
+        except ValueError as exc:
+            await safe_send_json(
+                ws,
+                {**ctx.evt_error(str(exc)), "session_id": sid},
+            )
+            return True
         request_id = str(msg.get("request_id") or f"r_{uuid.uuid4().hex[:10]}")
         if not content and not images and not files:
             ctx.log_prompt_lifecycle("rejected_empty", session, request_id, client_id=client.client_id)

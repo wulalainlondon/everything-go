@@ -86,6 +86,8 @@ class IngestWorker:
         self._conn = open_connection(db_path)
         init_schema(self._conn)
         migrate(self._conn)
+        self._prune_excluded_codex_rows()
+        self._prune_framework_noise_messages()
 
         # Bulk ingest (background, non-blocking)
         if self._config.search.ingest_on_startup:
@@ -174,6 +176,72 @@ class IngestWorker:
             d['error'] = 'bulk_ingest_failed'
         return d
 
+    def _prune_excluded_codex_rows(self) -> int:
+        """Remove stale search copies that now match the Codex cwd ignore policy."""
+        if self._conn is None:
+            return 0
+        patterns = tuple(getattr(self._config.sources, "codex_ignore_cwd_globs", ()))
+        prefixes = tuple(getattr(self._config.sources, "codex_ignore_name_prefixes", ()))
+        if not patterns and not prefixes:
+            return 0
+        from utils.session_source_policy import codex_session_is_ignored
+
+        rows = self._conn.execute(
+            "SELECT session_id, source_path, cwd, display_name FROM sessions WHERE source = 'codex'"
+        ).fetchall()
+        excluded = [
+            (str(row[0]), str(row[1]))
+            for row in rows
+            if codex_session_is_ignored(row[2], row[3], patterns, prefixes)
+        ]
+        if not excluded:
+            return 0
+        with self._conn:
+            self._conn.executemany(
+                "DELETE FROM messages WHERE session_id = ?",
+                ((session_id,) for session_id, _ in excluded),
+            )
+            self._conn.executemany(
+                "DELETE FROM sessions WHERE session_id = ?",
+                ((session_id,) for session_id, _ in excluded),
+            )
+            self._conn.executemany(
+                "DELETE FROM ingest_state WHERE source_path = ?",
+                ((source_path,) for _, source_path in excluded if source_path),
+            )
+        log.info("IngestWorker: pruned %d Codex session(s) excluded by cwd policy", len(excluded))
+        return len(excluded)
+
+    def _prune_framework_noise_messages(self) -> int:
+        """Remove already-indexed framework injections from prior versions."""
+        if self._conn is None:
+            return 0
+        with self._conn:
+            cursor = self._conn.execute(
+                """
+                DELETE FROM messages
+                WHERE role = 'user'
+                  AND session_id IN (
+                      SELECT session_id FROM sessions WHERE source = 'codex'
+                  )
+                  AND lower(ltrim(content)) LIKE '<recommended_plugins>%'
+                """
+            )
+            removed = max(0, cursor.rowcount)
+            self._conn.execute(
+                """
+                UPDATE sessions
+                SET msg_count = (
+                    SELECT COUNT(*) FROM messages
+                    WHERE messages.session_id = sessions.session_id
+                )
+                WHERE source = 'codex'
+                """
+            )
+        if removed:
+            log.info("IngestWorker: pruned %d framework-noise message(s)", removed)
+        return removed
+
     # ----------------------------------------------------------------
     # Internal: bulk ingest
     # ----------------------------------------------------------------
@@ -249,6 +317,10 @@ class IngestWorker:
 
             source = self._find_source_for(path)
             if source is None:
+                self._queue.task_done()
+                continue
+            should_index_path = getattr(source, "should_index_path", None)
+            if callable(should_index_path) and not should_index_path(path):
                 self._queue.task_done()
                 continue
 

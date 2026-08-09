@@ -2,7 +2,8 @@
 watcher.py — watchdog-based file watcher for JSONL source directories.
 
 Per TECH_RESEARCH Q3:
-- macOS: KqueueObserver first (FSEvents is unreliable), fallback to FSEventsObserver
+- macOS: PollingObserver; the process already has an FSEvents JSONL watcher,
+  and watchdog's native FSEvents extension rejects duplicate path watches
 - Linux: InotifyObserver; log inotify watch count at startup
 - Windows: WindowsApiObserver
 - Any import failure → PollingObserver(interval=config.watch_interval_sec)
@@ -37,19 +38,17 @@ def _make_observer(poll_interval: int = 2):
     _sys = platform.system()
 
     if _sys == 'Darwin':
-        # Prefer KqueueObserver (more reliable than FSEvents per TECH_RESEARCH Q3)
+        # KqueueObserver opens every filesystem entry. A second
+        # FSEventsObserver cannot watch a path already owned by jsonl_sessions
+        # in the same process. Polling is bounded and search indexing can
+        # tolerate its configured delay.
         try:
-            from watchdog.observers.kqueue import KqueueObserver  # type: ignore[import-untyped]
-            log.info("WatchdogWatcher: using KqueueObserver (macOS)")
-            return KqueueObserver()
+            from watchdog.observers.polling import PollingObserver  # type: ignore[import-untyped]
+            interval = max(2, poll_interval)
+            log.info("WatchdogWatcher: using PollingObserver (macOS, interval=%ds)", interval)
+            return PollingObserver(timeout=interval)
         except Exception as exc:
-            log.warning("WatchdogWatcher: KqueueObserver unavailable (%s), trying FSEventsObserver", exc)
-        try:
-            from watchdog.observers.fsevents import FSEventsObserver  # type: ignore[import-untyped]
-            log.info("WatchdogWatcher: using FSEventsObserver (macOS fallback)")
-            return FSEventsObserver()
-        except Exception as exc:
-            log.warning("WatchdogWatcher: FSEventsObserver unavailable (%s), falling back to polling", exc)
+            raise RuntimeError(f"PollingObserver unavailable on macOS: {exc}") from exc
 
     elif _sys == 'Linux':
         try:
@@ -95,9 +94,15 @@ def _log_inotify_limits() -> None:
 class _JsonlEventHandler:
     """watchdog FileSystemEventHandler that puts .jsonl paths into an asyncio.Queue."""
 
-    def __init__(self, queue: asyncio.Queue, loop: asyncio.AbstractEventLoop):
+    def __init__(
+        self,
+        queue: asyncio.Queue,
+        loop: asyncio.AbstractEventLoop,
+        path_filter=None,
+    ):
         self._queue = queue
         self._loop = loop
+        self._path_filter = path_filter
         # Coalesce: path_str → scheduled_time
         self._pending: Dict[str, float] = {}
         # Overflow: paths dropped due to QueueFull, retried on next enqueue opportunity
@@ -106,6 +111,8 @@ class _JsonlEventHandler:
     def _schedule(self, path_str: str) -> None:
         """Thread-safe: called from watchdog thread, enqueues into asyncio loop."""
         if not path_str.endswith('.jsonl'):
+            return
+        if self._path_filter is not None and not self._path_filter(Path(path_str)):
             return
         now = time.monotonic()
         self._pending[path_str] = now + _COALESCE_MS
@@ -195,6 +202,12 @@ class WatchdogWatcher:
         for source in self._sources:
             if not source.is_enabled():
                 continue
+            roots = getattr(source, 'watch_roots', None)
+            if roots is not None:
+                for root in roots:
+                    if root.exists() and root not in dirs:
+                        dirs.append(root)
+                continue
             # Use the source's own watch_root attribute so config overrides take effect.
             root = getattr(source, 'watch_root', None)
             if root is None:
@@ -212,7 +225,24 @@ class WatchdogWatcher:
             loop = asyncio.new_event_loop()
 
         self._observer = _make_observer(self._poll_interval)
-        self._handler = _JsonlEventHandler(self._queue, loop)
+        def _path_is_in_scope(path: Path) -> bool:
+            for source in self._sources:
+                predicate = getattr(source, 'should_index_path', None)
+                if predicate is not None:
+                    try:
+                        if predicate(path):
+                            return True
+                    except Exception:
+                        continue
+                elif path.is_relative_to(getattr(source, 'watch_root', path.parent)):
+                    return True
+            return False
+
+        self._handler = _JsonlEventHandler(
+            self._queue,
+            loop,
+            path_filter=_path_is_in_scope,
+        )
 
         self._watch_dirs = self._collect_watch_dirs()
         if not self._watch_dirs:

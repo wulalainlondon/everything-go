@@ -152,14 +152,22 @@ class CodexAppServerBackend(Backend, _StatesMixin, _CodexNativeSessionMixin, _Co
     def __init__(self, codex_bin: str,
                  broadcast_fn: "Callable[[dict], Coroutine] | None" = None,
                  notify_fcm_fn: "Callable[[str, str, str], Coroutine] | None" = None,
-                 persist_session_fn: "Callable | None" = None):
+                 persist_session_fn: "Callable | None" = None,
+                 codex_sessions_dir: str | None = None,
+                 codex_ignore_cwd_globs: tuple[str, ...] = (),
+                 codex_ignore_name_prefixes: tuple[str, ...] = ()):
         self._codex_bin = codex_bin
         self._broadcast_fn = broadcast_fn
         self._notify_fcm_fn = notify_fcm_fn
         self._persist_session_fn = persist_session_fn
-        self._codex_home = os.path.expanduser("~/.codex")
-        self._native_sessions_root = os.path.join(self._codex_home, "sessions")
+        configured_sessions = os.path.realpath(os.path.expanduser(
+            codex_sessions_dir or "~/.codex/sessions"
+        ))
+        self._codex_home = os.path.dirname(configured_sessions)
+        self._native_sessions_root = configured_sessions
         self._native_session_index_path = os.path.join(self._codex_home, "session_index.jsonl")
+        self._codex_ignore_cwd_globs = tuple(codex_ignore_cwd_globs)
+        self._codex_ignore_name_prefixes = tuple(codex_ignore_name_prefixes)
         self._session_path_index: dict[str, str] | None = None
         self._session_path_index_time: float = 0.0
         # Per-file cache for _load_native_codex_sessions: path -> (key, cwd, name)
@@ -200,12 +208,15 @@ class CodexAppServerBackend(Backend, _StatesMixin, _CodexNativeSessionMixin, _Co
             if ensure_browser_elicitation_routing(self._codex_home):
                 log.info("[codex-appserver] Browser Use elicitations routed through bridge policy")
             log.info("[codex-appserver] spawning codex app-server")
+            codex_env = os.environ.copy()
+            codex_env["CODEX_HOME"] = self._codex_home
             self._proc = await asyncio.create_subprocess_exec(
                 self._codex_bin, "app-server",
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 limit=_STREAM_READER_LIMIT,
+                env=codex_env,
             )
 
             # Start the global read loop before sending any RPC.
@@ -676,13 +687,34 @@ class CodexAppServerBackend(Backend, _StatesMixin, _CodexNativeSessionMixin, _Co
                 state.thread_id = None  # fall through to thread/start
 
         if state.thread_id is None:
-            result = await self._rpc("thread/start", {
+            # Record2 gate jobs are deliberately one-shot. Starting their native
+            # Codex threads as ephemeral prevents each archived request from
+            # retaining a separate MCP/tool subprocess tree in the singleton
+            # app-server. Interactive bridge sessions remain resumable.
+            ephemeral = session.session_id.startswith("record2_job_")
+            start_params = {
                 "model": session.model or CODEX_MODEL,
                 "cwd": cwd,
-                "ephemeral": False,
+                "ephemeral": ephemeral,
                 "approvalPolicy": "never",
                 "sandbox": self._sandbox_mode(session),
-            }, timeout=30.0)
+            }
+            if ephemeral:
+                # Record2 answers are entirely self-contained in the signed
+                # prompt. Disabling configured MCP servers prevents Codex from
+                # spawning a fresh computer-use/node-repl subprocess pair for
+                # every one-shot thread; archived threads otherwise leave those
+                # helpers resident until the singleton app-server restarts.
+                start_params["config"] = {
+                    "mcp_servers": {
+                        "computer-use": {"enabled": False},
+                        "node_repl": {"enabled": False},
+                        "openaiDeveloperDocs": {"enabled": False},
+                    }
+                }
+                start_params["dynamicTools"] = []
+                start_params["environments"] = []
+            result = await self._rpc("thread/start", start_params, timeout=30.0)
             thread = result.get("thread", {})
             state.thread_id = thread.get("id")
             if not state.thread_id:

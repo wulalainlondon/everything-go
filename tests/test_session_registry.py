@@ -174,6 +174,38 @@ def test_restore_sessions_drops_invalid_uuid_and_restores_valid(tmp_path):
     assert set(json.loads(saved.read_text(encoding="utf-8"))) == {"valid"}
 
 
+def test_restore_sessions_skips_codex_cwd_excluded_by_source_policy(tmp_path):
+    import session_registry
+
+    saved = tmp_path / "saved_sessions.json"
+    saved.write_text(json.dumps({
+        "daily": {
+            "resume_id": "12345678-1234-4234-9234-123456789abc",
+            "last_used": time.time(),
+            "cwd": "/Users/test/project",
+            "backend": "codex",
+        },
+        "evaluation": {
+            "resume_id": "22345678-1234-4234-9234-123456789abc",
+            "last_used": time.time(),
+            "cwd": "/private/tmp/evaluation/run-1",
+            "backend": "codex",
+        },
+    }), encoding="utf-8")
+    sessions: dict[str, session_registry.Session] = {}
+
+    restored = session_registry.restore_sessions_from_disk(
+        sessions,
+        saved_sessions_file=str(saved),
+        normalize_backend=lambda raw: raw or "claude",
+        codex_ignore_cwd_globs=("/private/tmp/**",),
+    )
+
+    assert restored == 1
+    assert set(sessions) == {"daily"}
+    assert set(json.loads(saved.read_text(encoding="utf-8"))) == {"daily"}
+
+
 def test_session_meta_and_read_cursor_persistence(tmp_path):
     import session_registry
 

@@ -36,34 +36,55 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable
 
 from transport import BridgeTransport
 
-try:
-    from aiortc import (
-        RTCConfiguration,
-        RTCIceServer,
-        RTCPeerConnection,
-        RTCSessionDescription,
-    )
-    from aiortc.sdp import candidate_from_sdp
-    _AIORTC_AVAILABLE = True
-    _AIORTC_IMPORT_ERROR: Optional[str] = None
-except ImportError as _e:
-    _AIORTC_AVAILABLE = False
-    _AIORTC_IMPORT_ERROR = str(_e)
-
 log = logging.getLogger("bridge.webrtc")
 
-DEFAULT_ICE_SERVERS = (
-    [
-        RTCIceServer(urls="stun:stun.l.google.com:19302"),
-        RTCIceServer(urls="stun:stun1.l.google.com:19302"),
-    ]
-    if _AIORTC_AVAILABLE
-    else []
-)
+# aiortc imports PyAV and its FFmpeg dylibs. Keep those ~30 MB of native
+# dependencies unloaded until a client actually asks for WebRTC.
+_AIORTC_LOADED = False
+_AIORTC_AVAILABLE = False
+_AIORTC_IMPORT_ERROR: str | None = None
+RTCConfiguration = None
+RTCIceServer = None
+RTCPeerConnection = None
+RTCSessionDescription = None
+candidate_from_sdp = None
+DEFAULT_ICE_SERVERS: list[Any] = []
+
+
+def _load_aiortc() -> bool:
+    global _AIORTC_LOADED, _AIORTC_AVAILABLE, _AIORTC_IMPORT_ERROR
+    global RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSessionDescription
+    global candidate_from_sdp, DEFAULT_ICE_SERVERS
+    if _AIORTC_LOADED:
+        return _AIORTC_AVAILABLE
+    _AIORTC_LOADED = True
+    try:
+        from aiortc import (
+            RTCConfiguration as _RTCConfiguration,
+            RTCIceServer as _RTCIceServer,
+            RTCPeerConnection as _RTCPeerConnection,
+            RTCSessionDescription as _RTCSessionDescription,
+        )
+        from aiortc.sdp import candidate_from_sdp as _candidate_from_sdp
+
+        RTCConfiguration = _RTCConfiguration
+        RTCIceServer = _RTCIceServer
+        RTCPeerConnection = _RTCPeerConnection
+        RTCSessionDescription = _RTCSessionDescription
+        candidate_from_sdp = _candidate_from_sdp
+        DEFAULT_ICE_SERVERS = [
+            _RTCIceServer(urls="stun:stun.l.google.com:19302"),
+            _RTCIceServer(urls="stun:stun1.l.google.com:19302"),
+        ]
+        _AIORTC_AVAILABLE = True
+        return True
+    except ImportError as exc:
+        _AIORTC_IMPORT_ERROR = str(exc)
+        return False
 
 WEBRTC_MESSAGE_TYPES = frozenset({"webrtc_offer", "webrtc_answer", "webrtc_ice"})
 
@@ -171,7 +192,7 @@ async def handle_webrtc_message(
     if mtype not in WEBRTC_MESSAGE_TYPES:
         return False
 
-    if not _AIORTC_AVAILABLE:
+    if not _load_aiortc():
         log.warning("[webrtc] aiortc unavailable (%s); rejecting %s", _AIORTC_IMPORT_ERROR, mtype)
         await _safe_send(ws, {
             "type": "error",
@@ -209,6 +230,8 @@ async def _handle_offer(ws, msg, on_channel_ready):
         except Exception:
             pass
 
+    assert RTCPeerConnection is not None and RTCConfiguration is not None
+    assert RTCSessionDescription is not None
     pc = RTCPeerConnection(configuration=RTCConfiguration(iceServers=list(DEFAULT_ICE_SERVERS)))
     _PC_BY_SIGNALING[ws] = pc
 
@@ -284,6 +307,7 @@ async def _handle_ice(ws, msg):
     if sdp_line.startswith("candidate:"):
         sdp_line = sdp_line[len("candidate:"):]
     try:
+        assert candidate_from_sdp is not None
         candidate = candidate_from_sdp(sdp_line)
         sdp_mid = msg.get("sdpMid")
         if sdp_mid is not None:

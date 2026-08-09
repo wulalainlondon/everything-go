@@ -7,6 +7,7 @@ import json
 import os
 import re
 import time
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -14,7 +15,9 @@ from typing import Any
 import client_manager
 import session_registry
 from session_registry import Session
+from utils.path_jail import is_inside_jail
 from utils.uuid_helper import is_valid_uuid
+from utils.session_source_policy import codex_session_is_ignored, path_is_within
 
 
 _TURN_ABORTED_RE = re.compile(r"<turn_aborted>.*?</turn_aborted>", re.IGNORECASE | re.DOTALL)
@@ -26,13 +29,17 @@ _JSONL_TURN_END_STOP_REASONS: frozenset[str] = frozenset(
 _sessions: dict[str, Session] = {}
 _default_cwd = session_registry.DEFAULT_CWD
 _claude_projects_dir = str(Path.home() / ".claude" / "projects")
+_root_dir = ""
+_codex_ignore_cwd_globs: tuple[str, ...] = ()
+_codex_ignore_name_prefixes: tuple[str, ...] = ()
 _session_backend: Callable[[Session], Any] | None = None
 _broadcast_json: Callable[[dict], Awaitable[int]] | None = None
 _build_sessions_list: Callable[[], dict] | None = None
 _dispatch_event: Callable[[dict, Session], Awaitable[bool]] | None = None
 _evt_done: Callable[[], dict] | None = None
 _log: Any = None
-_recent_msgs_cache: dict[str, tuple[float, list]] = {}
+_recent_msgs_cache: OrderedDict[str, tuple[float, list]] = OrderedDict()
+_RECENT_MSGS_CACHE_MAX = 256
 
 
 def configure(
@@ -46,12 +53,22 @@ def configure(
     dispatch_event: Callable[[dict, Session], Awaitable[bool]],
     evt_done: Callable[[], dict],
     log: Any,
+    root_dir: str = "",
+    codex_sessions_dir: str | None = None,
+    codex_ignore_cwd_globs: tuple[str, ...] = (),
+    codex_ignore_name_prefixes: tuple[str, ...] = (),
 ) -> None:
-    global _sessions, _default_cwd, _claude_projects_dir, _session_backend
+    global _sessions, _default_cwd, _claude_projects_dir, _root_dir, CODEX_SESSIONS_DIR
+    global _codex_ignore_cwd_globs, _codex_ignore_name_prefixes, _session_backend
     global _broadcast_json, _build_sessions_list, _dispatch_event, _evt_done, _log
     _sessions = sessions
     _default_cwd = default_cwd
     _claude_projects_dir = claude_projects_dir
+    _root_dir = os.path.realpath(os.path.expanduser(root_dir)) if root_dir else ""
+    if codex_sessions_dir is not None:
+        CODEX_SESSIONS_DIR = os.path.realpath(os.path.expanduser(codex_sessions_dir))
+    _codex_ignore_cwd_globs = tuple(codex_ignore_cwd_globs)
+    _codex_ignore_name_prefixes = tuple(codex_ignore_name_prefixes)
     _session_backend = session_backend
     _broadcast_json = broadcast_json
     _build_sessions_list = build_sessions_list
@@ -122,6 +139,7 @@ def _read_recent_msgs(path: str, fmt: str, n: int = 2) -> list:
         if cache_key in _recent_msgs_cache:
             cached_mtime, cached_msgs = _recent_msgs_cache[cache_key]
             if cached_mtime == mtime:
+                _recent_msgs_cache.move_to_end(cache_key)
                 return cached_msgs
     except Exception:
         pass
@@ -171,6 +189,9 @@ def _read_recent_msgs(path: str, fmt: str, n: int = 2) -> list:
         mtime = os.path.getmtime(path)
         cache_key = f"{path}:{fmt}:{n}"
         _recent_msgs_cache[cache_key] = (mtime, result)
+        _recent_msgs_cache.move_to_end(cache_key)
+        while len(_recent_msgs_cache) > _RECENT_MSGS_CACHE_MAX:
+            _recent_msgs_cache.popitem(last=False)
     except Exception:
         pass
     return result
@@ -197,14 +218,28 @@ def _register_jsonl_session(path: str) -> bool:
             return False
         stem = fn[:-6]
 
-        if CODEX_SESSIONS_DIR and path.startswith(CODEX_SESSIONS_DIR):
+        if path_is_within(path, CODEX_SESSIONS_DIR):
             backend_name = "codex"
+            if _root_dir:
+                return False
             resume_id = codex_session_id_from_stem(stem)
             if not is_valid_uuid(resume_id):
                 return False
             sid = f"jl_x_{resume_id[:12]}"
         else:
             backend_name = "claude"
+            if _root_dir:
+                try:
+                    relative = os.path.relpath(path, _claude_projects_dir)
+                    project_name = relative.split(os.sep, 1)[0]
+                    prefix = _root_dir.replace("/", "-")
+                    if not (
+                        project_name == prefix
+                        or project_name.startswith(prefix + "-")
+                    ):
+                        return False
+                except (OSError, ValueError):
+                    return False
             resume_id = stem
             if len(resume_id) < 8:
                 return False
@@ -268,6 +303,15 @@ def _register_jsonl_session(path: str) -> bool:
 
         if not name:
             name = resume_id[:8]
+        if _root_dir:
+            real_cwd = os.path.realpath(os.path.expanduser(cwd))
+            if not is_inside_jail(real_cwd, _root_dir):
+                return False
+        if backend_name == "codex" and codex_session_is_ignored(
+            cwd, name, _codex_ignore_cwd_globs, _codex_ignore_name_prefixes
+        ):
+            _info("JSONL session ignored by cwd policy: %s cwd=%s", resume_id[:12], cwd)
+            return False
         try:
             mtime = os.stat(path).st_mtime
         except OSError:
@@ -293,7 +337,7 @@ def _session_for_jsonl_path(path: str) -> Session | None:
     if not fn.endswith(".jsonl"):
         return None
     stem = fn[:-6]
-    if CODEX_SESSIONS_DIR and path.startswith(CODEX_SESSIONS_DIR):
+    if path_is_within(path, CODEX_SESSIONS_DIR):
         resume_id = codex_session_id_from_stem(stem)
     else:
         resume_id = stem
@@ -311,7 +355,7 @@ def merge_jsonl_sessions_into_state() -> bool:
             existing_uuids.add(s.resume_id)
         existing_uuids.update(getattr(s, "historical_resume_ids", set()))
 
-    for base, backend_name in ((_claude_projects_dir, "claude"), (CODEX_SESSIONS_DIR, "codex")):
+    for base, backend_name in _source_scan_roots():
         if not os.path.isdir(base):
             _info("JSONL initial scan (%s): source dir missing, skipped: %s", backend_name, base)
             continue
@@ -332,6 +376,35 @@ def merge_jsonl_sessions_into_state() -> bool:
             _warning("JSONL initial scan (%s) error: %s", backend_name, exc)
 
     return added
+
+
+def _source_scan_roots() -> list[tuple[str, str]]:
+    """Return the smallest source roots needed by this bridge instance."""
+    if not _root_dir:
+        return [
+            (_claude_projects_dir, "claude"),
+            (CODEX_SESSIONS_DIR, "codex"),
+        ]
+
+    roots: list[tuple[str, str]] = []
+    prefix = _root_dir.replace("/", "-")
+    try:
+        for entry in os.scandir(_claude_projects_dir):
+            if (
+                entry.is_dir()
+                and (entry.name == prefix or entry.name.startswith(prefix + "-"))
+            ):
+                roots.append((entry.path, "claude"))
+    except OSError:
+        pass
+    return roots
+
+
+def _source_watch_roots() -> list[tuple[str, str]]:
+    """FSEvents roots; parent watch detects creation of the first scoped project."""
+    if _root_dir:
+        return [(_claude_projects_dir, "claude")]
+    return _source_scan_roots()
 
 
 def _read_new_jsonl_lines(path: str, from_offset: int) -> tuple[list[dict], int]:
@@ -475,7 +548,7 @@ async def jsonl_watcher_task() -> None:
 
         observer = Observer()
         handler = _Handler()
-        for d in (_claude_projects_dir, CODEX_SESSIONS_DIR):
+        for d, _backend_name in _source_watch_roots():
             if os.path.isdir(d):
                 observer.schedule(handler, d, recursive=True)
         observer.start()
@@ -494,7 +567,7 @@ async def jsonl_watcher_task() -> None:
         def _dir_fingerprint() -> str:
             changed_parts: list[str] = []
             seen_paths: set[str] = set()
-            for base in (_claude_projects_dir, CODEX_SESSIONS_DIR):
+            for base, _backend_name in _source_scan_roots():
                 if not os.path.isdir(base):
                     continue
                 for root, _dirs, files in os.walk(base):

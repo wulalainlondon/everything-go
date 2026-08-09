@@ -3,7 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
 import time
+from collections import OrderedDict
+from collections.abc import Iterator, MutableMapping
 from dataclasses import dataclass, field
 from typing import Callable, Iterable
 
@@ -12,6 +15,12 @@ from typing import Callable, Iterable
 DEFAULT_HISTORY_LIMIT = int(os.environ.get("BRIDGE_HISTORY_LIMIT", "100"))
 MAX_HISTORY_LIMIT = int(os.environ.get("BRIDGE_MAX_HISTORY_LIMIT", "10000"))
 HISTORY_INDEX_TTL_SECONDS = float(os.environ.get("BRIDGE_HISTORY_INDEX_TTL_SECONDS", "300"))
+HISTORY_CACHE_MAX_ENTRIES = max(
+    0, int(os.environ.get("BRIDGE_HISTORY_CACHE_MAX_ENTRIES", "16"))
+)
+HISTORY_CACHE_MAX_BYTES = max(
+    0, int(os.environ.get("BRIDGE_HISTORY_CACHE_MAX_BYTES", str(128 * 1024 * 1024)))
+)
 
 
 @dataclass
@@ -22,7 +31,81 @@ class HistoryIndex:
     by_source_id: dict[str, int] = field(default_factory=dict)
 
 
-_JSONL_HISTORY_CACHE: dict[str, HistoryIndex] = {}
+class BoundedHistoryCache(MutableMapping[str, HistoryIndex]):
+    """LRU cache bounded by both entry count and source JSONL bytes.
+
+    ``HistoryIndex.key[2]`` is the source file size. It is a conservative,
+    cheap proxy for the retained Python object graph and avoids serializing
+    every history a second time just to calculate cache weight.
+    """
+
+    def __init__(self, max_entries: int, max_bytes: int) -> None:
+        self.max_entries = max(0, max_entries)
+        self.max_bytes = max(0, max_bytes)
+        self._entries: OrderedDict[str, HistoryIndex] = OrderedDict()
+        self._weights: dict[str, int] = {}
+        self._bytes = 0
+        self._lock = threading.RLock()
+
+    @staticmethod
+    def _weight(value: HistoryIndex) -> int:
+        try:
+            return max(4096, int(value.key[2]))
+        except (IndexError, TypeError, ValueError):
+            return 4096
+
+    @property
+    def bytes_used(self) -> int:
+        with self._lock:
+            return self._bytes
+
+    def __getitem__(self, key: str) -> HistoryIndex:
+        with self._lock:
+            value = self._entries[key]
+            self._entries.move_to_end(key)
+            return value
+
+    def __setitem__(self, key: str, value: HistoryIndex) -> None:
+        with self._lock:
+            self.__delitem__(key, missing_ok=True)
+            weight = self._weight(value)
+            if self.max_entries == 0 or self.max_bytes == 0 or weight > self.max_bytes:
+                return
+            self._entries[key] = value
+            self._weights[key] = weight
+            self._bytes += weight
+            while len(self._entries) > self.max_entries or self._bytes > self.max_bytes:
+                oldest_key, _ = self._entries.popitem(last=False)
+                self._bytes -= self._weights.pop(oldest_key, 0)
+
+    def __delitem__(self, key: str, *, missing_ok: bool = False) -> None:
+        with self._lock:
+            if key not in self._entries:
+                if missing_ok:
+                    return
+                raise KeyError(key)
+            del self._entries[key]
+            self._bytes -= self._weights.pop(key, 0)
+
+    def __iter__(self) -> Iterator[str]:
+        with self._lock:
+            return iter(tuple(self._entries))
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._entries)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._entries.clear()
+            self._weights.clear()
+            self._bytes = 0
+
+
+_JSONL_HISTORY_CACHE: BoundedHistoryCache = BoundedHistoryCache(
+    max_entries=HISTORY_CACHE_MAX_ENTRIES,
+    max_bytes=HISTORY_CACHE_MAX_BYTES,
+)
 
 
 def clamp_history_limit(value: object, default: int = DEFAULT_HISTORY_LIMIT) -> int:

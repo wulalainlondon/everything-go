@@ -7,6 +7,7 @@ from typing import Iterator, Optional
 from .base import SearchableMessage
 from ..ingest.display_name import is_framework_noise
 from .._strip_wrappers import strip_framework_wrappers
+from utils.session_source_policy import codex_session_is_ignored
 
 log = logging.getLogger(__name__)
 
@@ -49,25 +50,45 @@ def _is_codex_bootstrap_text(text: str) -> bool:
 class CodexSessionSource:
     name = 'codex'
 
-    def __init__(self, root_dir: str = ""):
+    def __init__(
+        self,
+        root_dir: str = "",
+        sessions_dir: str | Path | None = None,
+        ignore_cwd_globs: tuple[str, ...] = (),
+        ignore_name_prefixes: tuple[str, ...] = (),
+    ):
         self._root_dir = root_dir
+        self._sessions_dir = Path(sessions_dir or _CODEX_ROOT).expanduser().resolve()
+        self._ignore_cwd_globs = tuple(ignore_cwd_globs)
+        self._ignore_name_prefixes = tuple(ignore_name_prefixes)
 
     @property
     def watch_root(self) -> Path:
         """Return the root directory this source watches (respects module-level override)."""
-        return _CODEX_ROOT
+        return self._sessions_dir
 
     def is_enabled(self) -> bool:
         if self._root_dir:
             return False  # codex sessions are user-global, not project-scoped
-        return _CODEX_ROOT.is_dir()
+        return self._sessions_dir.is_dir()
 
     def discover(self) -> Iterator[Path]:
-        if not _CODEX_ROOT.is_dir():
+        if not self._sessions_dir.is_dir():
             return
         # Pattern: ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl
-        for p in _CODEX_ROOT.glob('*/*/*/rollout-*.jsonl'):
-            yield p.resolve()
+        for p in self._sessions_dir.glob('*/*/*/rollout-*.jsonl'):
+            resolved = p.resolve()
+            if self.should_index_path(resolved):
+                yield resolved
+
+    def should_index_path(self, path: Path) -> bool:
+        meta = self.get_session_meta(path)
+        return not codex_session_is_ignored(
+            meta.get("cwd"),
+            meta.get("display_name"),
+            self._ignore_cwd_globs,
+            self._ignore_name_prefixes,
+        )
 
     def iter_messages(
         self, path: Path, start_offset: int = 0
@@ -142,7 +163,9 @@ class CodexSessionSource:
                     if not text:
                         offset = next_offset
                         continue
-                    if role == 'user' and _is_codex_bootstrap_text(text):
+                    if role == 'user' and (
+                        _is_codex_bootstrap_text(text) or is_framework_noise(text)
+                    ):
                         offset = next_offset
                         continue
 

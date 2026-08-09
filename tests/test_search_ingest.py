@@ -77,6 +77,105 @@ def _count_sessions(conn) -> int:
     return conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
 
 
+def test_worker_prunes_previously_indexed_codex_sessions_by_cwd(tmp_path):
+    from bridge.config.schema import BridgeConfig, SearchConfig, SourcesConfig
+    from bridge.search.ingest.worker import IngestWorker
+
+    conn = _make_conn(tmp_path)
+    conn.execute(
+        """
+        INSERT INTO sessions(
+            session_id, source, source_path, project_dir, cwd, display_name
+        ) VALUES (?, 'codex', ?, ?, ?, ?)
+        """,
+        (
+            "codex:evaluation",
+            "/daily/sessions/rollout-eval.jsonl",
+            "/daily/sessions",
+            "/private/tmp/evaluation/run-1",
+            "evaluation",
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO sessions(
+            session_id, source, source_path, project_dir, cwd, display_name
+        ) VALUES (?, 'codex', ?, ?, ?, ?)
+        """,
+        (
+            "codex:daily",
+            "/daily/sessions/rollout-daily.jsonl",
+            "/daily/sessions",
+            "/Users/test/project",
+            "daily",
+        ),
+    )
+    conn.execute(
+        "INSERT INTO messages(session_id, msg_uuid, role, ts, content) VALUES (?, ?, 'user', '', ?)",
+        ("codex:evaluation", "eval-msg", "noise"),
+    )
+    conn.execute(
+        """
+        INSERT INTO ingest_state(
+            source_path, file_size, last_mtime, last_offset, last_ingest_at
+        ) VALUES (?, 1, 1, 1, 1)
+        """,
+        ("/daily/sessions/rollout-eval.jsonl",),
+    )
+    conn.commit()
+
+    config = BridgeConfig(
+        search=SearchConfig(index_path=tmp_path / "unused.db"),
+        sources=SourcesConfig(
+            codex_ignore_cwd_globs=("/private/tmp/**",),
+        ),
+    )
+    worker = IngestWorker(config=config)
+    worker._conn = conn
+
+    assert worker._prune_excluded_codex_rows() == 1
+    assert conn.execute("SELECT session_id FROM sessions").fetchall() == [("codex:daily",)]
+    assert conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM ingest_state").fetchone()[0] == 0
+    conn.close()
+
+
+def test_prune_framework_noise_messages(tmp_path):
+    from bridge.config.schema import BridgeConfig, SearchConfig
+    from bridge.search.ingest.worker import IngestWorker
+
+    conn = _make_conn(tmp_path)
+    conn.execute(
+        """
+        INSERT INTO sessions(
+            session_id, source, source_path, project_dir, cwd, display_name
+        ) VALUES (?, 'codex', ?, ?, ?, ?)
+        """,
+        ("codex:daily", "/daily/session.jsonl", "/daily", "/daily", "daily"),
+    )
+    conn.executemany(
+        """
+        INSERT INTO messages(session_id, msg_uuid, role, ts, content)
+        VALUES ('codex:daily', ?, 'user', '', ?)
+        """,
+        [
+            ("plugin-noise", "<recommended_plugins>\nInjected list"),
+            ("real", "real user text"),
+        ],
+    )
+    conn.commit()
+
+    worker = IngestWorker(
+        config=BridgeConfig(search=SearchConfig(index_path=tmp_path / "unused.db"))
+    )
+    worker._conn = conn
+
+    assert worker._prune_framework_noise_messages() == 1
+    assert conn.execute("SELECT content FROM messages").fetchall() == [("real user text",)]
+    assert conn.execute("SELECT msg_count FROM sessions").fetchone()[0] == 1
+    conn.close()
+
+
 def _get_ingest_state(conn, path: Path) -> dict | None:
     # ingest_file stores path.resolve() — always resolve before querying
     row = conn.execute(
@@ -691,6 +790,28 @@ def test_watcher_coalesces_burst_events(tmp_path):
 # ---------------------------------------------------------------------------
 # test_watcher_falls_back_to_polling_if_native_observer_unavailable
 # ---------------------------------------------------------------------------
+
+def test_watcher_prefers_polling_on_macos():
+    from bridge.search.ingest import watcher as watcher_mod
+
+    fake_polling_mod = types.ModuleType('watchdog.observers.polling')
+    fake_observer = MagicMock()
+
+    class _FakePollingObserver:
+        def __new__(cls, *args, **kwargs):
+            fake_observer.timeout = kwargs.get("timeout")
+            return fake_observer
+
+    fake_polling_mod.PollingObserver = _FakePollingObserver
+    with patch.dict(sys.modules, {
+        'watchdog.observers.polling': fake_polling_mod,
+    }):
+        with patch.object(watcher_mod.platform, 'system', return_value='Darwin'):
+            observer = watcher_mod._make_observer(poll_interval=1)
+
+    assert observer is fake_observer
+    assert observer.timeout == 2
+
 
 def test_watcher_falls_back_to_polling_if_native_observer_unavailable(tmp_path):
     """When native observer raises on import, _make_observer must return a PollingObserver."""

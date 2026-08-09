@@ -22,6 +22,11 @@ def clean_webrtc_registry():
     webrtc_signaling._PC_BY_SIGNALING.clear()
 
 
+def test_aiortc_is_lazy_loaded() -> None:
+    assert webrtc_signaling._AIORTC_LOADED is False
+    assert webrtc_signaling.RTCPeerConnection is None
+
+
 def test_detach_promoted_pc_prevents_signaling_cleanup_from_closing_datachannel_pc():
     ws = object()
     pc = FakePc()

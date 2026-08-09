@@ -246,6 +246,12 @@ _INBOUND_REQUIRED: dict[str, list[tuple[str, type]]] = {
     "stop_instance": [("name", str)],
     "upsert_instance": [("name", str), ("port", int), ("root_dir", str)],
     "delete_instance": [("name", str)],
+    "attachment_upload_init": [
+        ("upload_request_id", str), ("session_id", str), ("name", str),
+        ("media_type", str), ("size_bytes", int),
+    ],
+    "attachment_upload_finish": [("upload_id", str)],
+    "attachment_upload_cancel": [("upload_id", str)],
 }
 
 
@@ -283,6 +289,7 @@ _KNOWN_MSG_TYPES: frozenset[str] = frozenset({
     "feed_mark_read",
     "feed_delete",
     "list_instances", "start_instance", "stop_instance", "upsert_instance", "delete_instance",
+    "attachment_upload_init", "attachment_upload_finish", "attachment_upload_cancel",
 })
 
 
