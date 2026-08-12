@@ -152,6 +152,38 @@ func TestHistoryCoalesced(t *testing.T) {
 	}
 }
 
+func TestTTLCacheActivelyRemovesExpiredEntry(t *testing.T) {
+	c := newTTLCache()
+	c.set("history:old", &history.Result{Messages: []map[string]any{{"content": "large"}}}, 10*time.Millisecond)
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		c.mu.Lock()
+		remaining := len(c.m)
+		c.mu.Unlock()
+		if remaining == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("expired cache entry was not actively removed")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestTTLCacheOldTimerDoesNotDeleteReplacement(t *testing.T) {
+	c := newTTLCache()
+	c.set("history:same", "old", 20*time.Millisecond)
+	time.Sleep(5 * time.Millisecond)
+	c.set("history:same", "fresh", 200*time.Millisecond)
+
+	time.Sleep(30 * time.Millisecond)
+	got, ok := c.get("history:same")
+	if !ok || got != "fresh" {
+		t.Fatalf("replacement removed by stale expiry timer: got=%v ok=%v", got, ok)
+	}
+}
+
 // #6/#15: 100 concurrent get_resumable_sessions → provider scan runs once.
 func TestResumableCoalesced(t *testing.T) {
 	h, _ := newTestHub(t)

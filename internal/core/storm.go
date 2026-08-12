@@ -153,11 +153,13 @@ func itoa(n int) string {
 type ttlEntry struct {
 	val any
 	exp time.Time
+	gen uint64
 }
 
 type ttlCache struct {
-	mu sync.Mutex
-	m  map[string]ttlEntry
+	mu  sync.Mutex
+	m   map[string]ttlEntry
+	gen uint64
 }
 
 func newTTLCache() *ttlCache { return &ttlCache{m: map[string]ttlEntry{}} }
@@ -166,7 +168,11 @@ func (c *ttlCache) get(key string) (any, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	e, ok := c.m[key]
-	if !ok || time.Now().After(e.exp) {
+	if !ok {
+		return nil, false
+	}
+	if !time.Now().Before(e.exp) {
+		delete(c.m, key)
 		return nil, false
 	}
 	return e.val, true
@@ -174,6 +180,22 @@ func (c *ttlCache) get(key string) (any, bool) {
 
 func (c *ttlCache) set(key string, val any, ttl time.Duration) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.m[key] = ttlEntry{val: val, exp: time.Now().Add(ttl)}
+	c.gen++
+	gen := c.gen
+	exp := time.Now().Add(ttl)
+	c.m[key] = ttlEntry{val: val, exp: exp, gen: gen}
+	c.mu.Unlock()
+
+	// A lookup deletes an entry it observes as expired, but history cache keys
+	// include the session and pagination cursor and are often never requested
+	// again. Without an active expiry, every distinct history result remains in
+	// the map forever even though callers see a two-second TTL. The timer only
+	// captures the small key/generation pair, not the cached value.
+	time.AfterFunc(ttl, func() {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if e, ok := c.m[key]; ok && e.gen == gen && !time.Now().Before(e.exp) {
+			delete(c.m, key)
+		}
+	})
 }
