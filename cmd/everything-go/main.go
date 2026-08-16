@@ -66,6 +66,8 @@ func main() {
 	tunnel := flag.Bool("tunnel", false, "start a cloudflared quick tunnel for remote access")
 	mdns := flag.Bool("mdns", false, "enable mDNS (_bridge._tcp) registration")
 	mdnsOff := flag.Bool("no-mdns", false, "deprecated: mDNS is disabled by default")
+	disableSearch := flag.Bool("disable-search", false, "disable transcript search and background indexing")
+	disableNativeWatcher := flag.Bool("disable-native-watcher", false, "disable native session discovery outside bridge-created sessions")
 	mode := flag.String("mode", "bridge", "run mode: bridge (resident server) | index (one-shot search ingest, then exit)")
 	flag.Parse()
 
@@ -141,15 +143,19 @@ func main() {
 	// the heap-heavy parse of every transcript lands in a process that exits and
 	// returns its memory to the OS (see runSearchIndexerLoop).
 	ctx := context.Background()
-	if idx, err := search.New(filepath.Join(*dataDir, "everything_go_search.db")); err != nil {
-		log.Printf("search index disabled: %v", err)
-	} else {
-		hub.SetSearch(idx)
-		if exePath, err := os.Executable(); err == nil {
-			go runSearchIndexerLoop(ctx, idx, exePath, *dataDir, 60*time.Second)
+	if !*disableSearch {
+		if idx, err := search.New(filepath.Join(*dataDir, "everything_go_search.db")); err != nil {
+			log.Printf("search index disabled: %v", err)
 		} else {
-			log.Printf("[search] cannot locate binary for indexer child (%v); serving existing index only", err)
+			hub.SetSearch(idx)
+			if exePath, err := os.Executable(); err == nil {
+				go runSearchIndexerLoop(ctx, idx, exePath, *dataDir, 60*time.Second)
+			} else {
+				log.Printf("[search] cannot locate binary for indexer child (%v); serving existing index only", err)
+			}
 		}
+	} else {
+		log.Printf("search index disabled by flag")
 	}
 
 	// Feed store: HTML/markdown articles pushed from local pipelines, surfaced
@@ -194,7 +200,11 @@ func main() {
 
 	// Network presence services (P3 discovery + P4 tunnel). They are opt-in so
 	// the fixed-endpoint P2 path stays deterministic and easy to debug.
-	hub.StartNativeWatcher(ctx)
+	if !*disableNativeWatcher {
+		hub.StartNativeWatcher(ctx)
+	} else {
+		log.Printf("native session watcher disabled by flag")
+	}
 	if *discovery && !*noDiscovery {
 		go netsvc.NewBeacon(*port, *discoveryPort, cfg.InstanceID).Run(ctx)
 	}
