@@ -722,7 +722,11 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 			return
 		}
 		if p.Phase == "commentary" {
-			c.sink.Emit(backend.NewThinkingChunk(s.ID, reqID, p.Delta))
+			// Commentary is user-facing progress (the same channel used for
+			// intermediate assistant updates), not private model reasoning.  Sending
+			// it as thinking_chunk buries every live update in a collapsed thinking
+			// card and makes an active Codex turn look as if it is not streaming.
+			c.sink.Emit(backend.NewTextChunk(s.ID, reqID, p.Delta))
 			return
 		}
 		c.appendCodexAgentOutput(st, p.ThreadID, p.Delta)

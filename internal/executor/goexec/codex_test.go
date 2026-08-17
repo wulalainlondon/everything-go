@@ -135,6 +135,29 @@ func TestCodexRootTurnCompletionFinishesTheOwningSession(t *testing.T) {
 	}
 }
 
+func TestCodexRootCommentaryStreamsAsVisibleText(t *testing.T) {
+	sink := &capSink{}
+	c := NewCodex(sink, "codex")
+	reg := session.NewRegistry()
+	s := reg.Create("s1", "session", "/tmp", "codex", "", "", "root")
+	st := c.state(s.ID)
+	st.threadID = "root"
+	st.reqID = "r1"
+	c.threadToSession["root"] = s
+
+	c.dispatch(json.RawMessage(`{"method":"item/agentMessage/delta","params":{"threadId":"root","delta":"正在檢查測試","phase":"commentary"}}`))
+
+	if sink.count(func(e any) bool {
+		chunk, ok := e.(protocol.TextChunk)
+		return ok && chunk.SessionID == "s1" && chunk.RequestID == "r1" && chunk.Content == "正在檢查測試"
+	}) != 1 {
+		t.Fatalf("commentary was not emitted as visible text: %+v", sink.events)
+	}
+	if sink.count(func(e any) bool { _, ok := e.(protocol.ThinkingChunk); return ok }) != 0 {
+		t.Fatalf("commentary leaked into collapsed thinking: %+v", sink.events)
+	}
+}
+
 func TestCodexActiveTurnRouteCannotBeStolenByDuplicateSession(t *testing.T) {
 	sink := &capSink{}
 	c := NewCodex(sink, "codex")
@@ -1167,7 +1190,7 @@ func TestCodexHistoryReplaysToolBlocks(t *testing.T) {
 	}
 }
 
-func TestCodexHistoryPreservesCommentaryAsThinkingWhenRequested(t *testing.T) {
+func TestCodexHistoryPreservesCommentaryAsVisibleText(t *testing.T) {
 	uid := "123e4567-e89b-12d3-a456-426614174003"
 	root := t.TempDir()
 	day := filepath.Join(root, "2026", "07", "31")
@@ -1203,21 +1226,21 @@ func TestCodexHistoryPreservesCommentaryAsThinkingWhenRequested(t *testing.T) {
 	c := NewCodex(&capSink{}, "codex")
 	c.sessionsRoot = root
 
-	withThinking, err := c.LoadHistory(uid, history.Opts{Limit: 20, Mode: "snapshot", IncludeThinking: true})
+	withCommentary, err := c.LoadHistory(uid, history.Opts{Limit: 20, Mode: "snapshot", IncludeThinking: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(withThinking.Messages) != 3 {
-		t.Fatalf("want user + merged commentary/tool + final, got %+v", withThinking.Messages)
+	if len(withCommentary.Messages) != 3 {
+		t.Fatalf("want user + merged commentary/tool + final, got %+v", withCommentary.Messages)
 	}
-	commentaryBlocks, ok := withThinking.Messages[1]["blocks"].([]map[string]any)
-	if !ok || len(commentaryBlocks) != 2 || commentaryBlocks[0]["type"] != "thinking" ||
-		commentaryBlocks[0]["thinking"] != "先檢查目前狀態\n\n接著檢查工作目錄" ||
+	commentaryBlocks, ok := withCommentary.Messages[1]["blocks"].([]map[string]any)
+	if !ok || len(commentaryBlocks) != 2 || commentaryBlocks[0]["type"] != "text" ||
+		commentaryBlocks[0]["text"] != "先檢查目前狀態\n\n接著檢查工作目錄" ||
 		commentaryBlocks[1]["type"] != "tool_call" {
-		t.Fatalf("commentary was not preserved as thinking: %+v", withThinking.Messages[1])
+		t.Fatalf("commentary was not preserved as visible text: %+v", withCommentary.Messages[1])
 	}
-	if withThinking.Messages[1]["content"] != "pwd" {
-		t.Fatalf("commentary should not replace tool content: %+v", withThinking.Messages[1])
+	if withCommentary.Messages[1]["content"] != "pwd" {
+		t.Fatalf("commentary should not replace tool content: %+v", withCommentary.Messages[1])
 	}
 
 	withoutThinking, err := c.LoadHistory(uid, history.Opts{Limit: 20, Mode: "snapshot"})
@@ -1227,21 +1250,9 @@ func TestCodexHistoryPreservesCommentaryAsThinkingWhenRequested(t *testing.T) {
 	if len(withoutThinking.Messages) != 3 {
 		t.Fatalf("legacy history should omit commentary, got %+v", withoutThinking.Messages)
 	}
-	for _, message := range withoutThinking.Messages {
-		switch blocks := message["blocks"].(type) {
-		case []map[string]any:
-			for _, block := range blocks {
-				if block["type"] == "thinking" {
-					t.Fatalf("legacy history leaked thinking block: %+v", message)
-				}
-			}
-		case []any:
-			for _, raw := range blocks {
-				if block, ok := raw.(map[string]any); ok && block["type"] == "thinking" {
-					t.Fatalf("legacy cached history leaked thinking block: %+v", message)
-				}
-			}
-		}
+	legacyBlocks := withoutThinking.Messages[1]["blocks"].([]map[string]any)
+	if legacyBlocks[0]["type"] != "text" || legacyBlocks[0]["text"] != "先檢查目前狀態\n\n接著檢查工作目錄" {
+		t.Fatalf("commentary must remain visible without thinking opt-in: %+v", withoutThinking.Messages[1])
 	}
 
 	limited, err := c.LoadHistory(uid, history.Opts{Limit: 2, Mode: "snapshot", IncludeThinking: true})
@@ -1253,11 +1264,11 @@ func TestCodexHistoryPreservesCommentaryAsThinkingWhenRequested(t *testing.T) {
 	}
 }
 
-func TestAppendCodexHistoryThinkingKeepsBoundedLatestProgress(t *testing.T) {
-	old := strings.Repeat("舊", codexHistoryThinkingMaxRunes)
-	got := appendCodexHistoryThinking(old, "最新進度")
-	if len([]rune(got)) != codexHistoryThinkingMaxRunes || !strings.HasPrefix(got, "…") || !strings.HasSuffix(got, "最新進度") {
-		t.Fatalf("bounded thinking did not preserve latest progress: runes=%d suffix=%q", len([]rune(got)), got[len(got)-12:])
+func TestAppendCodexHistoryCommentaryKeepsBoundedLatestProgress(t *testing.T) {
+	old := strings.Repeat("舊", codexHistoryCommentaryMaxRunes)
+	got := appendCodexHistoryCommentary(old, "最新進度")
+	if len([]rune(got)) != codexHistoryCommentaryMaxRunes || !strings.HasPrefix(got, "…") || !strings.HasSuffix(got, "最新進度") {
+		t.Fatalf("bounded commentary did not preserve latest progress: runes=%d suffix=%q", len([]rune(got)), got[len(got)-12:])
 	}
 }
 
