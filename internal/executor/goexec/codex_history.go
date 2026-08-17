@@ -257,7 +257,7 @@ func (c *Codex) readCodexHistory(path, resumeID string) ([]map[string]any, bool,
 		if role != "user" && role != "assistant" {
 			continue
 		}
-		text := extractCodexText(payload.Content)
+		text := stripCodexBridgeHandoff(extractCodexText(payload.Content))
 		if text == "" || (role == "user" && isCodexBootstrapText(text)) {
 			continue
 		}
@@ -433,6 +433,23 @@ func isCodexBootstrapText(text string) bool {
 	stripped := strings.TrimLeft(text, " \t\r\n")
 	return (strings.HasPrefix(stripped, "<environment_context>") && strings.Contains(stripped, "</environment_context>") && strings.Contains(stripped, "<cwd>")) ||
 		(strings.HasPrefix(stripped, "# AGENTS.md instructions") && (strings.Contains(stripped, "<environment_context>") || strings.Contains(stripped, "<INSTRUCTIONS>")))
+}
+
+func stripCodexBridgeHandoff(text string) string {
+	trimmed := strings.TrimSpace(text)
+	if !strings.HasPrefix(trimmed, "<bridge_session_handoff") {
+		return text
+	}
+	end := strings.Index(trimmed, "</bridge_session_handoff>")
+	if end < 0 {
+		return ""
+	}
+	rest := strings.TrimSpace(trimmed[end+len("</bridge_session_handoff>"):])
+	if strings.HasPrefix(rest, "<current_user_request>") && strings.HasSuffix(rest, "</current_user_request>") {
+		rest = strings.TrimPrefix(rest, "<current_user_request>")
+		rest = strings.TrimSuffix(rest, "</current_user_request>")
+	}
+	return strings.TrimSpace(rest)
 }
 
 func sanitizeCodexSessionName(raw, fallback string) string {

@@ -121,6 +121,7 @@ func main() {
 		terminal := executor.NewTerminalSink(hub)
 		claude := goexec.NewClaude(terminal, *claudeBin)
 		codex := goexec.NewCodex(terminal, *codexBin)
+		codex.SetDataDir(*dataDir)
 		ollama := goexec.NewOllama(terminal, *ollamaHost, "")
 		backends := map[string]executor.Executor{
 			"claude": claude,

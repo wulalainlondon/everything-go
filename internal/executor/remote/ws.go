@@ -115,7 +115,7 @@ func (w *WS) Clear(ctx context.Context, s *session.Session) error {
 	if t := w.get(s.ID); t != nil {
 		w.removeIfCurrent(s.ID, t)
 	}
-	s.SetResumeID("")
+	s.ClearResumeIDs()
 	w.sink.Emit(backend.NewSessionWarning(s.ID, "Session history cleared."))
 	return nil
 }

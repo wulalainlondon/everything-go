@@ -32,18 +32,19 @@ type Session struct {
 	ID        string
 	CreatedAt float64 // unix seconds (matches Python time.time())
 
-	name              string
-	cwd               string
-	backend           string
-	model             string
-	sandbox           string
-	effort            string
-	serviceTier       string
-	collaborationMode string
-	personality       string
-	resumeID          string // AI-runtime conversation handle (Claude UUID / Codex thread id)
-	pinned            bool
-	hidden            bool
+	name                string
+	cwd                 string
+	backend             string
+	model               string
+	sandbox             string
+	effort              string
+	serviceTier         string
+	collaborationMode   string
+	personality         string
+	resumeID            string   // AI-runtime conversation handle (Claude UUID / Codex thread id)
+	historicalResumeIDs []string // archived physical threads belonging to this logical session
+	pinned              bool
+	hidden              bool
 
 	lastActivity float64
 	contextUsed  int
@@ -64,25 +65,26 @@ type Session struct {
 // Snapshot is an immutable, lock-free copy of a session's fields for callers
 // that need several at once (summaries, task listings, spawn argument building).
 type Snapshot struct {
-	ID                string
-	Name              string
-	Cwd               string
-	Backend           string
-	Model             string
-	Sandbox           string
-	Effort            string
-	ServiceTier       string
-	CollaborationMode string
-	Personality       string
-	ResumeID          string
-	CreatedAt         float64
-	LastActivity      float64
-	ContextUsed       int
-	ContextMax        int
-	Pinned            bool
-	Hidden            bool
-	Streaming         bool
-	State             State
+	ID                  string
+	Name                string
+	Cwd                 string
+	Backend             string
+	Model               string
+	Sandbox             string
+	Effort              string
+	ServiceTier         string
+	CollaborationMode   string
+	Personality         string
+	ResumeID            string
+	HistoricalResumeIDs []string
+	CreatedAt           float64
+	LastActivity        float64
+	ContextUsed         int
+	ContextMax          int
+	Pinned              bool
+	Hidden              bool
+	Streaming           bool
+	State               State
 }
 
 func nowSeconds() float64 { return float64(time.Now().UnixNano()) / 1e9 }
@@ -98,7 +100,8 @@ func (s *Session) snapshotLocked() Snapshot {
 	return Snapshot{
 		ID: s.ID, Name: s.name, Cwd: s.cwd, Backend: s.backend,
 		Model: s.model, Sandbox: s.sandbox, Effort: s.effort, ResumeID: s.resumeID,
-		ServiceTier: s.serviceTier, CollaborationMode: s.collaborationMode, Personality: s.personality,
+		HistoricalResumeIDs: append([]string(nil), s.historicalResumeIDs...),
+		ServiceTier:         s.serviceTier, CollaborationMode: s.collaborationMode, Personality: s.personality,
 		CreatedAt: s.CreatedAt, LastActivity: s.lastActivity,
 		ContextUsed: s.contextUsed, ContextMax: s.contextMax,
 		Pinned: s.pinned, Hidden: s.hidden,
@@ -186,8 +189,57 @@ func (s *Session) ApplyConfig(backend, model, sandbox string) {
 // when a turn establishes or clears one).
 func (s *Session) SetResumeID(id string) {
 	s.mu.Lock()
+	if id != "" && s.resumeID != "" && s.resumeID != id {
+		s.historicalResumeIDs = appendUniqueResumeID(s.historicalResumeIDs, s.resumeID, id)
+	}
 	s.resumeID = id
 	s.mu.Unlock()
+}
+
+// ClearResumeIDs intentionally forgets the entire logical history chain. Use
+// only for the user-facing clear-session operation; recovery failures should
+// call SetResumeID("") so archived generations remain readable.
+func (s *Session) ClearResumeIDs() {
+	s.mu.Lock()
+	s.resumeID = ""
+	s.historicalResumeIDs = nil
+	s.mu.Unlock()
+}
+
+// AddHistoricalResumeID records a read-only physical thread without changing
+// the active thread. It is used by native discovery when it sees an older
+// rollout whose jl_* alias is also the stable logical session id.
+func (s *Session) AddHistoricalResumeID(id string) {
+	if id == "" {
+		return
+	}
+	s.mu.Lock()
+	s.historicalResumeIDs = appendUniqueResumeID(s.historicalResumeIDs, id, s.resumeID)
+	s.mu.Unlock()
+}
+
+// ResumeIDs returns physical threads in chronological generation order, with
+// the active writable thread last.
+func (s *Session) ResumeIDs() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := append([]string(nil), s.historicalResumeIDs...)
+	if s.resumeID != "" {
+		out = appendUniqueResumeID(out, s.resumeID, "")
+	}
+	return out
+}
+
+func appendUniqueResumeID(ids []string, id, active string) []string {
+	if id == "" || id == active {
+		return ids
+	}
+	for _, existing := range ids {
+		if existing == id {
+			return ids
+		}
+	}
+	return append(ids, id)
 }
 
 // SetContext records backend-reported context usage for summaries/status views.
@@ -246,8 +298,9 @@ func (r *Registry) AttachStore(store *Store) {
 			ID: id, CreatedAt: created,
 			name: e.Name, cwd: e.Cwd, backend: e.Backend,
 			model: e.Model, sandbox: e.Sandbox, resumeID: resume,
-			effort:      e.Effort,
-			serviceTier: e.ServiceTier, collaborationMode: e.CollaborationMode, personality: e.Personality,
+			historicalResumeIDs: append([]string(nil), e.HistoricalResumeIDs...),
+			effort:              e.Effort,
+			serviceTier:         e.ServiceTier, collaborationMode: e.CollaborationMode, personality: e.Personality,
 			pinned: e.Pinned, hidden: e.Hidden,
 			lastActivity: float64(e.LastUsed),
 			state:        Idle,
@@ -449,10 +502,10 @@ func (r *Registry) UpsertExternal(id, name, cwd, backend, resumeID string, lastU
 		}
 		before := s.Snapshot()
 		s.mu.Lock()
-		if s.name == "" || strings.HasPrefix(s.ID, "jl_") {
+		if s.name == "" || (s.ID == id && strings.HasPrefix(s.ID, "jl_")) {
 			s.name = name
 		}
-		if s.cwd == "" || strings.HasPrefix(s.ID, "jl_") {
+		if s.cwd == "" || (s.ID == id && strings.HasPrefix(s.ID, "jl_")) {
 			s.cwd = cwd
 		}
 		if s.backend == "" {
@@ -475,10 +528,29 @@ func (r *Registry) UpsertExternal(id, name, cwd, backend, resumeID string, lastU
 	if s, ok := r.sessions[id]; ok {
 		before := s.Snapshot()
 		s.mu.Lock()
-		s.name = name
-		s.cwd = cwd
-		s.backend = backend
-		s.resumeID = resumeID
+		// A jl_* id is derived from the first physical rollout that created the
+		// logical session. After cold-recovery starts a new Codex thread, the
+		// native watcher will continue observing that old rollout. Never let that
+		// observation roll the active mapping backwards; retain it as history.
+		if s.resumeID == "" {
+			s.resumeID = resumeID
+			s.name = name
+			s.cwd = cwd
+			s.backend = backend
+		} else if s.resumeID != resumeID {
+			beforeCount := len(s.historicalResumeIDs)
+			s.historicalResumeIDs = appendUniqueResumeID(s.historicalResumeIDs, resumeID, s.resumeID)
+			if activity > s.lastActivity {
+				s.lastActivity = activity
+			}
+			historyChanged := len(s.historicalResumeIDs) != beforeCount
+			s.mu.Unlock()
+			return s, historyChanged
+		} else {
+			s.name = name
+			s.cwd = cwd
+			s.backend = backend
+		}
 		if activity > s.lastActivity {
 			s.lastActivity = activity
 		}

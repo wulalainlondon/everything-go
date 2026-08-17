@@ -13,21 +13,22 @@ import (
 // saved_sessions.json. Store writes known fields back into the original raw JSON
 // object so Python-only metadata survives Go updates.
 type savedEntry struct {
-	Name              string  `json:"name"`
-	ResumeID          string  `json:"resume_id"`
-	ClaudeUUID        string  `json:"claude_uuid"`
-	LastUsed          int64   `json:"last_used"`
-	Cwd               string  `json:"cwd"`
-	Backend           string  `json:"backend"`
-	Model             string  `json:"model"`
-	Sandbox           string  `json:"sandbox"`
-	Effort            string  `json:"effort,omitempty"`
-	ServiceTier       string  `json:"service_tier,omitempty"`
-	CollaborationMode string  `json:"collaboration_mode,omitempty"`
-	Personality       string  `json:"personality,omitempty"`
-	CreatedAt         float64 `json:"created_at"`
-	Pinned            bool    `json:"pinned,omitempty"`
-	Hidden            bool    `json:"hidden,omitempty"`
+	Name                string   `json:"name"`
+	ResumeID            string   `json:"resume_id"`
+	ClaudeUUID          string   `json:"claude_uuid"`
+	LastUsed            int64    `json:"last_used"`
+	Cwd                 string   `json:"cwd"`
+	Backend             string   `json:"backend"`
+	Model               string   `json:"model"`
+	Sandbox             string   `json:"sandbox"`
+	Effort              string   `json:"effort,omitempty"`
+	ServiceTier         string   `json:"service_tier,omitempty"`
+	CollaborationMode   string   `json:"collaboration_mode,omitempty"`
+	Personality         string   `json:"personality,omitempty"`
+	HistoricalResumeIDs []string `json:"historical_resume_ids,omitempty"`
+	CreatedAt           float64  `json:"created_at"`
+	Pinned              bool     `json:"pinned,omitempty"`
+	Hidden              bool     `json:"hidden,omitempty"`
 }
 
 const (
@@ -98,7 +99,8 @@ func (st *Store) Save(sessions []*Session) error {
 			Sandbox: snap.Sandbox, CreatedAt: snap.CreatedAt,
 			Effort:      snap.Effort,
 			ServiceTier: snap.ServiceTier, CollaborationMode: snap.CollaborationMode, Personality: snap.Personality,
-			Pinned: snap.Pinned, Hidden: snap.Hidden,
+			HistoricalResumeIDs: append([]string(nil), snap.HistoricalResumeIDs...),
+			Pinned:              snap.Pinned, Hidden: snap.Hidden,
 		}
 		obj := raw[snap.ID]
 		if obj == nil {
@@ -196,6 +198,11 @@ func putKnownFields(obj map[string]json.RawMessage, entry savedEntry) {
 	put("service_tier", entry.ServiceTier)
 	put("collaboration_mode", entry.CollaborationMode)
 	put("personality", entry.Personality)
+	if len(entry.HistoricalResumeIDs) > 0 {
+		put("historical_resume_ids", entry.HistoricalResumeIDs)
+	} else {
+		delete(obj, "historical_resume_ids")
+	}
 	put("created_at", entry.CreatedAt)
 	if entry.Pinned {
 		put("pinned", true)
@@ -245,6 +252,14 @@ func rawBool(obj map[string]json.RawMessage, key string) bool {
 	return b
 }
 
+func rawStrings(obj map[string]json.RawMessage, key string) []string {
+	var values []string
+	if json.Unmarshal(obj[key], &values) != nil {
+		return nil
+	}
+	return values
+}
+
 func entryFromRaw(obj map[string]json.RawMessage) savedEntry {
 	resumeID := rawString(obj, "resume_id")
 	claudeUUID := rawString(obj, "claude_uuid")
@@ -257,20 +272,21 @@ func entryFromRaw(obj map[string]json.RawMessage) savedEntry {
 		createdAt = float64(lastUsed)
 	}
 	return savedEntry{
-		Name:              rawString(obj, "name"),
-		ResumeID:          resumeID,
-		ClaudeUUID:        claudeUUID,
-		LastUsed:          lastUsed,
-		Cwd:               rawString(obj, "cwd"),
-		Backend:           rawString(obj, "backend"),
-		Model:             rawString(obj, "model"),
-		Sandbox:           rawString(obj, "sandbox"),
-		Effort:            rawString(obj, "effort"),
-		ServiceTier:       rawString(obj, "service_tier"),
-		CollaborationMode: rawString(obj, "collaboration_mode"),
-		Personality:       rawString(obj, "personality"),
-		CreatedAt:         createdAt,
-		Pinned:            rawBool(obj, "pinned"),
-		Hidden:            rawBool(obj, "hidden"),
+		Name:                rawString(obj, "name"),
+		ResumeID:            resumeID,
+		ClaudeUUID:          claudeUUID,
+		LastUsed:            lastUsed,
+		Cwd:                 rawString(obj, "cwd"),
+		Backend:             rawString(obj, "backend"),
+		Model:               rawString(obj, "model"),
+		Sandbox:             rawString(obj, "sandbox"),
+		Effort:              rawString(obj, "effort"),
+		ServiceTier:         rawString(obj, "service_tier"),
+		CollaborationMode:   rawString(obj, "collaboration_mode"),
+		Personality:         rawString(obj, "personality"),
+		HistoricalResumeIDs: rawStrings(obj, "historical_resume_ids"),
+		CreatedAt:           createdAt,
+		Pinned:              rawBool(obj, "pinned"),
+		Hidden:              rawBool(obj, "hidden"),
 	}
 }

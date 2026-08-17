@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"everything-go/internal/backend"
@@ -610,8 +611,8 @@ func (h *Hub) sendHistory(c *Client, s *session.Session, cmd clientproto.Command
 		return
 	}
 	provider, ok := hr.ProviderFor(s)
-	resumeID := s.ResumeID()
-	if !ok || resumeID == "" {
+	resumeIDs := s.ResumeIDs()
+	if !ok || len(resumeIDs) == 0 {
 		// No history backend or no resume id yet → empty snapshot.
 		c.enqueueEvent(h.client.HistorySnapshot(s.ID, []map[string]any{}, 0, false, cmd.KnownLast == "", ""))
 		return
@@ -622,9 +623,9 @@ func (h *Hub) sendHistory(c *Client, s *session.Session, cmd clientproto.Command
 	if cmd.IncludeThinking {
 		thinkFlag = "1"
 	}
-	key := c.deviceID + "|" + s.ID + "|" + resumeID + "|" + cmd.Mode + "|" + cmd.Before + "|" + cmd.KnownLast + "|" + itoa(cmd.Limit) + "|" + thinkFlag
+	key := c.deviceID + "|" + s.ID + "|" + strings.Join(resumeIDs, ",") + "|" + cmd.Mode + "|" + cmd.Before + "|" + cmd.KnownLast + "|" + itoa(cmd.Limit) + "|" + thinkFlag
 	v := h.coalesce(&h.storm.histSF, h.storm.histCache, key, historyCacheTTL, func() any {
-		res, err := provider.LoadHistory(resumeID, history.Opts{
+		res, err := loadLogicalSessionHistory(provider, resumeIDs, history.Opts{
 			Limit: cmd.Limit, KnownLast: cmd.KnownLast, Mode: cmd.Mode, Before: cmd.Before,
 			IncludeThinking: cmd.IncludeThinking,
 		})
@@ -649,6 +650,36 @@ func (h *Hub) sendHistory(c *Client, s *session.Session, cmd clientproto.Command
 		return
 	}
 	c.enqueueEvent(h.client.HistorySnapshot(s.ID, msgs, res.SourceCount, res.HasMoreBefore, res.KnownIDFound, res.SnapshotReason))
+}
+
+// loadLogicalSessionHistory merges the bounded tails of archived physical
+// Codex threads with the active generation, then applies the client's cursor
+// once across the logical timeline. A single-generation session keeps the old
+// fast path.
+func loadLogicalSessionHistory(provider backend.HistoryProvider, resumeIDs []string, opts history.Opts) (*history.Result, error) {
+	if len(resumeIDs) == 1 {
+		return provider.LoadHistory(resumeIDs[0], opts)
+	}
+	all := make([]map[string]any, 0)
+	total := 0
+	truncated := false
+	for _, resumeID := range resumeIDs {
+		res, err := provider.LoadHistory(resumeID, history.Opts{
+			Limit: 10_000, Mode: "snapshot", IncludeThinking: opts.IncludeThinking,
+		})
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, res.Messages...)
+		total += res.SourceCount
+		truncated = truncated || res.HasMoreBefore
+	}
+	res := history.Slice(all, opts)
+	res.SourceCount = total
+	if truncated {
+		res.HasMoreBefore = true
+	}
+	return res, nil
 }
 
 func (h *Hub) sendResumable(c *Client, limit int) {

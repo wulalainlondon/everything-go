@@ -234,7 +234,7 @@ func (c *Claude) Clear(ctx context.Context, s *session.Session) error {
 		p.cancel()
 	}
 	c.cancelInteractionsFor(s.ID)
-	s.SetResumeID("")
+	s.ClearResumeIDs()
 	// The next Send spawns a fresh proc (and todoStore), so the panel resets;
 	// tell the app to clear it now. Mirrors claude_cli.clear's _evt_todo_update([]).
 	c.sink.Emit(backend.NewTodoUpdate(s.ID, "", nil))

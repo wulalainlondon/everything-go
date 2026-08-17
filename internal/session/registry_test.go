@@ -81,6 +81,9 @@ func TestPersistRestartRoundTrip(t *testing.T) {
 		snap.Model != "gpt-5" || snap.Sandbox != "danger" || snap.ResumeID != "thread-abc" {
 		t.Fatalf("restored session lost fields: %+v", snap)
 	}
+	if len(snap.HistoricalResumeIDs) != 0 {
+		t.Fatalf("new session unexpectedly has historical ids: %+v", snap.HistoricalResumeIDs)
+	}
 	if got.State() != Idle {
 		t.Fatalf("restored session should be Idle, got %s", got.State())
 	}
@@ -216,12 +219,56 @@ func TestStorePreservesPythonOnlyFields(t *testing.T) {
 		t.Fatalf("python-only scalar fields were not preserved: %+v", got)
 	}
 	hist, ok := got["historical_resume_ids"].([]any)
-	if !ok || len(hist) != 1 || hist[0] != "uuid-prev" {
+	if !ok || len(hist) != 2 || hist[0] != "uuid-prev" || hist[1] != "uuid-old" {
 		t.Fatalf("historical_resume_ids not preserved: %+v", got["historical_resume_ids"])
 	}
 	recent, ok := got["recent_request_ids"].([]any)
 	if !ok || len(recent) != 1 || recent[0] != "r1" {
 		t.Fatalf("recent_request_ids not preserved: %+v", got["recent_request_ids"])
+	}
+}
+
+func TestNativeWatcherCannotRollLogicalSessionBackToArchivedThread(t *testing.T) {
+	r := NewRegistry()
+	s := r.Create("jl_x_old-thread", "logical", "/work", "codex", "", "", "old-thread")
+	s.SetResumeID("new-thread")
+
+	got, _ := r.UpsertExternal(
+		"jl_x_old-thread", "old native title", "/old", "codex", "old-thread", 300,
+	)
+	if got != s {
+		t.Fatalf("UpsertExternal returned %v, want same logical session", got)
+	}
+	snap := s.Snapshot()
+	if snap.ResumeID != "new-thread" {
+		t.Fatalf("native watcher rolled active resume id backwards: %+v", snap)
+	}
+	if len(snap.HistoricalResumeIDs) != 1 || snap.HistoricalResumeIDs[0] != "old-thread" {
+		t.Fatalf("old thread was not retained as history: %+v", snap.HistoricalResumeIDs)
+	}
+	if snap.Name != "logical" || snap.Cwd != "/work" {
+		t.Fatalf("archived rollout overwrote logical metadata: %+v", snap)
+	}
+}
+
+func TestResumeGenerationHistoryPersistsAcrossRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sessions.json")
+	r1 := NewRegistry()
+	r1.AttachStore(NewStore(path))
+	s := r1.Create("logical", "long session", "/work", "codex", "", "", "thread-a")
+	s.SetResumeID("thread-b")
+	s.SetResumeID("thread-c")
+	r1.Persist()
+
+	r2 := NewRegistry()
+	r2.AttachStore(NewStore(path))
+	restored, ok := r2.Get("logical")
+	if !ok {
+		t.Fatal("logical session missing after restart")
+	}
+	snap := restored.Snapshot()
+	if snap.ResumeID != "thread-c" || strings.Join(snap.HistoricalResumeIDs, ",") != "thread-a,thread-b" {
+		t.Fatalf("generation chain did not survive restart: %+v", snap)
 	}
 }
 

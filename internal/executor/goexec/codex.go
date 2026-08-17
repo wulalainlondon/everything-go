@@ -50,7 +50,8 @@ var (
 )
 
 type codexState struct {
-	mu sync.Mutex
+	mu       sync.Mutex
+	ensureMu sync.Mutex
 
 	threadID        string
 	currentTurnID   string
@@ -69,6 +70,7 @@ type codexState struct {
 	compactDone     chan struct{}
 	lastEventAt     time.Time
 	stallWarned     bool
+	pendingHandoff  string
 	agents          map[string]*codexAgent
 }
 
@@ -153,6 +155,10 @@ type Codex struct {
 	stallWarnAfter     time.Duration
 	stallAbortAfter    time.Duration
 	stallCheckEvery    time.Duration
+	dataDir            string
+	rolloverEnabled    bool
+	coldResumeMaxBytes int64
+	checkpointMaxBytes int
 }
 
 type codexInteraction struct {
@@ -168,6 +174,7 @@ func NewCodex(sink executor.Sink, codexBin string) *Codex {
 		codexBin = "codex"
 	}
 	codexHome := sourcepolicy.CodexHome()
+	home, _ := os.UserHomeDir()
 	return &Codex{
 		sink:               sink,
 		tools:              newToolEmitter(sink),
@@ -185,6 +192,18 @@ func NewCodex(sink executor.Sink, codexBin string) *Codex {
 		stallWarnAfter:     codexStallWarnAfter,
 		stallAbortAfter:    codexStallAbortAfter,
 		stallCheckEvery:    codexStallCheckEvery,
+		dataDir:            filepath.Join(home, ".everything-go-runtime"),
+		rolloverEnabled:    envBool("EVERYTHING_GO_CODEX_ROLLOVER_ENABLED", false),
+		coldResumeMaxBytes: envInt64("EVERYTHING_GO_CODEX_COLD_RESUME_MAX_BYTES", 256*1024*1024),
+		checkpointMaxBytes: int(envInt64("EVERYTHING_GO_CODEX_CHECKPOINT_MAX_BYTES", 128*1024)),
+	}
+}
+
+// SetDataDir points generation manifests at the bridge's configured state
+// directory. It must be called during startup before the executor is shared.
+func (c *Codex) SetDataDir(path string) {
+	if strings.TrimSpace(path) != "" {
+		c.dataDir = runtime.ExpandPath(path)
 	}
 }
 
@@ -1406,8 +1425,8 @@ func (c *Codex) Send(ctx context.Context, s *session.Session, reqID, content str
 		c.sink.Emit(backend.NewError(s.ID, reqID, backend.ErrProcessDied, "failed to start codex thread: "+err.Error()))
 		return err
 	}
-
-	if strings.TrimSpace(content) == "/compact" {
+	isCompactCommand := strings.TrimSpace(content) == "/compact"
+	if isCompactCommand {
 		st.mu.Lock()
 		st.reqID = reqID
 		st.stopping = false
@@ -1415,6 +1434,13 @@ func (c *Codex) Send(ctx context.Context, s *session.Session, reqID, content str
 		c.sink.Emit(backend.NewSessionCommandStarted(s.ID, reqID, 0))
 		go c.runCompactCommand(s, st, reqID)
 		return nil
+	}
+	st.mu.Lock()
+	handoff := st.pendingHandoff
+	st.pendingHandoff = ""
+	st.mu.Unlock()
+	if handoff != "" {
+		content = handoff + "\n\n<current_user_request>\n" + content + "\n</current_user_request>"
 	}
 
 	st.mu.Lock()
@@ -1982,6 +2008,8 @@ func codexUsageValues(u codexTokenUsage) (int, int) {
 
 // ensureThread starts or resumes the codex thread for this session.
 func (c *Codex) ensureThread(s *session.Session, st *codexState) error {
+	st.ensureMu.Lock()
+	defer st.ensureMu.Unlock()
 	st.mu.Lock()
 	have := st.threadID
 	st.mu.Unlock()
@@ -1997,15 +2025,35 @@ func (c *Codex) ensureThread(s *session.Session, st *codexState) error {
 	sandbox := codexSandboxForSession(snap)
 
 	var threadID string
+	var recovery *codexRecovery
 	if snap.ResumeID != "" {
-		raw, err := c.rpcCall("thread/resume", map[string]any{
-			"threadId": snap.ResumeID, "cwd": cwd,
-			"approvalPolicy": "never", "approvalsReviewer": "user", "sandbox": sandbox,
-		}, 15*time.Second)
-		if err == nil {
-			threadID = extractThreadID(raw, snap.ResumeID)
+		rolloutPath := c.findCodexSessionFile(snap.ResumeID)
+		rolloutBytes := fileSize(rolloutPath)
+		if c.rolloverEnabled && rolloutBytes > c.coldResumeMaxBytes {
+			var err error
+			recovery, err = c.prepareColdRecovery(snap, rolloutPath, rolloutBytes, "cold_resume_hard_limit")
+			if err != nil {
+				return fmt.Errorf("cold recovery required for %s (%d bytes): %w", snap.ResumeID, rolloutBytes, err)
+			}
+			log.Printf("[codex] cold resume guarded session=%s thread=%s bytes=%d", s.ID, snap.ResumeID, rolloutBytes)
 		} else {
-			log.Printf("[codex] thread/resume failed, starting new: %v", err)
+			raw, err := c.rpcCall("thread/resume", map[string]any{
+				"threadId": snap.ResumeID, "cwd": cwd,
+				"approvalPolicy": "never", "approvalsReviewer": "user", "sandbox": sandbox,
+			}, 15*time.Second)
+			if err == nil {
+				threadID = extractThreadID(raw, snap.ResumeID)
+			} else if isStaleThreadError(err) {
+				recovery, err = c.prepareColdRecovery(snap, rolloutPath, rolloutBytes, "thread_not_found")
+				if err != nil {
+					return fmt.Errorf("thread not found and recovery checkpoint failed: %w", err)
+				}
+				log.Printf("[codex] stale thread session=%s; starting recovery generation", s.ID)
+			} else {
+				// A timeout or transport failure is not proof that the old thread is
+				// unusable. Starting a blank fallback here forks the logical session.
+				return fmt.Errorf("thread/resume failed without safe fallback: %w", err)
+			}
 		}
 	}
 	if threadID == "" {
@@ -2037,9 +2085,17 @@ func (c *Codex) ensureThread(s *session.Session, st *codexState) error {
 			return errNoThreadID
 		}
 	}
+	if recovery != nil {
+		if err := c.commitColdRecovery(recovery, threadID); err != nil {
+			return fmt.Errorf("commit cold recovery: %w", err)
+		}
+	}
 
 	st.mu.Lock()
 	st.threadID = threadID
+	if recovery != nil {
+		st.pendingHandoff = recovery.Handoff
+	}
 	st.mu.Unlock()
 	c.mu.Lock()
 	c.threadToSession[threadID] = s
@@ -2123,7 +2179,7 @@ func (c *Codex) Clear(ctx context.Context, s *session.Session) error {
 			_, _ = c.rpcCall("thread/archive", map[string]any{"threadId": threadID}, 5*time.Second)
 		}
 	}
-	s.SetResumeID("")
+	s.ClearResumeIDs()
 	c.sink.Emit(backend.NewSessionWarning(s.ID, "Session history cleared."))
 	c.sink.Emit(backend.NewGoalCleared(s.ID))
 	return nil

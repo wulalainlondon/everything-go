@@ -330,7 +330,13 @@ func (h *Hub) Emit(event any) {
 	// (session_uuid) or a completed turn (done) — mirrors the Python bridge's
 	// persist-on-turn-complete trigger.
 	switch event.(type) {
-	case protocol.SessionUUID, protocol.Done:
+	case protocol.SessionUUID:
+		// A changed physical thread is the durable identity of a logical
+		// session. Persist synchronously before the executor can accept another
+		// turn or the service can restart; otherwise a crash can revive the old
+		// generation and fork history again.
+		h.registry.Persist()
+	case protocol.Done:
 		go h.registry.Persist()
 	}
 }
