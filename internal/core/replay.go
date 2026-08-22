@@ -95,6 +95,9 @@ func (h *Hub) ackOfflineReplay(c *Client, batchID string) {
 	if batchID == "" {
 		return
 	}
+	if h.ackAttachmentReplay(c, batchID) {
+		return
+	}
 	h.replayMu.Lock()
 	lease := h.replayLease
 	if lease == nil || lease.owner != c || lease.batchID != batchID {

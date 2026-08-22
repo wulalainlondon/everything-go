@@ -97,6 +97,22 @@ func (m *Mux) ClearGoal(ctx context.Context, s *session.Session) error {
 	return gc.ClearGoal(ctx, s)
 }
 
+func (m *Mux) ReleaseSession(ctx context.Context, s *session.Session) error {
+	controller, ok := m.pick(s).(backend.SessionControlExecutor)
+	if !ok {
+		return nil
+	}
+	return controller.ReleaseSession(ctx, s)
+}
+
+func (m *Mux) ClaimSession(ctx context.Context, s *session.Session) error {
+	controller, ok := m.pick(s).(backend.SessionControlExecutor)
+	if !ok {
+		return nil
+	}
+	return controller.ClaimSession(ctx, s)
+}
+
 func (m *Mux) UpdateSessionSettings(ctx context.Context, s *session.Session) error {
 	updater, ok := m.pick(s).(interface {
 		UpdateSessionSettings(context.Context, *session.Session) error

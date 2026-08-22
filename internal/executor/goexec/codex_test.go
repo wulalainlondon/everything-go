@@ -479,6 +479,26 @@ func TestCodexDetectsStaleThreadErrors(t *testing.T) {
 	}
 }
 
+func TestEnsureThreadClassifiesActiveWriter(t *testing.T) {
+	c := NewCodex(&capSink{}, "codex")
+	reg := session.NewRegistry()
+	s := reg.Create("logical", "session", t.TempDir(), backend.Codex, "", "", "thread-desktop")
+	writer := &rpcCaptureWriter{writes: make(chan []byte, 1)}
+	c.rpc.setWriter(writer)
+	go func() {
+		request := <-writer.writes
+		var frame struct {
+			ID int `json:"id"`
+		}
+		_ = json.Unmarshal(request, &frame)
+		c.rpc.dispatchResponse(json.RawMessage(fmt.Sprintf(`{"id":%d,"error":{"code":-32600,"message":"thread thread-desktop already has an active writer"}}`, frame.ID)))
+	}()
+	err := c.ensureThread(s, c.state(s.ID))
+	if !errors.Is(err, backend.ErrThreadActiveWriter) {
+		t.Fatalf("ensureThread error = %v, want ErrThreadActiveWriter", err)
+	}
+}
+
 func TestCodexAuthFingerprintChangesOnlyWithContent(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "auth.json")
 	if got, err := codexAuthFingerprint(path); err != nil || got != "missing" {
@@ -552,6 +572,7 @@ func TestCodexAuthChangeRestartsAppServerWhenIdle(t *testing.T) {
 	}
 
 	c := NewCodex(&capSink{}, wrapper)
+	c.appServerMode = "stdio"
 	c.authPath = authPath
 	if err := c.ensureServer(); err != nil {
 		t.Fatal(err)
@@ -622,6 +643,18 @@ func TestCodexAuthHelperProcess(t *testing.T) {
 		}
 	}
 	os.Exit(0)
+}
+
+func TestCodexDaemonSocketPath(t *testing.T) {
+	c := NewCodex(&capSink{}, "codex")
+	c.appServerSocket = ""
+	if got := c.daemonSocketPath("/tmp/codex-home"); got != "/tmp/codex-home/app-server-control/app-server-control.sock" {
+		t.Fatalf("default socket=%q", got)
+	}
+	c.appServerSocket = "/tmp/custom.sock"
+	if got := c.daemonSocketPath("/tmp/codex-home"); got != "/tmp/custom.sock" {
+		t.Fatalf("custom socket=%q", got)
+	}
 }
 
 func TestCodexTurnLivenessPolicy(t *testing.T) {

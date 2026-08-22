@@ -60,7 +60,11 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		// Goal is durable state. Send the full latest snapshot before transient
 		// replay so a dropped historical goal_update cannot leave the UI stale.
 		c.enqueueEvent(h.goals.Snapshot())
+		for _, entry := range h.controls.List() {
+			c.enqueueEvent(controlEvent(entry, "", ""))
+		}
 		h.replayOffline(c)
+		// Canonical media/documents use a separate per-device persistent cursor.
 		// Replay any file pushes this device hasn't acked yet (parity with the
 		// Python bridge, which re-emits pending file_push frames on hello).
 		h.sendPendingPushes(c)
@@ -113,6 +117,19 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 	case "offline_replay_ack":
 		h.ackOfflineReplay(c, cmd.BatchID)
 
+	case "handoff_to_desktop":
+		h.handleDesktopHandoff(c, cmd.SessionID)
+
+	case "reclaim_from_desktop":
+		h.handleDesktopReclaim(c, cmd.SessionID)
+
+	case "request_session_control":
+		entry := h.controls.Get(cmd.SessionID)
+		c.enqueueEvent(controlEvent(entry, "", ""))
+
+	case "request_attachment_replay":
+		h.startAttachmentReplay(c, cmd.SessionID)
+
 	case "get_all_sessions":
 		go h.handleGetAllSessions(c)
 
@@ -154,6 +171,9 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		h.Emit(h.client.SessionsList(h.sessionSummaries()))
 
 	case "message":
+		if h.rejectMobileWrite(c, cmd.SessionID) {
+			return
+		}
 		s, ok := h.registry.Get(cmd.SessionID)
 		if !ok {
 			h.Emit(h.client.Error(cmd.SessionID, "no_session", "unknown session"))
@@ -171,6 +191,11 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		}
 		if !s.Submit(func() {
 			if err := h.exec.Send(context.Background(), s, reqID, content, images, files); err != nil {
+				if errors.Is(err, backend.ErrThreadActiveWriter) {
+					h.markDesktopWriter(s)
+					h.Emit(backend.NewError(s.ID, reqID, "session_controlled_by_desktop", "This session is currently controlled by the desktop. Exit the desktop TUI and reclaim mobile control before sending a new turn."))
+					return
+				}
 				log.Printf("[%s] send error: %v", s.ID, err)
 			}
 		}) {
@@ -178,6 +203,9 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		}
 
 	case "steer_message":
+		if h.rejectMobileWrite(c, cmd.SessionID) {
+			return
+		}
 		cacheKey := cmd.SessionID + "\x00" + cmd.RequestID
 		h.steerMu.Lock()
 		cached, cachedOK := h.steerResults[cacheKey]
@@ -299,6 +327,10 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		}
 		go func() {
 			if err := gc.SetGoal(context.Background(), s, cmd.Objective, cmd.GoalStatus, cmd.TokenBudget); err != nil {
+				if errors.Is(err, backend.ErrThreadActiveWriter) {
+					h.markDesktopWriter(s)
+					return
+				}
 				log.Printf("[%s] goal set error: %v", s.ID, err)
 			}
 		}()
@@ -316,6 +348,10 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		}
 		go func() {
 			if err := gc.GetGoal(context.Background(), s); err != nil {
+				if errors.Is(err, backend.ErrThreadActiveWriter) {
+					h.markDesktopWriter(s)
+					return
+				}
 				log.Printf("[%s] goal get error: %v", s.ID, err)
 			}
 		}()
@@ -333,6 +369,10 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		}
 		go func() {
 			if err := gc.ClearGoal(context.Background(), s); err != nil {
+				if errors.Is(err, backend.ErrThreadActiveWriter) {
+					h.markDesktopWriter(s)
+					return
+				}
 				log.Printf("[%s] goal clear error: %v", s.ID, err)
 			}
 		}()

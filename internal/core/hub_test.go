@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -140,7 +141,12 @@ func TestEnqueueAfterShutdownDoesNotPanic(t *testing.T) {
 func TestHubResolvesLocalGeneratedMediaURL(t *testing.T) {
 	h, _ := newTestHub(t)
 	c := newTestClient(h)
+	c.deviceID = "phone"
+	h.registerLatest(c)
 	path := filepath.Join(t.TempDir(), "generated image.png")
+	if err := os.WriteFile(path, []byte("png"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	h.Emit(protocol.Media{
 		Type: "media", SessionID: "s1", RequestID: "r1",
 		MediaType: "image", Path: path,

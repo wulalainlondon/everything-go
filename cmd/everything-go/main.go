@@ -113,6 +113,7 @@ func main() {
 		LanIP:        detectLanIP(),
 		TailscaleIP:  detectTailscaleIP(),
 		Backends:     backend.DefaultRegistry(*remoteWSURL != ""),
+		CodexRemote:  codexRemoteEndpoint(),
 	}
 	hub := core.NewHub(reg, cfg, pairing, *port)
 
@@ -227,6 +228,17 @@ func main() {
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func codexRemoteEndpoint() string {
+	mode := strings.ToLower(strings.TrimSpace(os.Getenv("EVERYTHING_GO_CODEX_APP_SERVER_MODE")))
+	if mode == "stdio" || mode == "private" {
+		return ""
+	}
+	if socket := strings.TrimSpace(os.Getenv("EVERYTHING_GO_CODEX_APP_SERVER_SOCKET")); socket != "" {
+		return "unix://" + socket
+	}
+	return "unix://"
 }
 
 // runSearchIndexer is the body of `--mode=index`: a one-shot search ingest that

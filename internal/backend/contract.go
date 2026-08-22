@@ -13,8 +13,9 @@ import (
 
 var ErrUnsupportedGoal = errors.New("goal mode is only supported for Codex sessions")
 var (
-	ErrUnsupportedSteer = errors.New("same-turn steering is not supported by this backend")
-	ErrNoActiveTurn     = errors.New("there is no active turn to steer")
+	ErrUnsupportedSteer   = errors.New("same-turn steering is not supported by this backend")
+	ErrNoActiveTurn       = errors.New("there is no active turn to steer")
+	ErrThreadActiveWriter = errors.New("codex thread is controlled by another client")
 )
 
 const (
@@ -143,4 +144,11 @@ type GoalController interface {
 	SetGoal(ctx context.Context, s *session.Session, objective, status string, tokenBudget *int) error
 	GetGoal(ctx context.Context, s *session.Session) error
 	ClearGoal(ctx context.Context, s *session.Session) error
+}
+
+// SessionControlExecutor transfers a resumable session between the Bridge and
+// another client of the shared backend daemon without clearing or archiving it.
+type SessionControlExecutor interface {
+	ReleaseSession(ctx context.Context, s *session.Session) error
+	ClaimSession(ctx context.Context, s *session.Session) error
 }

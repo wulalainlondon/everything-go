@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -146,6 +147,13 @@ func sendReliable(ctx context.Context, inner Executor, sink *TerminalSink, s *se
 		}
 	}()
 	err = inner.Send(ctx, s, reqID, content, images, files)
+	if errors.Is(err, backend.ErrThreadActiveWriter) {
+		// The Hub converts this ownership conflict into a durable session_control
+		// event plus a request-scoped rejection. Do not manufacture a generic red
+		// send_error before it gets that opportunity.
+		sink.complete(k)
+		return err
+	}
 	if err != nil && !sink.Done(k) {
 		sink.Emit(backend.NewError(s.ID, reqID, backend.ErrSend, err.Error()))
 	}

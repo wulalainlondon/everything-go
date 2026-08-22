@@ -19,6 +19,7 @@ import (
 
 	"github.com/pion/webrtc/v4"
 
+	"everything-go/internal/attachmentjournal"
 	"everything-go/internal/backend"
 	"everything-go/internal/clientproto"
 	"everything-go/internal/executor"
@@ -44,27 +45,30 @@ type Config struct {
 	LanIP        string
 	TailscaleIP  string
 	Backends     []backend.Definition
+	CodexRemote  string
 }
 
 // Hub owns the set of connected clients and the session registry, and acts as
 // the executor.Sink (Emit broadcasts an event to connected clients, or buffers
 // it when none are connected so a reconnecting client can recover it).
 type Hub struct {
-	registry  *session.Registry
-	exec      executor.Executor
-	shells    *runtime.ShellManager
-	pairing   *governance.Pairing
-	perms     *governance.PermissionManager
-	offline   *governance.OfflineBuffer
-	goals     *governance.GoalStateStore
-	search    *search.Index
-	fcm       *fcm.Notifier
-	feed      *feed.Store
-	inbox     *inbox.Store
-	mediaScan *media.Scanner
-	cfg       Config
-	client    clientproto.AppV1
-	gen       string // per-boot generation id
+	registry    *session.Registry
+	exec        executor.Executor
+	shells      *runtime.ShellManager
+	pairing     *governance.Pairing
+	perms       *governance.PermissionManager
+	offline     *governance.OfflineBuffer
+	goals       *governance.GoalStateStore
+	search      *search.Index
+	fcm         *fcm.Notifier
+	feed        *feed.Store
+	inbox       *inbox.Store
+	mediaScan   *media.Scanner
+	attachments *attachmentjournal.Store
+	controls    *governance.SessionControlStore
+	cfg         Config
+	client      clientproto.AppV1
+	gen         string // per-boot generation id
 
 	iceServers []webrtc.ICEServer // STUN/TURN for WebRTC answers (default: Google STUN)
 
@@ -105,24 +109,30 @@ type Hub struct {
 
 	replayMu    sync.Mutex
 	replayLease *replayLease
+
+	attachmentReplayMu sync.Mutex
+	attachmentReplays  map[string]*attachmentReplayLease // device_id + session_id -> lease
 }
 
 func NewHub(reg *session.Registry, cfg Config, pairing *governance.Pairing, port int) *Hub {
 	h := &Hub{
-		registry:       reg,
-		pairing:        pairing,
-		offline:        governance.NewOfflineBuffer(),
-		goals:          governance.NewGoalStateStore(goalSnapshotPath(cfg.DataDir)),
-		cfg:            cfg,
-		client:         clientproto.NewAppV1(),
-		gen:            randomID(),
-		clients:        make(map[*Client]struct{}),
-		latestByDevice: make(map[string]*Client),
-		turnText:       make(map[string]*strings.Builder),
-		steerResults:   make(map[string]protocol.SteerResult),
-		iceServers:     stunServers,
-		storm:          newStormGuards(),
-		mediaScan:      media.NewScanner(port),
+		registry:          reg,
+		pairing:           pairing,
+		offline:           governance.NewOfflineBuffer(),
+		goals:             governance.NewGoalStateStore(goalSnapshotPath(cfg.DataDir)),
+		cfg:               cfg,
+		client:            clientproto.NewAppV1(),
+		gen:               randomID(),
+		clients:           make(map[*Client]struct{}),
+		latestByDevice:    make(map[string]*Client),
+		turnText:          make(map[string]*strings.Builder),
+		steerResults:      make(map[string]protocol.SteerResult),
+		iceServers:        stunServers,
+		storm:             newStormGuards(),
+		mediaScan:         media.NewScanner(port),
+		attachments:       attachmentjournal.New(cfg.DataDir),
+		controls:          governance.NewSessionControlStore(cfg.DataDir),
+		attachmentReplays: make(map[string]*attachmentReplayLease),
 	}
 	if cfg.TailscaleIP != "" {
 		h.mediaScan.SetTailscaleIP(cfg.TailscaleIP)
@@ -281,6 +291,16 @@ func (h *Hub) connectedDeviceIDs(exclude string) []string {
 // event for replay on the next reconnect (the offline-recovery path). Safe for
 // concurrent use.
 func (h *Hub) Emit(event any) {
+	// Attachments use their own durable per-device journal. They must never enter
+	// the global offline buffer: a desktop ACK must not consume a phone delivery.
+	if _, isMedia := event.(protocol.Media); isMedia {
+		h.emitAttachment(event)
+		return
+	}
+	if _, isDocument := event.(protocol.Document); isDocument {
+		h.emitAttachment(event)
+		return
+	}
 	// Backends may discover a local generated image before the core has enough
 	// network context to construct a phone-reachable URL. Resolve it at the Hub,
 	// which owns the media server and tunnel/Tailscale/LAN address selection.
@@ -459,6 +479,7 @@ func (h *Hub) removeClient(c *Client) {
 		h.latestMu.Unlock()
 	}
 	h.releaseReplayLease(c)
+	h.releaseAttachmentReplay(c)
 }
 
 func goalSnapshotPath(dataDir string) string {

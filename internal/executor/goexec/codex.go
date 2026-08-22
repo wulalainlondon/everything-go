@@ -10,9 +10,12 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,6 +24,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/coder/websocket"
 
 	"everything-go/internal/backend"
 	"everything-go/internal/executor"
@@ -37,6 +42,12 @@ const (
 	codexStallWarnAfter   = 5 * time.Minute
 	codexStallAbortAfter  = 30 * time.Minute
 	codexStallCheckEvery  = 30 * time.Second
+	// A thread/resume response contains the complete serialized history in one
+	// WebSocket message. coder/websocket defaults to 32 KiB, which disconnects
+	// healthy daemon sessions as soon as a non-trivial thread is resumed. Keep a
+	// finite ceiling for memory safety while matching the hundreds-of-MB replies
+	// already supported by the stdio transport below.
+	codexRemoteReadLimit = 512 * 1024 * 1024
 )
 
 var (
@@ -137,6 +148,9 @@ type Codex struct {
 	proc                  *exec.Cmd
 	stdin                 io.WriteCloser
 	procDone              chan struct{}
+	remoteConn            *websocket.Conn
+	remoteDone            chan struct{}
+	remoteCancel          context.CancelFunc
 	authPath              string
 	serverAuthFingerprint string
 	authReloadDeferred    bool
@@ -159,6 +173,8 @@ type Codex struct {
 	rolloverEnabled    bool
 	coldResumeMaxBytes int64
 	checkpointMaxBytes int
+	appServerMode      string // daemon (default) | stdio (compatibility fallback)
+	appServerSocket    string
 }
 
 type codexInteraction struct {
@@ -196,7 +212,17 @@ func NewCodex(sink executor.Sink, codexBin string) *Codex {
 		rolloverEnabled:    envBool("EVERYTHING_GO_CODEX_ROLLOVER_ENABLED", false),
 		coldResumeMaxBytes: envInt64("EVERYTHING_GO_CODEX_COLD_RESUME_MAX_BYTES", 256*1024*1024),
 		checkpointMaxBytes: int(envInt64("EVERYTHING_GO_CODEX_CHECKPOINT_MAX_BYTES", 128*1024)),
+		appServerMode:      codexAppServerMode(),
+		appServerSocket:    strings.TrimSpace(os.Getenv("EVERYTHING_GO_CODEX_APP_SERVER_SOCKET")),
 	}
+}
+
+func codexAppServerMode() string {
+	mode := strings.ToLower(strings.TrimSpace(os.Getenv("EVERYTHING_GO_CODEX_APP_SERVER_MODE")))
+	if mode == "stdio" || mode == "private" {
+		return "stdio"
+	}
+	return "daemon"
 }
 
 // SetDataDir points generation manifests at the bridge's configured state
@@ -226,6 +252,12 @@ func (c *Codex) ensureServer() error {
 	c.startMu.Lock()
 	defer c.startMu.Unlock()
 	if c.serverRunningLocked() {
+		// A shared daemon owns credential lifecycle. Restarting it from one Bridge
+		// would disrupt desktop TUI and other Bridge clients, so only the legacy
+		// private stdio mode performs auth-triggered process replacement.
+		if c.appServerMode == "daemon" {
+			return nil
+		}
 		fingerprint, err := codexAuthFingerprint(c.authPath)
 		if err != nil {
 			log.Printf("[codex] auth credential check failed: %v", err)
@@ -252,14 +284,29 @@ func (c *Codex) ensureServer() error {
 }
 
 func (c *Codex) startServerLocked() error {
-	log.Printf("[codex] spawning codex app-server")
+	log.Printf("[codex] connecting app-server mode=%s", c.appServerMode)
 	if changed, err := ensureBrowserElicitationRouting(filepath.Dir(c.sessionsRoot)); err != nil {
 		log.Printf("[codex] browser elicitation routing config failed: %v", err)
 	} else if changed {
 		log.Printf("[codex] Browser Use elicitations routed through bridge policy")
 	}
-	cmd := exec.Command(c.codexBin, "app-server")
-	cmd.Env = append(os.Environ(), "CODEX_HOME="+filepath.Dir(c.sessionsRoot))
+	codexHome := filepath.Dir(c.sessionsRoot)
+	if c.appServerMode == "daemon" {
+		for _, action := range []string{"start", "enable-remote-control"} {
+			startCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			managed := exec.CommandContext(startCtx, c.codexBin, "app-server", "daemon", action)
+			managed.Env = append(os.Environ(), "CODEX_HOME="+codexHome)
+			output, err := managed.CombinedOutput()
+			cancel()
+			if err != nil {
+				return fmt.Errorf("codex app-server daemon %s: %w (%s)", action, err, strings.TrimSpace(string(output)))
+			}
+		}
+		return c.startRemoteServerLocked(codexHome)
+	}
+	args := []string{"app-server"}
+	cmd := exec.Command(c.codexBin, args...)
+	cmd.Env = append(os.Environ(), "CODEX_HOME="+codexHome)
 	stdinPipe, err := cmd.StdinPipe()
 	if err != nil {
 		return err
@@ -275,10 +322,14 @@ func (c *Codex) startServerLocked() error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-	authFingerprint, err := codexAuthFingerprint(c.authPath)
-	if err != nil {
-		_ = cmd.Process.Kill()
-		return fmt.Errorf("read Codex credentials: %w", err)
+	authFingerprint := "shared-daemon"
+	if c.appServerMode != "daemon" {
+		var err error
+		authFingerprint, err = codexAuthFingerprint(c.authPath)
+		if err != nil {
+			_ = cmd.Process.Kill()
+			return fmt.Errorf("read Codex credentials: %w", err)
+		}
 	}
 	done := make(chan struct{})
 	c.proc = cmd
@@ -307,6 +358,14 @@ func (c *Codex) startServerLocked() error {
 		c.startMu.Unlock()
 	}(cmd, done)
 
+	if err := c.initializeRPC(); err != nil {
+		return err
+	}
+	c.startAuthWatcher()
+	return nil
+}
+
+func (c *Codex) initializeRPC() error {
 	if _, err := c.rpc.request("initialize", map[string]any{
 		"clientInfo": map[string]any{
 			"name":    "claude-bridge",
@@ -324,8 +383,92 @@ func (c *Codex) startServerLocked() error {
 	if err := c.rpc.notify("initialized", nil); err != nil {
 		return err
 	}
-	c.startAuthWatcher()
 	return nil
+}
+
+type websocketRPCWriter struct {
+	conn *websocket.Conn
+}
+
+func (w websocketRPCWriter) Write(p []byte) (int, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := w.conn.Write(ctx, websocket.MessageText, p); err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
+func (c *Codex) daemonSocketPath(codexHome string) string {
+	if c.appServerSocket != "" {
+		return c.appServerSocket
+	}
+	return filepath.Join(codexHome, "app-server-control", "app-server-control.sock")
+}
+
+func (c *Codex) startRemoteServerLocked(codexHome string) error {
+	socketPath := c.daemonSocketPath(codexHome)
+	dialer := &net.Dialer{Timeout: 10 * time.Second}
+	httpClient := &http.Client{Transport: &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return dialer.DialContext(ctx, "unix", socketPath)
+		},
+	}}
+	ctx, cancelDial := context.WithTimeout(context.Background(), 15*time.Second)
+	conn, _, err := websocket.Dial(ctx, "ws://localhost/", &websocket.DialOptions{HTTPClient: httpClient})
+	cancelDial()
+	if err != nil {
+		return fmt.Errorf("connect shared codex app-server at %s: %w", socketPath, err)
+	}
+	conn.SetReadLimit(codexRemoteReadLimit)
+	readCtx, cancelRead := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	c.remoteConn = conn
+	c.remoteDone = done
+	c.remoteCancel = cancelRead
+	c.serverAuthFingerprint = "shared-daemon"
+	c.authReloadDeferred = false
+	c.rpc.setWriter(websocketRPCWriter{conn: conn})
+	go c.readRemoteLoop(readCtx, conn, done)
+	if err := c.initializeRPC(); err != nil {
+		cancelRead()
+		_ = conn.Close(websocket.StatusInternalError, "initialize failed")
+		return err
+	}
+	log.Printf("[codex] connected shared daemon socket=%s", socketPath)
+	return nil
+}
+
+func (c *Codex) readRemoteLoop(ctx context.Context, conn *websocket.Conn, done chan struct{}) {
+	var readErr error
+	defer func() {
+		failure := error(errProcDead)
+		if readErr != nil && ctx.Err() == nil {
+			failure = fmt.Errorf("app-server connection lost: %w", readErr)
+			log.Printf("[codex] remote read loop error: %v", readErr)
+		}
+		c.rpc.failAll(failure)
+		c.invalidateLiveThreads()
+		close(done)
+		c.startMu.Lock()
+		if c.remoteConn == conn {
+			c.remoteConn = nil
+			c.remoteDone = nil
+			c.remoteCancel = nil
+			c.rpc.setWriter(nil)
+		}
+		c.startMu.Unlock()
+	}()
+	for {
+		_, payload, err := conn.Read(ctx)
+		if err != nil {
+			readErr = err
+			return
+		}
+		if !c.rpc.dispatchResponse(payload) {
+			c.dispatch(payload)
+		}
+	}
 }
 
 func codexAuthFingerprint(path string) (string, error) {
@@ -367,6 +510,20 @@ func (c *Codex) authCredentialsChanged() bool {
 }
 
 func (c *Codex) serverRunningLocked() bool {
+	if c.appServerMode == "daemon" {
+		if c.remoteConn == nil {
+			return false
+		}
+		if c.remoteDone == nil {
+			return true
+		}
+		select {
+		case <-c.remoteDone:
+			return false
+		default:
+			return true
+		}
+	}
 	if c.proc == nil {
 		return false
 	}
@@ -401,6 +558,27 @@ func (c *Codex) hasActiveWork() bool {
 }
 
 func (c *Codex) stopServerLocked() error {
+	if c.appServerMode == "daemon" {
+		conn, done, cancel := c.remoteConn, c.remoteDone, c.remoteCancel
+		if cancel != nil {
+			cancel()
+		}
+		if conn != nil {
+			_ = conn.Close(websocket.StatusNormalClosure, "bridge client closing")
+		}
+		if done != nil {
+			select {
+			case <-done:
+			case <-time.After(3 * time.Second):
+				return fmt.Errorf("timed out closing shared app-server client")
+			}
+		}
+		c.remoteConn = nil
+		c.remoteDone = nil
+		c.remoteCancel = nil
+		c.rpc.setWriter(nil)
+		return nil
+	}
 	cmd := c.proc
 	if cmd == nil || !c.serverRunningLocked() {
 		c.proc = nil
@@ -1422,7 +1600,9 @@ func (c *Codex) Send(ctx context.Context, s *session.Session, reqID, content str
 	st := c.state(s.ID)
 
 	if err := c.ensureThread(s, st); err != nil {
-		c.sink.Emit(backend.NewError(s.ID, reqID, backend.ErrProcessDied, "failed to start codex thread: "+err.Error()))
+		if !errors.Is(err, backend.ErrThreadActiveWriter) {
+			c.sink.Emit(backend.NewError(s.ID, reqID, backend.ErrProcessDied, "failed to start codex thread: "+err.Error()))
+		}
 		return err
 	}
 	isCompactCommand := strings.TrimSpace(content) == "/compact"
@@ -1724,7 +1904,9 @@ func (c *Codex) SetGoal(ctx context.Context, s *session.Session, objective, stat
 	}
 	st := c.state(s.ID)
 	if err := c.ensureThread(s, st); err != nil {
-		c.sink.Emit(backend.NewError(s.ID, "", backend.ErrProcessDied, "failed to start codex thread: "+err.Error()))
+		if !errors.Is(err, backend.ErrThreadActiveWriter) {
+			c.sink.Emit(backend.NewError(s.ID, "", backend.ErrProcessDied, "failed to start codex thread: "+err.Error()))
+		}
 		return err
 	}
 	st.mu.Lock()
@@ -1761,14 +1943,41 @@ func (c *Codex) GetGoal(ctx context.Context, s *session.Session) error {
 		return err
 	}
 	st := c.state(s.ID)
-	if err := c.ensureThread(s, st); err != nil {
-		c.sink.Emit(backend.NewError(s.ID, "", backend.ErrProcessDied, "failed to start codex thread: "+err.Error()))
-		return err
-	}
 	st.mu.Lock()
 	threadID := st.threadID
 	st.mu.Unlock()
+	if threadID == "" {
+		// Goal metadata is daemon-global and can be read by thread id while a
+		// desktop TUI owns the writer. Do not resume merely to perform this
+		// read-only query; Codex rejects that second attachment as an active writer.
+		threadID = s.ResumeID()
+	}
+	if threadID == "" {
+		if err := c.ensureThread(s, st); err != nil {
+			if !errors.Is(err, backend.ErrThreadActiveWriter) {
+				c.sink.Emit(backend.NewError(s.ID, "", backend.ErrProcessDied, "failed to start codex thread: "+err.Error()))
+			}
+			return err
+		}
+		st.mu.Lock()
+		threadID = st.threadID
+		st.mu.Unlock()
+	}
 	raw, err := c.rpcCall("thread/goal/get", map[string]any{"threadId": threadID}, 30*time.Second)
+	if err != nil && isStaleThreadError(err) {
+		// An unloaded historical thread still needs one normal resume. A thread
+		// already loaded by a desktop client takes the fast read-only path above.
+		if resumeErr := c.ensureThread(s, st); resumeErr != nil {
+			if !errors.Is(resumeErr, backend.ErrThreadActiveWriter) {
+				c.sink.Emit(backend.NewError(s.ID, "", backend.ErrProcessDied, "failed to start codex thread: "+resumeErr.Error()))
+			}
+			return resumeErr
+		}
+		st.mu.Lock()
+		threadID = st.threadID
+		st.mu.Unlock()
+		raw, err = c.rpcCall("thread/goal/get", map[string]any{"threadId": threadID}, 30*time.Second)
+	}
 	if err != nil {
 		c.sink.Emit(backend.NewError(s.ID, "", backend.ErrTurn, "goal get failed: "+err.Error()))
 		return err
@@ -1828,7 +2037,9 @@ func (c *Codex) ClearGoal(ctx context.Context, s *session.Session) error {
 	}
 	st := c.state(s.ID)
 	if err := c.ensureThread(s, st); err != nil {
-		c.sink.Emit(backend.NewError(s.ID, "", backend.ErrProcessDied, "failed to start codex thread: "+err.Error()))
+		if !errors.Is(err, backend.ErrThreadActiveWriter) {
+			c.sink.Emit(backend.NewError(s.ID, "", backend.ErrProcessDied, "failed to start codex thread: "+err.Error()))
+		}
 		return err
 	}
 	st.mu.Lock()
@@ -1994,6 +2205,13 @@ func isStaleThreadError(err error) bool {
 	return strings.Contains(msg, "unknown session") || strings.Contains(msg, "thread not found")
 }
 
+func isActiveWriterError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "already has an active writer")
+}
+
 func codexUsageValues(u codexTokenUsage) (int, int) {
 	used := u.Last.TotalTokens
 	if used == 0 {
@@ -2043,6 +2261,8 @@ func (c *Codex) ensureThread(s *session.Session, st *codexState) error {
 			}, 15*time.Second)
 			if err == nil {
 				threadID = extractThreadID(raw, snap.ResumeID)
+			} else if isActiveWriterError(err) {
+				return fmt.Errorf("thread/resume refused: %w: %v", backend.ErrThreadActiveWriter, err)
 			} else if isStaleThreadError(err) {
 				recovery, err = c.prepareColdRecovery(snap, rolloutPath, rolloutBytes, "thread_not_found")
 				if err != nil {
@@ -2202,6 +2422,47 @@ func (c *Codex) Close(ctx context.Context, s *session.Session) error {
 	}
 	c.mu.Unlock()
 	return nil
+}
+
+// ReleaseSession detaches only this daemon connection from a thread. It does
+// not archive, delete, or clear the rollout, so a desktop client can resume the
+// same thread id without competing with the Bridge's subscription.
+func (c *Codex) ReleaseSession(ctx context.Context, s *session.Session) error {
+	if err := c.ensureServer(); err != nil {
+		return err
+	}
+	st := c.state(s.ID)
+	st.ensureMu.Lock()
+	defer st.ensureMu.Unlock()
+	st.mu.Lock()
+	threadID := st.threadID
+	st.mu.Unlock()
+	if threadID == "" {
+		threadID = s.ResumeID()
+	}
+	if threadID == "" {
+		return nil
+	}
+	if _, err := c.rpcCall("thread/unsubscribe", map[string]any{"threadId": threadID}, 15*time.Second); err != nil {
+		if isActiveWriterError(err) {
+			// Another client already owns the thread; the desired handoff state is
+			// therefore already true from the Bridge's perspective.
+			c.forgetThread(s, st, threadID)
+			return nil
+		}
+		return fmt.Errorf("thread/unsubscribe: %w", err)
+	}
+	c.forgetThread(s, st, threadID)
+	return nil
+}
+
+// ClaimSession proves that the desktop writer is gone by successfully
+// resuming the thread before the control lease is returned to mobile.
+func (c *Codex) ClaimSession(ctx context.Context, s *session.Session) error {
+	if err := c.ensureServer(); err != nil {
+		return err
+	}
+	return c.ensureThread(s, c.state(s.ID))
 }
 
 func (c *Codex) RespondUserInput(id string, answers map[string]any, cancelled bool) bool {

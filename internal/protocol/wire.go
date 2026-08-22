@@ -182,6 +182,22 @@ type HelloAck struct {
 	Backends     []BackendDefinition `json:"backend_registry,omitempty"`
 }
 
+type SessionControlState struct {
+	Type           string `json:"type"`
+	SessionID      string `json:"session_id"`
+	ThreadID       string `json:"thread_id,omitempty"`
+	Owner          string `json:"owner"`
+	State          string `json:"state"`
+	DesktopCommand string `json:"desktop_command,omitempty"`
+	Message        string `json:"message,omitempty"`
+	UpdatedAt      int64  `json:"updated_at,omitempty"`
+}
+
+func NewSessionControlState(sessionID, threadID, owner, state, command, message string, updatedAt int64) SessionControlState {
+	return SessionControlState{Type: "session_control", SessionID: sessionID, ThreadID: threadID, Owner: owner,
+		State: state, DesktopCommand: command, Message: message, UpdatedAt: updatedAt}
+}
+
 // BackendDefinition is the bridge-advertised backend/model registry consumed by
 // the app's new-session UI. It is intentionally wire-level and static per
 // bridge process; runtime status remains in sessions/tasks/usage events.
@@ -1299,24 +1315,35 @@ func NewInteractionResolved(requestID, sessionID, status string) InteractionReso
 // Media announces an image or video file found in the assistant's output.
 // media_type is "image" | "video".
 type Media struct {
-	Type      string `json:"type"` // "media"
-	SessionID string `json:"session_id"`
-	RequestID string `json:"request_id,omitempty"` // mirrors the done event's request_id so app attaches to the right message
-	MediaType string `json:"media_type"`           // "image" | "video"
-	Path      string `json:"path"`
-	URL       string `json:"url"`
+	Type         string `json:"type"` // "media"
+	SessionID    string `json:"session_id"`
+	RequestID    string `json:"request_id,omitempty"` // mirrors the done event's request_id so app attaches to the right message
+	MediaType    string `json:"media_type"`           // "image" | "video"
+	Path         string `json:"path"`
+	URL          string `json:"url"`
+	AttachmentID string `json:"attachment_id,omitempty"`
+	MIMEType     string `json:"mime_type,omitempty"`
+	DisplayName  string `json:"display_name,omitempty"`
+	CreatedAt    int64  `json:"created_at,omitempty"`
+	Sequence     uint64 `json:"attachment_sequence,omitempty"`
+	Status       string `json:"status,omitempty"` // available | missing
 }
 
 // Document announces a document file (pdf/html) found in the assistant's output.
 // doc_type is "pdf" | "html".
 type Document struct {
-	Type      string `json:"type"` // "document"
-	SessionID string `json:"session_id"`
-	RequestID string `json:"request_id,omitempty"` // mirrors the done event's request_id
-	Path      string `json:"path"`
-	URL       string `json:"url"`
-	Title     string `json:"title"`
-	DocType   string `json:"doc_type"` // "pdf" | "html"
+	Type         string `json:"type"` // "document"
+	SessionID    string `json:"session_id"`
+	RequestID    string `json:"request_id,omitempty"` // mirrors the done event's request_id
+	Path         string `json:"path"`
+	URL          string `json:"url"`
+	Title        string `json:"title"`
+	DocType      string `json:"doc_type"` // "pdf" | "html"
+	AttachmentID string `json:"attachment_id,omitempty"`
+	MIMEType     string `json:"mime_type,omitempty"`
+	CreatedAt    int64  `json:"created_at,omitempty"`
+	Sequence     uint64 `json:"attachment_sequence,omitempty"`
+	Status       string `json:"status,omitempty"` // available | missing
 }
 
 // --- permission approval (bridge↔client), mirrors permission_manager.py ------
