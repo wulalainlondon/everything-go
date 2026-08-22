@@ -155,7 +155,8 @@ func (h *Hub) SetExecutor(e executor.Executor) { h.exec = e }
 
 // authValid mirrors bridge_v2.py:_is_auth_token_valid. BRIDGE_AUTH_TOKEN (a
 // manual override) takes priority; otherwise, if the bridge is claimed, only the
-// paired token is accepted; an unclaimed bridge accepts everyone. provided is
+// paired token is accepted. An unclaimed bridge is enrolled separately through
+// the LAN-only provisional handshake; it never grants full anonymous access.
 // expected pre-trimmed.
 func (h *Hub) authValid(provided string) bool {
 	if expected := strings.TrimSpace(os.Getenv("BRIDGE_AUTH_TOKEN")); expected != "" {
@@ -164,7 +165,7 @@ func (h *Hub) authValid(provided string) bool {
 	if h.pairing.IsLocked() {
 		return h.pairing.LockedTo(provided)
 	}
-	return true
+	return false
 }
 
 // SetSearch wires the search index (nil disables the search command family).

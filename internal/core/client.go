@@ -3,7 +3,9 @@ package core
 import (
 	"context"
 	"log"
+	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -56,11 +58,16 @@ type addressable interface {
 	RemoteAddr() string
 }
 
+type enrollmentEligible interface {
+	EnrollmentEligible() bool
+}
+
 // wsConn adapts coder/websocket to wireConn. Frames are always text (the wire
 // protocol is JSON); the read/write message type is fixed.
 type wsConn struct {
-	c    *websocket.Conn
-	addr string // r.RemoteAddr captured at accept time, for logging
+	c         *websocket.Conn
+	addr      string // r.RemoteAddr captured at accept time, for logging
+	canEnroll bool
 }
 
 func (w wsConn) Read(ctx context.Context) ([]byte, error) {
@@ -81,6 +88,8 @@ func (w wsConn) Kind() string { return "ws" }
 func (w wsConn) Ping(ctx context.Context) error { return w.c.Ping(ctx) }
 
 func (w wsConn) RemoteAddr() string { return w.addr }
+
+func (w wsConn) EnrollmentEligible() bool { return w.canEnroll }
 
 // Client is one logical connection (WS or WebRTC DataChannel). A single write
 // pump goroutine drains the send channel so conn writes are never concurrent.
@@ -104,6 +113,10 @@ type Client struct {
 
 	clientID string
 	deviceID string
+	// enrollmentOnly is true when the handshake was admitted solely through a
+	// short-lived LAN pairing window. Such a client may only complete claim_bridge
+	// (or ping) until its credential is persisted.
+	enrollmentOnly bool
 
 	// supportsReplayAck is negotiated by hello{replay_ack:true}. New clients
 	// receive bounded offline_replay_batch frames; legacy clients use a throttled
@@ -228,7 +241,24 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	conn.SetReadLimit(32 * 1024 * 1024)
-	h.serveConn(context.Background(), wsConn{c: conn, addr: r.RemoteAddr})
+	h.serveConn(context.Background(), wsConn{
+		c: conn, addr: r.RemoteAddr, canEnroll: directPrivateRequest(r),
+	})
+}
+
+func directPrivateRequest(r *http.Request) bool {
+	// A Cloudflare/reverse-proxy connection reaches the bridge from loopback, so
+	// RemoteAddr alone is not enough. Never permit credential enrollment through
+	// forwarded traffic even when the proxy itself is local.
+	if r.Header.Get("CF-Connecting-IP") != "" || r.Header.Get("X-Forwarded-For") != "" {
+		return false
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	return ip != nil && (ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast())
 }
 
 // serveConn runs the full client lifecycle over an arbitrary transport: the
@@ -297,7 +327,15 @@ func (c *Client) handshake(ctx context.Context) (clientproto.Command, bool) {
 		c.writeNow(ctx, protocol.NewError("", "", "Protocol error: first message must be hello"))
 		return clientproto.Command{}, false
 	}
-	if !c.hub.authValid(strings.TrimSpace(in.AuthToken)) {
+	provided := strings.TrimSpace(in.AuthToken)
+	authorized := c.hub.authValid(provided)
+	if !authorized && strings.TrimSpace(os.Getenv("BRIDGE_AUTH_TOKEN")) == "" && provided != "" && c.hub.pairing.EnrollmentOpen() {
+		if eligible, ok := c.conn.(enrollmentEligible); ok && eligible.EnrollmentEligible() {
+			authorized = true
+			c.enrollmentOnly = true
+		}
+	}
+	if !authorized {
 		c.writeNow(ctx, protocol.NewError("", "", "Unauthorized: invalid auth token"))
 		return clientproto.Command{}, false
 	}

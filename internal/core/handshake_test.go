@@ -20,10 +20,10 @@ func (h *Hub) clientCount() int {
 	return len(h.clients)
 }
 
-func TestAuthValidUnlockedAcceptsAll(t *testing.T) {
+func TestAuthValidUnlockedDoesNotGrantFullAccess(t *testing.T) {
 	h, _ := newTestHub(t)
-	if !h.authValid("") || !h.authValid("anything") {
-		t.Fatal("an unlocked bridge must accept any token")
+	if h.authValid("") || h.authValid("anything") {
+		t.Fatal("an unlocked bridge must require LAN enrollment")
 	}
 }
 
@@ -133,23 +133,17 @@ func TestHandshakeAcceptsValidHello(t *testing.T) {
 	conn, ctx, cleanup := dialWS(t, h)
 	defer cleanup()
 
-	_ = conn.Write(ctx, websocket.MessageText, []byte(`{"type":"hello","device_id":"d1"}`))
+	_ = conn.Write(ctx, websocket.MessageText, []byte(`{"type":"hello","device_id":"d1","auth_token":"first-token"}`))
 	m := readEvent(t, ctx, conn)
 	if m["type"] != "hello_ack" {
 		t.Fatalf("valid hello should get hello_ack, got %v", m)
 	}
-	registry, ok := m["backend_registry"].([]any)
-	if !ok || len(registry) != 1 {
-		t.Fatalf("hello_ack should include backend_registry, got %v", m["backend_registry"])
+	if _, ok := m["backend_registry"]; ok {
+		t.Fatalf("first-device provisional hello must not expose backend registry: %v", m)
 	}
-	backend := registry[0].(map[string]any)
-	if backend["id"] != "remote-ws" {
-		t.Fatalf("backend_registry id = %v, want remote-ws", backend["id"])
-	}
-	// hello_ack is followed by the proactive sessions_list.
-	m2 := readEvent(t, ctx, conn)
-	if m2["type"] != "sessions_list" {
-		t.Fatalf("expected sessions_list after hello_ack, got %v", m2)
+	_ = conn.Write(ctx, websocket.MessageText, []byte(`{"type":"claim_bridge","device_id":"d1","auth_token":"first-token"}`))
+	if ack := readEvent(t, ctx, conn); ack["type"] != "claim_ack" {
+		t.Fatalf("first-device claim failed: %v", ack)
 	}
 }
 
@@ -168,6 +162,80 @@ func TestHandshakeAcceptsPairedTokenWhenLocked(t *testing.T) {
 	}
 	if m["locked_to_me"] != true {
 		t.Fatalf("hello_ack should report locked_to_me=true for the owner, got %v", m)
+	}
+}
+
+func TestAuthenticatedDeviceOpensPairingWindow(t *testing.T) {
+	h, _ := newTestHub(t)
+	if err := h.pairing.Claim("owner", "dev-owner"); err != nil {
+		t.Fatal(err)
+	}
+	conn, ctx, cleanup := dialWS(t, h)
+	defer cleanup()
+	_ = conn.Write(ctx, websocket.MessageText, []byte(`{"type":"hello","device_id":"dev-owner","auth_token":"owner"}`))
+	if got := readEvent(t, ctx, conn); got["type"] != "hello_ack" {
+		t.Fatalf("owner handshake failed: %v", got)
+	}
+	_ = conn.Write(ctx, websocket.MessageText, []byte(`{"type":"open_pairing_window"}`))
+	for {
+		got := readEvent(t, ctx, conn)
+		if got["type"] == "pairing_window_ack" {
+			if got["expires_at"].(float64) <= float64(time.Now().Unix()) {
+				t.Fatalf("bad pairing expiry: %v", got)
+			}
+			break
+		}
+	}
+	if !h.pairing.EnrollmentOpen() {
+		t.Fatal("pairing window was not opened")
+	}
+}
+
+func TestHandshakeAllowsLANEnrollmentDuringWindow(t *testing.T) {
+	h, _ := newTestHub(t)
+	_ = h.pairing.Claim("owner", "dev-owner")
+	h.pairing.OpenEnrollment(time.Minute)
+	conn, ctx, cleanup := dialWS(t, h)
+	defer cleanup()
+
+	_ = conn.Write(ctx, websocket.MessageText, []byte(`{"type":"hello","device_id":"new-device","auth_token":"new-token"}`))
+	if got := readEvent(t, ctx, conn); got["type"] != "hello_ack" {
+		t.Fatalf("LAN enrollment hello rejected: %v", got)
+	} else if _, leaked := got["backend_registry"]; leaked || got["data_dir"] != "" || got["root_dir"] != "" {
+		t.Fatalf("provisional hello leaked bridge metadata: %v", got)
+	}
+	_ = conn.Write(ctx, websocket.MessageText, []byte(`{"type":"request_sessions_list"}`))
+	var gateError map[string]any
+	for gateError == nil {
+		got := readEvent(t, ctx, conn)
+		if got["type"] == "error" {
+			gateError = got
+		}
+	}
+	if !strings.Contains(gateError["message"].(string), "Pairing required") {
+		t.Fatalf("provisional client should be command-gated: %v", gateError)
+	}
+	_ = conn.Write(ctx, websocket.MessageText, []byte(`{"type":"claim_bridge","device_id":"new-device","auth_token":"new-token"}`))
+	for {
+		got := readEvent(t, ctx, conn)
+		if got["type"] == "claim_ack" {
+			break
+		}
+	}
+	if !h.pairing.LockedTo("new-token") {
+		t.Fatal("new LAN credential was not persisted")
+	}
+}
+
+func TestDirectPrivateRequestRejectsForwardedTunnel(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "http://bridge/ws", nil)
+	r.RemoteAddr = "127.0.0.1:12345"
+	if !directPrivateRequest(r) {
+		t.Fatal("direct loopback should be eligible")
+	}
+	r.Header.Set("CF-Connecting-IP", "203.0.113.8")
+	if directPrivateRequest(r) {
+		t.Fatal("Cloudflare-forwarded loopback must not be enrollment eligible")
 	}
 }
 

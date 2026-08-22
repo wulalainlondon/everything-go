@@ -20,6 +20,9 @@ import (
 // DataChannel transport.
 func TestWebRTCPromotesDataChannelToClient(t *testing.T) {
 	h, _ := newTestHub(t)
+	if err := h.pairing.Claim("web-token", "dweb"); err != nil {
+		t.Fatal(err)
+	}
 	h.SetICEServers(nil) // loopback host candidates → no network, fast + deterministic
 
 	sig := newTestClient(h) // signaling client; its send channel captures answers
@@ -81,7 +84,7 @@ func TestWebRTCPromotesDataChannelToClient(t *testing.T) {
 		t.Fatal("client DataChannel never opened")
 	}
 
-	if err := dc.SendText(`{"type":"hello","device_id":"dweb"}`); err != nil {
+	if err := dc.SendText(`{"type":"hello","device_id":"dweb","auth_token":"web-token"}`); err != nil {
 		t.Fatalf("send hello over DC: %v", err)
 	}
 

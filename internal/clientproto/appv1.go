@@ -236,6 +236,7 @@ type HelloInput struct {
 	Gen          string
 	IsLocked     bool
 	LockedToMe   bool
+	PairingOpen  bool
 	InstanceName string
 	RootDir      string
 	DataDir      string
@@ -254,6 +255,7 @@ func (AppV1) HelloAck(in HelloInput) protocol.HelloAck {
 		Gen:          in.Gen,
 		IsLocked:     in.IsLocked,
 		LockedToMe:   in.LockedToMe,
+		PairingOpen:  in.PairingOpen,
 		InstanceName: in.InstanceName,
 		RootDir:      in.RootDir,
 		DataDir:      in.DataDir,
@@ -346,8 +348,12 @@ func (AppV1) ClaimAck() protocol.ClaimAck {
 	return protocol.NewClaimAck()
 }
 
-func (AppV1) UnclaimAck() protocol.UnclaimAck {
-	return protocol.NewUnclaimAck()
+func (AppV1) UnclaimAck(isLocked bool) protocol.UnclaimAck {
+	return protocol.NewUnclaimAck(isLocked)
+}
+
+func (AppV1) PairingWindowAck(expiresAt int64) protocol.PairingWindowAck {
+	return protocol.NewPairingWindowAck(expiresAt)
 }
 
 func (AppV1) SessionClosed(sessionID string) protocol.SessionClosed {

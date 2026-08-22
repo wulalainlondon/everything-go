@@ -30,26 +30,44 @@ func truncate(s string, n int) string {
 // to the Executor. The payload beyond {type, session_id} is only inspected by
 // the specific handler that needs it.
 func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
+	if c.enrollmentOnly && cmd.Kind != "hello" && cmd.Kind != "claim_bridge" && cmd.Kind != "ping" {
+		c.enqueueEvent(h.client.Error("", "", "Pairing required before this device can use the bridge"))
+		return
+	}
 	switch cmd.Kind {
 	case "hello":
 		c.deviceID = cmd.DeviceID
 		c.supportsReplayAck = cmd.ReplayAck
 		// Latest-device-wins: evict any older client from the same device so the
 		// half-disconnect storm can't pile up zombie clients (#1).
-		h.registerLatest(c)
+		if !c.enrollmentOnly {
+			h.registerLatest(c)
+		}
 		h.tunnelURLMu.RLock()
 		tunnelURL := h.tunnelURL
 		h.tunnelURLMu.RUnlock()
-		c.enqueueEvent(h.client.HelloAck(clientproto.HelloInput{
+		helloInput := clientproto.HelloInput{
 			ClientID: c.clientID, DeviceID: cmd.DeviceID,
 			DeviceName: cmd.DeviceName, InstanceID: h.cfg.InstanceID, Gen: h.gen,
 			IsLocked:     h.pairing.IsLocked(),
 			LockedToMe:   h.pairing.LockedTo(cmd.AuthToken),
-			InstanceName: h.cfg.InstanceName, RootDir: h.cfg.RootDir,
-			DataDir: h.cfg.DataDir, LanIP: h.cfg.LanIP,
-			TunnelURL: tunnelURL,
-			Backends:  h.cfg.Backends,
-		}))
+			PairingOpen:  h.pairing.EnrollmentOpen(),
+			InstanceName: h.cfg.InstanceName,
+		}
+		if !c.enrollmentOnly {
+			helloInput.RootDir = h.cfg.RootDir
+			helloInput.DataDir = h.cfg.DataDir
+			helloInput.LanIP = h.cfg.LanIP
+			helloInput.TunnelURL = tunnelURL
+			helloInput.Backends = h.cfg.Backends
+		}
+		c.enqueueEvent(h.client.HelloAck(helloInput))
+		// A provisional LAN client receives only enough information to complete
+		// claim_bridge. Do not disclose sessions, goals, replay, files or backend
+		// metadata before its per-device credential is persisted.
+		if c.enrollmentOnly {
+			return
+		}
 		// Runtime catalogs require app-server initialization. Refresh them after
 		// the cheap hello response so reconnection latency is unaffected.
 		go h.sendBackendCatalog(c)
@@ -96,14 +114,23 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 			c.enqueueEvent(h.client.Error("", "", err.Error()))
 			return
 		}
+		wasEnrollment := c.enrollmentOnly
+		c.enrollmentOnly = false
+		if wasEnrollment {
+			h.registerLatest(c)
+		}
 		c.enqueueEvent(h.client.ClaimAck())
+
+	case "open_pairing_window":
+		expiresAt := h.pairing.OpenEnrollment(2 * time.Minute)
+		c.enqueueEvent(h.client.PairingWindowAck(expiresAt.Unix()))
 
 	case "unclaim_bridge":
 		if err := h.pairing.Unclaim(cmd.AuthToken); err != nil {
 			c.enqueueEvent(h.client.Error("", "", err.Error()))
 			return
 		}
-		c.enqueueEvent(h.client.UnclaimAck())
+		c.enqueueEvent(h.client.UnclaimAck(h.pairing.IsLocked()))
 
 	case "request_sessions_list":
 		c.enqueueEvent(h.client.SessionsList(h.sessionSummaries()))

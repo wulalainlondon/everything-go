@@ -214,7 +214,19 @@ func main() {
 		go netsvc.RegisterMDNS(ctx, *port, cfg.InstanceName)
 	}
 	if *tunnel {
-		go netsvc.NewTunnel(*port, hub.NotifyTunnelURL).Run(ctx)
+		go func() {
+			// Do not expose an unclaimed bridge through a public quick tunnel.
+			// LAN discovery remains available and the tunnel starts after pairing.
+			for !pairing.IsLocked() {
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(time.Second):
+				}
+			}
+			log.Printf("[tunnel] trusted device present; starting remote tunnel")
+			netsvc.NewTunnel(*port, hub.NotifyTunnelURL).Run(ctx)
+		}()
 	}
 
 	mux := http.NewServeMux()

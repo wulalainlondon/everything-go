@@ -101,7 +101,7 @@ func TestOutboundEventSchemas(t *testing.T) {
 		{"tool_start", NewToolStart("s1", "r1", "t1", "Bash", "ls"), "tool_start", []string{"type", "session_id", "tool_use_id", "name", "command"}},
 		{"goal_update", NewGoalUpdate("s1", Goal{ThreadID: "t1", Objective: "ship", Status: "active"}), "goal_update", []string{"type", "session_id", "goal"}},
 		{"goal_cleared", NewGoalCleared("s1"), "goal_cleared", []string{"type", "session_id"}},
-		{"unclaim_ack", NewUnclaimAck(), "unclaim_ack", []string{"type", "is_locked"}},
+		{"unclaim_ack", NewUnclaimAck(false), "unclaim_ack", []string{"type", "is_locked"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

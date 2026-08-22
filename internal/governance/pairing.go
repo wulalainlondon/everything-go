@@ -1,9 +1,5 @@
-// Package governance implements connection-governance: bridge pairing
-// (claim/unclaim single-owner lock) and the offline event buffer that lets a
-// reconnecting client recover events emitted while it was disconnected.
-//
-// Fidelity reference: bridge/pairing.py, bridge/offline_replay.py, and the
-// claim/unclaim + reconnect logic in bridge/handlers/connection.py.
+// Package governance implements connection-governance: bridge pairing and the
+// offline event buffer that lets reconnecting clients recover missed events.
 package governance
 
 import (
@@ -11,91 +7,140 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 )
 
 var (
-	// ErrClaimedByAnother is returned when claim_bridge targets a bridge already
-	// locked to a different auth token.
-	ErrClaimedByAnother = errors.New("Bridge already claimed by another device")
-	// ErrTokenMismatch is returned when unclaim_bridge presents the wrong token.
-	ErrTokenMismatch = errors.New("Unauthorized: token mismatch")
+	ErrClaimedByAnother = errors.New("Bridge pairing is closed; open a pairing window from a trusted device")
+	ErrTokenMismatch    = errors.New("Unauthorized: token mismatch")
 )
 
-// Pairing is the single-owner lock state, persisted to pairing.json.
+const pairingSchemaVersion = 2
+const initialEnrollmentDuration = 10 * time.Minute
+
+type pairedDevice struct {
+	Token    string `json:"token"`
+	DeviceID string `json:"device_id"`
+	PairedAt int64  `json:"paired_at"`
+}
+
+type pairingFile struct {
+	Version int            `json:"version,omitempty"`
+	Devices []pairedDevice `json:"devices,omitempty"`
+
+	// v1 migration fields. They are read but never emitted by v2.
+	PairedToken    string `json:"paired_token,omitempty"`
+	PairedDeviceID string `json:"paired_device_id,omitempty"`
+	PairedAt       int64  `json:"paired_at,omitempty"`
+}
+
+// Pairing persists one credential per trusted device. The first device may
+// claim an unpaired bridge. Additional devices require a short-lived pairing
+// window opened by an already authenticated client.
 type Pairing struct {
 	mu   sync.Mutex
 	path string
 
-	token    string
-	deviceID string
-	pairedAt int64
+	devices     map[string]pairedDevice // token -> device
+	enrollUntil time.Time
 }
 
-type pairingFile struct {
-	PairedToken    string `json:"paired_token"`
-	PairedDeviceID string `json:"paired_device_id"`
-	PairedAt       int64  `json:"paired_at"`
-}
-
-// NewPairing loads pairing state from path (absent file → unpaired).
 func NewPairing(path string) *Pairing {
-	p := &Pairing{path: path}
+	p := &Pairing{path: path, devices: make(map[string]pairedDevice)}
 	if data, err := os.ReadFile(path); err == nil {
 		var f pairingFile
 		if json.Unmarshal(data, &f) == nil {
-			p.token = f.PairedToken
-			p.deviceID = f.PairedDeviceID
-			p.pairedAt = f.PairedAt
+			for _, device := range f.Devices {
+				if device.Token != "" {
+					p.devices[device.Token] = device
+				}
+			}
+			if len(p.devices) == 0 && f.PairedToken != "" {
+				p.devices[f.PairedToken] = pairedDevice{
+					Token: f.PairedToken, DeviceID: f.PairedDeviceID, PairedAt: f.PairedAt,
+				}
+			}
 		}
+	}
+	if len(p.devices) == 0 {
+		p.enrollUntil = time.Now().Add(initialEnrollmentDuration)
 	}
 	return p
 }
 
-// IsLocked reports whether the bridge is claimed by some device.
 func (p *Pairing) IsLocked() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.token != ""
+	return len(p.devices) > 0
 }
 
-// LockedTo reports whether the bridge is claimed by exactly this token.
 func (p *Pairing) LockedTo(token string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.token != "" && p.token == token
+	_, ok := p.devices[token]
+	return token != "" && ok
 }
 
-// Claim locks the bridge to token/deviceID. Idempotent for the same token;
-// rejects a different token while already locked.
+func (p *Pairing) OpenEnrollment(duration time.Duration) time.Time {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if duration <= 0 {
+		duration = 2 * time.Minute
+	}
+	p.enrollUntil = time.Now().Add(duration)
+	return p.enrollUntil
+}
+
+func (p *Pairing) EnrollmentOpen() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return time.Now().Before(p.enrollUntil)
+}
+
+func (p *Pairing) closeEnrollmentLocked() { p.enrollUntil = time.Time{} }
+
+// Claim registers token for deviceID. The first device can always claim; a new
+// token on an existing bridge is accepted only while enrollment is open.
 func (p *Pairing) Claim(token, deviceID string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.token != "" && p.token != token {
+	if token == "" {
+		return ErrTokenMismatch
+	}
+	if existing, ok := p.devices[token]; ok {
+		existing.DeviceID = deviceID
+		p.devices[token] = existing
+		return p.saveLocked()
+	}
+	if len(p.devices) > 0 && !time.Now().Before(p.enrollUntil) {
 		return ErrClaimedByAnother
 	}
-	p.token = token
-	p.deviceID = deviceID
-	p.pairedAt = time.Now().Unix()
+	p.devices[token] = pairedDevice{Token: token, DeviceID: deviceID, PairedAt: time.Now().Unix()}
+	p.closeEnrollmentLocked() // one newly trusted device per explicit window
 	return p.saveLocked()
 }
 
-// Unclaim releases the lock. Requires the matching token (no-op if unpaired).
+// Unclaim revokes only the presented device credential. Other trusted devices
+// remain connected and retain access.
 func (p *Pairing) Unclaim(token string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.token != "" && p.token != token {
+	if _, ok := p.devices[token]; !ok {
 		return ErrTokenMismatch
 	}
-	p.token = ""
-	p.deviceID = ""
-	p.pairedAt = 0
-	_ = os.Remove(p.path)
-	return nil
+	delete(p.devices, token)
+	if len(p.devices) == 0 {
+		p.enrollUntil = time.Now().Add(initialEnrollmentDuration)
+		if p.path != "" {
+			_ = os.Remove(p.path)
+		}
+		return nil
+	}
+	return p.saveLocked()
 }
 
-// saveLocked atomically writes pairing.json (.tmp + rename). Caller holds mu.
 func (p *Pairing) saveLocked() error {
 	if p.path == "" {
 		return nil
@@ -103,14 +148,20 @@ func (p *Pairing) saveLocked() error {
 	if err := os.MkdirAll(filepath.Dir(p.path), 0o755); err != nil {
 		return err
 	}
-	data, err := json.Marshal(pairingFile{
-		PairedToken: p.token, PairedDeviceID: p.deviceID, PairedAt: p.pairedAt,
-	})
+	devices := make([]pairedDevice, 0, len(p.devices))
+	for _, device := range p.devices {
+		devices = append(devices, device)
+	}
+	sort.Slice(devices, func(i, j int) bool { return devices[i].Token < devices[j].Token })
+	data, err := json.Marshal(pairingFile{Version: pairingSchemaVersion, Devices: devices})
 	if err != nil {
 		return err
 	}
 	tmp := p.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmp, 0o600); err != nil {
 		return err
 	}
 	return os.Rename(tmp, p.path)

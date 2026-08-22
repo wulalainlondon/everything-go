@@ -174,6 +174,7 @@ type HelloAck struct {
 	Gen          string              `json:"gen,omitempty"`
 	IsLocked     bool                `json:"is_locked"`
 	LockedToMe   bool                `json:"locked_to_me"`
+	PairingOpen  bool                `json:"pairing_open,omitempty"`
 	InstanceName string              `json:"instance_name,omitempty"`
 	RootDir      string              `json:"root_dir"`
 	DataDir      string              `json:"data_dir"`
@@ -296,8 +297,17 @@ type UnclaimAck struct {
 	IsLocked bool   `json:"is_locked"`
 }
 
-func NewUnclaimAck() UnclaimAck {
-	return UnclaimAck{Type: "unclaim_ack", IsLocked: false}
+func NewUnclaimAck(isLocked bool) UnclaimAck {
+	return UnclaimAck{Type: "unclaim_ack", IsLocked: isLocked}
+}
+
+type PairingWindowAck struct {
+	Type      string `json:"type"`
+	ExpiresAt int64  `json:"expires_at"`
+}
+
+func NewPairingWindowAck(expiresAt int64) PairingWindowAck {
+	return PairingWindowAck{Type: "pairing_window_ack", ExpiresAt: expiresAt}
 }
 
 type Pong struct {
