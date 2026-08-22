@@ -239,6 +239,18 @@ func TestDirectPrivateRequestRejectsForwardedTunnel(t *testing.T) {
 	}
 }
 
+func TestDirectPrivateRequestAllowsDirectTailscalePeer(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "http://bridge/ws", nil)
+	r.RemoteAddr = "100.70.64.26:54321"
+	if !directPrivateRequest(r) {
+		t.Fatal("direct Tailscale CGNAT peer should be enrollment eligible")
+	}
+	r.Header.Set("X-Forwarded-For", "100.70.64.26")
+	if directPrivateRequest(r) {
+		t.Fatal("forwarded Tailscale address must not be enrollment eligible")
+	}
+}
+
 func TestHandshakeRespectsContextTimeout(t *testing.T) {
 	h, _ := newTestHub(t)
 	c := &Client{hub: h, conn: nopConn{}, send: make(chan []byte, 1), quit: make(chan struct{}), clientID: "timeout"}

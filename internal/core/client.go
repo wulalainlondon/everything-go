@@ -258,7 +258,12 @@ func directPrivateRequest(r *http.Request) bool {
 		host = r.RemoteAddr
 	}
 	ip := net.ParseIP(strings.Trim(host, "[]"))
-	return ip != nil && (ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast())
+	return ip != nil && (ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || isTailscaleCGNAT(ip))
+}
+
+func isTailscaleCGNAT(ip net.IP) bool {
+	ipv4 := ip.To4()
+	return ipv4 != nil && ipv4[0] == 100 && ipv4[1] >= 64 && ipv4[1] <= 127
 }
 
 // serveConn runs the full client lifecycle over an arbitrary transport: the
