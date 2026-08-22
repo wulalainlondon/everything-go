@@ -2,6 +2,7 @@ package goexec
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -95,6 +96,7 @@ func TestEnsureThreadSingleflightSendsOneResumeRPC(t *testing.T) {
 func TestEnsureThreadLargeRolloutSkipsDirectResume(t *testing.T) {
 	root := t.TempDir()
 	resumeID := "019fb03e-0666-7ce3-8f99-8f19c79540e2"
+	newID := "01a01044-6c39-7d02-a5c0-164b2289ecdc"
 	rollout := filepath.Join(root, "rollout-2026-08-17T00-00-00-"+resumeID+".jsonl")
 	rows := []string{
 		`{"timestamp":"2026-08-17T00:00:00Z","type":"session_meta","payload":{"id":"019fb03e-0666-7ce3-8f99-8f19c79540e2","cwd":"/work"}}`,
@@ -123,7 +125,7 @@ func TestEnsureThreadLargeRolloutSkipsDirectResume(t *testing.T) {
 		}
 		_ = json.Unmarshal(request, &frame)
 		method <- frame.Method
-		c.rpc.dispatchResponse(json.RawMessage(fmt.Sprintf(`{"id":%d,"result":{"thread":{"id":"thread-new"}}}`, frame.ID)))
+		c.rpc.dispatchResponse(json.RawMessage(fmt.Sprintf(`{"id":%d,"result":{"thread":{"id":%q}}}`, frame.ID, newID)))
 	}()
 
 	if err := c.ensureThread(s, st); err != nil {
@@ -132,11 +134,97 @@ func TestEnsureThreadLargeRolloutSkipsDirectResume(t *testing.T) {
 	if got := <-method; got != "thread/start" {
 		t.Fatalf("large rollout attempted %q, want thread/start without resume", got)
 	}
-	if s.ResumeID() != "thread-new" || strings.Join(s.Snapshot().HistoricalResumeIDs, ",") != resumeID {
-		t.Fatalf("generation mapping not advanced: %+v", s.Snapshot())
+	if s.ResumeID() != resumeID || len(s.Snapshot().HistoricalResumeIDs) != 0 {
+		t.Fatalf("generation mapping advanced before first turn: %+v", s.Snapshot())
 	}
-	if st.pendingHandoff == "" {
+	if st.pendingHandoff == "" || st.pendingRecovery == nil {
 		t.Fatal("recovery handoff was not staged for the first user turn")
+	}
+	newRollout := filepath.Join(root, "rollout-2026-08-18T00-00-00-"+newID+".jsonl")
+	if err := os.WriteFile(newRollout, []byte("materialized first turn\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c.finalizePendingRecovery(s, st, newID)
+	if s.ResumeID() != newID || strings.Join(s.Snapshot().HistoricalResumeIDs, ",") != resumeID {
+		t.Fatalf("generation mapping not advanced after first turn: %+v", s.Snapshot())
+	}
+}
+
+func TestNoRolloutFoundIsStaleThreadError(t *testing.T) {
+	err := errors.New(`{"code":-32600,"message":"no rollout found for thread id missing"}`)
+	if !isStaleThreadError(err) {
+		t.Fatal("Codex no-rollout response must trigger safe local recovery")
+	}
+}
+
+func TestLatestAvailableRecoverySourceFallsBackToHistoricalGeneration(t *testing.T) {
+	root := t.TempDir()
+	oldID := "019fb760-170f-7371-9bd6-eb10e23254ef"
+	path := filepath.Join(root, "rollout-2026-07-31T00-00-00-"+oldID+".jsonl")
+	if err := os.WriteFile(path, []byte("old generation\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := NewCodex(&capSink{}, "codex")
+	c.sessionsRoot = root
+	snap := session.Snapshot{ResumeID: "01a0292b-ecba-7e12-925a-e2349c57da9e", HistoricalResumeIDs: []string{oldID}}
+	source, gotPath, gotBytes, ok := c.latestAvailableRecoverySource(snap)
+	if !ok || source.ResumeID != oldID || gotPath != path || gotBytes <= 0 {
+		t.Fatalf("historical fallback = (%+v, %q, %d, %v)", source, gotPath, gotBytes, ok)
+	}
+}
+
+func TestEnsureThreadRecoversMissingActiveGenerationFromHistoricalRollout(t *testing.T) {
+	root := t.TempDir()
+	oldID := "019fb760-170f-7371-9bd6-eb10e23254ef"
+	missingID := "01a0292b-ecba-7e12-925a-e2349c57da9e"
+	newID := "01a02a64-0b4b-7681-af53-4ff558c8cedb"
+	rollout := filepath.Join(root, "rollout-2026-07-31T00-00-00-"+oldID+".jsonl")
+	rows := []string{
+		fmt.Sprintf(`{"timestamp":"2026-07-31T00:00:00Z","type":"session_meta","payload":{"id":%q,"cwd":"/work"}}`, oldID),
+		`{"timestamp":"2026-07-31T00:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"keep this context"}]}}`,
+		`{"timestamp":"2026-07-31T00:00:02Z","type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"saved answer"}]}}`,
+	}
+	if err := os.WriteFile(rollout, []byte(strings.Join(rows, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := NewCodex(&capSink{}, "codex")
+	c.sessionsRoot = root
+	c.dataDir = t.TempDir()
+	reg := session.NewRegistry()
+	s := reg.Create("s1", "broken generation", t.TempDir(), "codex", "", "", missingID)
+	s.AddHistoricalResumeID(oldID)
+	st := c.state(s.ID)
+	writer := &rpcCaptureWriter{writes: make(chan []byte, 2)}
+	c.rpc.setWriter(writer)
+	methods := make(chan string, 2)
+	go func() {
+		for i := 0; i < 2; i++ {
+			request := <-writer.writes
+			var frame struct {
+				ID     int    `json:"id"`
+				Method string `json:"method"`
+			}
+			_ = json.Unmarshal(request, &frame)
+			methods <- frame.Method
+			if i == 0 {
+				c.rpc.dispatchResponse(json.RawMessage(fmt.Sprintf(`{"id":%d,"error":{"code":-32600,"message":"no rollout found for thread id %s"}}`, frame.ID, missingID)))
+			} else {
+				c.rpc.dispatchResponse(json.RawMessage(fmt.Sprintf(`{"id":%d,"result":{"thread":{"id":%q}}}`, frame.ID, newID)))
+			}
+		}
+	}()
+
+	if err := c.ensureThread(s, st); err != nil {
+		t.Fatal(err)
+	}
+	if first, second := <-methods, <-methods; first != "thread/resume" || second != "thread/start" {
+		t.Fatalf("RPC sequence = %q, %q", first, second)
+	}
+	if st.pendingRecovery == nil || st.pendingRecovery.OldResumeID != oldID || st.pendingHandoff == "" {
+		t.Fatalf("historical recovery not staged: %+v", st.pendingRecovery)
+	}
+	if s.ResumeID() != missingID {
+		t.Fatalf("missing generation committed before a materialized turn: %s", s.ResumeID())
 	}
 }
 

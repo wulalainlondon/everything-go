@@ -82,6 +82,7 @@ type codexState struct {
 	lastEventAt     time.Time
 	stallWarned     bool
 	pendingHandoff  string
+	pendingRecovery *codexRecovery
 	agents          map[string]*codexAgent
 }
 
@@ -1750,6 +1751,11 @@ func (c *Codex) runTurn(s *session.Session, st *codexState, threadID string, inp
 	}
 
 	st.mu.Lock()
+	completedThreadID := st.threadID
+	st.mu.Unlock()
+	c.finalizePendingRecovery(s, st, completedThreadID)
+
+	st.mu.Lock()
 	stopping, turnErr := st.stopping, st.turnErr
 	st.mu.Unlock()
 
@@ -2075,7 +2081,11 @@ func (c *Codex) shouldAutoCompact(st *codexState) bool {
 func (c *Codex) startTurnWithStaleRetry(s *session.Session, st *codexState, threadID string, input []map[string]any) error {
 	snap := s.Snapshot()
 	err := c.startTurn(threadID, input, snap)
-	if err == nil || !isStaleThreadError(err) {
+	if err == nil {
+		c.finalizePendingRecovery(s, st, threadID)
+		return nil
+	}
+	if !isStaleThreadError(err) {
 		return err
 	}
 
@@ -2090,7 +2100,57 @@ func (c *Codex) startTurnWithStaleRetry(s *session.Session, st *codexState, thre
 	if err := c.moveActiveThreadClaim(threadID, newThreadID, s); err != nil {
 		return err
 	}
-	return c.startTurn(newThreadID, input, snap)
+	if err := c.startTurn(newThreadID, input, snap); err != nil {
+		return err
+	}
+	c.finalizePendingRecovery(s, st, newThreadID)
+	return nil
+}
+
+// finalizePendingRecovery advances the durable session mapping only after
+// turn/start succeeds. thread/start alone does not necessarily materialize a
+// rollout, so committing in ensureThread can leave a registry pointing at an
+// in-memory-only thread after the app-server restarts.
+func (c *Codex) finalizePendingRecovery(s *session.Session, st *codexState, threadID string) {
+	st.mu.Lock()
+	recovery := st.pendingRecovery
+	st.mu.Unlock()
+	if recovery == nil {
+		return
+	}
+	if !c.waitForCodexRollout(threadID, 2*time.Second) {
+		// Keep the transaction pending. runTurn retries finalization after the
+		// terminal notification, by which point Codex must have flushed the file.
+		log.Printf("[codex] recovery rollout not materialized yet session=%s thread=%s", s.ID, threadID)
+		return
+	}
+	if err := c.commitColdRecovery(recovery, threadID); err != nil {
+		// The turn was accepted already. Do not retry it and risk duplicate work;
+		// retain the usable Codex thread and surface the secondary metadata error.
+		log.Printf("[codex] recovery manifest commit failed session=%s thread=%s: %v", s.ID, threadID, err)
+		c.sink.Emit(backend.NewSessionWarning(s.ID, "Codex recovery metadata could not be finalized; the active thread remains usable."))
+	}
+	st.mu.Lock()
+	if st.pendingRecovery == recovery {
+		st.pendingRecovery = nil
+	}
+	st.mu.Unlock()
+	s.SetResumeID(threadID)
+	c.sink.Emit(backend.NewSessionUUID(s.ID, threadID))
+	log.Printf("[codex] recovery committed session=%s thread=%s", s.ID, threadID)
+}
+
+func (c *Codex) waitForCodexRollout(threadID string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if fileSize(c.findCodexSessionFile(threadID)) > 0 {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
 }
 
 func (c *Codex) claimActiveThread(threadID string, s *session.Session) error {
@@ -2202,7 +2262,8 @@ func isStaleThreadError(err error) bool {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "unknown session") || strings.Contains(msg, "thread not found")
+	return strings.Contains(msg, "unknown session") || strings.Contains(msg, "thread not found") ||
+		strings.Contains(msg, "no rollout found")
 }
 
 func isActiveWriterError(err error) bool {
@@ -2264,7 +2325,11 @@ func (c *Codex) ensureThread(s *session.Session, st *codexState) error {
 			} else if isActiveWriterError(err) {
 				return fmt.Errorf("thread/resume refused: %w: %v", backend.ErrThreadActiveWriter, err)
 			} else if isStaleThreadError(err) {
-				recovery, err = c.prepareColdRecovery(snap, rolloutPath, rolloutBytes, "thread_not_found")
+				recoverySnap, recoveryPath, recoveryBytes, ok := c.latestAvailableRecoverySource(snap)
+				if !ok {
+					return fmt.Errorf("thread not found and no local rollout generation is available: %w", err)
+				}
+				recovery, err = c.prepareColdRecovery(recoverySnap, recoveryPath, recoveryBytes, "thread_not_found")
 				if err != nil {
 					return fmt.Errorf("thread not found and recovery checkpoint failed: %w", err)
 				}
@@ -2305,25 +2370,24 @@ func (c *Codex) ensureThread(s *session.Session, st *codexState) error {
 			return errNoThreadID
 		}
 	}
-	if recovery != nil {
-		if err := c.commitColdRecovery(recovery, threadID); err != nil {
-			return fmt.Errorf("commit cold recovery: %w", err)
-		}
-	}
-
 	st.mu.Lock()
 	st.threadID = threadID
 	if recovery != nil {
 		st.pendingHandoff = recovery.Handoff
+		st.pendingRecovery = recovery
 	}
 	st.mu.Unlock()
 	c.mu.Lock()
 	c.threadToSession[threadID] = s
 	c.mu.Unlock()
 
-	s.SetResumeID(threadID)
-	c.sink.Emit(backend.NewSessionUUID(s.ID, threadID))
-	log.Printf("[codex] session=%s thread=%s", s.ID, threadID)
+	if recovery == nil {
+		s.SetResumeID(threadID)
+		c.sink.Emit(backend.NewSessionUUID(s.ID, threadID))
+		log.Printf("[codex] session=%s thread=%s", s.ID, threadID)
+	} else {
+		log.Printf("[codex] recovery staged session=%s source=%s thread=%s", s.ID, recovery.OldResumeID, threadID)
+	}
 	return nil
 }
 

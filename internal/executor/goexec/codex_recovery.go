@@ -71,6 +71,28 @@ type codexRecovery struct {
 	Handoff       string
 }
 
+// latestAvailableRecoverySource finds the newest physical generation that is
+// still present on this Bridge. This repairs a registry left pointing at a
+// thread/start result that never produced a rollout, while retaining the older
+// on-disk generation as the recovery source.
+func (c *Codex) latestAvailableRecoverySource(snap session.Snapshot) (session.Snapshot, string, int64, bool) {
+	ids := append(append([]string(nil), snap.HistoricalResumeIDs...), snap.ResumeID)
+	for i := len(ids) - 1; i >= 0; i-- {
+		if ids[i] == "" {
+			continue
+		}
+		path := c.findCodexSessionFile(ids[i])
+		bytes := fileSize(path)
+		if path == "" || bytes <= 0 {
+			continue
+		}
+		source := snap
+		source.ResumeID = ids[i]
+		return source, path, bytes, true
+	}
+	return session.Snapshot{}, "", 0, false
+}
+
 var recoverySecretPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)\b(bearer)\s+[A-Za-z0-9._~+/=-]{12,}`),
 	regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{12,}`),
@@ -223,7 +245,7 @@ func (c *Codex) commitColdRecovery(recovery *codexRecovery, newResumeID string) 
 		})
 	} else {
 		for i := range manifest.Generations {
-			if manifest.Generations[i].ResumeID == recovery.OldResumeID {
+			if manifest.Generations[i].ResumeID == recovery.OldResumeID || manifest.Generations[i].Status == "active" {
 				manifest.Generations[i].Status = "archived"
 			}
 		}
