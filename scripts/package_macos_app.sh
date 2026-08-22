@@ -19,6 +19,11 @@ BUNDLE_ID="${EVERYTHING_GO_BUNDLE_ID:-com.everything-go.app}"
 VERSION="${EVERYTHING_GO_VERSION:-0.0.0}"
 SIGN_IDENTITY="${EVERYTHING_GO_CODESIGN_IDENTITY:--}"
 
+if [ "$SIGN_IDENTITY" != "Developer ID Application: YuDi Huang (UPWLTJL6S2)" ]; then
+  echo "refusing to package release with unexpected signing identity: $SIGN_IDENTITY" >&2
+  exit 1
+fi
+
 WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
@@ -51,13 +56,9 @@ cat > "$APP_DIR/Contents/Info.plist" <<EOF
 </plist>
 EOF
 
-if command -v codesign >/dev/null 2>&1; then
-  if [ "$SIGN_IDENTITY" = "-" ]; then
-    codesign --force --deep --options runtime --timestamp=none --sign "$SIGN_IDENTITY" "$APP_DIR"
-  else
-    codesign --force --deep --options runtime --timestamp --sign "$SIGN_IDENTITY" "$APP_DIR"
-  fi
-fi
+command -v codesign >/dev/null 2>&1 || { echo "codesign is required" >&2; exit 1; }
+codesign --force --deep --options runtime --timestamp --sign "$SIGN_IDENTITY" "$APP_DIR"
+codesign --verify --deep --strict --verbose=2 "$APP_DIR"
 
 (cd "$WORK_DIR" && ditto -c -k --sequesterRsrc --keepParent "$APP_NAME.app" "$OUT_ZIP")
 echo "wrote $OUT_ZIP"

@@ -16,8 +16,8 @@ KEY_P8_BASE64="${APPSTORE_CONNECT_API_KEY_P8_BASE64:-}"
 KEYCHAIN_PROFILE="${NOTARYTOOL_KEYCHAIN_PROFILE:-}"
 
 if [ -z "$KEYCHAIN_PROFILE" ] && { [ -z "$KEY_ID" ] || [ -z "$ISSUER_ID" ] || [ -z "$KEY_P8_BASE64" ]; }; then
-  echo "notarization skipped: missing App Store Connect API key env" >&2
-  exit 0
+  echo "notarization failed: missing App Store Connect API key env" >&2
+  exit 1
 fi
 
 WORK_DIR="$(mktemp -d)"

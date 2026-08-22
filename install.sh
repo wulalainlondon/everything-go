@@ -7,11 +7,11 @@
 #   curl -fsSL https://github.com/wulalainlondon/everything-go/releases/latest/download/install.sh | bash
 #
 # What it does:
-#   1. detects your OS/arch and downloads the matching static binary
+#   1. downloads and verifies the signed, notarized macOS app (or Linux binary)
 #   2. makes sure `cloudflared` exists (for off-WiFi remote access)
 #   3. installs everything-go as a background service (launchd / systemd)
-#      started with --mdns (same-WiFi auto-discovery) and --tunnel
-#      (cloudflare URL is pushed to the app so it keeps working off-WiFi)
+#      started with UDP discovery + mDNS; the tunnel starts only after a trusted
+#      device has paired on the local network
 #   4. starts it and prints how the phone app connects
 #
 # Prerequisite: you already have the `claude` and/or `codex` CLI installed
@@ -26,6 +26,8 @@ LABEL="com.everything-go.app"
 BIN="$RUNTIME_DIR/everything-go"
 APP_DIR="$RUNTIME_DIR/Everything Go.app"
 APP_BIN="$APP_DIR/Contents/MacOS/everything-go"
+EXPECTED_SIGNING_AUTHORITY="Developer ID Application: YuDi Huang (UPWLTJL6S2)"
+EXPECTED_TEAM_ID="UPWLTJL6S2"
 LAUNCH="$RUNTIME_DIR/everything_go_launch.sh"
 SESSION_STORE="${EVERYTHING_GO_SESSION_STORE:-$HOME/.claude-bridge-runtime/saved_sessions.json}"
 SERVICE_BIN="$BIN"
@@ -117,21 +119,47 @@ install_bridge_binary() {
 
   if [ "$OS" = darwin ]; then
     local app_asset="everything-go-darwin-${ARCH}.app.zip"
-    local app_url
+    local app_url sums_url staging extracted authority team backup expected_sha actual_sha
     app_url=$(base_url "$app_asset")
+    sums_url=$(base_url "SHA256SUMS")
     say "downloading $app_asset ..."
-    if curl -fSL --proto '=https' --tlsv1.2 "$app_url" -o "$RUNTIME_DIR/$app_asset.tmp"; then
-      rm -rf "$APP_DIR.tmp" "$APP_DIR"
-      ditto -x -k "$RUNTIME_DIR/$app_asset.tmp" "$RUNTIME_DIR"
-      rm -f "$RUNTIME_DIR/$app_asset.tmp"
-      [ -x "$APP_BIN" ] || die "app asset did not contain executable: $APP_BIN"
-      SERVICE_BIN="$APP_BIN"
-      PERMISSION_TARGET="$APP_DIR"
-      say "app installed: $APP_DIR"
-      return 0
+    curl -fSL --proto '=https' --tlsv1.2 "$app_url" -o "$RUNTIME_DIR/$app_asset.tmp" \
+      || die "signed macOS app download failed: $app_url"
+    curl -fsSL --proto '=https' --tlsv1.2 "$sums_url" -o "$RUNTIME_DIR/SHA256SUMS.tmp" \
+      || die "checksum download failed: $sums_url"
+    expected_sha=$(awk -v asset="$app_asset" '$2 == asset { print $1 }' "$RUNTIME_DIR/SHA256SUMS.tmp")
+    [ -n "$expected_sha" ] || die "release checksum does not contain $app_asset"
+    actual_sha=$(shasum -a 256 "$RUNTIME_DIR/$app_asset.tmp" | awk '{print $1}')
+    [ "$actual_sha" = "$expected_sha" ] || die "checksum mismatch for $app_asset"
+
+    staging=$(mktemp -d "$RUNTIME_DIR/.install.XXXXXX")
+    ditto -x -k "$RUNTIME_DIR/$app_asset.tmp" "$staging"
+    extracted="$staging/Everything Go.app"
+    [ -x "$extracted/Contents/MacOS/everything-go" ] \
+      || die "app asset did not contain the expected executable"
+    codesign --verify --deep --strict --verbose=2 "$extracted" \
+      || die "Developer ID signature verification failed"
+    authority=$(codesign -d --verbose=4 "$extracted" 2>&1 | sed -n 's/^Authority=//p' | head -1)
+    team=$(codesign -d --verbose=4 "$extracted" 2>&1 | sed -n 's/^TeamIdentifier=//p' | head -1)
+    [ "$authority" = "$EXPECTED_SIGNING_AUTHORITY" ] \
+      || die "unexpected signing authority: ${authority:-missing}"
+    [ "$team" = "$EXPECTED_TEAM_ID" ] || die "unexpected signing team: ${team:-missing}"
+    spctl -a -t exec -vv "$extracted" || die "Gatekeeper rejected the app"
+    xcrun stapler validate "$extracted" || die "notarization ticket validation failed"
+
+    backup="$RUNTIME_DIR/Everything Go.previous.app"
+    rm -rf "$backup"
+    if [ -d "$APP_DIR" ]; then mv "$APP_DIR" "$backup"; fi
+    if ! mv "$extracted" "$APP_DIR"; then
+      [ -d "$backup" ] && mv "$backup" "$APP_DIR"
+      die "failed to install the verified app"
     fi
-    rm -f "$RUNTIME_DIR/$app_asset.tmp"
-    warn "app asset unavailable; falling back to unsigned raw binary"
+    rm -rf "$staging"
+    rm -f "$RUNTIME_DIR/$app_asset.tmp" "$RUNTIME_DIR/SHA256SUMS.tmp"
+    SERVICE_BIN="$APP_BIN"
+    PERMISSION_TARGET="$APP_DIR"
+    say "verified signed app installed: $APP_DIR"
+    return 0
   fi
 
   say "downloading $ASSET ..."
@@ -220,6 +248,7 @@ exec "$SERVICE_BIN" \\
   --executor go \\
   --data-dir "$RUNTIME_DIR" \\
   --session-store "$SESSION_STORE" \\
+  --discovery \\
   --mdns \\
   --tunnel \\
   --instance-name "\$(hostname -s 2>/dev/null || echo everything-go)"
@@ -260,6 +289,28 @@ EOF
   fi
 }
 
+verify_launchd_health_or_rollback() {
+  local target="gui/$(id -u)/$LABEL" attempt failed_app
+  for attempt in $(seq 1 20); do
+    if nc -z 127.0.0.1 "$PORT" >/dev/null 2>&1; then
+      say "launchd health check passed on port $PORT"
+      return 0
+    fi
+    sleep 1
+  done
+
+  warn "new bridge failed its launch health check; restoring previous signed app"
+  if [ -d "$RUNTIME_DIR/Everything Go.previous.app" ]; then
+    failed_app="$RUNTIME_DIR/Everything Go.failed.app"
+    rm -rf "$failed_app"
+    [ -d "$APP_DIR" ] && mv "$APP_DIR" "$failed_app"
+    mv "$RUNTIME_DIR/Everything Go.previous.app" "$APP_DIR"
+    launchctl kickstart -k "$target" >/dev/null 2>&1 || true
+    die "update rolled back; inspect /tmp/$LABEL.stderr.log"
+  fi
+  die "bridge did not become healthy; inspect /tmp/$LABEL.stderr.log"
+}
+
 install_systemd() {
   local unit_dir="$HOME/.config/systemd/user"
   mkdir -p "$unit_dir"
@@ -283,6 +334,7 @@ EOF
 
 if [ "$OS" = darwin ]; then
   install_launchd
+  verify_launchd_health_or_rollback
 else
   if command -v systemctl >/dev/null 2>&1; then
     install_systemd
@@ -298,10 +350,10 @@ echo
 say "✅ everything-go is running on port $PORT"
 echo
 say "📱 In the phone app:"
-say "   • Same WiFi: it auto-discovers this bridge (mDNS). Just open the app."
+say "   • Same WiFi: it auto-discovers this bridge (UDP + mDNS). Just open the app."
 [ -n "$LAN_IP" ] && say "     (manual fallback — add bridge IP: $LAN_IP  port: $PORT)"
-say "   • Off WiFi: connect once on WiFi; the cloudflare URL is pushed to the"
-say "     app automatically, so it keeps working after you leave."
+say "   • Off WiFi: pair once on WiFi. Only then does the Cloudflare tunnel start;"
+say "     its URL is pushed to the trusted app automatically."
 echo
 say "logs:    /tmp/$LABEL.stderr.log"
 say "restart: launchctl kickstart -k gui/\$(id -u)/$LABEL   (macOS)"

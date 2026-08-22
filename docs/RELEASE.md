@@ -87,25 +87,7 @@ codesign -d --verbose=4 \
 
 ### Service shows exit `-9` (SIGKILL) after update
 
-The `.app` bundle binary has a broken codesign. Fix:
-
-```bash
-rm -rf /tmp/eg-fresh.app
-mkdir -p /tmp/eg-fresh.app/Contents/{MacOS,Resources}
-cp ~/.everything-go-runtime/Everything\ Go.app/Contents/Info.plist \
-   /tmp/eg-fresh.app/Contents/
-cp ~/.everything-go-runtime/Everything\ Go.app/Contents/MacOS/everything-go \
-   /tmp/eg-fresh.app/Contents/MacOS/
-codesign --force --deep --sign - /tmp/eg-fresh.app
-mv ~/.everything-go-runtime/Everything\ Go.app \
-   ~/.everything-go-runtime/Everything\ Go.app.bak
-ditto /tmp/eg-fresh.app ~/.everything-go-runtime/Everything\ Go.app
-launchctl kickstart -k gui/$(id -u)/com.everything-go.app
-```
-
-Root cause: macOS sets `com.apple.macl` on downloaded files, which prevents
-`codesign --force` from replacing the signature in-place. Building a fresh bundle
-in `/tmp` (no xattrs) and replacing via `ditto` works around this.
-
-This should not happen with properly notarized releases, but can occur if the
-release was built without valid signing secrets (ad-hoc fallback).
+Do not ad-hoc re-sign or run a raw replacement binary. Re-run `install.sh`; it
+verifies the checksum, exact Developer ID identity, Gatekeeper acceptance and
+the stapled notarization ticket before replacing the installed app. If the new
+release cannot pass those gates, keep the previous signed app and stop rollout.
