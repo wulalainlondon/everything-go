@@ -105,9 +105,13 @@ func main() {
 	}
 
 	pairing := governance.NewPairing(filepath.Join(*dataDir, "pairing.json"))
+	instanceID, err := governance.LoadOrCreateInstanceID(filepath.Join(*dataDir, "instance_id"))
+	if err != nil {
+		log.Fatalf("load instance id: %v", err)
+	}
 	cfg := core.Config{
 		InstanceName: *instanceName,
-		InstanceID:   "everything-go",
+		InstanceID:   instanceID,
 		RootDir:      *rootDir,
 		DataDir:      *dataDir,
 		LanIP:        detectLanIP(),
