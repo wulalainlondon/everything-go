@@ -169,8 +169,7 @@ func newBroadcastConn(ctx context.Context, srcIP string) (net.PacketConn, error)
 		Control: func(_, _ string, c syscall.RawConn) error {
 			var serr error
 			if err := c.Control(func(fd uintptr) {
-				_ = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
-				serr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_BROADCAST, 1)
+				serr = setBroadcastOptions(fd)
 			}); err != nil {
 				return err
 			}

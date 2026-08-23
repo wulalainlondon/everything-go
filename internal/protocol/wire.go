@@ -7,7 +7,12 @@
 // renders identically against either backend.
 package protocol
 
-import "encoding/json"
+import (
+	"encoding/json"
+
+	"everything-go/internal/artifacts"
+	"everything-go/internal/instances"
+)
 
 // Inbound is a flat superset of every client→bridge frame we currently handle.
 // All fields are optional; only `Type` is always present. New command fields can
@@ -126,6 +131,11 @@ type Inbound struct {
 	URL            string `json:"url"`
 	ClientDedupKey string `json:"client_dedup_key"`
 	ContentType    string `json:"content_type"`
+
+	// instance management
+	Port    int    `json:"port"`
+	RootDir string `json:"root_dir"`
+	DataDir string `json:"data_dir"`
 }
 
 // InboundImage is one attached image on a message (app strips the data-URL
@@ -1123,12 +1133,100 @@ func NewWebRTCReady() WebRTCReady {
 // always [] never null, per the app's z.array schemas.
 
 type InstancesList struct {
-	Type      string `json:"type"`
-	Instances []any  `json:"instances"`
+	Type      string             `json:"type"`
+	Instances []instances.Status `json:"instances"`
 }
 
-func NewInstancesList() InstancesList {
-	return InstancesList{Type: "instances_list", Instances: []any{}}
+type ArtifactsList struct {
+	Type      string               `json:"type"`
+	Artifacts []artifacts.Artifact `json:"artifacts"`
+}
+
+func NewArtifactsList(items []artifacts.Artifact) ArtifactsList {
+	if items == nil {
+		items = []artifacts.Artifact{}
+	}
+	return ArtifactsList{Type: "artifacts_list", Artifacts: items}
+}
+
+type YouTubeTaskStarted struct {
+	Type     string             `json:"type"`
+	TaskID   string             `json:"task_id"`
+	Artifact artifacts.Artifact `json:"artifact"`
+}
+
+type YouTubeTaskDone struct {
+	Type      string               `json:"type"`
+	TaskID    string               `json:"task_id"`
+	Artifacts []artifacts.Artifact `json:"artifacts"`
+}
+
+type YouTubeTaskFailed struct {
+	Type     string             `json:"type"`
+	TaskID   string             `json:"task_id"`
+	Artifact artifacts.Artifact `json:"artifact"`
+	Message  string             `json:"message"`
+}
+
+func NewYouTubeTaskStarted(taskID string, artifact artifacts.Artifact) YouTubeTaskStarted {
+	return YouTubeTaskStarted{Type: "youtube_task_started", TaskID: taskID, Artifact: artifact}
+}
+
+func NewYouTubeTaskDone(taskID string, items []artifacts.Artifact) YouTubeTaskDone {
+	if items == nil {
+		items = []artifacts.Artifact{}
+	}
+	return YouTubeTaskDone{Type: "youtube_task_done", TaskID: taskID, Artifacts: items}
+}
+
+func NewYouTubeTaskFailed(taskID string, artifact artifacts.Artifact, message string) YouTubeTaskFailed {
+	return YouTubeTaskFailed{Type: "youtube_task_failed", TaskID: taskID, Artifact: artifact, Message: message}
+}
+
+func NewInstancesList(items []instances.Status) InstancesList {
+	if items == nil {
+		items = []instances.Status{}
+	}
+	return InstancesList{Type: "instances_list", Instances: items}
+}
+
+type InstanceAction struct {
+	Type string  `json:"type"`
+	Name string  `json:"name"`
+	OK   bool    `json:"ok"`
+	Code *string `json:"code"`
+}
+
+type InstanceUpserted struct {
+	Type     string            `json:"type"`
+	OK       bool              `json:"ok"`
+	Name     string            `json:"name"`
+	Code     *string           `json:"code"`
+	Instance *instances.Status `json:"instance"`
+}
+
+type InstanceError struct {
+	Type    string `json:"type"`
+	Command string `json:"command"`
+	Name    string `json:"name"`
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+func optionalCode(code string) *string {
+	if code == "" {
+		return nil
+	}
+	return &code
+}
+func NewInstanceAction(kind, name, code string) InstanceAction {
+	return InstanceAction{Type: kind, Name: name, OK: code == "", Code: optionalCode(code)}
+}
+func NewInstanceUpserted(name string, status *instances.Status, code string) InstanceUpserted {
+	return InstanceUpserted{Type: "instance_upserted", OK: code == "", Name: name, Code: optionalCode(code), Instance: status}
+}
+func NewInstanceError(command, name, code, message string) InstanceError {
+	return InstanceError{Type: "instance_error", Command: command, Name: name, Code: code, Message: message}
 }
 
 // InboxItem is one file-push record as the app consumes it (inbox_list items and

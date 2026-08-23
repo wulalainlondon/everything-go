@@ -3,7 +3,9 @@
 package clientproto
 
 import (
+	"everything-go/internal/artifacts"
 	"everything-go/internal/backend"
+	"everything-go/internal/instances"
 	"everything-go/internal/protocol"
 )
 
@@ -98,6 +100,9 @@ type Command struct {
 	URL            string
 	ClientDedupKey string
 	ContentType    string
+	Port           int
+	RootDir        string
+	DataDir        string
 
 	Images []backend.ImageAttachment
 	Files  []backend.FileAttachment
@@ -191,6 +196,9 @@ func (AppV1) ParseCommand(in protocol.Inbound) Command {
 		URL:            in.URL,
 		ClientDedupKey: in.ClientDedupKey,
 		ContentType:    in.ContentType,
+		Port:           in.Port,
+		RootDir:        in.RootDir,
+		DataDir:        in.DataDir,
 
 		Images: inboundImagesToBackend(in.Images),
 		Files:  inboundFilesToBackend(in.Files),
@@ -431,8 +439,36 @@ func (AppV1) GitDiffResult(sessionID, diff, errCode string, initialized bool) pr
 	return protocol.NewGitDiffResult(sessionID, diff, errCode, initialized)
 }
 
-func (AppV1) InstancesList() protocol.InstancesList {
-	return protocol.NewInstancesList()
+func (AppV1) InstancesList(items []instances.Status) protocol.InstancesList {
+	return protocol.NewInstancesList(items)
+}
+
+func (AppV1) InstanceAction(kind, name, code string) protocol.InstanceAction {
+	return protocol.NewInstanceAction(kind, name, code)
+}
+
+func (AppV1) InstanceUpserted(name string, status *instances.Status, code string) protocol.InstanceUpserted {
+	return protocol.NewInstanceUpserted(name, status, code)
+}
+
+func (AppV1) InstanceError(command, name, code, message string) protocol.InstanceError {
+	return protocol.NewInstanceError(command, name, code, message)
+}
+
+func (AppV1) ArtifactsList(items []artifacts.Artifact) protocol.ArtifactsList {
+	return protocol.NewArtifactsList(items)
+}
+
+func (AppV1) YouTubeTaskStarted(taskID string, artifact artifacts.Artifact) protocol.YouTubeTaskStarted {
+	return protocol.NewYouTubeTaskStarted(taskID, artifact)
+}
+
+func (AppV1) YouTubeTaskDone(taskID string, items []artifacts.Artifact) protocol.YouTubeTaskDone {
+	return protocol.NewYouTubeTaskDone(taskID, items)
+}
+
+func (AppV1) YouTubeTaskFailed(taskID string, artifact artifacts.Artifact, message string) protocol.YouTubeTaskFailed {
+	return protocol.NewYouTubeTaskFailed(taskID, artifact, message)
 }
 
 func (AppV1) InboxListItems(items []protocol.InboxItem) protocol.InboxList {

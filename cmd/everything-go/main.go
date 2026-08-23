@@ -1,11 +1,4 @@
-// Command everything-go is a Go re-implementation of the bridge that speaks the
-// same external WebSocket protocol as the Python bridge, so the same React app
-// can connect to either for A/B/C stability comparison.
-//
-// The connection core is fixed; --executor selects what runs the AI workload:
-//
-//	go      pure-Go executor (config 2)
-//	python  forward to a Python worker over a socket (config 3) — not yet wired
+// Command everything-go is the native Averything bridge service.
 package main
 
 import (
@@ -22,7 +15,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"everything-go/internal/backend"
@@ -46,8 +38,8 @@ import (
 var embeddedFCMKey []byte
 
 func main() {
-	port := flag.Int("port", 8767, "WebSocket listen port (Python prod uses 8766)")
-	execName := flag.String("executor", "go", "AI executor: go | python")
+	port := flag.Int("port", 8767, "WebSocket listen port")
+	legacyExecutor := flag.String("executor", "go", "deprecated compatibility flag; only go is supported")
 	claudeBin := flag.String("claude-bin", "claude", "path to the claude CLI binary")
 	codexBin := flag.String("codex-bin", "codex", "path to the codex CLI binary")
 	ollamaHost := flag.String("ollama-host", "http://localhost:11434", "Ollama base URL")
@@ -70,6 +62,10 @@ func main() {
 	disableNativeWatcher := flag.Bool("disable-native-watcher", false, "disable native session discovery outside bridge-created sessions")
 	mode := flag.String("mode", "bridge", "run mode: bridge (resident server) | index (one-shot search ingest, then exit)")
 	flag.Parse()
+	if *legacyExecutor != "go" {
+		fmt.Fprintf(os.Stderr, "unsupported executor %q; this release is Go-only\n", *legacyExecutor)
+		os.Exit(2)
+	}
 
 	// `--mode=index` is the short-lived indexer child: it ingests the search DB
 	// to completion and exits, keeping the heap-heavy transcript parse out of the
@@ -121,28 +117,20 @@ func main() {
 	}
 	hub := core.NewHub(reg, cfg, pairing, *port)
 
-	switch *execName {
-	case "go":
-		terminal := executor.NewTerminalSink(hub)
-		claude := goexec.NewClaude(terminal, *claudeBin)
-		codex := goexec.NewCodex(terminal, *codexBin)
-		codex.SetDataDir(*dataDir)
-		ollama := goexec.NewOllama(terminal, *ollamaHost, "")
-		backends := map[string]executor.Executor{
-			"claude": claude,
-			"codex":  codex,
-			"ollama": ollama,
-		}
-		if *remoteWSURL != "" {
-			backends["remote-ws"] = remote.NewWS(terminal, *remoteWSURL, *remoteWSToken)
-		}
-		hub.SetExecutor(executor.NewReliableMux(backends, claude, terminal))
-	case "python":
-		log.Fatal("--executor=python not yet implemented (config 3 comes after config 2 is proven)")
-	default:
-		fmt.Fprintf(os.Stderr, "unknown executor %q\n", *execName)
-		os.Exit(2)
+	terminal := executor.NewTerminalSink(hub)
+	claude := goexec.NewClaude(terminal, *claudeBin)
+	codex := goexec.NewCodex(terminal, *codexBin)
+	codex.SetDataDir(*dataDir)
+	ollama := goexec.NewOllama(terminal, *ollamaHost, "")
+	backends := map[string]executor.Executor{
+		"claude": claude,
+		"codex":  codex,
+		"ollama": ollama,
 	}
+	if *remoteWSURL != "" {
+		backends["remote-ws"] = remote.NewWS(terminal, *remoteWSURL, *remoteWSToken)
+	}
+	hub.SetExecutor(executor.NewReliableMux(backends, claude, terminal))
 
 	// Search index: FTS5 over Claude/Codex JSONL. The resident bridge only READS
 	// the WAL DB; ingestion runs in short-lived `--mode=index` child processes so
@@ -172,15 +160,13 @@ func main() {
 	// get_inbox), persisted so an offline device recovers it on reconnect.
 	hub.SetInbox(inbox.New(*dataDir))
 
-	// restart_bridge: Python touches a trigger file watched by an external
-	// launchd restart-agent; the experiment port has no such agent, so we
-	// self-re-exec — same binary, args and env, same PID. The short pause lets
-	// the restart_ack flush to the socket before the image is replaced.
+	// restart_bridge self-reexecs the same verified binary. The short pause lets
+	// the restart acknowledgement flush before the image is replaced.
 	if exePath, err := os.Executable(); err == nil {
 		hub.SetRestart(func() {
 			time.Sleep(200 * time.Millisecond)
 			log.Printf("[restart] re-exec %s %v", exePath, os.Args)
-			if err := syscall.Exec(exePath, os.Args, os.Environ()); err != nil {
+			if err := reexecSelf(exePath, os.Args, os.Environ()); err != nil {
 				log.Printf("[restart] exec failed: %v", err)
 			}
 		})
@@ -240,7 +226,7 @@ func main() {
 	mux.HandleFunc("/", hub.ServeWS)
 
 	addr := fmt.Sprintf(":%d", *port)
-	log.Printf("everything-go listening on %s (executor=%s)", addr, *execName)
+	log.Printf("everything-go listening on %s", addr)
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		log.Fatal(err)
 	}
@@ -309,23 +295,6 @@ func runSearchIndexerLoop(ctx context.Context, idx *search.Index, exePath, dataD
 		case <-time.After(interval):
 		}
 	}
-}
-
-// acquireIndexLock takes an exclusive, non-blocking flock so only one indexer
-// child writes the search DB at a time. The returned func releases it.
-func acquireIndexLock(dataDir string) (func(), error) {
-	f, err := os.OpenFile(filepath.Join(dataDir, "everything_go_indexer.lock"), os.O_CREATE|os.O_RDWR, 0o644)
-	if err != nil {
-		return nil, err
-	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		_ = f.Close()
-		return nil, err
-	}
-	return func() {
-		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-		_ = f.Close()
-	}, nil
 }
 
 func runPermissionCheck(dataDir, sessionStorePath, extraPaths string) error {

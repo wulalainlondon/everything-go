@@ -484,6 +484,12 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 	case "scan_markdown_files":
 		go h.sendMarkdownFilesListing(c, cmd)
 
+	case "scan_artifacts":
+		go h.sendArtifactsList(c, cmd)
+
+	case "youtube_task":
+		go h.startYouTubeTask(c, cmd)
+
 	case "save_file":
 		go h.saveFile(c, cmd)
 
@@ -534,7 +540,10 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 	// implemented; the app polls all of these on connect.
 
 	case "list_instances":
-		c.enqueueEvent(h.client.InstancesList())
+		h.handleInstanceCommand(c, cmd)
+
+	case "start_instance", "stop_instance", "upsert_instance", "delete_instance":
+		h.handleInstanceCommand(c, cmd)
 
 	case "push_file":
 		go h.handlePushFile(c, cmd.Path)

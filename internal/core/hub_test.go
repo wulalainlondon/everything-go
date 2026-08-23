@@ -54,8 +54,9 @@ func (f *fakeExec) Steer(_ context.Context, s *session.Session, reqID, content s
 func newTestHub(t *testing.T) (*Hub, *fakeExec) {
 	t.Helper()
 	reg := session.NewRegistry()
-	pairing := governance.NewPairing(filepath.Join(t.TempDir(), "pairing.json"))
-	h := NewHub(reg, Config{InstanceID: "i1", InstanceName: "test"}, pairing, 0)
+	testDataDir := t.TempDir()
+	pairing := governance.NewPairing(filepath.Join(testDataDir, "pairing.json"))
+	h := NewHub(reg, Config{InstanceID: "i1", InstanceName: "test", DataDir: testDataDir}, pairing, 0)
 	fe := &fakeExec{sink: h}
 	h.SetExecutor(fe)
 	return h, fe

@@ -27,6 +27,7 @@ import (
 	"everything-go/internal/feed"
 	"everything-go/internal/governance"
 	"everything-go/internal/inbox"
+	"everything-go/internal/instances"
 	"everything-go/internal/media"
 	"everything-go/internal/nativewatch"
 	"everything-go/internal/protocol"
@@ -63,6 +64,7 @@ type Hub struct {
 	fcm         *fcm.Notifier
 	feed        *feed.Store
 	inbox       *inbox.Store
+	instances   *instances.Manager
 	mediaScan   *media.Scanner
 	attachments *attachmentjournal.Store
 	controls    *governance.SessionControlStore
@@ -115,6 +117,7 @@ type Hub struct {
 }
 
 func NewHub(reg *session.Registry, cfg Config, pairing *governance.Pairing, port int) *Hub {
+	exePath, _ := os.Executable()
 	h := &Hub{
 		registry:          reg,
 		pairing:           pairing,
@@ -131,6 +134,7 @@ func NewHub(reg *session.Registry, cfg Config, pairing *governance.Pairing, port
 		storm:             newStormGuards(),
 		mediaScan:         media.NewScanner(port),
 		attachments:       attachmentjournal.New(cfg.DataDir),
+		instances:         instances.New(cfg.DataDir, exePath),
 		controls:          governance.NewSessionControlStore(cfg.DataDir),
 		attachmentReplays: make(map[string]*attachmentReplayLease),
 	}
