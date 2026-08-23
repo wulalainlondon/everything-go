@@ -3,7 +3,6 @@ package main
 
 import (
 	"context"
-	_ "embed"
 	"errors"
 	"flag"
 	"fmt"
@@ -33,9 +32,6 @@ import (
 	"everything-go/internal/session"
 	"everything-go/internal/sourcepolicy"
 )
-
-//go:embed keys/fcm_service_account.json
-var embeddedFCMKey []byte
 
 func main() {
 	port := flag.Int("port", 8767, "WebSocket listen port")
@@ -186,7 +182,8 @@ func main() {
 		})
 	}
 
-	// FCM push: explicit --service-account flag overrides the embedded key.
+	// FCM push credentials must remain local runtime data. Public release
+	// binaries never embed a service-account private key.
 	fcmTokenPath := filepath.Join(*dataDir, "fcm_token.txt")
 	if *serviceAccount != "" {
 		if notifier, err := fcm.New(*serviceAccount, fcmTokenPath); err != nil {
@@ -196,12 +193,7 @@ func main() {
 			log.Printf("FCM push enabled (service account: %s)", *serviceAccount)
 		}
 	} else {
-		if notifier, err := fcm.NewFromBytes(embeddedFCMKey, fcmTokenPath); err != nil {
-			log.Printf("FCM disabled (embedded key): %v", err)
-		} else {
-			hub.SetFCM(notifier)
-			log.Printf("FCM push enabled (embedded key)")
-		}
+		log.Printf("FCM disabled: no --service-account configured")
 	}
 
 	// Network presence services (P3 discovery + P4 tunnel). They are opt-in so

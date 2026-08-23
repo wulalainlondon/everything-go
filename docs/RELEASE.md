@@ -11,7 +11,10 @@ Required repository secrets:
 - `APPSTORE_CONNECT_API_KEY_ID`
 - `APPSTORE_CONNECT_API_ISSUER_ID`
 - `APPSTORE_CONNECT_API_KEY_P8_BASE64`
-- `FCM_SERVICE_ACCOUNT_JSON` (optional; releases work without embedded push credentials)
+
+FCM service-account credentials are never release secrets and must never be
+embedded in a public binary. Deployments that need push notifications pass a
+local `0600` JSON file with `--service-account`.
 
 The workflow cross-builds macOS, Linux, and Windows; packages both macOS architectures as app bundles; enforces the exact Developer ID identity; notarizes and staples; then publishes installers, binaries, app bundles, and `SHA256SUMS`.
 

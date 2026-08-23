@@ -30,6 +30,7 @@ EXPECTED_SIGNING_AUTHORITY="Developer ID Application: YuDi Huang (UPWLTJL6S2)"
 EXPECTED_TEAM_ID="UPWLTJL6S2"
 LAUNCH="$RUNTIME_DIR/everything_go_launch.sh"
 SESSION_STORE="${EVERYTHING_GO_SESSION_STORE:-$HOME/.claude-bridge-runtime/saved_sessions.json}"
+SERVICE_ACCOUNT="${EVERYTHING_GO_SERVICE_ACCOUNT:-$HOME/.config/claude-bridge/serviceAccountKey.json}"
 SERVICE_BIN="$BIN"
 PERMISSION_TARGET="$BIN"
 BROWSER_ORIGIN_MODE="${BRIDGE_BROWSER_ORIGIN_MODE:-ask}"
@@ -251,6 +252,10 @@ export EVERYTHING_GO_CODEX_IGNORE_NAME_PREFIXES="$CODEX_IGNORE_NAME_PREFIXES"
 export EVERYTHING_GO_CODEX_ROLLOVER_ENABLED="$CODEX_ROLLOVER_ENABLED"
 export EVERYTHING_GO_CODEX_COLD_RESUME_MAX_BYTES="$CODEX_COLD_RESUME_MAX_BYTES"
 export EVERYTHING_GO_CODEX_CHECKPOINT_MAX_BYTES="$CODEX_CHECKPOINT_MAX_BYTES"
+service_account_args=()
+if [[ -f "$SERVICE_ACCOUNT" ]]; then
+  service_account_args+=(--service-account "$SERVICE_ACCOUNT")
+fi
 exec "$SERVICE_BIN" \\
   --port "$PORT" \\
   --data-dir "$RUNTIME_DIR" \\
@@ -258,7 +263,8 @@ exec "$SERVICE_BIN" \\
   --discovery \\
   --mdns \\
   --tunnel \\
-  --instance-name "\$(hostname -s 2>/dev/null || echo everything-go)"
+  --instance-name "\$(hostname -s 2>/dev/null || echo everything-go)" \\
+  "\${service_account_args[@]}"
 EOF
 chmod +x "$LAUNCH"
 say "launch script written: $LAUNCH"
