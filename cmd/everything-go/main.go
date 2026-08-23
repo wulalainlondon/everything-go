@@ -42,6 +42,7 @@ func main() {
 	legacyExecutor := flag.String("executor", "go", "deprecated compatibility flag; only go is supported")
 	claudeBin := flag.String("claude-bin", "claude", "path to the claude CLI binary")
 	codexBin := flag.String("codex-bin", "codex", "path to the codex CLI binary")
+	geminiBin := flag.String("gemini-bin", "", "path to the Gemini CLI binary (empty = discover gemini in PATH)")
 	ollamaHost := flag.String("ollama-host", "http://localhost:11434", "Ollama base URL")
 	remoteWSURL := flag.String("remote-ws-url", "", "remote backend WebSocket URL for backend=remote-ws")
 	remoteWSToken := flag.String("remote-ws-token", "", "bearer token for remote backend WebSocket")
@@ -60,18 +61,24 @@ func main() {
 	mdnsOff := flag.Bool("no-mdns", false, "deprecated: mDNS is disabled by default")
 	disableSearch := flag.Bool("disable-search", false, "disable transcript search and background indexing")
 	disableNativeWatcher := flag.Bool("disable-native-watcher", false, "disable native session discovery outside bridge-created sessions")
-	mode := flag.String("mode", "bridge", "run mode: bridge (resident server) | index (one-shot search ingest, then exit)")
+	mode := flag.String("mode", "bridge", "run mode: bridge | index | healthcheck | doctor")
 	flag.Parse()
 	if *legacyExecutor != "go" {
 		fmt.Fprintf(os.Stderr, "unsupported executor %q; this release is Go-only\n", *legacyExecutor)
 		os.Exit(2)
 	}
 
-	// `--mode=index` is the short-lived indexer child: it ingests the search DB
-	// to completion and exits, keeping the heap-heavy transcript parse out of the
-	// resident bridge. It needs nothing else, so branch before any server setup.
-	if *mode == "index" {
+	switch *mode {
+	case "index":
 		os.Exit(runSearchIndexer(*dataDir))
+	case "healthcheck":
+		os.Exit(runHealthcheck(*port))
+	case "doctor":
+		os.Exit(runDoctor(*port, *dataDir, *claudeBin, *codexBin, *geminiBin))
+	case "bridge":
+	default:
+		fmt.Fprintf(os.Stderr, "unknown mode %q\n", *mode)
+		os.Exit(2)
 	}
 
 	sessionStorePath := *sessionStore
@@ -122,10 +129,12 @@ func main() {
 	codex := goexec.NewCodex(terminal, *codexBin)
 	codex.SetDataDir(*dataDir)
 	ollama := goexec.NewOllama(terminal, *ollamaHost, "")
+	gemini := goexec.NewGemini(terminal, *geminiBin)
 	backends := map[string]executor.Executor{
 		"claude": claude,
 		"codex":  codex,
 		"ollama": ollama,
+		"gemini": gemini,
 	}
 	if *remoteWSURL != "" {
 		backends["remote-ws"] = remote.NewWS(terminal, *remoteWSURL, *remoteWSToken)
@@ -137,6 +146,11 @@ func main() {
 	// the heap-heavy parse of every transcript lands in a process that exits and
 	// returns its memory to the OS (see runSearchIndexerLoop).
 	ctx := context.Background()
+	externalTunnelURLFile := strings.TrimSpace(os.Getenv("BRIDGE_TUNNEL_URL_FILE"))
+	if externalTunnelURLFile != "" {
+		go netsvc.WatchURLFile(ctx, externalTunnelURLFile, time.Second, hub.NotifyTunnelURL)
+		log.Printf("[tunnel] watching externally managed URL file %s", externalTunnelURLFile)
+	}
 	if !*disableSearch {
 		if idx, err := search.New(filepath.Join(*dataDir, "everything_go_search.db")); err != nil {
 			log.Printf("search index disabled: %v", err)
@@ -203,7 +217,7 @@ func main() {
 	if *mdns && !*mdnsOff {
 		go netsvc.RegisterMDNS(ctx, *port, cfg.InstanceName)
 	}
-	if *tunnel {
+	if *tunnel && externalTunnelURLFile == "" {
 		go func() {
 			// Do not expose an unclaimed bridge through a public quick tunnel.
 			// LAN discovery remains available and the tunnel starts after pairing.
@@ -241,6 +255,60 @@ func codexRemoteEndpoint() string {
 		return "unix://" + socket
 	}
 	return "unix://"
+}
+
+func runHealthcheck(port int) int {
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", fmt.Sprint(port)), 2*time.Second)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "bridge healthcheck failed: %v\n", err)
+		return 1
+	}
+	_ = conn.Close()
+	fmt.Printf("bridge healthy on 127.0.0.1:%d\n", port)
+	return 0
+}
+
+func runDoctor(port int, dataDir, claudeBin, codexBin, geminiBin string) int {
+	failures := 0
+	backendCount := 0
+	checkBinary := func(label, requested string, optional bool) {
+		resolved, err := exec.LookPath(requested)
+		if strings.TrimSpace(requested) == "" {
+			err = errors.New("not configured")
+		}
+		if err != nil {
+			if !optional {
+				failures++
+			}
+			fmt.Printf("%-12s missing (%v)\n", label, err)
+			return
+		}
+		if label != "cloudflared" {
+			backendCount++
+		}
+		fmt.Printf("%-12s %s\n", label, resolved)
+	}
+	checkBinary("claude", claudeBin, true)
+	checkBinary("codex", codexBin, true)
+	checkBinary("gemini", geminiBin, true)
+	checkBinary("cloudflared", "cloudflared", true)
+	if backendCount == 0 {
+		failures++
+		fmt.Println("backend      no supported AI CLI found")
+	}
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		failures++
+		fmt.Printf("data_dir     error (%v)\n", err)
+	} else {
+		fmt.Printf("data_dir     %s\n", dataDir)
+	}
+	if runHealthcheck(port) != 0 {
+		failures++
+	}
+	if failures > 0 {
+		return 1
+	}
+	return 0
 }
 
 // runSearchIndexer is the body of `--mode=index`: a one-shot search ingest that

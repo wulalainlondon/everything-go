@@ -22,6 +22,7 @@ const (
 	Claude   = "claude"
 	Codex    = "codex"
 	Ollama   = "ollama"
+	Gemini   = "gemini"
 	RemoteWS = "remote-ws"
 )
 

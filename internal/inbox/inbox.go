@@ -1,11 +1,6 @@
-// Package inbox is the Go port of bridge/push_registry.py's file-push inbox: a
-// small store for files pushed from the desktop to the mobile app (e.g. an APK
-// built locally → delivered to the phone). The registry is persisted to
-// inbox.json so a file survives a bridge restart until every target device has
-// acked it. Mirrors the *inline* path only: files are base64-encoded into the
-// frame (and the inbox entry). The Python large-file path uploads to Firebase
-// Storage and hands back a signed URL; Go has no Storage binding, so files over
-// the inline cap are rejected with a clear error rather than silently dropped.
+// Package inbox persists files pushed from desktop to mobile. Small files are
+// stored inline; large files retain a canonical local path so their URL can be
+// regenerated from current tunnel/network state on every delivery.
 package inbox
 
 import (
@@ -51,7 +46,8 @@ type Entry struct {
 	Size            int64    `json:"size"`
 	MimeType        string   `json:"mime_type"`
 	Data            string   `json:"data,omitempty"` // base64 inline body
-	URL             string   `json:"url,omitempty"`  // populated only by the Python Storage path
+	URL             string   `json:"url,omitempty"`
+	LocalPath       string   `json:"local_path,omitempty"`
 	TargetDeviceIDs []string `json:"target_device_ids"`
 	AckedDeviceIDs  []string `json:"acked_device_ids"`
 	PushedAt        float64  `json:"pushed_at"`
@@ -70,18 +66,25 @@ type Item struct {
 	PushedAt float64
 }
 
-func (e *Entry) item() Item {
+func (e *Entry) item(urlBuilder func(string) string) Item {
+	url := e.URL
+	if e.LocalPath != "" && urlBuilder != nil {
+		if info, err := os.Stat(e.LocalPath); err == nil && !info.IsDir() {
+			url = urlBuilder(e.LocalPath)
+		}
+	}
 	return Item{
 		FileID: e.FileID, Filename: e.Filename, Size: e.Size,
-		MimeType: e.MimeType, Data: e.Data, URL: e.URL, PushedAt: e.PushedAt,
+		MimeType: e.MimeType, Data: e.Data, URL: url, PushedAt: e.PushedAt,
 	}
 }
 
 // Store holds the push registry and persists it. Safe for concurrent use.
 type Store struct {
-	dir string // <data_dir>
-	mu  sync.Mutex
-	reg map[string]*Entry
+	dir        string // <data_dir>
+	mu         sync.Mutex
+	reg        map[string]*Entry
+	urlBuilder func(string) string
 }
 
 // New opens (or creates) the inbox rooted at dataDir, loading inbox.json and
@@ -90,6 +93,12 @@ func New(dataDir string) *Store {
 	s := &Store{dir: dataDir, reg: map[string]*Entry{}}
 	s.load()
 	return s
+}
+
+func (s *Store) SetURLBuilder(builder func(string) string) {
+	s.mu.Lock()
+	s.urlBuilder = builder
+	s.mu.Unlock()
 }
 
 func (s *Store) path() string { return filepath.Join(s.dir, "inbox.json") }
@@ -141,8 +150,8 @@ func indexByte(s string, b byte) int {
 
 // Push reads absPath, base64-inlines it, registers it for every target device
 // (all connected devices except the sender) and persists. Returns the stored
-// item for broadcast. Errors if the file is missing, is a directory, or exceeds
-// the inline cap (no Firebase Storage fallback in Go).
+// item for broadcast. Files above the inline cap are served from their original
+// path instead of being copied into inbox.json.
 func (s *Store) Push(absPath, senderDevice string, targets []string) (Item, error) {
 	info, err := os.Stat(absPath)
 	if err != nil {
@@ -151,12 +160,18 @@ func (s *Store) Push(absPath, senderDevice string, targets []string) (Item, erro
 	if info.IsDir() {
 		return Item{}, errors.New("path is a directory")
 	}
+	var encoded, localPath string
 	if info.Size() > inlineMaxBytes {
-		return Item{}, errors.New("File too large for inline transfer and Firebase Storage not available")
-	}
-	raw, err := os.ReadFile(absPath)
-	if err != nil {
-		return Item{}, fmt.Errorf("Push failed: %v", err)
+		localPath, err = filepath.EvalSymlinks(absPath)
+		if err != nil {
+			return Item{}, fmt.Errorf("Push failed: %v", err)
+		}
+	} else {
+		raw, readErr := os.ReadFile(absPath)
+		if readErr != nil {
+			return Item{}, fmt.Errorf("Push failed: %v", readErr)
+		}
+		encoded = base64.StdEncoding.EncodeToString(raw)
 	}
 	name := filepath.Base(absPath)
 	e := &Entry{
@@ -164,7 +179,8 @@ func (s *Store) Push(absPath, senderDevice string, targets []string) (Item, erro
 		Filename:        name,
 		Size:            info.Size(),
 		MimeType:        guessMime(name),
-		Data:            base64.StdEncoding.EncodeToString(raw),
+		Data:            encoded,
+		LocalPath:       localPath,
 		TargetDeviceIDs: append([]string{}, targets...),
 		AckedDeviceIDs:  []string{},
 		PushedAt:        nowSecs(),
@@ -173,7 +189,7 @@ func (s *Store) Push(absPath, senderDevice string, targets []string) (Item, erro
 	s.reg[e.FileID] = e
 	s.save()
 	s.mu.Unlock()
-	return e.item(), nil
+	return e.item(s.urlBuilder), nil
 }
 
 // Pending returns the un-acked, un-expired items targeted at deviceID (or
@@ -191,10 +207,14 @@ func (s *Store) Pending(deviceID string) []Item {
 		if deviceID != "" && contains(e.AckedDeviceIDs, deviceID) {
 			continue
 		}
-		if e.Data == "" && e.URL == "" {
+		if e.Data == "" && e.URL == "" && e.LocalPath == "" {
 			continue // nothing deliverable
 		}
-		out = append(out, e.item())
+		item := e.item(s.urlBuilder)
+		if item.Data == "" && item.URL == "" {
+			continue
+		}
+		out = append(out, item)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].PushedAt > out[j].PushedAt })
 	return out

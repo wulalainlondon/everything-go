@@ -37,6 +37,12 @@ func DefaultRegistry(includeRemoteWS bool) []Definition {
 			},
 		},
 		{
+			ID:           Gemini,
+			Label:        "Gemini",
+			Models:       []Model{},
+			Capabilities: Capabilities{History: true, Sandbox: true, Images: true, Files: true},
+		},
+		{
 			ID:           Ollama,
 			Label:        "Ollama",
 			DefaultModel: "qwen2.5:7b",

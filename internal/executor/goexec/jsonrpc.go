@@ -13,7 +13,8 @@ import (
 // we do too: requests are {id, method, params}, responses {id, result|error},
 // notifications {method, params}.
 type rpcPlumber struct {
-	name string
+	name    string
+	jsonRPC bool
 
 	wmu sync.Mutex
 	w   io.Writer
@@ -30,6 +31,12 @@ type rpcReply struct {
 
 func newRPCPlumber(name string) *rpcPlumber {
 	return &rpcPlumber{name: name, nextID: 1, pending: make(map[int]chan rpcReply)}
+}
+
+func newJSONRPCPlumber(name string) *rpcPlumber {
+	p := newRPCPlumber(name)
+	p.jsonRPC = true
+	return p
 }
 
 func (p *rpcPlumber) setWriter(w io.Writer) {
@@ -63,6 +70,9 @@ func (p *rpcPlumber) request(method string, params any, timeout time.Duration) (
 	p.mu.Unlock()
 
 	req := map[string]any{"id": id, "method": method}
+	if p.jsonRPC {
+		req["jsonrpc"] = "2.0"
+	}
 	if params != nil {
 		req["params"] = params
 	}
@@ -86,6 +96,9 @@ func (p *rpcPlumber) request(method string, params any, timeout time.Duration) (
 
 func (p *rpcPlumber) notify(method string, params any) error {
 	msg := map[string]any{"method": method}
+	if p.jsonRPC {
+		msg["jsonrpc"] = "2.0"
+	}
 	if params != nil {
 		msg["params"] = params
 	}

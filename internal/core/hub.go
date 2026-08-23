@@ -201,7 +201,12 @@ func (h *Hub) NotifyTunnelURL(wsURL string) {
 func (h *Hub) SetFeed(f *feed.Store) { h.feed = f }
 
 // SetInbox wires the file-push inbox (nil → push_file/get_inbox answer empty/no-op).
-func (h *Hub) SetInbox(i *inbox.Store) { h.inbox = i }
+func (h *Hub) SetInbox(i *inbox.Store) {
+	h.inbox = i
+	if i != nil {
+		i.SetURLBuilder(h.mediaScan.LocalURL)
+	}
+}
 
 // SetRestart wires the bridge-restart action (nil → restart_bridge is a no-op
 // that answers "not configured"). main wires this to a self-re-exec.

@@ -107,7 +107,7 @@ func (m *Manager) Delete(name string) string {
 	if index < 0 {
 		return "not_found"
 	}
-	if proc := m.started[name]; proc != nil && processAlive(proc.Pid) {
+	if _, ok := m.managedProcess(items[index]); ok {
 		return "still_running"
 	}
 	items = append(items[:index], items[index+1:]...)
@@ -124,7 +124,7 @@ func (m *Manager) Start(name string) string {
 	if !ok {
 		return "not_found"
 	}
-	if proc := m.started[name]; proc != nil && processAlive(proc.Pid) {
+	if _, ok := m.managedProcess(item); ok {
 		return ""
 	}
 	if m.exePath == "" {
@@ -142,7 +142,7 @@ func (m *Manager) Start(name string) string {
 		_ = logFile.Close()
 		return "log_open_failed"
 	}
-	args := []string{"--port", strconv.Itoa(item.Port), "--data-dir", item.DataDir, "--instance-name", item.Name, "--disable-native-watcher"}
+	args := []string{"--port", strconv.Itoa(item.Port), "--data-dir", item.DataDir, "--instance-name", item.Name, "--disable-native-watcher", "--disable-search"}
 	if item.RootDir != "" {
 		args = append(args, "--root-dir", item.RootDir)
 	}
@@ -176,8 +176,8 @@ func (m *Manager) Stop(name string) string {
 	if !ok {
 		return "not_found"
 	}
-	proc := m.started[name]
-	if proc == nil || !processAlive(proc.Pid) {
+	proc, running := m.managedProcess(item)
+	if !running {
 		_ = atomicWrite(filepath.Join(item.DataDir, ".bridge_state"), []byte("disabled"))
 		return "not_running"
 	}
@@ -203,12 +203,28 @@ func (m *Manager) find(name string) (Instance, bool) {
 func (m *Manager) status(item Instance) Status {
 	state := "stopped"
 	var pid *int
-	if proc := m.started[item.Name]; proc != nil && processAlive(proc.Pid) {
+	if proc, ok := m.managedProcess(item); ok {
 		state, pid = "running", &proc.Pid
 	} else if bytes, err := os.ReadFile(filepath.Join(item.DataDir, ".bridge_state")); err == nil && strings.TrimSpace(string(bytes)) == "enabled" {
 		state = "crashed"
 	}
 	return Status{Instance: item, State: state, SupervisorPID: pid, BridgePID: pid}
+}
+
+func (m *Manager) managedProcess(item Instance) (*os.Process, bool) {
+	if proc := m.started[item.Name]; proc != nil && processAlive(proc.Pid) {
+		return proc, true
+	}
+	data, err := os.ReadFile(filepath.Join(item.DataDir, "bridge.pid"))
+	if err != nil {
+		return nil, false
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pid <= 0 || !processAlive(pid) || !processMatches(pid, m.exePath, item.DataDir) {
+		return nil, false
+	}
+	proc, err := os.FindProcess(pid)
+	return proc, err == nil
 }
 
 func validate(item Instance, existing []Instance) string {

@@ -5,6 +5,8 @@ package instances
 import (
 	"os"
 	"os/exec"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -12,6 +14,15 @@ import (
 func configureDetached(cmd *exec.Cmd) { cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true} }
 
 func processAlive(pid int) bool { return syscall.Kill(pid, 0) == nil }
+
+func processMatches(pid int, exePath, dataDir string) bool {
+	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=").Output()
+	if err != nil {
+		return false
+	}
+	command := string(out)
+	return exePath != "" && strings.Contains(command, exePath) && dataDir != "" && strings.Contains(command, dataDir)
+}
 
 func terminateProcess(proc *os.Process) error {
 	if err := proc.Signal(syscall.SIGTERM); err != nil {
