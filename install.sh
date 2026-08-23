@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 #
-# everything-go bridge installer
+# Averything Bridge installer (native Go)
 # ------------------------------------------------------------------
 # One-liner (paste to your claude/codex CLI, or run in a terminal):
 #
-#   curl -fsSL https://github.com/wulalainlondon/everything-go/releases/latest/download/install.sh | bash
+#   curl -fsSL https://github.com/wulalainlondon/averything-bridge/releases/latest/download/install.sh | bash
 #
 # What it does:
 #   1. downloads and verifies the signed, notarized macOS app (or Linux binary)
@@ -19,7 +19,7 @@
 # ------------------------------------------------------------------
 set -euo pipefail
 
-REPO="${EVERYTHING_GO_REPO:-wulalainlondon/everything-go}"
+REPO="${EVERYTHING_GO_REPO:-wulalainlondon/averything-bridge}"
 PORT="${EVERYTHING_GO_PORT:-8766}"
 RUNTIME_DIR="${EVERYTHING_GO_HOME:-$HOME/.everything-go-runtime}"
 LABEL="com.everything-go.app"
@@ -165,8 +165,16 @@ install_bridge_binary() {
   say "downloading $ASSET ..."
   curl -fSL --proto '=https' --tlsv1.2 "$URL" -o "$BIN.tmp" \
     || die "download failed: $URL"
+  curl -fsSL --proto '=https' --tlsv1.2 "$(base_url SHA256SUMS)" -o "$RUNTIME_DIR/SHA256SUMS.tmp" \
+    || die "checksum download failed"
+  local expected_sha actual_sha
+  expected_sha=$(awk -v asset="$ASSET" '$2 == asset { print $1 }' "$RUNTIME_DIR/SHA256SUMS.tmp")
+  [ -n "$expected_sha" ] || die "release checksum does not contain $ASSET"
+  actual_sha=$(shasum -a 256 "$BIN.tmp" | awk '{print $1}')
+  [ "$actual_sha" = "$expected_sha" ] || die "checksum mismatch for $ASSET"
   chmod +x "$BIN.tmp"
   mv -f "$BIN.tmp" "$BIN"
+  rm -f "$RUNTIME_DIR/SHA256SUMS.tmp"
   SERVICE_BIN="$BIN"
   PERMISSION_TARGET="$BIN"
   say "binary installed: $BIN"
@@ -245,7 +253,6 @@ export EVERYTHING_GO_CODEX_COLD_RESUME_MAX_BYTES="$CODEX_COLD_RESUME_MAX_BYTES"
 export EVERYTHING_GO_CODEX_CHECKPOINT_MAX_BYTES="$CODEX_CHECKPOINT_MAX_BYTES"
 exec "$SERVICE_BIN" \\
   --port "$PORT" \\
-  --executor go \\
   --data-dir "$RUNTIME_DIR" \\
   --session-store "$SESSION_STORE" \\
   --discovery \\
