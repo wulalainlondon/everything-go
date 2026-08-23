@@ -1,538 +1,359 @@
-#!/bin/bash
+#!/usr/bin/env bash
+#
+# everything-go bridge installer
+# ------------------------------------------------------------------
+# One-liner (paste to your claude/codex CLI, or run in a terminal):
+#
+#   curl -fsSL https://github.com/wulalainlondon/everything-go/releases/latest/download/install.sh | bash
+#
+# What it does:
+#   1. downloads and verifies the signed, notarized macOS app (or Linux binary)
+#   2. makes sure `cloudflared` exists (for off-WiFi remote access)
+#   3. installs everything-go as a background service (launchd / systemd)
+#      started with UDP discovery + mDNS; the tunnel starts only after a trusted
+#      device has paired on the local network
+#   4. starts it and prints how the phone app connects
+#
+# Prerequisite: you already have the `claude` and/or `codex` CLI installed
+# and logged in. This bridge spawns *your* CLI with *your* account.
+# ------------------------------------------------------------------
 set -euo pipefail
 
-SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RUNTIME_DIR="$HOME/.claude-bridge-runtime"
+REPO="${EVERYTHING_GO_REPO:-wulalainlondon/everything-go}"
+PORT="${EVERYTHING_GO_PORT:-8766}"
+RUNTIME_DIR="${EVERYTHING_GO_HOME:-$HOME/.everything-go-runtime}"
+LABEL="com.everything-go.app"
+BIN="$RUNTIME_DIR/everything-go"
+APP_DIR="$RUNTIME_DIR/Everything Go.app"
+APP_BIN="$APP_DIR/Contents/MacOS/everything-go"
+EXPECTED_SIGNING_AUTHORITY="Developer ID Application: YuDi Huang (UPWLTJL6S2)"
+EXPECTED_TEAM_ID="UPWLTJL6S2"
+LAUNCH="$RUNTIME_DIR/everything_go_launch.sh"
+SESSION_STORE="${EVERYTHING_GO_SESSION_STORE:-$HOME/.claude-bridge-runtime/saved_sessions.json}"
+SERVICE_BIN="$BIN"
+PERMISSION_TARGET="$BIN"
+BROWSER_ORIGIN_MODE="${BRIDGE_BROWSER_ORIGIN_MODE:-ask}"
+BROWSER_ALLOWED_ORIGINS="${BRIDGE_BROWSER_ALLOWED_ORIGINS:-}"
+BROWSER_MANAGE_AUTO_REVIEW="${BRIDGE_BROWSER_MANAGE_AUTO_REVIEW:-1}"
+BROWSER_ENABLE_NETWORK="${BRIDGE_BROWSER_ENABLE_NETWORK:-1}"
+CODEX_SESSIONS_DIR="${EVERYTHING_GO_CODEX_SESSIONS_DIR:-${CODEX_HOME:-$HOME/.codex}/sessions}"
+CODEX_IGNORE_CWD_GLOBS="${EVERYTHING_GO_CODEX_IGNORE_CWD_GLOBS:-}"
+CODEX_IGNORE_NAME_PREFIXES="${EVERYTHING_GO_CODEX_IGNORE_NAME_PREFIXES:-}"
+CODEX_ROLLOVER_ENABLED="${EVERYTHING_GO_CODEX_ROLLOVER_ENABLED:-false}"
+CODEX_COLD_RESUME_MAX_BYTES="${EVERYTHING_GO_CODEX_COLD_RESUME_MAX_BYTES:-268435456}"
+CODEX_CHECKPOINT_MAX_BYTES="${EVERYTHING_GO_CODEX_CHECKPOINT_MAX_BYTES:-131072}"
 
-if [[ "$SRC_DIR" == "$RUNTIME_DIR" ]]; then
-  echo "ERROR: install.sh 從 runtime 目錄執行 — rsync 會是 no-op，程式碼不會更新。" >&2
-  echo "       請從 source 目錄執行，例如：" >&2
-  echo "         bash ~/Downloads/Helper/claude-bridge/bridge/install.sh" >&2
-  exit 1
+say()  { printf '\033[1;36m[everything-go]\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33m[everything-go]\033[0m %s\n' "$*" >&2; }
+die()  { printf '\033[1;31m[everything-go]\033[0m %s\n' "$*" >&2; exit 1; }
+
+run_permission_check() {
+  local extra_paths="$HOME/Downloads:$HOME/Documents:$HOME/Desktop"
+  "$SERVICE_BIN" \
+    --permission-check \
+    --data-dir "$RUNTIME_DIR" \
+    --session-store "$SESSION_STORE" \
+    --permission-check-paths "$extra_paths"
+}
+
+open_full_disk_access_settings() {
+  if command -v open >/dev/null 2>&1; then
+    open "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles" >/dev/null 2>&1 || true
+  fi
+}
+
+ensure_macos_permissions() {
+  [ "$OS" = darwin ] || return 0
+  [ "${EVERYTHING_GO_SKIP_PERMISSION_CHECK:-0}" = "1" ] && {
+    warn "skipping macOS permission check because EVERYTHING_GO_SKIP_PERMISSION_CHECK=1"
+    return 0
+  }
+
+  say "checking macOS file permissions with the installed bridge binary ..."
+  if run_permission_check; then
+    say "macOS permission check passed"
+    return 0
+  fi
+
+  warn "macOS blocked the bridge from reading one or more local folders."
+  warn "Grant Full Disk Access to: $PERMISSION_TARGET"
+  warn "System Settings → Privacy & Security → Full Disk Access"
+  open_full_disk_access_settings
+
+  while true; do
+    if [ ! -r /dev/tty ]; then
+      die "permission approval needs an interactive terminal; re-run install.sh in Terminal after granting Full Disk Access to $SERVICE_BIN"
+    fi
+    printf "Press Enter after granting Full Disk Access, or Ctrl-C to stop: " >/dev/tty
+    read -r _unused </dev/tty
+    if run_permission_check; then
+      say "macOS permission check passed"
+      return 0
+    fi
+    warn "permission check still failed; confirm Full Disk Access is enabled for $SERVICE_BIN"
+    open_full_disk_access_settings
+  done
+}
+
+install_bridge_binary() {
+  mkdir -p "$RUNTIME_DIR"
+
+  # Resolve the latest tag via API to build a direct /releases/download/<tag>/
+  # URL, bypassing the /releases/latest/download/ redirect which returns 504
+  # for zip assets on some GitHub CDN nodes.
+  local latest_tag
+  latest_tag=$(curl -fsSL --proto '=https' --tlsv1.2 \
+    "https://api.github.com/repos/$REPO/releases/latest" \
+    | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
+  [ -n "$latest_tag" ] || latest_tag="latest"
+
+  base_url() { # $1 = asset filename
+    if [ "$latest_tag" = "latest" ]; then
+      echo "https://github.com/$REPO/releases/latest/download/$1"
+    else
+      echo "https://github.com/$REPO/releases/download/$latest_tag/$1"
+    fi
+  }
+
+  URL=$(base_url "$ASSET")
+
+  if [ "$OS" = darwin ]; then
+    local app_asset="everything-go-darwin-${ARCH}.app.zip"
+    local app_url sums_url staging extracted authority team backup expected_sha actual_sha
+    app_url=$(base_url "$app_asset")
+    sums_url=$(base_url "SHA256SUMS")
+    say "downloading $app_asset ..."
+    curl -fSL --proto '=https' --tlsv1.2 "$app_url" -o "$RUNTIME_DIR/$app_asset.tmp" \
+      || die "signed macOS app download failed: $app_url"
+    curl -fsSL --proto '=https' --tlsv1.2 "$sums_url" -o "$RUNTIME_DIR/SHA256SUMS.tmp" \
+      || die "checksum download failed: $sums_url"
+    expected_sha=$(awk -v asset="$app_asset" '$2 == asset { print $1 }' "$RUNTIME_DIR/SHA256SUMS.tmp")
+    [ -n "$expected_sha" ] || die "release checksum does not contain $app_asset"
+    actual_sha=$(shasum -a 256 "$RUNTIME_DIR/$app_asset.tmp" | awk '{print $1}')
+    [ "$actual_sha" = "$expected_sha" ] || die "checksum mismatch for $app_asset"
+
+    staging=$(mktemp -d "$RUNTIME_DIR/.install.XXXXXX")
+    ditto -x -k "$RUNTIME_DIR/$app_asset.tmp" "$staging"
+    extracted="$staging/Everything Go.app"
+    [ -x "$extracted/Contents/MacOS/everything-go" ] \
+      || die "app asset did not contain the expected executable"
+    codesign --verify --deep --strict --verbose=2 "$extracted" \
+      || die "Developer ID signature verification failed"
+    authority=$(codesign -d --verbose=4 "$extracted" 2>&1 | sed -n 's/^Authority=//p' | head -1)
+    team=$(codesign -d --verbose=4 "$extracted" 2>&1 | sed -n 's/^TeamIdentifier=//p' | head -1)
+    [ "$authority" = "$EXPECTED_SIGNING_AUTHORITY" ] \
+      || die "unexpected signing authority: ${authority:-missing}"
+    [ "$team" = "$EXPECTED_TEAM_ID" ] || die "unexpected signing team: ${team:-missing}"
+    spctl -a -t exec -vv "$extracted" || die "Gatekeeper rejected the app"
+    xcrun stapler validate "$extracted" || die "notarization ticket validation failed"
+
+    backup="$RUNTIME_DIR/Everything Go.previous.app"
+    rm -rf "$backup"
+    if [ -d "$APP_DIR" ]; then mv "$APP_DIR" "$backup"; fi
+    if ! mv "$extracted" "$APP_DIR"; then
+      [ -d "$backup" ] && mv "$backup" "$APP_DIR"
+      die "failed to install the verified app"
+    fi
+    rm -rf "$staging"
+    rm -f "$RUNTIME_DIR/$app_asset.tmp" "$RUNTIME_DIR/SHA256SUMS.tmp"
+    SERVICE_BIN="$APP_BIN"
+    PERMISSION_TARGET="$APP_DIR"
+    say "verified signed app installed: $APP_DIR"
+    return 0
+  fi
+
+  say "downloading $ASSET ..."
+  curl -fSL --proto '=https' --tlsv1.2 "$URL" -o "$BIN.tmp" \
+    || die "download failed: $URL"
+  chmod +x "$BIN.tmp"
+  mv -f "$BIN.tmp" "$BIN"
+  SERVICE_BIN="$BIN"
+  PERMISSION_TARGET="$BIN"
+  say "binary installed: $BIN"
+}
+
+# ── 1. platform detection ──────────────────────────────────────────
+OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
+ARCH="$(uname -m)"
+case "$ARCH" in
+  arm64|aarch64) ARCH=arm64 ;;
+  x86_64|amd64)  ARCH=amd64 ;;
+  *) die "unsupported architecture: $ARCH" ;;
+esac
+case "$OS" in
+  darwin|linux) ;;
+  *) die "unsupported OS: $OS (only macOS and Linux are supported)" ;;
+esac
+ASSET="everything-go-${OS}-${ARCH}"
+
+# ── 2. prerequisite: claude or codex CLI ───────────────────────────
+CLAUDE_BIN="$(command -v claude 2>/dev/null || true)"
+CODEX_BIN="$(command -v codex 2>/dev/null || true)"
+if [ -z "$CLAUDE_BIN" ] && [ -z "$CODEX_BIN" ]; then
+  die "neither 'claude' nor 'codex' CLI found in PATH. Install and log in to at least one first."
 fi
-SERVICE_LABEL="${BRIDGE_SERVICE_LABEL:-com.claude-bridge.app}"
-PLIST_NAME="${SERVICE_LABEL}.plist"
-LAUNCH_AGENTS="$HOME/Library/LaunchAgents"
-PLIST_PATH="$LAUNCH_AGENTS/$PLIST_NAME"
-SERVICE_TARGET="gui/$(id -u)/$SERVICE_LABEL"
-DOMAIN_TARGET="gui/$(id -u)"
+say "found CLI: ${CLAUDE_BIN:-—} ${CODEX_BIN:-—}"
 
-# ============================================================================
-# Evict any legacy bridge labels that are NOT the current SERVICE_LABEL.
-#
-# Why: SERVICE_LABEL is configurable via BRIDGE_SERVICE_LABEL.  When it
-# changes (e.g. com.claude-bridge.app → com.wulala.claude-bridge) the new
-# plist is created but the old one is never removed.  Both have KeepAlive=true
-# so both supervisors stay alive and fight for the same port.  We clean up
-# all known historical labels here, before the pre-flight check, so we can
-# never end up with two supervisors.
-# ============================================================================
-_LEGACY_LABELS=(
-  "com.claude-bridge.app"
-  "com.wulala.claude-bridge"
-)
-for _legacy in "${_LEGACY_LABELS[@]}"; do
-  [[ "$_legacy" == "$SERVICE_LABEL" ]] && continue
-  _legacy_target="gui/$(id -u)/$_legacy"
-  _legacy_plist="$LAUNCH_AGENTS/$_legacy.plist"
-  if launchctl print "$_legacy_target" >/dev/null 2>&1; then
-    echo "[install] Evicting legacy bridge service: $_legacy"
-    launchctl bootout "$_legacy_target" 2>/dev/null || true
-    sleep 1
-  fi
-  if [[ -f "$_legacy_plist" ]]; then
-    echo "[install] Removing legacy plist: $_legacy_plist"
-    rm -f "$_legacy_plist"
-  fi
+# Collect the dirs that hold claude/codex so the background service's PATH
+# can find them (launchd/systemd start with a minimal PATH).
+CLI_PATHS=""
+for b in "$CLAUDE_BIN" "$CODEX_BIN"; do
+  [ -n "$b" ] && CLI_PATHS="$CLI_PATHS:$(dirname "$b")"
 done
 
-# ============================================================================
-# Pre-flight: refuse to run from inside the bridge's own process tree.
-#
-# Why: install.sh ultimately restarts the bridge service.  If launched from a
-# subprocess of bridge_v2.py (e.g. a Codex / Claude backend exec_command), the
-# restart will SIGKILL this very script mid-execution, leaving the deploy
-# half-done.  This caused a real outage on 2026-05-18 01:37.
-# ============================================================================
-check_not_inside_bridge() {
-  local pid="$PPID"
-  local depth=0
-  while [[ "$pid" -gt 1 && "$depth" -lt 20 ]]; do
-    local cmd
-    cmd="$(ps -o command= -p "$pid" 2>/dev/null || true)"
-    if [[ "$cmd" == *"bridge_v2.py"* ]] \
-       || [[ "$cmd" == *"bridge_supervisor.sh"* ]] \
-       || [[ "$cmd" == *"bridge_launch.sh"* ]]; then
-      echo "ERROR: install.sh is running inside the bridge's own process tree." >&2
-      echo "       Restarting the bridge here would SIGKILL this script." >&2
-      echo "       Offending ancestor: pid=$pid cmd=$cmd" >&2
-      echo "       Run install.sh from a separate terminal (not from a bridge" >&2
-      echo "       backend's exec_command)." >&2
-      exit 2
-    fi
-    pid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ' || echo 1)"
-    [[ -z "$pid" ]] && break
-    depth=$((depth+1))
-  done
-}
-check_not_inside_bridge
+# ── 3. download the bridge binary/app ──────────────────────────────
+install_bridge_binary
 
-# ============================================================================
-# Sync source -> runtime.  Exclude ALL state files so a re-deploy never
-# clobbers anything the running bridge owns.
-# ============================================================================
-echo "==> Sync runtime files"
-mkdir -p "$RUNTIME_DIR"
-
-# Dynamically exclude instance data subdirectories defined in instances.json
-# so rsync --delete doesn't warn about non-empty dirs it can't remove.
-_INSTANCE_EXCLUDES=()
-if [[ -f "$RUNTIME_DIR/instances.json" ]]; then
-  while IFS= read -r _subdir; do
-    [[ -n "$_subdir" ]] && _INSTANCE_EXCLUDES+=("--exclude" "$_subdir/")
-  done < <(python3 - "$RUNTIME_DIR" <<'PYEOF'
-import json, os, sys
-runtime = os.path.realpath(sys.argv[1])
-try:
-    data = json.load(open(os.path.join(runtime, "instances.json")))
-    seen = set()
-    for inst in data.get("instances", []):
-        dd = os.path.realpath(os.path.expanduser(inst.get("data_dir", "")))
-        if dd.startswith(runtime + "/"):
-            rel = dd[len(runtime)+1:].split("/")[0]
-            if rel and rel not in seen:
-                seen.add(rel)
-                print(rel)
-except Exception as e:
-    print(str(e), file=sys.stderr)
-PYEOF
-)
-fi
-
-rsync -a --delete \
-  --exclude '.git' \
-  --exclude '__pycache__' \
-  --exclude 'venv/' \
-  --exclude '.bridge_images/' \
-  --exclude '.claude/' \
-  --exclude 'saved_sessions*.json' \
-  --exclude 'saved_sessions*.json.lock' \
-  --exclude 'session_meta.json' \
-  --exclude 'read_cursors.json' \
-  --exclude 'path_overrides.json' \
-  --exclude 'pairing.json' \
-  --exclude 'fcm_token.txt' \
-  --exclude 'fcm_token.txt.invalid' \
-  --exclude 'serviceAccountKey.json' \
-  --exclude 'bridge_v2.log' \
-  --exclude 'bridge.log' \
-  --exclude 'bridge.err' \
-  --exclude 'bridge.pid' \
-  --exclude 'supervisor.log' \
-  --exclude 'supervisor.pid' \
-  --exclude '.supervisor.lock' \
-  --exclude '.requirements.sha256' \
-  --exclude 'search.db' \
-  --exclude 'search.db-shm' \
-  --exclude 'search.db-wal' \
-  --exclude 'bridge_history_cache.db' \
-  --exclude 'bridge_history_cache.db-shm' \
-  --exclude 'bridge_history_cache.db-wal' \
-  --exclude '.tmp_*.json' \
-  --exclude 'launchd-wrapper.log' \
-  --exclude 'instances.json' \
-  --exclude 'install.sh' \
-  --exclude 'tunnel_url.txt' \
-  --exclude 'bridge_identity.json' \
-  ${_INSTANCE_EXCLUDES[@]+"${_INSTANCE_EXCLUDES[@]}"} \
-  "$SRC_DIR/" "$RUNTIME_DIR/"
-cd "$RUNTIME_DIR"
-
-# Record the active service label so restart_agent.sh can look it up.
-echo "$SERVICE_LABEL" > "$RUNTIME_DIR/.service-label"
-
-# ============================================================================
-# Bootstrap instances.json — create on first install/upgrade; never overwrite.
-# ============================================================================
-INSTANCES_CONFIG="$RUNTIME_DIR/instances.json"
-if [[ ! -f "$INSTANCES_CONFIG" ]]; then
-  if [[ -f "$RUNTIME_DIR/saved_sessions.json" ]]; then
-    # Upgrading from single-instance: auto-generate default instance config
-    echo "[install] Detected existing single-instance state. Generating default instances.json..."
-    cat > "$INSTANCES_CONFIG" <<EOF
-{
-  "instances": [
-    {
-      "name": "default",
-      "port": 8766,
-      "data_dir": "$RUNTIME_DIR",
-      "root_dir": ""
-    }
-  ]
-}
-EOF
-    echo "[install] Generated $INSTANCES_CONFIG with single default instance (port 8766, data_dir=$RUNTIME_DIR)"
-  else
-    # Fresh install: copy example
-    cp "$RUNTIME_DIR/instances.json.example" "$INSTANCES_CONFIG"
-    echo "[install] Created $INSTANCES_CONFIG from example."
-    echo "[install]    Edit it to configure your instances, then re-run install.sh."
-    echo "[install]    At minimum, update 'root_dir' values to real paths."
-  fi
-fi
-
-# ============================================================================
-# Setup venv.  Only --force-reinstall when requirements.txt actually changed.
-# This avoids burning 30+ seconds on every deploy.
-# ============================================================================
-echo "==> Setup virtualenv and deps"
-if [[ ! -d venv ]]; then
-  python3 -m venv venv
-fi
-VENV_PYTHON="$RUNTIME_DIR/venv/bin/python"
-"$VENV_PYTHON" -m pip install --upgrade pip --quiet
-
-REQ_HASH_FILE="$RUNTIME_DIR/.requirements.sha256"
-REQ_HASH_NEW="$(shasum -a 256 requirements.txt | awk '{print $1}')"
-REQ_HASH_OLD="$(cat "$REQ_HASH_FILE" 2>/dev/null || echo '')"
-
-if [[ "$REQ_HASH_NEW" != "$REQ_HASH_OLD" ]]; then
-  echo "    requirements.txt changed, reinstalling deps"
-  "$VENV_PYTHON" -m pip install -r requirements.txt --quiet --force-reinstall
-  echo "$REQ_HASH_NEW" > "$REQ_HASH_FILE"
-else
-  echo "    requirements.txt unchanged, skipping reinstall"
-  # Still run a normal install in case venv is missing something
-  "$VENV_PYTHON" -m pip install -r requirements.txt --quiet
-fi
-
-chmod +x run_bridge.sh bridge_supervisor.sh supervisor_instance.sh bridge_healthcheck.py bridge_launch.sh restart_agent.sh cloudflared_launcher.sh
-
-# ============================================================================
-# Install cloudflared for auto-tunnel support (best-effort).
-# ============================================================================
-echo "==> Check cloudflared"
+# ── 4. ensure cloudflared (remote access; optional but recommended) ─
+CF_PATH=""
 if command -v cloudflared >/dev/null 2>&1; then
-  echo "    cloudflared already installed: $(cloudflared --version 2>&1 | head -1)"
-elif command -v brew >/dev/null 2>&1; then
-  echo "    Installing cloudflared via Homebrew..."
-  brew install cloudflared --quiet
-  echo "    cloudflared installed: $(cloudflared --version 2>&1 | head -1)"
+  CF_PATH="$(dirname "$(command -v cloudflared)")"
+elif [ "$OS" = darwin ] && command -v brew >/dev/null 2>&1; then
+  say "installing cloudflared via Homebrew ..."
+  brew install cloudflared && CF_PATH="$(dirname "$(command -v cloudflared)")"
 else
-  echo "    WARNING: brew not found — cloudflared skipped."
-  echo "             Auto-tunnel will not work until cloudflared is installed."
-  echo "             Manual install: https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/install-and-setup/installation/"
+  # Linux ships a raw binary; macOS only ships .tgz/.pkg, so non-brew mac
+  # users get a warning instead.
+  if [ "$OS" = linux ]; then
+    say "downloading cloudflared ..."
+    curl -fSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${ARCH}" \
+      -o "$RUNTIME_DIR/cloudflared" && chmod +x "$RUNTIME_DIR/cloudflared" \
+      && CF_PATH="$RUNTIME_DIR"
+  fi
+fi
+if [ -z "$CF_PATH" ]; then
+  warn "cloudflared not available — same-WiFi will still work via mDNS, but"
+  warn "off-WiFi remote access needs cloudflared (install Homebrew then re-run)."
 fi
 
-# ============================================================================
-# Check git — required for diff visualization feature.
-# ============================================================================
-echo "==> Check git"
-if command -v git >/dev/null 2>&1; then
-  echo "    git already installed: $(git --version)"
-elif command -v brew >/dev/null 2>&1; then
-  echo "    Installing git via Homebrew..."
-  brew install git --quiet
-  echo "    git installed: $(git --version)"
-else
-  echo "    WARNING: git not found and Homebrew is unavailable."
-  echo "             To install: xcode-select --install"
-  echo "             (This opens a macOS system dialog to install Command Line Tools)"
-fi
+# ── 5. generate the launch wrapper ─────────────────────────────────
+# Service-managers start with a bare PATH; bake in the CLI + cloudflared dirs.
+SERVICE_PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin${CLI_PATHS}${CF_PATH:+:$CF_PATH}"
+cat > "$LAUNCH" <<EOF
+#!/usr/bin/env bash
+set -uo pipefail
+export PATH="$SERVICE_PATH:\$PATH"
+export BRIDGE_BROWSER_ORIGIN_MODE="$BROWSER_ORIGIN_MODE"
+export BRIDGE_BROWSER_ALLOWED_ORIGINS="$BROWSER_ALLOWED_ORIGINS"
+export BRIDGE_BROWSER_MANAGE_AUTO_REVIEW="$BROWSER_MANAGE_AUTO_REVIEW"
+export BRIDGE_BROWSER_ENABLE_NETWORK="$BROWSER_ENABLE_NETWORK"
+export EVERYTHING_GO_CODEX_SESSIONS_DIR="$CODEX_SESSIONS_DIR"
+export EVERYTHING_GO_CODEX_IGNORE_CWD_GLOBS="$CODEX_IGNORE_CWD_GLOBS"
+export EVERYTHING_GO_CODEX_IGNORE_NAME_PREFIXES="$CODEX_IGNORE_NAME_PREFIXES"
+export EVERYTHING_GO_CODEX_ROLLOVER_ENABLED="$CODEX_ROLLOVER_ENABLED"
+export EVERYTHING_GO_CODEX_COLD_RESUME_MAX_BYTES="$CODEX_COLD_RESUME_MAX_BYTES"
+export EVERYTHING_GO_CODEX_CHECKPOINT_MAX_BYTES="$CODEX_CHECKPOINT_MAX_BYTES"
+exec "$SERVICE_BIN" \\
+  --port "$PORT" \\
+  --executor go \\
+  --data-dir "$RUNTIME_DIR" \\
+  --session-store "$SESSION_STORE" \\
+  --discovery \\
+  --mdns \\
+  --tunnel \\
+  --instance-name "\$(hostname -s 2>/dev/null || echo everything-go)"
+EOF
+chmod +x "$LAUNCH"
+say "launch script written: $LAUNCH"
+ensure_macos_permissions
 
-# ============================================================================
-# Write plist into a temp path; only swap if content actually differs.
-# This lets us avoid bootout/bootstrap on every deploy.
-# ============================================================================
-echo "==> Update launchd agent"
-mkdir -p "$LAUNCH_AGENTS"
-
-PLIST_TMP="$(mktemp -t claude-bridge-plist.XXXXXX)"
-cat > "$PLIST_TMP" <<PLIST
+# ── 6. install as a background service ─────────────────────────────
+install_launchd() {
+  local plist="$HOME/Library/LaunchAgents/$LABEL.plist"
+  mkdir -p "$HOME/Library/LaunchAgents"
+  cat > "$plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>$SERVICE_LABEL</string>
-  <key>Program</key><string>/bin/bash</string>
+  <key>Label</key><string>$LABEL</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/bin/bash</string>
-    <string>-lc</string>
-    <string>exec $RUNTIME_DIR/bridge_launch.sh</string>
+    <string>/bin/bash</string><string>-lc</string><string>exec $LAUNCH</string>
   </array>
   <key>WorkingDirectory</key><string>$RUNTIME_DIR</string>
   <key>KeepAlive</key><true/>
   <key>RunAtLoad</key><true/>
-  <key>ThrottleInterval</key><integer>30</integer>
-  <key>StandardOutPath</key><string>/tmp/$SERVICE_LABEL.stdout.log</string>
-  <key>StandardErrorPath</key><string>/tmp/$SERVICE_LABEL.stderr.log</string>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
-    <key>HOME</key><string>$HOME</string>
-    <key>BRIDGE_INSTANCES_CONFIG</key><string>$RUNTIME_DIR/instances.json</string>
-    <key>BRIDGE_DISABLE_MDNS</key><string>0</string>
-    <key>BRIDGE_AUTO_TUNNEL</key><string>0</string>
-    <key>BRIDGE_TUNNEL_URL_FILE</key><string>$RUNTIME_DIR/tunnel_url.txt</string>
-    <key>BRIDGE_BROWSER_ORIGIN_MODE</key><string>${BRIDGE_BROWSER_ORIGIN_MODE:-ask}</string>
-    <key>BRIDGE_BROWSER_ALLOWED_ORIGINS</key><string>${BRIDGE_BROWSER_ALLOWED_ORIGINS:-}</string>
-    <key>BRIDGE_BROWSER_MANAGE_AUTO_REVIEW</key><string>${BRIDGE_BROWSER_MANAGE_AUTO_REVIEW:-1}</string>
-  </dict>
-  <key>SoftResourceLimits</key>
-  <dict>
-    <key>NumberOfFiles</key>
-    <integer>65536</integer>
-  </dict>
-  <key>HardResourceLimits</key>
-  <dict>
-    <key>NumberOfFiles</key>
-    <integer>65536</integer>
-  </dict>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>StandardOutPath</key><string>/tmp/$LABEL.stdout.log</string>
+  <key>StandardErrorPath</key><string>/tmp/$LABEL.stderr.log</string>
 </dict>
 </plist>
-PLIST
-
-PLIST_CHANGED=false
-if [[ ! -f "$PLIST_PATH" ]] || ! cmp -s "$PLIST_TMP" "$PLIST_PATH"; then
-  PLIST_CHANGED=true
-  mv "$PLIST_TMP" "$PLIST_PATH"
-  echo "    plist content changed"
-else
-  rm -f "$PLIST_TMP"
-  echo "    plist unchanged"
-fi
-
-# ============================================================================
-# Restart service.  Strategy:
-#
-#   - If plist content changed OR service not loaded: bootout + bootstrap
-#     (full re-register; only path that picks up plist changes).
-#   - Otherwise:                                       kickstart -k
-#     (hot restart; KeepAlive respawns; no caller-tree-kill side-effect).
-#
-# We never use bootout when not strictly necessary: bootout SIGKILLs the entire
-# process tree of the service, which is fine when called externally but
-# catastrophic when called from within a bridge backend.  The pre-flight check
-# above protects us either way, but minimising bootout reduces blast radius.
-# ============================================================================
-SERVICE_LOADED=false
-if launchctl print "$SERVICE_TARGET" >/dev/null 2>&1; then
-  SERVICE_LOADED=true
-fi
-
-if [[ "$PLIST_CHANGED" == "true" ]] || [[ "$SERVICE_LOADED" == "false" ]]; then
-  echo "==> Re-registering service (plist changed or not loaded)"
-  if [[ "$SERVICE_LOADED" == "true" ]]; then
-    launchctl bootout "$DOMAIN_TARGET" "$PLIST_PATH" 2>/dev/null || true
-    # Give launchd a moment to actually tear down + release port.
-    sleep 1
-  fi
-
-  # Defensive: clean any stragglers on port 8766 before bootstrap, in case
-  # bootout couldn't reach a process or someone started bridge manually.
-  PORT="${BRIDGE_PORT:-8766}"
-  STRAGGLER_PIDS="$(lsof -ti :"$PORT" 2>/dev/null || true)"
-  if [[ -n "$STRAGGLER_PIDS" ]]; then
-    echo "    Killing stragglers on port $PORT: $STRAGGLER_PIDS"
-    echo "$STRAGGLER_PIDS" | xargs kill -9 2>/dev/null || true
-    sleep 1
-  fi
-
-  launchctl bootstrap "$DOMAIN_TARGET" "$PLIST_PATH"
-  launchctl enable "$SERVICE_TARGET" 2>/dev/null || true
-else
-  echo "==> Hot-restarting service (kickstart -k)"
-  # Kill the running bridge process(es) BEFORE kickstart so the new supervisor
-  # starts with a free port and launches fresh code.  Without this, supervisor
-  # adopts the healthy orphan and the newly-deployed bridge_v2.py never takes
-  # effect — the same bug that affects code-only deploys (plist unchanged).
-  PORT="${BRIDGE_PORT:-8766}"
-  STRAGGLER_PIDS="$(lsof -ti :"$PORT" 2>/dev/null || true)"
-  if [[ -n "$STRAGGLER_PIDS" ]]; then
-    echo "    Killing bridge on port $PORT (pid(s): $STRAGGLER_PIDS) so new code takes effect"
-    echo "$STRAGGLER_PIDS" | xargs kill -9 2>/dev/null || true
-    sleep 1
-  fi
-  launchctl kickstart -k "$SERVICE_TARGET"
-fi
-
-# ============================================================================
-# Wait for bridge instances to come back up.
-# Reads instances.json for the authoritative port list; falls back to port
-# 8766 only if parsing fails (e.g. fresh example config not yet edited).
-# ============================================================================
-echo "==> Waiting for bridge instances to start..."
-UNHEALTHY=0
-
-# Parse instances.json into name|port lines; on failure emit a sentinel.
-INSTANCES_LIST="$(python3 -c "
-import json, sys
-try:
-    data = json.load(open('$RUNTIME_DIR/instances.json'))
-    for inst in data['instances']:
-        print(f\"{inst['name']}|{inst['port']}|\")
-except Exception as e:
-    print(f'ERROR|0|{e}', file=sys.stderr)
-" 2>/dev/null)" || true
-
-if [[ -z "$INSTANCES_LIST" ]]; then
-  # Fallback: instances.json unreadable — check port 8766 only
-  echo "[install] Could not parse instances.json; falling back to port 8766 healthcheck"
-  INSTANCES_LIST="default|8766|"
-fi
-
-while IFS='|' read -r name port _rest; do
-  [[ -z "$name" || "$name" == "ERROR" ]] && continue
-  # Wait up to 10 s (20 x 0.5 s) for this instance to become healthy
-  for i in {1..20}; do
-    sleep 0.5
-    if "$RUNTIME_DIR/venv/bin/python" "$RUNTIME_DIR/bridge_healthcheck.py" \
-         --host 127.0.0.1 --port "$port" --timeout 1 2>/dev/null; then
-      echo "[install] instance '$name' is healthy on :$port"
-      break
-    fi
-  done
-  # Final verdict check
-  if ! "$RUNTIME_DIR/venv/bin/python" "$RUNTIME_DIR/bridge_healthcheck.py" \
-       --host 127.0.0.1 --port "$port" --timeout 1 2>/dev/null; then
-    echo "WARNING: instance '$name' on port $port did not pass healthcheck within 10s." >&2
-    echo "  Check logs:" >&2
-    echo "    /tmp/$SERVICE_LABEL.stderr.log" >&2
-    echo "    /tmp/$SERVICE_LABEL.stdout.log" >&2
-    echo "    $RUNTIME_DIR/instances/$name/bridge.log" >&2
-    UNHEALTHY=1
-  fi
-done <<< "$INSTANCES_LIST"
-
-if (( UNHEALTHY )); then
-  exit 1
-fi
-
-# ============================================================================
-# Register the restart-agent launchd service.
-#
-# This is a separate launchd service whose parent is PID 1, NOT the bridge.
-# It watches .restart-trigger via WatchPaths; when bridge writes that file
-# (on a restart_bridge WS command), launchd fires restart_agent.sh which
-# does a kickstart of the bridge service without being in its process tree.
-# ============================================================================
-# ============================================================================
-# Register cloudflared as an independent launchd service.
-#
-# Key invariant: if the plist is UNCHANGED, we do NOT restart the service.
-# This preserves the running cloudflared process (and its tunnel URL) across
-# bridge deploys.  Only a plist change (e.g. port update) forces a restart.
-# ============================================================================
-echo "==> Register cloudflared service"
-CFD_LABEL="com.claude-bridge.cloudflared"
-CFD_PLIST_PATH="$LAUNCH_AGENTS/$CFD_LABEL.plist"
-CFD_TARGET="gui/$(id -u)/$CFD_LABEL"
-CFD_URL_FILE="$RUNTIME_DIR/tunnel_url.txt"
-
-if ! command -v cloudflared >/dev/null 2>&1; then
-  echo "    cloudflared not installed — skipping service registration"
-  echo "    (install via: brew install cloudflared)"
-else
-  CFD_TMP="$(mktemp -t claude-bridge-cfd.XXXXXX)"
-  cat > "$CFD_TMP" <<CFD_PLIST_EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>$CFD_LABEL</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/bin/bash</string>
-    <string>-lc</string>
-    <string>exec $RUNTIME_DIR/cloudflared_launcher.sh</string>
-  </array>
-  <key>WorkingDirectory</key><string>$RUNTIME_DIR</string>
-  <key>KeepAlive</key><true/>
-  <key>RunAtLoad</key><true/>
-  <key>ThrottleInterval</key><integer>30</integer>
-  <key>StandardOutPath</key><string>/tmp/$CFD_LABEL.stdout.log</string>
-  <key>StandardErrorPath</key><string>/tmp/$CFD_LABEL.stderr.log</string>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
-    <key>HOME</key><string>$HOME</string>
-    <key>BRIDGE_DATA_DIR</key><string>$RUNTIME_DIR</string>
-    <key>BRIDGE_PORT</key><string>8766</string>
-    <key>BRIDGE_TUNNEL_URL_FILE</key><string>$CFD_URL_FILE</string>
-  </dict>
-</dict>
-</plist>
-CFD_PLIST_EOF
-
-  if [[ ! -f "$CFD_PLIST_PATH" ]] || ! cmp -s "$CFD_TMP" "$CFD_PLIST_PATH"; then
-    # Plist changed (or first install) — restart service to pick up new config.
-    mv "$CFD_TMP" "$CFD_PLIST_PATH"
-    echo "    cloudflared plist updated — restarting service"
-    if launchctl print "$CFD_TARGET" >/dev/null 2>&1; then
-      launchctl bootout "$CFD_TARGET" 2>/dev/null || true
-      sleep 1
-    fi
-    launchctl bootstrap "$DOMAIN_TARGET" "$CFD_PLIST_PATH"
-    launchctl enable "$CFD_TARGET" 2>/dev/null || true
-    echo "    cloudflared service registered (will acquire new tunnel URL)"
+EOF
+  local target="gui/$(id -u)/$LABEL"
+  if launchctl print "$target" >/dev/null 2>&1; then
+    launchctl kickstart -k "$target"
   else
-    rm -f "$CFD_TMP"
-    echo "    cloudflared plist unchanged — service left running (tunnel URL preserved)"
+    launchctl bootstrap "gui/$(id -u)" "$plist"
+    launchctl kickstart -k "$target"
   fi
-fi
+}
 
-echo "==> Register restart-agent"
-RAGENT_LABEL="com.claude-bridge.restart-agent"
-RAGENT_PLIST_PATH="$LAUNCH_AGENTS/$RAGENT_LABEL.plist"
-RAGENT_TRIGGER="$RUNTIME_DIR/.restart-trigger"
-RAGENT_TARGET="gui/$(id -u)/$RAGENT_LABEL"
+verify_launchd_health_or_rollback() {
+  local target="gui/$(id -u)/$LABEL" attempt failed_app
+  for attempt in $(seq 1 20); do
+    if nc -z 127.0.0.1 "$PORT" >/dev/null 2>&1; then
+      say "launchd health check passed on port $PORT"
+      return 0
+    fi
+    sleep 1
+  done
 
-RAGENT_TMP="$(mktemp -t claude-bridge-ragent.XXXXXX)"
-cat > "$RAGENT_TMP" <<RAGENT_PLIST_EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>$RAGENT_LABEL</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/bin/bash</string>
-    <string>-lc</string>
-    <string>exec $RUNTIME_DIR/restart_agent.sh</string>
-  </array>
-  <key>WorkingDirectory</key><string>$RUNTIME_DIR</string>
-  <key>WatchPaths</key>
-  <array>
-    <string>$RAGENT_TRIGGER</string>
-  </array>
-  <key>KeepAlive</key><false/>
-  <key>RunAtLoad</key><false/>
-  <key>ThrottleInterval</key><integer>5</integer>
-  <key>StandardOutPath</key><string>/tmp/$RAGENT_LABEL.stdout.log</string>
-  <key>StandardErrorPath</key><string>/tmp/$RAGENT_LABEL.stderr.log</string>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
-    <key>HOME</key><string>$HOME</string>
-  </dict>
-</dict>
-</plist>
-RAGENT_PLIST_EOF
-
-if [[ ! -f "$RAGENT_PLIST_PATH" ]] || ! cmp -s "$RAGENT_TMP" "$RAGENT_PLIST_PATH"; then
-  mv "$RAGENT_TMP" "$RAGENT_PLIST_PATH"
-  if launchctl print "$RAGENT_TARGET" >/dev/null 2>&1; then
-    launchctl bootout "$RAGENT_TARGET" 2>/dev/null || true
-    sleep 0.5
+  warn "new bridge failed its launch health check; restoring previous signed app"
+  if [ -d "$RUNTIME_DIR/Everything Go.previous.app" ]; then
+    failed_app="$RUNTIME_DIR/Everything Go.failed.app"
+    rm -rf "$failed_app"
+    [ -d "$APP_DIR" ] && mv "$APP_DIR" "$failed_app"
+    mv "$RUNTIME_DIR/Everything Go.previous.app" "$APP_DIR"
+    launchctl kickstart -k "$target" >/dev/null 2>&1 || true
+    die "update rolled back; inspect /tmp/$LABEL.stderr.log"
   fi
-  launchctl bootstrap "$DOMAIN_TARGET" "$RAGENT_PLIST_PATH"
-  launchctl enable "$RAGENT_TARGET" 2>/dev/null || true
-  echo "    restart-agent registered"
+  die "bridge did not become healthy; inspect /tmp/$LABEL.stderr.log"
+}
+
+install_systemd() {
+  local unit_dir="$HOME/.config/systemd/user"
+  mkdir -p "$unit_dir"
+  cat > "$unit_dir/everything-go.service" <<EOF
+[Unit]
+Description=everything-go bridge
+After=network-online.target
+
+[Service]
+ExecStart=$LAUNCH
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+EOF
+  systemctl --user daemon-reload
+  systemctl --user enable --now everything-go.service
+  command -v loginctl >/dev/null 2>&1 && loginctl enable-linger "$(whoami)" 2>/dev/null || true
+}
+
+if [ "$OS" = darwin ]; then
+  install_launchd
+  verify_launchd_health_or_rollback
 else
-  rm -f "$RAGENT_TMP"
-  echo "    restart-agent plist unchanged"
+  if command -v systemctl >/dev/null 2>&1; then
+    install_systemd
+  else
+    warn "no systemd — starting in foreground (will stop when you close this shell)."
+    exec "$LAUNCH"
+  fi
 fi
 
-echo "Installed: $PLIST_PATH"
-echo "Runtime  : $RUNTIME_DIR"
+# ── 7. report ──────────────────────────────────────────────────────
+LAN_IP="$( (ipconfig getifaddr en0 2>/dev/null) || (hostname -I 2>/dev/null | awk '{print $1}') || true )"
+echo
+say "✅ everything-go is running on port $PORT"
+echo
+say "📱 In the phone app:"
+say "   • Same WiFi: it auto-discovers this bridge (UDP + mDNS). Just open the app."
+[ -n "$LAN_IP" ] && say "     (manual fallback — add bridge IP: $LAN_IP  port: $PORT)"
+say "   • Off WiFi: pair once on WiFi. Only then does the Cloudflare tunnel start;"
+say "     its URL is pushed to the trusted app automatically."
+echo
+say "logs:    /tmp/$LABEL.stderr.log"
+say "restart: launchctl kickstart -k gui/\$(id -u)/$LABEL   (macOS)"

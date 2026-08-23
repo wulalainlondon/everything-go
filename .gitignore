@@ -1,21 +1,24 @@
-venv/
-__pycache__/
-*.pyc
-*.pyo
-fcm_token.txt
-serviceAccountKey.json
-saved_sessions.json
-*.log
-.env
-saved_sessions_codex.json
-session_meta.json
-read_cursors.json
-bridge.pid
-supervisor.pid
-.supervisor.lock/
-bridge_v2.log
-bridge.err
-path_overrides.json
+/everything-go
+/dist/
+/build/
 
-# Local recovery snapshots created during backend experiments.
+# Local recovery snapshots created during executor experiments.
 *.backup-record2-*
+
+# FCM service account key — injected at CI build time via FCM_SERVICE_ACCOUNT_JSON secret.
+# Never commit; the binary embeds it at build time via //go:embed.
+cmd/everything-go/keys/*.json
+!cmd/everything-go/keys/fcm_service_account.json
+*.log
+.DS_Store
+
+# Runtime state written into --data-dir when the bridge is run from the source
+# tree (default data-dir is cwd). The real service writes to ~/.everything-go-runtime.
+everything_go_sessions.json
+everything_go_search.db
+everything_go_search.db-shm
+everything_go_search.db-wal
+pairing.json
+fcm_token.txt
+/feed/
+/inbox/
