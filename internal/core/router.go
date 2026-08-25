@@ -75,6 +75,7 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		// while this (or the previous) client was offline — same ordering as the
 		// Python bridge so the app reconciles before replayed events arrive.
 		c.enqueueEvent(h.client.SessionsList(h.sessionSummaries()))
+		c.enqueueEvent(h.runtimeSnapshot(c.deviceID))
 		// Goal is durable state. Send the full latest snapshot before transient
 		// replay so a dropped historical goal_update cannot leave the UI stale.
 		c.enqueueEvent(h.goals.Snapshot())
@@ -144,6 +145,15 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 	case "offline_replay_ack":
 		h.ackOfflineReplay(c, cmd.BatchID)
 
+	case "session_runtime_ack":
+		view := h.runtimes.Ack(c.deviceID, cmd.SessionID, cmd.Revision, cmd.Read)
+		if view.SessionID != "" {
+			c.enqueueEvent(runtimeEvent(view))
+		}
+
+	case "request_runtime_snapshot":
+		c.enqueueEvent(h.runtimeSnapshot(c.deviceID))
+
 	case "handoff_to_desktop":
 		h.handleDesktopHandoff(c, cmd.SessionID)
 
@@ -185,6 +195,7 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 			return
 		}
 		s := h.registry.Create(cmd.SessionID, cmd.Name, cwd, cmd.Backend, cmd.Model, cmd.Sandbox, cmd.ResumeClaudeID)
+		h.runtimes.Ensure(cmd.SessionID, "idle", 0)
 		if cmd.EffortSet {
 			s.SetEffort(cmd.Effort)
 		}
@@ -216,7 +227,9 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 			h.Emit(h.client.Error(cmd.SessionID, "invalid_attachment", err.Error()))
 			return
 		}
-		if !s.Submit(func() {
+		h.updateRuntime(cmd.SessionID, "queued", reqID, s.QueueLen()+1, "", "")
+		accepted := s.Submit(func() {
+			h.updateRuntime(cmd.SessionID, "running", reqID, s.QueueLen(), "", "")
 			if err := h.exec.Send(context.Background(), s, reqID, content, images, files); err != nil {
 				if errors.Is(err, backend.ErrThreadActiveWriter) {
 					h.markDesktopWriter(s)
@@ -225,9 +238,16 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 				}
 				log.Printf("[%s] send error: %v", s.ID, err)
 			}
-		}) {
+		})
+		if !accepted {
+			h.updateRuntime(cmd.SessionID, "failed", reqID, 0, "failed", "session is closed")
 			h.Emit(h.client.Error(cmd.SessionID, "session_closed", "session is closed"))
+			return
 		}
+		// This ACK means the Bridge accepted ownership of the request and placed it
+		// in the in-memory per-session actor queue. It is deliberately independent
+		// from turn progress, which may already have advanced on a warm session.
+		c.enqueueEvent(protocol.NewMessageAck(cmd.SessionID, reqID, "queued"))
 
 	case "steer_message":
 		if h.rejectMobileWrite(c, cmd.SessionID) {
@@ -287,6 +307,7 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 	case "stop":
 		if s, ok := h.registry.Get(cmd.SessionID); ok {
 			s.MarkStopping()
+			h.updateRuntime(cmd.SessionID, "stopping", "", s.QueueLen(), "", "")
 			go func() {
 				_ = h.exec.Stop(context.Background(), s)
 				s.EndTurn() // release the queue even if the backend emits no terminal event
@@ -305,6 +326,7 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		if s, ok := h.registry.Get(cmd.SessionID); ok {
 			go func() { _ = h.exec.Close(context.Background(), s) }()
 			h.registry.Delete(cmd.SessionID) // also stops the session's turn worker
+			h.updateRuntime(cmd.SessionID, "closed", "", 0, "closed", "")
 			h.Emit(h.client.SessionClosed(cmd.SessionID))
 			go h.registry.Persist()
 		}

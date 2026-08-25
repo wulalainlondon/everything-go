@@ -371,6 +371,26 @@ func TestMessageStreamsAndEndsTurn(t *testing.T) {
 	waitState(t, s, session.Idle)
 }
 
+func TestMessageAckConfirmsBridgeQueueAcceptance(t *testing.T) {
+	h, fe := newTestHub(t)
+	c := newTestClient(h)
+	release := make(chan struct{})
+	fe.onSend = func(s *session.Session, reqID, content string) {
+		<-release
+		h.Emit(protocol.NewDone(s.ID, reqID))
+	}
+
+	route(h, c, `{"type":"new_session","session_id":"s1","backend":"codex"}`)
+	waitForType(t, c, "session_created")
+	route(h, c, `{"type":"message","session_id":"s1","request_id":"r-ack","content":"hello"}`)
+	ack := waitForType(t, c, "message_ack")
+	if ack["session_id"] != "s1" || ack["request_id"] != "r-ack" || ack["status"] != "queued" {
+		t.Fatalf("unexpected message ACK: %+v", ack)
+	}
+	close(release)
+	waitForType(t, c, "done")
+}
+
 // stop on a long-running turn (one that emits nothing until interrupted) must
 // emit stopped and return the session to Idle.
 func TestStopEndsTurn(t *testing.T) {

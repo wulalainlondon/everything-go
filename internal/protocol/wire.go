@@ -23,6 +23,8 @@ type Inbound struct {
 	AuthToken  string `json:"auth_token"`
 	ReplayAck  bool   `json:"replay_ack"`
 	BatchID    string `json:"batch_id"`
+	Revision   uint64 `json:"revision"`
+	Read       bool   `json:"read"`
 
 	// new_session
 	Name           string `json:"name"`
@@ -166,21 +168,22 @@ func ParseInbound(raw []byte) (Inbound, error) {
 // marshals the returned value and writes it to the socket.
 
 type HelloAck struct {
-	Type         string              `json:"type"`
-	ClientID     string              `json:"client_id"`
-	DeviceID     string              `json:"device_id"`
-	DeviceName   string              `json:"device_name,omitempty"`
-	InstanceID   string              `json:"instance_id,omitempty"`
-	Gen          string              `json:"gen,omitempty"`
-	IsLocked     bool                `json:"is_locked"`
-	LockedToMe   bool                `json:"locked_to_me"`
-	PairingOpen  bool                `json:"pairing_open,omitempty"`
-	InstanceName string              `json:"instance_name,omitempty"`
-	RootDir      string              `json:"root_dir"`
-	DataDir      string              `json:"data_dir"`
-	LanIP        string              `json:"lan_ip,omitempty"`
-	TunnelURL    string              `json:"tunnel_url,omitempty"`
-	Backends     []BackendDefinition `json:"backend_registry,omitempty"`
+	Type            string              `json:"type"`
+	ProtocolVersion int                 `json:"protocol_version"`
+	ClientID        string              `json:"client_id"`
+	DeviceID        string              `json:"device_id"`
+	DeviceName      string              `json:"device_name,omitempty"`
+	InstanceID      string              `json:"instance_id,omitempty"`
+	Gen             string              `json:"gen,omitempty"`
+	IsLocked        bool                `json:"is_locked"`
+	LockedToMe      bool                `json:"locked_to_me"`
+	PairingOpen     bool                `json:"pairing_open,omitempty"`
+	InstanceName    string              `json:"instance_name,omitempty"`
+	RootDir         string              `json:"root_dir"`
+	DataDir         string              `json:"data_dir"`
+	LanIP           string              `json:"lan_ip,omitempty"`
+	TunnelURL       string              `json:"tunnel_url,omitempty"`
+	Backends        []BackendDefinition `json:"backend_registry,omitempty"`
 }
 
 type SessionControlState struct {
@@ -192,6 +195,43 @@ type SessionControlState struct {
 	DesktopCommand string `json:"desktop_command,omitempty"`
 	Message        string `json:"message,omitempty"`
 	UpdatedAt      int64  `json:"updated_at,omitempty"`
+}
+
+// SessionRuntime is the server-authoritative lifecycle snapshot for one
+// logical session. It is compact and durable; message content is reconciled
+// separately from native history.
+type SessionRuntime struct {
+	Type               string `json:"type"`
+	SessionID          string `json:"session_id"`
+	Revision           uint64 `json:"revision"`
+	Phase              string `json:"phase"`
+	Stage              string `json:"stage,omitempty"`
+	StageMessage       string `json:"stage_message,omitempty"`
+	StageStartedAt     int64  `json:"stage_started_at,omitempty"`
+	ActiveRequestID    string `json:"active_request_id,omitempty"`
+	QueueLength        int    `json:"queue_length"`
+	LastTerminalStatus string `json:"last_terminal_status,omitempty"`
+	LastError          string `json:"last_error,omitempty"`
+	UpdatedAt          int64  `json:"updated_at"`
+	CompletedAt        int64  `json:"completed_at,omitempty"`
+	Unread             int    `json:"unread"`
+	DeliveryPending    bool   `json:"delivery_pending"`
+	HistoryReconcile   bool   `json:"history_reconcile"`
+}
+
+type SessionRuntimeSnapshot struct {
+	Type  string           `json:"type"`
+	Items []SessionRuntime `json:"items"`
+}
+
+// TurnProgress is an internal executor-to-Hub signal. Hub converts it into a
+// revisioned SessionRuntime event and does not forward this transient value to
+// clients directly, so reconnect always observes the same canonical stage.
+type TurnProgress struct {
+	SessionID string
+	RequestID string
+	Stage     string
+	Message   string
 }
 
 func NewSessionControlState(sessionID, threadID, owner, state, command, message string, updatedAt int64) SessionControlState {
@@ -315,6 +355,17 @@ type Pong struct {
 }
 
 func NewPong() Pong { return Pong{Type: "pong"} }
+
+type MessageAck struct {
+	Type      string `json:"type"`
+	SessionID string `json:"session_id"`
+	RequestID string `json:"request_id"`
+	Status    string `json:"status"`
+}
+
+func NewMessageAck(sessionID, requestID, status string) MessageAck {
+	return MessageAck{Type: "message_ack", SessionID: sessionID, RequestID: requestID, Status: status}
+}
 
 // RecentMessage is one entry in SessionSummary.RecentMessages.
 type RecentMessage struct {

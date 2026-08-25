@@ -992,6 +992,35 @@ func TestCodexLiveToolStartNormalizesFunctionCall(t *testing.T) {
 	}
 }
 
+func TestCodexConversationItemsDoNotEmitToolLifecycle(t *testing.T) {
+	for _, itemType := range []string{"userMessage", "agentMessage", "reasoning", "plan"} {
+		t.Run(itemType, func(t *testing.T) {
+			sink := &capSink{}
+			c := NewCodex(sink, "codex")
+			reg := session.NewRegistry()
+			s := reg.Create("s1", "codex", "/tmp", "codex", "", "", "")
+			st := c.state(s.ID)
+			st.threadID = "thread-1"
+			st.reqID = "r1"
+			c.threadToSession["thread-1"] = s
+
+			for _, method := range []string{"item/started", "item/completed"} {
+				c.dispatch(json.RawMessage(fmt.Sprintf(`{
+					"method":%q,
+					"params":{"threadId":"thread-1","item":{"id":"item-1","type":%q}}
+				}`, method, itemType)))
+			}
+
+			for _, event := range sink.events {
+				switch event.(type) {
+				case backend.ToolStart, backend.ToolResult, backend.ToolEnd:
+					t.Fatalf("conversation item %q emitted tool lifecycle event: %#v", itemType, event)
+				}
+			}
+		})
+	}
+}
+
 func TestCodexTokenUsageUpdatesAutoCompactThreshold(t *testing.T) {
 	c := NewCodex(&capSink{}, "codex")
 	reg := session.NewRegistry()

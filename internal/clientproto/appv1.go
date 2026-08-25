@@ -26,6 +26,8 @@ type Command struct {
 	AuthToken  string
 	ReplayAck  bool
 	BatchID    string
+	Revision   uint64
+	Read       bool
 
 	Name            string
 	Cwd             string
@@ -114,6 +116,8 @@ func (AppV1) ParseCommand(in protocol.Inbound) Command {
 		AuthToken:  in.AuthToken,
 		ReplayAck:  in.ReplayAck,
 		BatchID:    in.BatchID,
+		Revision:   in.Revision,
+		Read:       in.Read,
 
 		Name:            in.Name,
 		Cwd:             in.Cwd,
@@ -247,21 +251,22 @@ type HelloInput struct {
 
 func (AppV1) HelloAck(in HelloInput) protocol.HelloAck {
 	return protocol.HelloAck{
-		Type:         "hello_ack",
-		ClientID:     in.ClientID,
-		DeviceID:     in.DeviceID,
-		DeviceName:   in.DeviceName,
-		InstanceID:   in.InstanceID,
-		Gen:          in.Gen,
-		IsLocked:     in.IsLocked,
-		LockedToMe:   in.LockedToMe,
-		PairingOpen:  in.PairingOpen,
-		InstanceName: in.InstanceName,
-		RootDir:      in.RootDir,
-		DataDir:      in.DataDir,
-		LanIP:        in.LanIP,
-		TunnelURL:    in.TunnelURL,
-		Backends:     backendDefinitionsToWire(in.Backends),
+		Type:            "hello_ack",
+		ProtocolVersion: 2,
+		ClientID:        in.ClientID,
+		DeviceID:        in.DeviceID,
+		DeviceName:      in.DeviceName,
+		InstanceID:      in.InstanceID,
+		Gen:             in.Gen,
+		IsLocked:        in.IsLocked,
+		LockedToMe:      in.LockedToMe,
+		PairingOpen:     in.PairingOpen,
+		InstanceName:    in.InstanceName,
+		RootDir:         in.RootDir,
+		DataDir:         in.DataDir,
+		LanIP:           in.LanIP,
+		TunnelURL:       in.TunnelURL,
+		Backends:        backendDefinitionsToWire(in.Backends),
 	}
 }
 

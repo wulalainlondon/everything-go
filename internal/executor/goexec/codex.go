@@ -909,6 +909,7 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 		st.mu.Lock()
 		st.currentTurnID = p.Turn.ID
 		st.mu.Unlock()
+		c.sink.Emit(backend.NewTurnProgress(s.ID, reqID, "thinking", ""))
 
 	case "item/agentMessage/delta":
 		if p.Delta == "" {
@@ -981,6 +982,9 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 		}
 		if !isRootThread {
 			c.emitCodexAgentTree(s)
+			return
+		}
+		if _, isTool := normalizeCodexLiveTool(m.Params); !isTool {
 			return
 		}
 		itemID := firstNonEmpty(p.ItemID, p.Item.ID, "codex_item")
@@ -1599,6 +1603,16 @@ func (c *Codex) Send(ctx context.Context, s *session.Session, reqID, content str
 		return err
 	}
 	st := c.state(s.ID)
+	st.mu.Lock()
+	threadAlreadyLoaded := st.threadID != ""
+	st.mu.Unlock()
+	if !threadAlreadyLoaded {
+		if s.ResumeID() != "" {
+			c.sink.Emit(backend.NewTurnProgress(s.ID, reqID, "resuming_thread", "Loading the existing Codex conversation"))
+		} else {
+			c.sink.Emit(backend.NewTurnProgress(s.ID, reqID, "starting_thread", "Creating a Codex conversation"))
+		}
+	}
 
 	if err := c.ensureThread(s, st); err != nil {
 		if !errors.Is(err, backend.ErrThreadActiveWriter) {
@@ -1606,6 +1620,7 @@ func (c *Codex) Send(ctx context.Context, s *session.Session, reqID, content str
 		}
 		return err
 	}
+	c.sink.Emit(backend.NewTurnProgress(s.ID, reqID, "submitting_turn", "Sending the turn to Codex"))
 	isCompactCommand := strings.TrimSpace(content) == "/compact"
 	if isCompactCommand {
 		st.mu.Lock()
@@ -1694,6 +1709,10 @@ func (c *Codex) steerActiveTurn(s *session.Session, clientUserMessageID, content
 
 func (c *Codex) runTurn(s *session.Session, st *codexState, threadID string, input []map[string]any, done chan struct{}) {
 	defer c.cleanupTempImages(st)
+	st.mu.Lock()
+	requestID := st.reqID
+	st.mu.Unlock()
+	c.sink.Emit(backend.NewTurnProgress(s.ID, requestID, "waiting_model", "Waiting for Codex to accept the turn"))
 	if err := c.startTurnWithStaleRetry(s, st, threadID, input); err != nil {
 		st.finish("turn/start failed: " + err.Error())
 	}

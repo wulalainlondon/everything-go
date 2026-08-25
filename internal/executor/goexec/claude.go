@@ -177,6 +177,11 @@ func (c *Claude) Send(ctx context.Context, s *session.Session, reqID, content st
 	c.mu.Lock()
 	p := c.procs[s.ID]
 	if p == nil {
+		if s.ResumeID() != "" {
+			c.sink.Emit(backend.NewTurnProgress(s.ID, reqID, "resuming_thread", "Loading the existing Claude conversation"))
+		} else {
+			c.sink.Emit(backend.NewTurnProgress(s.ID, reqID, "starting_thread", "Starting Claude"))
+		}
 		var err error
 		p, err = c.spawn(s)
 		if err != nil {
@@ -189,6 +194,7 @@ func (c *Claude) Send(ctx context.Context, s *session.Session, reqID, content st
 	isCompact := strings.TrimSpace(content) == "/compact"
 	p.beginTurn(reqID, isCompact)
 	c.mu.Unlock()
+	c.sink.Emit(backend.NewTurnProgress(s.ID, reqID, "submitting_turn", "Sending the turn to Claude"))
 	if isCompact {
 		c.sink.Emit(backend.NewSessionCommandStarted(s.ID, reqID, 0))
 	}
@@ -207,6 +213,7 @@ func (c *Claude) Send(ctx context.Context, s *session.Session, reqID, content st
 		}
 		return err
 	}
+	c.sink.Emit(backend.NewTurnProgress(s.ID, reqID, "waiting_model", "Claude accepted the turn"))
 	go c.agentTreePoller(s, p)
 	return nil
 }

@@ -1,0 +1,60 @@
+package core
+
+import (
+	"testing"
+
+	"everything-go/internal/protocol"
+)
+
+func TestRuntimeDeliveryAndReadArePerDevice(t *testing.T) {
+	h, _ := newTestHub(t)
+	h.registry.Create("s1", "one", t.TempDir(), "codex", "", "", "")
+	desktop := attachmentClient(h, "desktop")
+	phone := attachmentClient(h, "phone")
+
+	h.Emit(protocol.NewDone("s1", "r1"))
+	desktopRuntime := waitForType(t, desktop, "session_runtime")
+	phoneRuntime := waitForType(t, phone, "session_runtime")
+	if desktopRuntime["unread"] != float64(1) || phoneRuntime["unread"] != float64(1) {
+		t.Fatalf("initial unread desktop=%v phone=%v", desktopRuntime, phoneRuntime)
+	}
+	revision := uint64(desktopRuntime["revision"].(float64))
+	route(h, desktop, `{"type":"session_runtime_ack","session_id":"s1","revision":`+formatUint(revision)+`,"read":true}`)
+	ackedDesktop := waitForType(t, desktop, "session_runtime")
+	if ackedDesktop["unread"] != float64(0) {
+		t.Fatalf("desktop unread after ACK=%v", ackedDesktop)
+	}
+
+	phoneSnapshot := h.runtimeSnapshot("phone")
+	if len(phoneSnapshot.Items) != 1 || phoneSnapshot.Items[0].Unread != 1 {
+		t.Fatalf("desktop ACK consumed phone state: %+v", phoneSnapshot.Items)
+	}
+}
+
+func formatUint(v uint64) string {
+	if v == 0 {
+		return "0"
+	}
+	buf := [20]byte{}
+	i := len(buf)
+	for v > 0 {
+		i--
+		buf[i] = byte('0' + v%10)
+		v /= 10
+	}
+	return string(buf[i:])
+}
+
+func TestRuntimeSnapshotSurvivesOtherOnlineClient(t *testing.T) {
+	h, _ := newTestHub(t)
+	h.registry.Create("s1", "one", t.TempDir(), "codex", "", "", "")
+	desktop := attachmentClient(h, "desktop")
+	h.Emit(protocol.NewDone("s1", "r1"))
+	_ = waitForType(t, desktop, "done")
+	_ = waitForType(t, desktop, "session_runtime")
+
+	phone := h.runtimeSnapshot("phone")
+	if len(phone.Items) != 1 || phone.Items[0].Phase != "completed" || phone.Items[0].Unread != 1 {
+		t.Fatalf("offline phone did not recover terminal snapshot: %+v", phone.Items)
+	}
+}

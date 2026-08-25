@@ -31,6 +31,7 @@ import (
 	"everything-go/internal/nativewatch"
 	"everything-go/internal/protocol"
 	"everything-go/internal/runtime"
+	"everything-go/internal/runtimejournal"
 	"everything-go/internal/search"
 	"everything-go/internal/session"
 )
@@ -66,6 +67,7 @@ type Hub struct {
 	mediaScan   *media.Scanner
 	attachments *attachmentjournal.Store
 	controls    *governance.SessionControlStore
+	runtimes    *runtimejournal.Store
 	cfg         Config
 	client      clientproto.AppV1
 	gen         string // per-boot generation id
@@ -132,8 +134,12 @@ func NewHub(reg *session.Registry, cfg Config, pairing *governance.Pairing, port
 		mediaScan:         media.NewScanner(port),
 		attachments:       attachmentjournal.New(cfg.DataDir),
 		controls:          governance.NewSessionControlStore(cfg.DataDir),
+		runtimes:          runtimejournal.New(cfg.DataDir),
 		attachmentReplays: make(map[string]*attachmentReplayLease),
 	}
+	// No Session worker can be active while a new Hub is being constructed.
+	// Recover stale persisted phases exactly once here, never during reconnect.
+	h.runtimes.RecoverAllStale()
 	if cfg.TailscaleIP != "" {
 		h.mediaScan.SetTailscaleIP(cfg.TailscaleIP)
 	}
@@ -292,6 +298,13 @@ func (h *Hub) connectedDeviceIDs(exclude string) []string {
 // event for replay on the next reconnect (the offline-recovery path). Safe for
 // concurrent use.
 func (h *Hub) Emit(event any) {
+	// Executor progress is intentionally internal. Convert it to the durable,
+	// revisioned per-device runtime view instead of leaking a second transient
+	// status protocol that reconnecting clients could miss.
+	if progress, ok := event.(protocol.TurnProgress); ok {
+		h.driveRuntimeState(progress)
+		return
+	}
 	// Attachments use their own durable per-device journal. They must never enter
 	// the global offline buffer: a desktop ACK must not consume a phone delivery.
 	if _, isMedia := event.(protocol.Media); isMedia {
@@ -323,7 +336,6 @@ func (h *Hub) Emit(event any) {
 	// where session lifecycle state is driven: a terminal event ends the turn
 	// (releasing the per-session queue). State is never mutated by the backends.
 	h.driveTurnState(event)
-
 	// Accumulate assistant text per turn so a push notification can carry a
 	// summary when the turn completes (mirrors the Python notify_fcm payload).
 	h.accumulateTurn(event)
@@ -360,6 +372,11 @@ func (h *Hub) Emit(event any) {
 	case protocol.Done:
 		go h.registry.Persist()
 	}
+
+	// Persist and publish the compact authoritative lifecycle only after the
+	// original event. This preserves text -> attachment -> done ordering for
+	// existing clients while still making reconnect state durable.
+	h.driveRuntimeState(event)
 }
 
 // replayOffline flushes buffered events to a single reconnecting client, in

@@ -30,6 +30,7 @@ type (
 	UserInputPayload      = protocol.UserInputRequestPayload
 	UserInputRequest      = protocol.UserInputRequestEvent
 	InteractionResolved   = protocol.InteractionResolved
+	TurnProgress          = protocol.TurnProgress
 	SessionInitInfo       = protocol.SessionInitInfo
 	MCPServerStatus       = protocol.MCPServerStatus
 )
@@ -158,6 +159,10 @@ func NewUserInputRequest(payload UserInputPayload) UserInputRequest {
 
 func NewInteractionResolved(requestID, sessionID, status string) InteractionResolved {
 	return protocol.NewInteractionResolved(requestID, sessionID, status)
+}
+
+func NewTurnProgress(sessionID, requestID, stage, message string) TurnProgress {
+	return TurnProgress{SessionID: sessionID, RequestID: requestID, Stage: stage, Message: message}
 }
 
 func NewUsageReport(fiveHour, sevenDay, sevenDaySonnet *UsageWindow) UsageReport {
