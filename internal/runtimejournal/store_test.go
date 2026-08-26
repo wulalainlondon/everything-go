@@ -1,6 +1,10 @@
 package runtimejournal
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestPerDeviceReadAndRestart(t *testing.T) {
 	dir := t.TempDir()
@@ -10,7 +14,9 @@ func TestPerDeviceReadAndRestart(t *testing.T) {
 	if got := s.Snapshot("phone", []string{"s1"})[0].Unread; got != 1 {
 		t.Fatalf("phone unread=%d", got)
 	}
-	s.Ack("desktop", "s1", completed.Revision, true)
+	if _, changed := s.Ack("desktop", "s1", completed.Revision, true); !changed {
+		t.Fatal("first desktop ACK did not advance its cursor")
+	}
 	if got := s.Snapshot("phone", []string{"s1"})[0].Unread; got != 1 {
 		t.Fatalf("desktop consumed phone unread=%d", got)
 	}
@@ -21,9 +27,36 @@ func TestPerDeviceReadAndRestart(t *testing.T) {
 	if got := reloaded.Snapshot("phone", []string{"s1"})[0].Unread; got != 1 {
 		t.Fatalf("restart lost phone cursor: %d", got)
 	}
-	reloaded.Ack("phone", "s1", completed.Revision, true)
+	if _, changed := reloaded.Ack("phone", "s1", completed.Revision, true); !changed {
+		t.Fatal("first phone ACK did not advance its cursor")
+	}
 	if got := reloaded.Snapshot("phone", []string{"s1"})[0].Unread; got != 0 {
 		t.Fatalf("phone read did not clear: %d", got)
+	}
+}
+
+func TestDuplicateAckDoesNotRewriteJournal(t *testing.T) {
+	dir := t.TempDir()
+	s := New(dir)
+	completed, _ := s.Update("s1", "completed", "r1", 0, "completed", "")
+	if _, changed := s.Ack("phone", "s1", completed.Revision, true); !changed {
+		t.Fatal("first ACK did not change the cursor")
+	}
+	path := filepath.Join(dir, "session_runtime.json")
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, changed := s.Ack("phone", "s1", completed.Revision, true); changed {
+		t.Fatal("duplicate ACK reported a change")
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !after.ModTime().Equal(before.ModTime()) || after.Size() != before.Size() {
+		t.Fatalf("duplicate ACK rewrote journal: before=%v/%d after=%v/%d",
+			before.ModTime(), before.Size(), after.ModTime(), after.Size())
 	}
 }
 

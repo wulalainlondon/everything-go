@@ -2,6 +2,7 @@ package core
 
 import (
 	"testing"
+	"time"
 
 	"everything-go/internal/protocol"
 )
@@ -20,9 +21,14 @@ func TestRuntimeDeliveryAndReadArePerDevice(t *testing.T) {
 	}
 	revision := uint64(desktopRuntime["revision"].(float64))
 	route(h, desktop, `{"type":"session_runtime_ack","session_id":"s1","revision":`+formatUint(revision)+`,"read":true}`)
-	ackedDesktop := waitForType(t, desktop, "session_runtime")
-	if ackedDesktop["unread"] != float64(0) {
-		t.Fatalf("desktop unread after ACK=%v", ackedDesktop)
+	select {
+	case data := <-desktop.send:
+		t.Fatalf("runtime ACK must be one-way, got echo %s", data)
+	case <-time.After(50 * time.Millisecond):
+	}
+	desktopSnapshot := h.runtimeSnapshot("desktop")
+	if len(desktopSnapshot.Items) != 1 || desktopSnapshot.Items[0].Unread != 0 {
+		t.Fatalf("desktop unread after ACK=%+v", desktopSnapshot.Items)
 	}
 
 	phoneSnapshot := h.runtimeSnapshot("phone")

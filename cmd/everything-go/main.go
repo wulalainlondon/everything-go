@@ -187,7 +187,7 @@ func main() {
 	}
 
 	// FCM push: explicit --service-account flag overrides the embedded key.
-	fcmTokenPath := filepath.Join(*dataDir, "fcm_token.txt")
+	fcmTokenPath := filepath.Join(*dataDir, "fcm_tokens.json")
 	if *serviceAccount != "" {
 		if notifier, err := fcm.New(*serviceAccount, fcmTokenPath); err != nil {
 			log.Printf("FCM disabled: %v", err)

@@ -146,10 +146,11 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		h.ackOfflineReplay(c, cmd.BatchID)
 
 	case "session_runtime_ack":
-		view := h.runtimes.Ack(c.deviceID, cmd.SessionID, cmd.Revision, cmd.Read)
-		if view.SessionID != "" {
-			c.enqueueEvent(runtimeEvent(view))
-		}
+		// ACK is intentionally one-way. Echoing the updated session_runtime here
+		// makes legacy clients ACK the echo again forever, rewriting the journal
+		// and eventually starving WebSocket pings. The next authoritative runtime
+		// change or requested snapshot carries the device-specific read state.
+		_, _ = h.runtimes.Ack(c.deviceID, cmd.SessionID, cmd.Revision, cmd.Read)
 
 	case "request_runtime_snapshot":
 		c.enqueueEvent(h.runtimeSnapshot(c.deviceID))
@@ -528,7 +529,7 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 
 	case "fcm_token":
 		if h.fcm != nil {
-			h.fcm.SetToken(cmd.Token)
+			h.fcm.SetToken(c.deviceID, cmd.Token)
 		}
 
 	case "permission_response":

@@ -1,9 +1,109 @@
 package fcm
 
 import (
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
+
+	"golang.org/x/oauth2"
 )
+
+func testNotifier(path, endpoint string, client *http.Client) *Notifier {
+	return &Notifier{
+		projectID:    "test",
+		tokenSource:  oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "oauth"}),
+		registryPath: path,
+		endpoint:     endpoint,
+		http:         client,
+		devices:      make(map[string]deviceRegistration),
+	}
+}
+
+func TestPerDeviceRegistryPersistsWithoutOverwrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "fcm_tokens.json")
+	n := testNotifier(path, "", http.DefaultClient)
+	n.SetToken("note20", "token-note20")
+	n.SetToken("ipad", "token-ipad")
+
+	reloaded := testNotifier(path, "", http.DefaultClient)
+	reloaded.loadRegistry()
+	targets := reloaded.targets()
+	sort.Slice(targets, func(i, j int) bool { return targets[i].deviceID < targets[j].deviceID })
+	if len(targets) != 2 || targets[0].deviceID != "ipad" || targets[0].token != "token-ipad" ||
+		targets[1].deviceID != "note20" || targets[1].token != "token-note20" {
+		t.Fatalf("registry did not preserve both devices: %+v", targets)
+	}
+}
+
+func TestTokenMovesToNewDeviceWithoutDuplicatePush(t *testing.T) {
+	n := testNotifier(filepath.Join(t.TempDir(), "fcm_tokens.json"), "", http.DefaultClient)
+	n.SetToken("old-install", "same-token")
+	n.SetToken("new-install", "same-token")
+	targets := n.targets()
+	if len(targets) != 1 || targets[0].deviceID != "new-install" {
+		t.Fatalf("token was not moved to the new stable device: %+v", targets)
+	}
+}
+
+func TestLegacySingleTokenIsImported(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "fcm_token.txt"), []byte("legacy-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	n := testNotifier(filepath.Join(dir, "fcm_tokens.json"), "", http.DefaultClient)
+	n.loadRegistry()
+	targets := n.targets()
+	if len(targets) != 1 || targets[0].deviceID != legacyDeviceID || targets[0].token != "legacy-token" {
+		t.Fatalf("legacy token was not imported: %+v", targets)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "fcm_tokens.json")); err != nil {
+		t.Fatalf("imported registry was not persisted: %v", err)
+	}
+}
+
+func TestNotifyFansOutAndInvalidatesOnlyFailedDevice(t *testing.T) {
+	var mu sync.Mutex
+	var received []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var msg v1message
+		_ = json.Unmarshal(body, &msg)
+		mu.Lock()
+		received = append(received, msg.Message.Token)
+		mu.Unlock()
+		if msg.Message.Token == "bad-token" {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":{"status":"UNREGISTERED"}}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	n := testNotifier(filepath.Join(t.TempDir(), "fcm_tokens.json"), server.URL, server.Client())
+	n.SetToken("note20", "good-token")
+	n.SetToken("old-phone", "bad-token")
+	n.NotifyTaskDone("session", "done", "s1")
+
+	mu.Lock()
+	sort.Strings(received)
+	gotReceived := append([]string(nil), received...)
+	mu.Unlock()
+	if strings.Join(gotReceived, ",") != "bad-token,good-token" {
+		t.Fatalf("notification did not fan out once per token: %v", gotReceived)
+	}
+	targets := n.targets()
+	if len(targets) != 1 || targets[0].deviceID != "note20" || targets[0].token != "good-token" {
+		t.Fatalf("fatal response removed the wrong registrations: %+v", targets)
+	}
+}
 
 func TestSummarizeStripsMarkdown(t *testing.T) {
 	got := summarize("Here is **bold** and `code` and a [link](http://x).")

@@ -270,9 +270,9 @@ func (s *Store) Snapshot(deviceID string, sessionIDs []string) []View {
 
 // Ack advances only the named device. read=true additionally marks terminal
 // results through revision as viewed; another device's unread count is intact.
-func (s *Store) Ack(deviceID, sessionID string, revision uint64, read bool) View {
+func (s *Store) Ack(deviceID, sessionID string, revision uint64, read bool) (View, bool) {
 	if deviceID == "" || sessionID == "" {
-		return View{}
+		return View{}, false
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -280,14 +280,19 @@ func (s *Store) Ack(deviceID, sessionID string, revision uint64, read bool) View
 	if revision == 0 || revision > r.Revision {
 		revision = r.Revision
 	}
+	changed := false
 	if revision > r.AckedByDevice[deviceID] {
 		r.AckedByDevice[deviceID] = revision
+		changed = true
 	}
 	if read && revision > r.ReadByDevice[deviceID] {
 		r.ReadByDevice[deviceID] = revision
+		changed = true
 	}
-	s.saveLocked()
-	return viewLocked(r, deviceID)
+	if changed {
+		s.saveLocked()
+	}
+	return viewLocked(r, deviceID), changed
 }
 
 func (s *Store) Remove(sessionID string) {

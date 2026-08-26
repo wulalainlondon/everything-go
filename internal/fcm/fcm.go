@@ -18,6 +18,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -29,32 +30,53 @@ import (
 
 const messagingScope = "https://www.googleapis.com/auth/firebase.messaging"
 
-// Notifier holds the OAuth2 token source and the current device token.
-type Notifier struct {
-	projectID   string
-	tokenSource oauth2.TokenSource
-	tokenPath   string
-	endpoint    string
-	http        *http.Client
+const (
+	registryVersion = 1
+	legacyDeviceID  = "legacy"
+	maxDevices      = 64
+)
 
-	mu          sync.RWMutex
-	deviceToken string
+type deviceRegistration struct {
+	Token     string `json:"token"`
+	UpdatedAt int64  `json:"updated_at"`
 }
 
-// New loads the service account from serviceAccountPath and the persisted device
-// token from tokenPath (if present). Returns (nil, err) if the credentials are
+type tokenRegistry struct {
+	Version int                           `json:"version"`
+	Devices map[string]deviceRegistration `json:"devices"`
+}
+
+type target struct {
+	deviceID string
+	token    string
+}
+
+// Notifier holds the OAuth2 token source and a per-device token registry.
+type Notifier struct {
+	projectID    string
+	tokenSource  oauth2.TokenSource
+	registryPath string
+	endpoint     string
+	http         *http.Client
+
+	mu      sync.RWMutex
+	devices map[string]deviceRegistration
+}
+
+// New loads the service account from serviceAccountPath and the persisted
+// per-device token registry from registryPath (if present). Returns (nil, err) if the credentials are
 // missing or invalid — the caller treats a nil Notifier as "FCM disabled".
-func New(serviceAccountPath, tokenPath string) (*Notifier, error) {
+func New(serviceAccountPath, registryPath string) (*Notifier, error) {
 	data, err := os.ReadFile(serviceAccountPath)
 	if err != nil {
 		return nil, fmt.Errorf("read service account: %w", err)
 	}
-	return NewFromBytes(data, tokenPath)
+	return NewFromBytes(data, registryPath)
 }
 
 // NewFromBytes is like New but accepts the service account JSON directly
 // (e.g. from an //go:embed directive).
-func NewFromBytes(data []byte, tokenPath string) (*Notifier, error) {
+func NewFromBytes(data []byte, registryPath string) (*Notifier, error) {
 	var sa struct {
 		ProjectID string `json:"project_id"`
 	}
@@ -66,102 +88,104 @@ func NewFromBytes(data []byte, tokenPath string) (*Notifier, error) {
 		return nil, fmt.Errorf("credentials: %w", err)
 	}
 	n := &Notifier{
-		projectID:   sa.ProjectID,
-		tokenSource: creds.TokenSource,
-		tokenPath:   tokenPath,
-		endpoint:    "https://fcm.googleapis.com/v1/projects/" + sa.ProjectID + "/messages:send",
-		http:        &http.Client{Timeout: 15 * time.Second},
+		projectID: sa.ProjectID,
+		// Fan-out calls Token concurrently. ReuseTokenSource both caches the
+		// OAuth token and serializes refreshes around the underlying source.
+		tokenSource:  oauth2.ReuseTokenSource(nil, creds.TokenSource),
+		registryPath: registryPath,
+		endpoint:     "https://fcm.googleapis.com/v1/projects/" + sa.ProjectID + "/messages:send",
+		http:         &http.Client{Timeout: 15 * time.Second},
+		devices:      make(map[string]deviceRegistration),
 	}
-	if tok, err := os.ReadFile(tokenPath); err == nil {
-		n.deviceToken = strings.TrimSpace(string(tok))
-	}
+	n.loadRegistry()
 	return n, nil
 }
 
-// SetToken registers/updates the device token and persists it (fcm_token cmd).
-func (n *Notifier) SetToken(token string) {
+// SetToken registers/updates one stable device's token and persists the whole
+// registry. Reusing a token under a new device id moves it instead of creating
+// duplicate pushes (e.g. after an app reinstall changes the local device id).
+func (n *Notifier) SetToken(deviceID, token string) {
+	deviceID = strings.TrimSpace(deviceID)
 	token = strings.TrimSpace(token)
-	if token == "" {
+	if token == "" || deviceID == "" {
 		return
 	}
 	n.mu.Lock()
-	n.deviceToken = token
-	n.mu.Unlock()
-	if n.tokenPath != "" {
-		tmp := n.tokenPath + ".tmp"
-		if os.WriteFile(tmp, []byte(token), 0o600) == nil {
-			_ = os.Rename(tmp, n.tokenPath)
+	for id, registration := range n.devices {
+		if id != deviceID && registration.Token == token {
+			delete(n.devices, id)
 		}
 	}
-	log.Printf("[fcm] device token registered (len=%d)", len(token))
+	current, exists := n.devices[deviceID]
+	if exists && current.Token == token {
+		n.mu.Unlock()
+		return
+	}
+	n.devices[deviceID] = deviceRegistration{Token: token, UpdatedAt: time.Now().UnixMilli()}
+	n.enforceCapLocked()
+	n.persistLocked()
+	n.mu.Unlock()
+	log.Printf("[fcm] device token registered device=%s (len=%d)", deviceID, len(token))
 }
 
-func (n *Notifier) token() string {
+func (n *Notifier) targets() []target {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
-	return n.deviceToken
+	out := make([]target, 0, len(n.devices))
+	seen := make(map[string]struct{}, len(n.devices))
+	for deviceID, registration := range n.devices {
+		if registration.Token == "" {
+			continue
+		}
+		if _, duplicate := seen[registration.Token]; duplicate {
+			continue
+		}
+		seen[registration.Token] = struct{}{}
+		out = append(out, target{deviceID: deviceID, token: registration.Token})
+	}
+	return out
 }
 
 // NotifyTaskDone sends the turn-complete push. No-op if no device token yet.
 func (n *Notifier) NotifyTaskDone(sessionName, lastText, sessionID string) {
-	tok := n.token()
-	if tok == "" {
-		return
-	}
 	summary := summarize(lastText)
 	msg := v1message{}
-	msg.Message.Token = tok
 	msg.Message.Notification.Title = "✓ " + sessionName
 	msg.Message.Notification.Body = summary
 	msg.Message.Data = map[string]string{"type": "task_done", "session_id": sessionID}
-	n.send(msg, "task_done")
+	n.sendAll(msg, "task_done")
 }
 
 // NotifyFilePush mirrors notify_fcm_file_push.
 func (n *Notifier) NotifyFilePush(fileID, filename string) {
-	tok := n.token()
-	if tok == "" {
-		return
-	}
 	msg := v1message{}
-	msg.Message.Token = tok
 	msg.Message.Notification.Title = "📎 新檔案"
 	msg.Message.Notification.Body = filename
 	msg.Message.Data = map[string]string{
 		"type": "file_push", "file_id": fileID, "filename": filename, "deep_link": "bridge://inbox",
 	}
-	n.send(msg, "file_push")
+	n.sendAll(msg, "file_push")
 }
 
 // NotifyTunnelURL mirrors push_registry.send_tunnel_fcm_once.
 // Sends a data-only (silent) push so the app can update its tunnel URL.
 func (n *Notifier) NotifyTunnelURL(wsURL, instanceID string) {
-	tok := n.token()
-	if tok == "" {
-		return
-	}
 	msg := v1message{}
-	msg.Message.Token = tok
 	msg.Message.Data = map[string]string{
 		"type": "tunnel_url", "url": wsURL, "instance_id": instanceID,
 	}
-	n.send(msg, "tunnel_url")
+	n.sendAll(msg, "tunnel_url")
 }
 
 // NotifyFeedNew mirrors feed_ops.notify_fcm_feed_new.
 func (n *Notifier) NotifyFeedNew(feedID, title string) {
-	tok := n.token()
-	if tok == "" {
-		return
-	}
 	msg := v1message{}
-	msg.Message.Token = tok
 	msg.Message.Notification.Title = "新文章"
 	msg.Message.Notification.Body = title
 	msg.Message.Data = map[string]string{
 		"type": "feed_new", "feed_id": feedID, "title": title, "deep_link": "bridge://feed",
 	}
-	n.send(msg, "feed_new")
+	n.sendAll(msg, "feed_new")
 }
 
 type v1message struct {
@@ -175,9 +199,31 @@ type v1message struct {
 	} `json:"message"`
 }
 
-// send POSTs the message with 3 attempts + exponential backoff, matching the
-// Python retry policy. A 404/UNREGISTERED clears the stored token.
-func (n *Notifier) send(msg v1message, kind string) {
+// sendAll fans a notification out concurrently so a slow or invalid device
+// cannot delay the remaining devices.
+func (n *Notifier) sendAll(msg v1message, kind string) {
+	targets := n.targets()
+	if len(targets) == 0 {
+		return
+	}
+	var wg sync.WaitGroup
+	wg.Add(len(targets))
+	for _, dst := range targets {
+		dst := dst
+		go func() {
+			defer wg.Done()
+			copy := msg
+			copy.Message.Token = dst.token
+			n.send(copy, kind, dst)
+		}()
+	}
+	wg.Wait()
+}
+
+// send POSTs one device's message with 3 attempts + exponential backoff,
+// matching the Python retry policy. A fatal response removes only the token
+// that failed; other device registrations remain intact.
+func (n *Notifier) send(msg v1message, kind string, dst target) {
 	body, _ := json.Marshal(msg)
 	for attempt := 0; attempt < 3; attempt++ {
 		tok, err := n.tokenSource.Token()
@@ -193,12 +239,12 @@ func (n *Notifier) send(msg v1message, kind string) {
 			respBody, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			if resp.StatusCode == 200 {
-				log.Printf("[fcm] %s notification sent", kind)
+				log.Printf("[fcm] %s notification sent device=%s", kind, dst.deviceID)
 				return
 			}
 			if tokenFatal(resp.StatusCode, respBody) {
-				log.Printf("[fcm] device token invalid (%d) — clearing; resp=%s", resp.StatusCode, truncate(string(respBody), 300))
-				n.invalidate()
+				log.Printf("[fcm] device token invalid device=%s (%d) — clearing; resp=%s", dst.deviceID, resp.StatusCode, truncate(string(respBody), 300))
+				n.invalidate(dst)
 				return
 			}
 			err = fmt.Errorf("status %d: %s", resp.StatusCode, truncate(string(respBody), 200))
@@ -207,16 +253,78 @@ func (n *Notifier) send(msg v1message, kind string) {
 			time.Sleep(time.Duration(1<<attempt) * time.Second)
 			continue
 		}
-		log.Printf("[fcm] %s send failed after 3 attempts: %v", kind, err)
+		log.Printf("[fcm] %s send failed device=%s after 3 attempts: %v", kind, dst.deviceID, err)
 	}
 }
 
-func (n *Notifier) invalidate() {
+func (n *Notifier) invalidate(dst target) {
 	n.mu.Lock()
-	n.deviceToken = ""
+	current, ok := n.devices[dst.deviceID]
+	if ok && current.Token == dst.token {
+		delete(n.devices, dst.deviceID)
+		n.persistLocked()
+	}
 	n.mu.Unlock()
-	if n.tokenPath != "" {
-		_ = os.Remove(n.tokenPath)
+}
+
+func (n *Notifier) loadRegistry() {
+	if n.registryPath == "" {
+		return
+	}
+	data, err := os.ReadFile(n.registryPath)
+	if err == nil {
+		var registry tokenRegistry
+		if json.Unmarshal(data, &registry) == nil && registry.Devices != nil {
+			n.devices = registry.Devices
+			before := len(n.devices)
+			n.enforceCapLocked()
+			if len(n.devices) != before {
+				n.persistLocked()
+			}
+			return
+		}
+		// Backward compatibility when the constructor still points at the old
+		// plain-text file during a rolling upgrade.
+		if tok := strings.TrimSpace(string(data)); tok != "" && !strings.HasPrefix(tok, "{") {
+			n.devices[legacyDeviceID] = deviceRegistration{Token: tok, UpdatedAt: time.Now().UnixMilli()}
+			n.persistLocked()
+			return
+		}
+	}
+	legacyPath := filepath.Join(filepath.Dir(n.registryPath), "fcm_token.txt")
+	if tok, legacyErr := os.ReadFile(legacyPath); legacyErr == nil {
+		if token := strings.TrimSpace(string(tok)); token != "" {
+			n.devices[legacyDeviceID] = deviceRegistration{Token: token, UpdatedAt: time.Now().UnixMilli()}
+			n.persistLocked()
+		}
+	}
+}
+
+func (n *Notifier) persistLocked() {
+	if n.registryPath == "" || os.MkdirAll(filepath.Dir(n.registryPath), 0o700) != nil {
+		return
+	}
+	data, err := json.Marshal(tokenRegistry{Version: registryVersion, Devices: n.devices})
+	if err != nil {
+		return
+	}
+	tmp := n.registryPath + ".tmp"
+	if os.WriteFile(tmp, data, 0o600) == nil {
+		_ = os.Rename(tmp, n.registryPath)
+	}
+}
+
+func (n *Notifier) enforceCapLocked() {
+	for len(n.devices) > maxDevices {
+		oldestID := ""
+		var oldestAt int64
+		for deviceID, registration := range n.devices {
+			if oldestID == "" || registration.UpdatedAt < oldestAt {
+				oldestID = deviceID
+				oldestAt = registration.UpdatedAt
+			}
+		}
+		delete(n.devices, oldestID)
 	}
 }
 
