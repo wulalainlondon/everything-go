@@ -64,6 +64,15 @@ func headSig(path string) string {
 // invoking fn(raw, nextOffset) per line. An incomplete trailing line is left
 // for a later resume. Returns the offset after the last complete line.
 func lineReader(path string, startOffset int64, fn func(raw []byte, lineNum int, nextOffset int64)) int64 {
+	return lineReaderUntil(path, startOffset, func(raw []byte, lineNum int, nextOffset int64) bool {
+		fn(raw, lineNum, nextOffset)
+		return false
+	})
+}
+
+// lineReaderUntil is lineReader with an early-stop signal. Metadata readers use
+// it to stop physical I/O as soon as cwd/timestamp/display name are known.
+func lineReaderUntil(path string, startOffset int64, fn func(raw []byte, lineNum int, nextOffset int64) bool) int64 {
 	f, err := os.Open(path)
 	if err != nil {
 		return startOffset
@@ -80,8 +89,11 @@ func lineReader(path string, startOffset int64, fn func(raw []byte, lineNum int,
 		if len(raw) > 0 && raw[len(raw)-1] == '\n' {
 			next := offset + int64(len(raw))
 			lineNum++
-			fn(raw, lineNum, next)
+			stop := fn(raw, lineNum, next)
 			offset = next
+			if stop {
+				return offset
+			}
 		}
 		if err != nil {
 			break // EOF or incomplete trailing line (not emitted)
@@ -224,13 +236,10 @@ func (c claudeSource) sessionMeta(path string) sessionMeta {
 		meta.ProjectDir = filepath.Dir(path)
 	}
 	cwdSet := false
-	lineReader(path, 0, func(raw []byte, _ int, _ int64) {
-		if meta.Cwd != "" && meta.FirstTS != "" && meta.DisplayName != "" {
-			return
-		}
+	lineReaderUntil(path, 0, func(raw []byte, _ int, _ int64) bool {
 		var rec claudeRecord
 		if json.Unmarshal(raw, &rec) != nil {
-			return
+			return false
 		}
 		if !cwdSet && rec.Cwd != "" {
 			meta.Cwd = rec.Cwd
@@ -245,6 +254,7 @@ func (c claudeSource) sessionMeta(path string) sessionMeta {
 				meta.DisplayName = collapseWS(text, 80)
 			}
 		}
+		return meta.Cwd != "" && meta.FirstTS != "" && meta.DisplayName != ""
 	})
 	return meta
 }
@@ -274,19 +284,16 @@ func (c codexSource) enabled() bool {
 
 func (c codexSource) discover() []string {
 	matches, _ := filepath.Glob(filepath.Join(c.root, "*", "*", "*", "rollout-*.jsonl"))
-	filtered := make([]string, 0, len(matches))
-	for _, path := range matches {
-		meta := c.sessionMeta(path)
-		if !sourcepolicy.IgnoreCodexSession(
-			meta.Cwd,
-			meta.DisplayName,
-			c.ignoreCWDGlobs,
-			c.ignoreNamePrefixes,
-		) {
-			filtered = append(filtered, path)
-		}
-	}
-	return filtered
+	return matches
+}
+
+func (c codexSource) includeMeta(meta sessionMeta) bool {
+	return !sourcepolicy.IgnoreCodexSession(
+		meta.Cwd,
+		meta.DisplayName,
+		c.ignoreCWDGlobs,
+		c.ignoreNamePrefixes,
+	)
 }
 
 func (c codexSource) headSignature(path string) string { return headSig(path) }
@@ -372,13 +379,10 @@ func (c codexSource) iterMessages(path string, startOffset int64) ([]searchableM
 func (c codexSource) sessionMeta(path string) sessionMeta {
 	meta := sessionMeta{ProjectDir: filepath.Dir(path)}
 	cwdSet := false
-	lineReader(path, 0, func(raw []byte, _ int, _ int64) {
-		if meta.Cwd != "" && meta.FirstTS != "" && meta.DisplayName != "" {
-			return
-		}
+	lineReaderUntil(path, 0, func(raw []byte, _ int, _ int64) bool {
 		var rec codexRecord
 		if json.Unmarshal(raw, &rec) != nil {
-			return
+			return false
 		}
 		if meta.FirstTS == "" && rec.Timestamp != "" {
 			meta.FirstTS = rec.Timestamp
@@ -399,6 +403,7 @@ func (c codexSource) sessionMeta(path string) sessionMeta {
 				}
 			}
 		}
+		return meta.Cwd != "" && meta.FirstTS != "" && meta.DisplayName != ""
 	})
 	return meta
 }

@@ -166,6 +166,11 @@ type Codex struct {
 	catalogMu          sync.RWMutex
 	catalog            backend.Definition
 	collaborationModes map[string]map[string]any
+	rolloutMu          sync.Mutex
+	rolloutRoot        string
+	rolloutScannedAt   time.Time
+	rolloutPaths       []string
+	rolloutByID        map[string]string
 	turnTimeout        time.Duration
 	stallWarnAfter     time.Duration
 	stallAbortAfter    time.Duration

@@ -1,8 +1,13 @@
 package search
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"log"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -57,6 +62,9 @@ func New(dbPath string) (*Index, error) {
 // short-lived process that does the heap-heavy parse and then exits, handing all
 // of its memory back to the OS so the resident bridge stays lightweight.
 func (idx *Index) RunOnce() int {
+	if err := idx.refreshSourcePolicyFingerprint(); err != nil {
+		log.Printf("[search] source policy fingerprint: %v", err)
+	}
 	if removed, err := idx.pruneExcludedCodexSessions(); err != nil {
 		log.Printf("[search] prune excluded Codex sessions: %v", err)
 	} else if removed > 0 {
@@ -68,6 +76,41 @@ func (idx *Index) RunOnce() int {
 		log.Printf("[search] pruned %d framework-noise message(s)", removed)
 	}
 	return idx.ingestAll()
+}
+
+// refreshSourcePolicyFingerprint invalidates only Codex ingest cursors when
+// ignore rules actually change. Ignored files can therefore keep a lightweight
+// stat cursor during normal cycles without becoming permanently invisible if a
+// later policy starts including them.
+func (idx *Index) refreshSourcePolicyFingerprint() error {
+	parts := append([]string(nil), sourcepolicy.CodexIgnoreCWDGlobs()...)
+	parts = append(parts, "\x00")
+	parts = append(parts, sourcepolicy.CodexIgnoreNamePrefixes()...)
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
+	fingerprint := hex.EncodeToString(sum[:])
+	const key = "codex_source_policy_fingerprint"
+	var previous string
+	err := idx.db.QueryRow("SELECT value FROM schema_meta WHERE key=?", key).Scan(&previous)
+	if err == sql.ErrNoRows {
+		_, err = idx.db.Exec("INSERT INTO schema_meta(key,value) VALUES(?,?)", key, fingerprint)
+		return err
+	}
+	if err != nil || previous == fingerprint {
+		return err
+	}
+	root := filepath.Clean(sourcepolicy.CodexSessionsDir()) + string(os.PathSeparator) + "%"
+	tx, err := idx.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec("DELETE FROM ingest_state WHERE source_path LIKE ?", root); err != nil {
+		return err
+	}
+	if _, err := tx.Exec("UPDATE schema_meta SET value=? WHERE key=?", fingerprint, key); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (idx *Index) pruneFrameworkNoiseMessages() (int64, error) {

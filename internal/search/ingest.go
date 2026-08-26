@@ -12,13 +12,15 @@ type ingestJob struct {
 	src   source
 	path  string
 	mtime time.Time
+	meta  sessionMeta
 }
 
 // ingestFile brings one file's messages into the index incrementally. It honors
 // the stored byte offset, detects rotation/truncation via head signature + size,
 // upserts the session row, inserts new messages, and records ingest_state.
 // Mirrors bridge/search/ingest/single_file.py (condensed).
-func (idx *Index) ingestFile(src source, path string) (extracted int, err error) {
+func (idx *Index) ingestFile(job ingestJob) (extracted int, err error) {
+	src, path := job.src, job.path
 	info, statErr := os.Stat(path)
 	if statErr != nil {
 		return 0, statErr
@@ -48,7 +50,7 @@ func (idx *Index) ingestFile(src source, path string) (extracted int, err error)
 	}
 
 	msgs, finalOffset := src.iterMessages(path, startOffset)
-	meta := src.sessionMeta(path)
+	meta := job.meta
 	sid := src.sessionIDFor(path)
 
 	idx.writeMu.Lock()
@@ -184,13 +186,37 @@ func (idx *Index) discoverJobs() []ingestJob {
 					continue
 				}
 			}
-			jobs = append(jobs, ingestJob{src: src, path: path, mtime: info.ModTime()})
+			// Metadata can require opening and parsing the rollout. Do it only
+			// after the stat-based unchanged-file gate; the previous ordering
+			// reread every Codex file on every nominally incremental cycle.
+			meta := src.sessionMeta(path)
+			if filter, ok := src.(interface{ includeMeta(sessionMeta) bool }); ok && !filter.includeMeta(meta) {
+				idx.markSkippedFile(src, path, info)
+				continue
+			}
+			jobs = append(jobs, ingestJob{src: src, path: path, mtime: info.ModTime(), meta: meta})
 		}
 	}
 	sort.SliceStable(jobs, func(i, j int) bool {
 		return jobs[i].mtime.After(jobs[j].mtime)
 	})
 	return jobs
+}
+
+func (idx *Index) markSkippedFile(src source, path string, info os.FileInfo) {
+	mtime := float64(info.ModTime().UnixNano()) / 1e9
+	now := float64(time.Now().UnixNano()) / 1e9
+	_, _ = idx.db.Exec(
+		`INSERT INTO ingest_state(source_path,file_size,last_mtime,last_offset,head_sha256,last_ingest_at,msg_extracted,errors)
+		 VALUES(?,?,?,?,?,?,0,0)
+		 ON CONFLICT(source_path) DO UPDATE SET
+		  file_size=excluded.file_size,
+		  last_mtime=excluded.last_mtime,
+		  last_offset=excluded.last_offset,
+		  head_sha256=excluded.head_sha256,
+		  last_ingest_at=excluded.last_ingest_at`,
+		path, info.Size(), mtime, info.Size(), src.headSignature(path), now,
+	)
 }
 
 // ingestBatch processes a bounded slice of work. It returns the remaining jobs
@@ -209,7 +235,7 @@ func (idx *Index) ingestBatch(jobs []ingestJob, maxFiles int, maxDuration time.D
 			p.currentSource = job.src.name()
 		})
 
-		n, err := idx.ingestFile(job.src, job.path)
+		n, err := idx.ingestFile(job)
 		if err != nil {
 			log.Printf("[search] ingest %s: %v", job.path, err)
 			idx.setProgress(func(p *ingestProgress) {
