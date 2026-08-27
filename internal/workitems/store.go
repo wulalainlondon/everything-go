@@ -854,6 +854,23 @@ func (s *Store) Snapshot(ctx context.Context) (Snapshot, error) {
 		}
 		snap.Comments = append(snap.Comments, comment)
 	}
+	if err := rows.Close(); err != nil {
+		return snap, err
+	}
+	rows, err = s.db.QueryContext(ctx, `SELECT id,work_item_id,session_link_id,request_id,kind,status,
+		started_at,finished_at,terminal_reason FROM work_item_runs ORDER BY started_at,id`)
+	if err != nil {
+		return snap, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var run Run
+		if err := rows.Scan(&run.ID, &run.WorkItemID, &run.SessionLinkID, &run.RequestID,
+			&run.Kind, &run.Status, &run.StartedAt, &run.FinishedAt, &run.TerminalReason); err != nil {
+			return snap, err
+		}
+		snap.Runs = append(snap.Runs, run)
+	}
 	return snap, rows.Err()
 }
 

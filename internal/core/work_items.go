@@ -233,6 +233,30 @@ func (h *Hub) handleWorkCommand(c *Client, cmd clientproto.Command) {
 			MutationID: cmd.MutationID, EntityVersion: item.Version, Revision: item.ActivityRevision,
 			Item: &item, Comment: &comment})
 
+	case "work_item_start_run":
+		if h.rejectMobileWrite(c, cmd.SessionID) {
+			return
+		}
+		if _, ok := h.registry.Get(cmd.SessionID); !ok {
+			h.sendWorkError(c, cmd.MutationID, errors.New("cannot start a run in an unknown Bridge session"))
+			return
+		}
+		run, item, err := h.work.StartRun(ctx, workitems.StartRunInput{
+			ID: cmd.RunID, WorkItemID: cmd.WorkItemID, SessionID: cmd.SessionID,
+			RequestID: cmd.RequestID, Kind: cmd.RunKind, ExpectedVersion: cmd.ExpectedVersion, Actor: actor,
+		})
+		if err != nil {
+			h.sendWorkError(c, cmd.MutationID, err)
+			return
+		}
+		h.completeWorkMutation(c, cmd.MutationID, protocol.WorkMutationAck{Type: "work_mutation_ack",
+			MutationID: cmd.MutationID, EntityVersion: item.Version, Revision: item.ActivityRevision,
+			Item: &item, Run: &run})
+		// Reuse the ordinary Session actor and mobile/desktop control lease. The
+		// durable run exists before submission, so runtime projection is ordered.
+		h.route(ctx, c, clientproto.Command{Kind: "message", SessionID: cmd.SessionID,
+			RequestID: cmd.RequestID, Content: cmd.Content})
+
 	case "work_item_read":
 		view, err := h.work.MarkRead(ctx, c.deviceID, cmd.WorkItemID, cmd.Revision)
 		if err != nil {

@@ -1,6 +1,9 @@
 package core
 
 import (
+	"context"
+	"log"
+
 	"everything-go/internal/protocol"
 	"everything-go/internal/runtimejournal"
 )
@@ -49,6 +52,36 @@ func (h *Hub) updateRuntime(sessionID, phase, requestID string, queueLength int,
 		return
 	}
 	h.broadcastRuntime(view)
+	h.projectWorkRun(sessionID, requestID, phase, message)
+}
+
+func (h *Hub) projectWorkRun(sessionID, requestID, phase, reason string) {
+	if h.work == nil {
+		return
+	}
+	status := phase
+	switch phase {
+	case "completed":
+		status = "succeeded"
+	case "waiting":
+		status = "waiting_user"
+	case "running", "queued", "failed", "interrupted":
+	default:
+		return
+	}
+	update, err := h.work.AdvanceRun(context.Background(), sessionID, requestID, status, reason)
+	if err != nil {
+		log.Printf("[work] project run session=%s request=%s: %v", sessionID, requestID, err)
+		return
+	}
+	if !update.Changed {
+		return
+	}
+	h.broadcastWorkRevision(update.Item.ActivityRevision)
+	if update.Attention != "" && h.fcm != nil {
+		go h.fcm.NotifyWorkAttention(h.cfg.InstanceID, update.Item.ID, update.Item.Title,
+			update.Item.ActivityRevision, update.Attention)
+	}
 }
 
 func (h *Hub) broadcastRuntime(view runtimejournal.View) {

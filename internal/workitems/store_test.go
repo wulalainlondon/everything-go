@@ -214,3 +214,56 @@ func TestRelatedEntitiesAreTransactionalAndAppearInDeltas(t *testing.T) {
 		t.Fatalf("snapshot after related mutations=%+v", snap)
 	}
 }
+
+func TestExplicitRunProjectsToReviewButOrdinaryLinkedSessionDoesNot(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	item := seedItem(t, s, "p1", "i1")
+	item = move(t, s, item, LifecycleReady, ActorUser)
+	_, item, err := s.LinkSession(ctx, LinkSessionInput{ID: "link1", WorkItemID: item.ID,
+		SessionID: "s1", ExpectedVersion: item.Version, Actor: Actor{Type: ActorUser}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ordinary, err := s.AdvanceRun(ctx, "s1", "ordinary", "succeeded", "")
+	if err != nil || ordinary.Changed {
+		t.Fatalf("ordinary linked turn changed work: %+v err=%v", ordinary, err)
+	}
+	run, item, err := s.StartRun(ctx, StartRunInput{ID: "run1", WorkItemID: item.ID,
+		SessionID: "s1", RequestID: "req1", Kind: "implementation", ExpectedVersion: item.Version,
+		Actor: Actor{Type: ActorMobile}})
+	if err != nil || run.Status != "queued" || item.Lifecycle != LifecycleActive {
+		t.Fatalf("start run=%+v item=%+v err=%v", run, item, err)
+	}
+	update, err := s.AdvanceRun(ctx, "s1", "req1", "running", "")
+	if err != nil || !update.Changed || update.Item.Lifecycle != LifecycleActive {
+		t.Fatalf("running update=%+v err=%v", update, err)
+	}
+	update, err = s.AdvanceRun(ctx, "s1", "req1", "succeeded", "")
+	if err != nil || !update.Changed || update.Item.Lifecycle != LifecycleReview || update.Attention != "review_ready" {
+		t.Fatalf("success update=%+v err=%v", update, err)
+	}
+	snap, err := s.Snapshot(ctx)
+	if err != nil || len(snap.Runs) != 1 || snap.Runs[0].FinishedAt == nil {
+		t.Fatalf("run snapshot=%+v err=%v", snap.Runs, err)
+	}
+}
+
+func TestFailedExplicitRunCreatesAttentionWithoutCompletingWork(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	item := seedItem(t, s, "p1", "i1")
+	item = move(t, s, item, LifecycleReady, ActorUser)
+	_, item, _ = s.LinkSession(ctx, LinkSessionInput{ID: "link1", WorkItemID: item.ID,
+		SessionID: "s1", ExpectedVersion: item.Version, Actor: Actor{Type: ActorUser}})
+	_, item, err := s.StartRun(ctx, StartRunInput{ID: "run1", WorkItemID: item.ID,
+		SessionID: "s1", RequestID: "req1", ExpectedVersion: item.Version, Actor: Actor{Type: ActorMobile}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	update, err := s.AdvanceRun(ctx, "s1", "req1", "failed", "tool failed")
+	if err != nil || update.Item.Lifecycle != LifecycleActive || update.Attention != "execution_failed" ||
+		update.Item.BlockedReasonCode != "execution_failed" {
+		t.Fatalf("failure projection=%+v err=%v", update, err)
+	}
+}

@@ -4,7 +4,10 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"everything-go/internal/protocol"
+	"everything-go/internal/session"
 	"everything-go/internal/workitems"
 )
 
@@ -17,6 +20,47 @@ func attachWorkService(t *testing.T, h *Hub, dir string) *workitems.Service {
 	h.SetWorkItems(service)
 	t.Cleanup(func() { _ = service.Close() })
 	return service
+}
+
+func TestWorkStartRunUsesSessionActorAndProjectsSuccessToReview(t *testing.T) {
+	h, exec := newTestHub(t)
+	service := attachWorkService(t, h, t.TempDir())
+	c := newTestClient(h)
+	c.deviceID = "phone"
+	route(h, c, `{"type":"new_session","session_id":"s1","name":"Run","backend":"codex"}`)
+	_ = waitForType(t, c, "session_created")
+	route(h, c, `{"type":"work_project_create","project_id":"p1","mutation_id":"mp","name":"P"}`)
+	_ = waitForType(t, c, "work_mutation_ack")
+	route(h, c, `{"type":"work_item_create","project_id":"p1","work_item_id":"wi1","mutation_id":"mi","title":"Deliver"}`)
+	created := waitForType(t, c, "work_mutation_ack")
+	version := uint64(created["entity_version"].(float64))
+	route(h, c, `{"type":"work_item_move","work_item_id":"wi1","mutation_id":"mm","expected_version":`+formatUint(version)+`,"lifecycle":"ready"}`)
+	moved := waitForType(t, c, "work_mutation_ack")
+	version = uint64(moved["entity_version"].(float64))
+	route(h, c, `{"type":"work_item_link_session","work_item_id":"wi1","session_id":"s1","mutation_id":"ml","expected_version":`+formatUint(version)+`,"role":"primary"}`)
+	linked := waitForType(t, c, "work_mutation_ack")
+	version = uint64(linked["entity_version"].(float64))
+	exec.onSend = func(s *session.Session, reqID, content string) {
+		if content != "implement it" {
+			t.Errorf("run content=%q", content)
+		}
+		h.Emit(protocol.NewDone(s.ID, reqID))
+	}
+	route(h, c, `{"type":"work_item_start_run","work_item_id":"wi1","session_id":"s1","request_id":"req1","run_id":"run1","run_kind":"implementation","mutation_id":"mr","expected_version":`+formatUint(version)+`,"content":"implement it"}`)
+	ack := waitForType(t, c, "work_mutation_ack")
+	if ack["run"].(map[string]any)["id"] != "run1" {
+		t.Fatalf("run ack=%+v", ack)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		item, err := service.GetItem(context.Background(), "wi1")
+		if err == nil && item.Lifecycle == workitems.LifecycleReview {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	item, _ := service.GetItem(context.Background(), "wi1")
+	t.Fatalf("explicit successful run did not reach review: %+v", item)
 }
 
 func TestWorkHelloAdvertisesCapabilityAndSnapshot(t *testing.T) {

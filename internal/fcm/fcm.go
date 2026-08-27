@@ -188,6 +188,18 @@ func (n *Notifier) NotifyFeedNew(feedID, title string) {
 	n.sendAll(msg, "feed_new")
 }
 
+func (n *Notifier) NotifyWorkAttention(instanceID, workItemID, title string, revision uint64, kind string) {
+	msg := v1message{}
+	msg.Message.Notification.Title = "工作需要你的注意"
+	msg.Message.Notification.Body = title
+	msg.Message.Data = map[string]string{
+		"type": "work_attention", "authority_instance_id": instanceID,
+		"work_item_id": workItemID, "activity_revision": fmt.Sprint(revision),
+		"kind": kind, "title": title, "deep_link": "bridge://inbox/work/" + workItemID,
+	}
+	n.sendAll(msg, "work_attention")
+}
+
 type v1message struct {
 	Message struct {
 		Token        string `json:"token"`

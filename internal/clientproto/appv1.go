@@ -115,6 +115,8 @@ type Command struct {
 	DependsOnID       string
 	WorkLinkID        string
 	CommentID         string
+	RunID             string
+	RunKind           string
 	Body              string
 	BlockedReasonCode string
 	BlockedNote       string
@@ -231,6 +233,8 @@ func (AppV1) ParseCommand(in protocol.Inbound) Command {
 		DependsOnID:       in.DependsOnID,
 		WorkLinkID:        in.WorkLinkID,
 		CommentID:         in.CommentID,
+		RunID:             in.RunID,
+		RunKind:           in.RunKind,
 		Body:              in.Body,
 		BlockedReasonCode: in.BlockedReasonCode,
 		BlockedNote:       in.BlockedNote,

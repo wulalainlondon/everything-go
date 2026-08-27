@@ -98,3 +98,11 @@ func (s *Service) RememberMutation(ctx context.Context, deviceID, mutationID str
 func (s *Service) CompactChanges(ctx context.Context) (int64, error) {
 	return s.store.CompactChanges(ctx)
 }
+
+func (s *Service) StartRun(ctx context.Context, in StartRunInput) (Run, WorkItem, error) {
+	return s.store.StartRun(ctx, in)
+}
+
+func (s *Service) AdvanceRun(ctx context.Context, sessionID, requestID, status, reason string) (RunUpdate, error) {
+	return s.store.AdvanceRun(ctx, sessionID, requestID, status, reason)
+}

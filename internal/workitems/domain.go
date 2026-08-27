@@ -112,6 +112,18 @@ type Comment struct {
 	DeletedAt      *int64    `json:"deleted_at,omitempty"`
 }
 
+type Run struct {
+	ID             string `json:"id"`
+	WorkItemID     string `json:"work_item_id"`
+	SessionLinkID  string `json:"session_link_id,omitempty"`
+	RequestID      string `json:"request_id"`
+	Kind           string `json:"kind"`
+	Status         string `json:"status"`
+	StartedAt      int64  `json:"started_at"`
+	FinishedAt     *int64 `json:"finished_at,omitempty"`
+	TerminalReason string `json:"terminal_reason,omitempty"`
+}
+
 type Activity struct {
 	Revision   uint64    `json:"revision"`
 	WorkItemID string    `json:"work_item_id"`
@@ -137,6 +149,7 @@ type ChangePayload struct {
 	Link       *SessionLink `json:"link,omitempty"`
 	Dependency *Dependency  `json:"dependency,omitempty"`
 	Comment    *Comment     `json:"comment,omitempty"`
+	Run        *Run         `json:"run,omitempty"`
 }
 
 type Snapshot struct {
@@ -146,6 +159,7 @@ type Snapshot struct {
 	SessionLinks []SessionLink `json:"session_links"`
 	Dependencies []Dependency  `json:"dependencies"`
 	Comments     []Comment     `json:"comments"`
+	Runs         []Run         `json:"runs"`
 }
 
 type ItemView struct {
@@ -160,6 +174,7 @@ type DeviceSnapshot struct {
 	SessionLinks []SessionLink `json:"session_links"`
 	Dependencies []Dependency  `json:"dependencies"`
 	Comments     []Comment     `json:"comments"`
+	Runs         []Run         `json:"runs"`
 }
 
 type ConflictError struct {

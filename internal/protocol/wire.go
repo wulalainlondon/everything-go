@@ -149,6 +149,8 @@ type Inbound struct {
 	DependsOnID       string   `json:"depends_on_id"`
 	WorkLinkID        string   `json:"work_link_id"`
 	CommentID         string   `json:"comment_id"`
+	RunID             string   `json:"run_id"`
+	RunKind           string   `json:"run_kind"`
 	Body              string   `json:"body"`
 	BlockedReasonCode string   `json:"blocked_reason_code"`
 	BlockedNote       string   `json:"blocked_note"`
@@ -235,6 +237,9 @@ func NewWorkSnapshot(snapshot workitems.DeviceSnapshot) WorkSnapshot {
 	if snapshot.Comments == nil {
 		snapshot.Comments = []workitems.Comment{}
 	}
+	if snapshot.Runs == nil {
+		snapshot.Runs = []workitems.Run{}
+	}
 	return WorkSnapshot{Type: "work_snapshot", DeviceSnapshot: snapshot}
 }
 
@@ -267,6 +272,7 @@ type WorkMutationAck struct {
 	Item          *workitems.WorkItem    `json:"item,omitempty"`
 	Link          *workitems.SessionLink `json:"link,omitempty"`
 	Comment       *workitems.Comment     `json:"comment,omitempty"`
+	Run           *workitems.Run         `json:"run,omitempty"`
 }
 
 type WorkConflict struct {
