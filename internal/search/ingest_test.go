@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 type countingSource struct {
@@ -36,6 +37,30 @@ func TestIngestMetricsDistinguishChangedAndIdlePasses(t *testing.T) {
 	idle := idx.ingestAllMetrics()
 	if idle.FilesSeen != 1 || idle.FilesChanged != 0 || idle.FilesQueued != 0 || idle.BytesRead != 0 {
 		t.Fatalf("idle metrics=%+v", idle)
+	}
+}
+
+func TestMetadataOnlyTouchRefreshesCursorOnce(t *testing.T) {
+	idx := newTestIndex(t)
+	path := filepath.Join(t.TempDir(), "rollout-touch.jsonl")
+	contents := []byte("{}\n")
+	if err := os.WriteFile(path, contents, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	idx.sources = []source{&countingSource{path: path, include: true}}
+	idx.ingestAllMetrics()
+
+	touched := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(path, touched, touched); err != nil {
+		t.Fatal(err)
+	}
+	metadataOnly := idx.ingestAllMetrics()
+	if metadataOnly.FilesChanged != 1 || metadataOnly.FilesQueued != 1 || metadataOnly.BytesRead != 0 {
+		t.Fatalf("metadata-only metrics=%+v", metadataOnly)
+	}
+	idle := idx.ingestAllMetrics()
+	if idle.FilesChanged != 0 || idle.FilesQueued != 0 || idle.BytesRead != 0 {
+		t.Fatalf("metadata-only touch repeated: %+v", idle)
 	}
 }
 func (s *countingSource) headSignature(string) string { return "head" }

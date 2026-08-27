@@ -46,6 +46,7 @@ func (idx *Index) ingestFile(job ingestJob) (extracted int, bytesRead int64, err
 		startOffset = 0 // re-ingest from the top
 	}
 	if startOffset == size && !rotated {
+		idx.refreshUnchangedCursor(path, size, mtime, headSHA)
 		return 0, 0, nil // nothing new
 	}
 
@@ -149,6 +150,25 @@ func (idx *Index) ingestFile(job ingestJob) (extracted int, bytesRead int64, err
 		return 0, bytesRead, err
 	}
 	return len(msgs), bytesRead, nil
+}
+
+// refreshUnchangedCursor records metadata-only touches. Without this update a
+// file whose mtime changed but whose size/head did not would be rediscovered on
+// every reconciliation forever, preventing the idle scheduler from backing off.
+func (idx *Index) refreshUnchangedCursor(path string, size int64, mtime float64, headSHA string) {
+	now := float64(time.Now().UnixNano()) / 1e9
+	_, _ = idx.db.Exec(`
+		INSERT INTO ingest_state(source_path, file_size, last_mtime, last_offset,
+			head_sha256, last_ingest_at, msg_extracted, errors)
+		VALUES(?,?,?,?,?,?,0,0)
+		ON CONFLICT(source_path) DO UPDATE SET
+			file_size=excluded.file_size,
+			last_mtime=excluded.last_mtime,
+			last_offset=excluded.last_offset,
+			head_sha256=excluded.head_sha256,
+			last_ingest_at=excluded.last_ingest_at`,
+		path, size, mtime, size, headSHA, now,
+	)
 }
 
 type cachedState struct {
