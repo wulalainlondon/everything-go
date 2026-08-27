@@ -37,6 +37,7 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 	switch cmd.Kind {
 	case "hello":
 		c.deviceID = cmd.DeviceID
+		c.clientSurface = strings.ToLower(strings.TrimSpace(cmd.ClientSurface))
 		c.supportsReplayAck = cmd.ReplayAck
 		// Latest-device-wins: evict any older client from the same device so the
 		// half-disconnect storm can't pile up zombie clients (#1).
@@ -79,9 +80,10 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		// Python bridge so the app reconciles before replayed events arrive.
 		c.enqueueEvent(h.client.SessionsList(h.sessionSummaries()))
 		c.enqueueEvent(h.runtimeSnapshot(c.deviceID))
-		if h.work != nil {
-			h.sendWorkSnapshot(c)
-		}
+		// Work reconciliation is client-cursor driven. The client responds to
+		// the advertised capability with work_sync_request using the revision it
+		// has durably applied. Pushing an unconditional snapshot here made every
+		// reconnect O(board size) and could replace a warm cache unnecessarily.
 		// Goal is durable state. Send the full latest snapshot before transient
 		// replay so a dropped historical goal_update cannot leave the UI stale.
 		c.enqueueEvent(h.goals.Snapshot())
@@ -180,7 +182,8 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 	case "work_project_create", "work_item_create", "work_item_update", "work_item_move",
 		"work_item_archive", "work_item_restore", "work_item_link_session", "work_item_unlink_session",
 		"work_item_dependency_add", "work_item_dependency_remove", "work_item_comment_add",
-		"work_item_comment_edit", "work_item_start_run", "work_item_read":
+		"work_item_comment_edit", "work_item_attachment_add", "work_item_attachment_remove",
+		"work_item_start_run", "work_item_read":
 		h.handleWorkCommand(c, cmd)
 
 	case "handoff_to_desktop":

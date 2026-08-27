@@ -111,8 +111,9 @@ type Client struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	clientID string
-	deviceID string
+	clientID      string
+	deviceID      string
+	clientSurface string
 	// enrollmentOnly is true when the handshake was admitted solely through a
 	// short-lived LAN pairing window. Such a client may only complete claim_bridge
 	// (or ping) until its credential is persisted.

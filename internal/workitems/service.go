@@ -63,6 +63,14 @@ func (s *Service) EditComment(ctx context.Context, in EditCommentInput) (Comment
 	return s.store.EditComment(ctx, in)
 }
 
+func (s *Service) AddAttachment(ctx context.Context, in AddAttachmentInput) (AttachmentRef, WorkItem, error) {
+	return s.store.AddAttachment(ctx, in)
+}
+
+func (s *Service) RemoveAttachment(ctx context.Context, in RemoveAttachmentInput) (AttachmentRef, WorkItem, error) {
+	return s.store.RemoveAttachment(ctx, in)
+}
+
 func (s *Service) GetItem(ctx context.Context, id string) (WorkItem, error) {
 	return s.store.GetItem(ctx, id)
 }

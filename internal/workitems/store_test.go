@@ -2,7 +2,9 @@ package workitems
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -212,6 +214,68 @@ func TestRelatedEntitiesAreTransactionalAndAppearInDeltas(t *testing.T) {
 	}
 	if len(snap.SessionLinks) != 0 || len(snap.Comments) != 1 || snap.Comments[0].Body != "approved soon" {
 		t.Fatalf("snapshot after related mutations=%+v", snap)
+	}
+}
+
+func TestAttachmentRefsAreDurableAndRemovalIsDeltaVisible(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	item := seedItem(t, s, "p1", "i1")
+	ref, item, err := s.AddAttachment(ctx, AddAttachmentInput{ID: "wa1", WorkItemID: item.ID,
+		AttachmentID: "att1", DisplayName: "proof.png", ExpectedVersion: item.Version,
+		Actor: Actor{Type: ActorMobile, DeviceID: "phone"}})
+	if err != nil || ref.AttachmentID != "att1" {
+		t.Fatalf("ref=%+v item=%+v err=%v", ref, item, err)
+	}
+	snapshot, err := s.Snapshot(ctx)
+	if err != nil || len(snapshot.Attachments) != 1 || snapshot.Attachments[0].ID != ref.ID {
+		t.Fatalf("snapshot attachments=%+v err=%v", snapshot.Attachments, err)
+	}
+	ref, item, err = s.RemoveAttachment(ctx, RemoveAttachmentInput{AttachmentRefID: ref.ID,
+		ExpectedVersion: item.Version, Actor: Actor{Type: ActorMobile, DeviceID: "phone"}})
+	if err != nil || ref.RemovedAt == nil {
+		t.Fatalf("removed ref=%+v item=%+v err=%v", ref, item, err)
+	}
+	changes, _, _, err := s.ChangesSince(ctx, item.ActivityRevision-1, 10)
+	if err != nil || len(changes) != 1 || !strings.Contains(string(changes[0].Payload), `"removed_at"`) {
+		t.Fatalf("removal delta=%+v err=%v", changes, err)
+	}
+}
+
+func TestSchemaV1MigrationBacksUpAndAddsAttachmentTombstone(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "everything_go_work_items.db")
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`CREATE TABLE work_schema(version INTEGER NOT NULL);
+		INSERT INTO work_schema(version) VALUES(1);
+		CREATE TABLE work_item_attachments(
+		id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL, comment_id TEXT,
+		attachment_id TEXT NOT NULL, display_name TEXT NOT NULL DEFAULT '',
+		sort_key INTEGER NOT NULL, created_at INTEGER NOT NULL);`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(dir, "bridge-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	var version int
+	if err := s.db.QueryRow("SELECT version FROM work_schema").Scan(&version); err != nil || version != schemaVersion {
+		t.Fatalf("version=%d err=%v", version, err)
+	}
+	var column string
+	if err := s.db.QueryRow(`SELECT name FROM pragma_table_info('work_item_attachments') WHERE name='removed_at'`).Scan(&column); err != nil || column != "removed_at" {
+		t.Fatalf("column=%q err=%v", column, err)
+	}
+	if _, err := os.Stat(path + ".pre-v2.bak"); err != nil {
+		t.Fatalf("migration backup missing: %v", err)
 	}
 }
 

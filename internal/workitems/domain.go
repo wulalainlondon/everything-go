@@ -124,6 +124,23 @@ type Run struct {
 	TerminalReason string `json:"terminal_reason,omitempty"`
 }
 
+// AttachmentRef stores only the durable relationship to the canonical
+// attachment journal. URL, MIME and availability are delivery projections
+// populated by core and are never written to the Work database.
+type AttachmentRef struct {
+	ID           string `json:"id"`
+	WorkItemID   string `json:"work_item_id"`
+	AttachmentID string `json:"attachment_id"`
+	DisplayName  string `json:"display_name,omitempty"`
+	SortKey      int64  `json:"sort_key"`
+	CreatedAt    int64  `json:"created_at"`
+	RemovedAt    *int64 `json:"removed_at,omitempty"`
+	Kind         string `json:"kind,omitempty"`
+	MIMEType     string `json:"mime_type,omitempty"`
+	URL          string `json:"url,omitempty"`
+	Status       string `json:"status,omitempty"`
+}
+
 type Activity struct {
 	Revision   uint64    `json:"revision"`
 	WorkItemID string    `json:"work_item_id"`
@@ -145,21 +162,25 @@ type Change struct {
 // ChangePayload is the native delta envelope. A single transaction can update
 // an item and one related entity without forcing clients to race a second sync.
 type ChangePayload struct {
-	Item       *WorkItem    `json:"item,omitempty"`
-	Link       *SessionLink `json:"link,omitempty"`
-	Dependency *Dependency  `json:"dependency,omitempty"`
-	Comment    *Comment     `json:"comment,omitempty"`
-	Run        *Run         `json:"run,omitempty"`
+	Item       *WorkItem      `json:"item,omitempty"`
+	Link       *SessionLink   `json:"link,omitempty"`
+	Dependency *Dependency    `json:"dependency,omitempty"`
+	Comment    *Comment       `json:"comment,omitempty"`
+	Run        *Run           `json:"run,omitempty"`
+	Attachment *AttachmentRef `json:"attachment,omitempty"`
+	Activity   *Activity      `json:"activity,omitempty"`
 }
 
 type Snapshot struct {
-	Revision     uint64        `json:"revision"`
-	Projects     []Project     `json:"projects"`
-	Items        []WorkItem    `json:"items"`
-	SessionLinks []SessionLink `json:"session_links"`
-	Dependencies []Dependency  `json:"dependencies"`
-	Comments     []Comment     `json:"comments"`
-	Runs         []Run         `json:"runs"`
+	Revision     uint64          `json:"revision"`
+	Projects     []Project       `json:"projects"`
+	Items        []WorkItem      `json:"items"`
+	SessionLinks []SessionLink   `json:"session_links"`
+	Dependencies []Dependency    `json:"dependencies"`
+	Comments     []Comment       `json:"comments"`
+	Runs         []Run           `json:"runs"`
+	Attachments  []AttachmentRef `json:"attachments"`
+	Activities   []Activity      `json:"activities"`
 }
 
 type ItemView struct {
@@ -168,13 +189,15 @@ type ItemView struct {
 }
 
 type DeviceSnapshot struct {
-	Revision     uint64        `json:"revision"`
-	Projects     []Project     `json:"projects"`
-	Items        []ItemView    `json:"items"`
-	SessionLinks []SessionLink `json:"session_links"`
-	Dependencies []Dependency  `json:"dependencies"`
-	Comments     []Comment     `json:"comments"`
-	Runs         []Run         `json:"runs"`
+	Revision     uint64          `json:"revision"`
+	Projects     []Project       `json:"projects"`
+	Items        []ItemView      `json:"items"`
+	SessionLinks []SessionLink   `json:"session_links"`
+	Dependencies []Dependency    `json:"dependencies"`
+	Comments     []Comment       `json:"comments"`
+	Runs         []Run           `json:"runs"`
+	Attachments  []AttachmentRef `json:"attachments"`
+	Activities   []Activity      `json:"activities"`
 }
 
 type ConflictError struct {

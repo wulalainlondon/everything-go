@@ -2,6 +2,8 @@ package core
 
 import (
 	"context"
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -10,6 +12,25 @@ import (
 	"everything-go/internal/session"
 	"everything-go/internal/workitems"
 )
+
+func assertNoTypeWithin(t *testing.T, c *Client, typ string, duration time.Duration) {
+	t.Helper()
+	deadline := time.After(duration)
+	for {
+		select {
+		case data := <-c.send:
+			var event map[string]any
+			if err := json.Unmarshal(data, &event); err != nil {
+				t.Fatalf("bad event JSON: %v", err)
+			}
+			if event["type"] == typ {
+				t.Fatalf("unexpected event type %q before client sync request", typ)
+			}
+		case <-deadline:
+			return
+		}
+	}
+}
 
 func attachWorkService(t *testing.T, h *Hub, dir string) *workitems.Service {
 	t.Helper()
@@ -63,7 +84,7 @@ func TestWorkStartRunUsesSessionActorAndProjectsSuccessToReview(t *testing.T) {
 	t.Fatalf("explicit successful run did not reach review: %+v", item)
 }
 
-func TestWorkHelloAdvertisesCapabilityAndSnapshot(t *testing.T) {
+func TestWorkHelloAdvertisesCapabilityAndReconcilesFromClientCursor(t *testing.T) {
 	h, _ := newTestHub(t)
 	attachWorkService(t, h, t.TempDir())
 	c := newTestClient(h)
@@ -73,6 +94,8 @@ func TestWorkHelloAdvertisesCapabilityAndSnapshot(t *testing.T) {
 	if !ok || len(capabilities) != 1 || capabilities[0] != "work_items_v1" {
 		t.Fatalf("hello capabilities=%v", hello["capabilities"])
 	}
+	assertNoTypeWithin(t, c, "work_snapshot", 50*time.Millisecond)
+	route(h, c, `{"type":"work_sync_request","revision":0}`)
 	snapshot := waitForType(t, c, "work_snapshot")
 	if _, ok := snapshot["projects"].([]any); !ok {
 		t.Fatalf("work snapshot collections must be arrays: %+v", snapshot)
@@ -152,10 +175,52 @@ func TestWorkSnapshotSurvivesBridgeRestart(t *testing.T) {
 	h2.SetWorkItems(service2)
 	c2 := newTestClient(h2)
 	c2.deviceID = "phone"
-	h2.sendWorkSnapshot(c2)
+	h2.sendWorkSnapshot(c2, true)
 	snapshot := waitForType(t, c2, "work_snapshot")
 	items := snapshot["items"].([]any)
 	if len(items) != 1 || items[0].(map[string]any)["id"] != "wi1" {
 		t.Fatalf("restart snapshot=%+v db=%s", snapshot, filepath.Join(dir, "everything_go_work_items.db"))
+	}
+}
+
+func TestWorkAttachmentUsesCanonicalJournalAndReportsMissingSource(t *testing.T) {
+	h, _ := newTestHub(t)
+	attachWorkService(t, h, t.TempDir())
+	c := newTestClient(h)
+	c.deviceID = "phone"
+	c.clientSurface = "android"
+	route(h, c, `{"type":"work_project_create","project_id":"p1","mutation_id":"mp","name":"P"}`)
+	_ = waitForType(t, c, "work_mutation_ack")
+	route(h, c, `{"type":"work_item_create","project_id":"p1","work_item_id":"wi1","mutation_id":"mi","title":"Proof"}`)
+	created := waitForType(t, c, "work_mutation_ack")
+	version := uint64(created["entity_version"].(float64))
+
+	path := filepath.Join(t.TempDir(), "proof.png")
+	if err := os.WriteFile(path, []byte("png"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	record, added := h.attachments.Add(protocol.Media{Type: "media", SessionID: "s1", RequestID: "r1", MediaType: "image", Path: path})
+	if !added {
+		t.Fatal("canonical attachment was not registered")
+	}
+	route(h, c, `{"type":"work_item_attachment_add","work_item_id":"wi1","work_attachment_id":"wa1","attachment_id":"`+record.AttachmentID+`","mutation_id":"ma","expected_version":`+formatUint(version)+`}`)
+	ack := waitForType(t, c, "work_mutation_ack")
+	attachment := ack["attachment"].(map[string]any)
+	if attachment["status"] != "available" || attachment["url"] == "" {
+		t.Fatalf("materialized attachment=%+v", attachment)
+	}
+
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	route(h, c, `{"type":"work_sync_request","revision":0}`)
+	snapshot := waitForType(t, c, "work_snapshot")
+	attachments := snapshot["attachments"].([]any)
+	if len(attachments) != 1 || attachments[0].(map[string]any)["status"] != "missing" {
+		t.Fatalf("missing attachment snapshot=%+v", attachments)
+	}
+	activities := snapshot["activities"].([]any)
+	if len(activities) == 0 || activities[0].(map[string]any)["actor"] != "mobile" {
+		t.Fatalf("client surface was not preserved in activity: %+v", activities)
 	}
 }

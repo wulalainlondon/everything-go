@@ -77,7 +77,8 @@ func (s *Store) SnapshotForDevice(ctx context.Context, deviceID string) (DeviceS
 		}
 	}
 	result := DeviceSnapshot{Revision: base.Revision, Projects: base.Projects,
-		SessionLinks: base.SessionLinks, Dependencies: base.Dependencies, Comments: base.Comments, Runs: base.Runs}
+		SessionLinks: base.SessionLinks, Dependencies: base.Dependencies, Comments: base.Comments,
+		Runs: base.Runs, Attachments: base.Attachments, Activities: base.Activities}
 	result.Items = make([]ItemView, 0, len(base.Items))
 	for _, item := range base.Items {
 		unread := 0
@@ -102,6 +103,13 @@ func (s *Store) ChangesSince(ctx context.Context, since uint64, limit int) ([]Ch
 	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(MIN(revision),0),COALESCE(MAX(revision),0)
 		FROM work_changes`).Scan(&minRevision, &maxRevision); err != nil {
 		return nil, 0, false, err
+	}
+	// A cache can legitimately be ahead after the Bridge data directory is
+	// restored/reset while the stable authority identity remains configured.
+	// There is no valid forward delta from that base; force an authoritative
+	// snapshot so the client can replace the stale cache instead of looping.
+	if since > maxRevision {
+		return nil, maxRevision, true, nil
 	}
 	if minRevision > 0 && since+1 < minRevision {
 		return nil, maxRevision, true, nil

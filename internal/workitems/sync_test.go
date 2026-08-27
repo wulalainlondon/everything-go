@@ -40,6 +40,15 @@ func TestChangesSinceAndCompactedCursor(t *testing.T) {
 	}
 }
 
+func TestClientCursorAheadOfAuthorityRequiresSnapshot(t *testing.T) {
+	s := openTestStore(t)
+	seedItem(t, s, "p1", "i1")
+	changes, latest, compacted, err := s.ChangesSince(context.Background(), 99, 100)
+	if err != nil || !compacted || len(changes) != 0 || latest != 2 {
+		t.Fatalf("changes=%+v latest=%d compacted=%v err=%v", changes, latest, compacted, err)
+	}
+}
+
 func TestMutationResponsePersistsAcrossRestart(t *testing.T) {
 	dir := t.TempDir()
 	ctx := context.Background()

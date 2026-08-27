@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"os"
 	"strings"
 
 	"everything-go/internal/clientproto"
@@ -12,7 +13,7 @@ import (
 	"everything-go/internal/workitems"
 )
 
-func (h *Hub) sendWorkSnapshot(c *Client) {
+func (h *Hub) sendWorkSnapshot(c *Client, authoritativeReset bool) {
 	if h.work == nil {
 		return
 	}
@@ -21,7 +22,8 @@ func (h *Hub) sendWorkSnapshot(c *Client) {
 		c.enqueueEvent(protocol.WorkError{Type: "work_error", Code: "snapshot_failed", Message: err.Error()})
 		return
 	}
-	c.enqueueEvent(protocol.NewWorkSnapshot(snapshot))
+	h.materializeWorkSnapshot(&snapshot)
+	c.enqueueEvent(protocol.NewWorkSnapshot(snapshot, authoritativeReset))
 	_ = h.work.AckSync(context.Background(), c.deviceID, snapshot.Revision, 0)
 }
 
@@ -36,9 +38,10 @@ func (h *Hub) sendWorkSync(c *Client, since uint64) {
 		return
 	}
 	if compacted || since == 0 {
-		h.sendWorkSnapshot(c)
+		h.sendWorkSnapshot(c, true)
 		return
 	}
+	h.materializeWorkChanges(changes)
 	event := protocol.NewWorkDeltaBatch(since, latest, changes)
 	c.enqueueEvent(event)
 	_ = h.work.AckSync(context.Background(), c.deviceID, event.ToRevision, 0)
@@ -68,7 +71,14 @@ func (h *Hub) handleWorkCommand(c *Client, cmd clientproto.Command) {
 		return
 	}
 	ctx := context.Background()
-	actor := workitems.Actor{Type: workitems.ActorUser, DeviceID: c.deviceID}
+	actorType := workitems.ActorUser
+	switch c.clientSurface {
+	case "android", "ios":
+		actorType = workitems.ActorMobile
+	case "desktop", "web":
+		actorType = workitems.ActorDesktop
+	}
+	actor := workitems.Actor{Type: actorType, DeviceID: c.deviceID}
 	if cmd.Kind != "work_item_read" {
 		if strings.TrimSpace(c.deviceID) == "" || strings.TrimSpace(cmd.MutationID) == "" {
 			h.sendWorkError(c, cmd.MutationID, errors.New("device id and mutation id are required"))
@@ -233,6 +243,50 @@ func (h *Hub) handleWorkCommand(c *Client, cmd clientproto.Command) {
 			MutationID: cmd.MutationID, EntityVersion: item.Version, Revision: item.ActivityRevision,
 			Item: &item, Comment: &comment})
 
+	case "work_item_attachment_add":
+		record, ok := h.attachments.Get(cmd.AttachmentID)
+		if !ok {
+			h.sendWorkError(c, cmd.MutationID, errors.New("canonical attachment not found"))
+			return
+		}
+		found, newlyPinned := h.attachments.Pin(record.AttachmentID, cmd.WorkItemID)
+		if !found {
+			h.sendWorkError(c, cmd.MutationID, errors.New("canonical attachment could not be pinned"))
+			return
+		}
+		displayName := strings.TrimSpace(cmd.Name)
+		if displayName == "" {
+			displayName = record.DisplayName
+		}
+		ref, item, err := h.work.AddAttachment(ctx, workitems.AddAttachmentInput{
+			ID: cmd.WorkAttachmentID, WorkItemID: cmd.WorkItemID, AttachmentID: record.AttachmentID,
+			DisplayName: displayName, SortKey: cmd.SortKey, ExpectedVersion: cmd.ExpectedVersion, Actor: actor,
+		})
+		if err != nil {
+			if newlyPinned {
+				h.attachments.Unpin(record.AttachmentID, cmd.WorkItemID)
+			}
+			h.sendWorkError(c, cmd.MutationID, err)
+			return
+		}
+		ref = h.materializeWorkAttachment(ref)
+		h.completeWorkMutation(c, cmd.MutationID, protocol.WorkMutationAck{Type: "work_mutation_ack",
+			MutationID: cmd.MutationID, EntityVersion: item.Version, Revision: item.ActivityRevision,
+			Item: &item, Attachment: &ref})
+
+	case "work_item_attachment_remove":
+		ref, item, err := h.work.RemoveAttachment(ctx, workitems.RemoveAttachmentInput{
+			AttachmentRefID: cmd.WorkAttachmentID, ExpectedVersion: cmd.ExpectedVersion, Actor: actor,
+		})
+		if err != nil {
+			h.sendWorkError(c, cmd.MutationID, err)
+			return
+		}
+		h.attachments.Unpin(ref.AttachmentID, ref.WorkItemID)
+		h.completeWorkMutation(c, cmd.MutationID, protocol.WorkMutationAck{Type: "work_mutation_ack",
+			MutationID: cmd.MutationID, EntityVersion: item.Version, Revision: item.ActivityRevision,
+			Item: &item, Attachment: &ref})
+
 	case "work_item_start_run":
 		if h.rejectMobileWrite(c, cmd.SessionID) {
 			return
@@ -268,6 +322,10 @@ func (h *Hub) handleWorkCommand(c *Client, cmd clientproto.Command) {
 }
 
 func (h *Hub) completeWorkMutation(c *Client, mutationID string, event protocol.WorkMutationAck) {
+	if event.Attachment != nil {
+		materialized := h.materializeWorkAttachment(*event.Attachment)
+		event.Attachment = &materialized
+	}
 	raw, err := json.Marshal(event)
 	if err != nil {
 		h.sendWorkError(c, mutationID, err)
@@ -322,6 +380,7 @@ func (h *Hub) broadcastWorkRevision(revision uint64) {
 		}
 		return
 	}
+	h.materializeWorkChanges(changes)
 	event := protocol.NewWorkDeltaBatch(revision-1, latest, changes)
 	h.mu.RLock()
 	clients := make([]*Client, 0, len(h.clients))
@@ -335,4 +394,43 @@ func (h *Hub) broadcastWorkRevision(revision uint64) {
 		client.enqueueEvent(event)
 		_ = h.work.AckSync(context.Background(), client.deviceID, event.ToRevision, 0)
 	}
+}
+
+func (h *Hub) materializeWorkSnapshot(snapshot *workitems.DeviceSnapshot) {
+	for i := range snapshot.Attachments {
+		snapshot.Attachments[i] = h.materializeWorkAttachment(snapshot.Attachments[i])
+	}
+}
+
+func (h *Hub) materializeWorkChanges(changes []workitems.Change) {
+	for i := range changes {
+		var payload workitems.ChangePayload
+		if json.Unmarshal(changes[i].Payload, &payload) != nil || payload.Attachment == nil {
+			continue
+		}
+		materialized := h.materializeWorkAttachment(*payload.Attachment)
+		payload.Attachment = &materialized
+		if body, err := json.Marshal(payload); err == nil {
+			changes[i].Payload = body
+		}
+	}
+}
+
+func (h *Hub) materializeWorkAttachment(ref workitems.AttachmentRef) workitems.AttachmentRef {
+	ref.Status = "missing"
+	record, ok := h.attachments.Get(ref.AttachmentID)
+	if !ok {
+		return ref
+	}
+	ref.Kind = record.Kind
+	ref.MIMEType = record.MIMEType
+	if ref.DisplayName == "" {
+		ref.DisplayName = record.DisplayName
+	}
+	if info, err := os.Stat(record.Path); err != nil || info.IsDir() {
+		return ref
+	}
+	ref.Status = "available"
+	ref.URL = h.mediaScan.LocalURL(record.Path)
+	return ref
 }

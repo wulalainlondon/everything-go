@@ -22,13 +22,14 @@ type Inbound struct {
 	RequestID string `json:"request_id"`
 
 	// hello / pairing
-	DeviceID   string `json:"device_id"`
-	DeviceName string `json:"device_name"`
-	AuthToken  string `json:"auth_token"`
-	ReplayAck  bool   `json:"replay_ack"`
-	BatchID    string `json:"batch_id"`
-	Revision   uint64 `json:"revision"`
-	Read       bool   `json:"read"`
+	DeviceID      string `json:"device_id"`
+	DeviceName    string `json:"device_name"`
+	ClientSurface string `json:"client_surface"`
+	AuthToken     string `json:"auth_token"`
+	ReplayAck     bool   `json:"replay_ack"`
+	BatchID       string `json:"batch_id"`
+	Revision      uint64 `json:"revision"`
+	Read          bool   `json:"read"`
 
 	// new_session
 	Name           string `json:"name"`
@@ -149,6 +150,8 @@ type Inbound struct {
 	DependsOnID       string   `json:"depends_on_id"`
 	WorkLinkID        string   `json:"work_link_id"`
 	CommentID         string   `json:"comment_id"`
+	WorkAttachmentID  string   `json:"work_attachment_id"`
+	AttachmentID      string   `json:"attachment_id"`
 	RunID             string   `json:"run_id"`
 	RunKind           string   `json:"run_kind"`
 	Body              string   `json:"body"`
@@ -217,11 +220,12 @@ type HelloAck struct {
 }
 
 type WorkSnapshot struct {
-	Type string `json:"type"`
+	Type               string `json:"type"`
+	AuthoritativeReset bool   `json:"authoritative_reset,omitempty"`
 	workitems.DeviceSnapshot
 }
 
-func NewWorkSnapshot(snapshot workitems.DeviceSnapshot) WorkSnapshot {
+func NewWorkSnapshot(snapshot workitems.DeviceSnapshot, authoritativeReset ...bool) WorkSnapshot {
 	if snapshot.Projects == nil {
 		snapshot.Projects = []workitems.Project{}
 	}
@@ -240,7 +244,14 @@ func NewWorkSnapshot(snapshot workitems.DeviceSnapshot) WorkSnapshot {
 	if snapshot.Runs == nil {
 		snapshot.Runs = []workitems.Run{}
 	}
-	return WorkSnapshot{Type: "work_snapshot", DeviceSnapshot: snapshot}
+	if snapshot.Attachments == nil {
+		snapshot.Attachments = []workitems.AttachmentRef{}
+	}
+	if snapshot.Activities == nil {
+		snapshot.Activities = []workitems.Activity{}
+	}
+	reset := len(authoritativeReset) > 0 && authoritativeReset[0]
+	return WorkSnapshot{Type: "work_snapshot", AuthoritativeReset: reset, DeviceSnapshot: snapshot}
 }
 
 type WorkDeltaBatch struct {
@@ -264,15 +275,16 @@ func NewWorkDeltaBatch(from, latest uint64, changes []workitems.Change) WorkDelt
 }
 
 type WorkMutationAck struct {
-	Type          string                 `json:"type"`
-	MutationID    string                 `json:"mutation_id"`
-	EntityVersion uint64                 `json:"entity_version"`
-	Revision      uint64                 `json:"revision"`
-	Project       *workitems.Project     `json:"project,omitempty"`
-	Item          *workitems.WorkItem    `json:"item,omitempty"`
-	Link          *workitems.SessionLink `json:"link,omitempty"`
-	Comment       *workitems.Comment     `json:"comment,omitempty"`
-	Run           *workitems.Run         `json:"run,omitempty"`
+	Type          string                   `json:"type"`
+	MutationID    string                   `json:"mutation_id"`
+	EntityVersion uint64                   `json:"entity_version"`
+	Revision      uint64                   `json:"revision"`
+	Project       *workitems.Project       `json:"project,omitempty"`
+	Item          *workitems.WorkItem      `json:"item,omitempty"`
+	Link          *workitems.SessionLink   `json:"link,omitempty"`
+	Comment       *workitems.Comment       `json:"comment,omitempty"`
+	Run           *workitems.Run           `json:"run,omitempty"`
+	Attachment    *workitems.AttachmentRef `json:"attachment,omitempty"`
 }
 
 type WorkConflict struct {

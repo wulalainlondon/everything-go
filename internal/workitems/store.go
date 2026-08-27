@@ -16,7 +16,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 1
+const schemaVersion = 2
 
 const schema = `
 CREATE TABLE IF NOT EXISTS work_schema (
@@ -115,7 +115,8 @@ CREATE TABLE IF NOT EXISTS work_item_attachments (
   attachment_id TEXT NOT NULL,
   display_name TEXT NOT NULL DEFAULT '',
   sort_key INTEGER NOT NULL,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  removed_at INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS work_item_activity (
@@ -164,6 +165,7 @@ CREATE TABLE IF NOT EXISTS work_mutation_dedup (
 
 type Store struct {
 	db         *sql.DB
+	dbPath     string
 	instanceID string
 	now        func() time.Time
 }
@@ -186,12 +188,45 @@ func Open(dataDir, instanceID string) (*Store, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	store := &Store{db: db, instanceID: instanceID, now: time.Now}
+	store := &Store{db: db, dbPath: path, instanceID: instanceID, now: time.Now}
+	if err := store.backupLegacySchema(context.Background()); err != nil {
+		db.Close()
+		return nil, err
+	}
 	if err := store.migrate(context.Background()); err != nil {
 		db.Close()
 		return nil, err
 	}
 	return store, nil
+}
+
+func (s *Store) backupLegacySchema(ctx context.Context) error {
+	var version int
+	err := s.db.QueryRowContext(ctx, "SELECT version FROM work_schema LIMIT 1").Scan(&version)
+	if errors.Is(err, sql.ErrNoRows) || (err != nil && strings.Contains(err.Error(), "no such table")) {
+		return nil
+	}
+	if err != nil || version != 1 {
+		return err
+	}
+	backupPath := s.dbPath + ".pre-v2.bak"
+	if _, err := os.Stat(backupPath); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, "PRAGMA wal_checkpoint(FULL)"); err != nil {
+		return err
+	}
+	data, err := os.ReadFile(s.dbPath)
+	if err != nil {
+		return err
+	}
+	tmp := backupPath + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, backupPath)
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -218,9 +253,22 @@ func (s *Store) migrate(ctx context.Context) error {
 		if err := tx.QueryRowContext(ctx, "SELECT version FROM work_schema LIMIT 1").Scan(&version); err != nil {
 			return err
 		}
-		if version != schemaVersion {
+		switch version {
+		case 1:
+			if _, err := tx.ExecContext(ctx, "ALTER TABLE work_item_attachments ADD COLUMN removed_at INTEGER"); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, "UPDATE work_schema SET version=?", schemaVersion); err != nil {
+				return err
+			}
+		case schemaVersion:
+		default:
 			return fmt.Errorf("unsupported work item schema version %d", version)
 		}
+	}
+	if _, err := tx.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS work_attachment_active_identity
+		ON work_item_attachments(work_item_id, attachment_id) WHERE removed_at IS NULL`); err != nil {
+		return err
 	}
 	return tx.Commit()
 }
@@ -316,10 +364,11 @@ func (s *Store) CreateItem(ctx context.Context, in CreateItemInput) (WorkItem, e
 	if _, err := tx.ExecContext(ctx, "UPDATE work_items SET activity_revision=? WHERE id=?", revision, item.ID); err != nil {
 		return WorkItem{}, err
 	}
-	if err := insertActivity(ctx, tx, revision, item.ID, "created", in.Actor, item, now); err != nil {
+	activity, err := insertActivity(ctx, tx, revision, item.ID, "created", in.Actor, item, now)
+	if err != nil {
 		return WorkItem{}, err
 	}
-	if err := updateChangePayload(ctx, tx, revision, ChangePayload{Item: &item}); err != nil {
+	if err := updateChangePayload(ctx, tx, revision, ChangePayload{Item: &item, Activity: &activity}); err != nil {
 		return WorkItem{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -448,10 +497,12 @@ func (s *Store) writeItemMutation(ctx context.Context, tx *sql.Tx, item WorkItem
 	if _, err := tx.ExecContext(ctx, "UPDATE work_items SET activity_revision=? WHERE id=?", revision, item.ID); err != nil {
 		return WorkItem{}, err
 	}
-	if err := insertActivity(ctx, tx, revision, item.ID, kind, actor, item, item.UpdatedAt); err != nil {
+	activity, err := insertActivity(ctx, tx, revision, item.ID, kind, actor, item, item.UpdatedAt)
+	if err != nil {
 		return WorkItem{}, err
 	}
 	payload.Item = &item
+	payload.Activity = &activity
 	if err := updateChangePayload(ctx, tx, revision, payload); err != nil {
 		return WorkItem{}, err
 	}
@@ -768,6 +819,101 @@ func (s *Store) EditComment(ctx context.Context, in EditCommentInput) (Comment, 
 	return comment, updated, err
 }
 
+type AddAttachmentInput struct {
+	ID              string
+	WorkItemID      string
+	AttachmentID    string
+	DisplayName     string
+	SortKey         int64
+	ExpectedVersion uint64
+	Actor           Actor
+}
+
+func (s *Store) AddAttachment(ctx context.Context, in AddAttachmentInput) (AttachmentRef, WorkItem, error) {
+	if strings.TrimSpace(in.AttachmentID) == "" {
+		return AttachmentRef{}, WorkItem{}, errors.New("attachment id is required")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return AttachmentRef{}, WorkItem{}, err
+	}
+	defer tx.Rollback()
+	item, err := getItemTx(ctx, tx, in.WorkItemID)
+	if err != nil {
+		return AttachmentRef{}, WorkItem{}, err
+	}
+	if item.Version != in.ExpectedVersion {
+		return AttachmentRef{}, WorkItem{}, &ConflictError{Expected: in.ExpectedVersion, Current: item}
+	}
+	now := s.now().UnixMilli()
+	ref := AttachmentRef{ID: in.ID, WorkItemID: item.ID, AttachmentID: strings.TrimSpace(in.AttachmentID),
+		DisplayName: strings.TrimSpace(in.DisplayName), SortKey: in.SortKey, CreatedAt: now}
+	if ref.ID == "" {
+		ref.ID = newID("wa")
+	}
+	if ref.SortKey == 0 {
+		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(sort_key),0)+1024 FROM work_item_attachments
+			WHERE work_item_id=? AND removed_at IS NULL`, item.ID).Scan(&ref.SortKey); err != nil {
+			return AttachmentRef{}, WorkItem{}, err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO work_item_attachments
+		(id,work_item_id,attachment_id,display_name,sort_key,created_at,removed_at)
+		VALUES(?,?,?,?,?,?,NULL)`, ref.ID, ref.WorkItemID, ref.AttachmentID, ref.DisplayName, ref.SortKey, ref.CreatedAt); err != nil {
+		return AttachmentRef{}, WorkItem{}, err
+	}
+	item.Version++
+	item.UpdatedAt = now
+	item, err = s.writeItemMutation(ctx, tx, item, "attachment_added", in.Actor, ChangePayload{Item: &item, Attachment: &ref})
+	if err != nil {
+		return AttachmentRef{}, WorkItem{}, err
+	}
+	return ref, item, nil
+}
+
+type RemoveAttachmentInput struct {
+	AttachmentRefID string
+	ExpectedVersion uint64
+	Actor           Actor
+}
+
+func (s *Store) RemoveAttachment(ctx context.Context, in RemoveAttachmentInput) (AttachmentRef, WorkItem, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return AttachmentRef{}, WorkItem{}, err
+	}
+	defer tx.Rollback()
+	var ref AttachmentRef
+	err = tx.QueryRowContext(ctx, `SELECT id,work_item_id,attachment_id,display_name,sort_key,created_at,removed_at
+		FROM work_item_attachments WHERE id=? AND removed_at IS NULL`, in.AttachmentRefID).Scan(
+		&ref.ID, &ref.WorkItemID, &ref.AttachmentID, &ref.DisplayName, &ref.SortKey, &ref.CreatedAt, &ref.RemovedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return AttachmentRef{}, WorkItem{}, ErrNotFound
+	}
+	if err != nil {
+		return AttachmentRef{}, WorkItem{}, err
+	}
+	item, err := getItemTx(ctx, tx, ref.WorkItemID)
+	if err != nil {
+		return AttachmentRef{}, WorkItem{}, err
+	}
+	if item.Version != in.ExpectedVersion {
+		return AttachmentRef{}, WorkItem{}, &ConflictError{Expected: in.ExpectedVersion, Current: item}
+	}
+	now := s.now().UnixMilli()
+	ref.RemovedAt = &now
+	if _, err := tx.ExecContext(ctx, `UPDATE work_item_attachments SET removed_at=? WHERE id=? AND removed_at IS NULL`, now, ref.ID); err != nil {
+		return AttachmentRef{}, WorkItem{}, err
+	}
+	item.Version++
+	item.UpdatedAt = now
+	item, err = s.writeItemMutation(ctx, tx, item, "attachment_removed", in.Actor, ChangePayload{Item: &item, Attachment: &ref})
+	if err != nil {
+		return AttachmentRef{}, WorkItem{}, err
+	}
+	return ref, item, nil
+}
+
 func (s *Store) GetItem(ctx context.Context, id string) (WorkItem, error) {
 	return getItemQuery(ctx, s.db, id)
 }
@@ -873,6 +1019,40 @@ func (s *Store) Snapshot(ctx context.Context) (Snapshot, error) {
 		}
 		snap.Runs = append(snap.Runs, run)
 	}
+	if err := rows.Close(); err != nil {
+		return snap, err
+	}
+	rows, err = s.db.QueryContext(ctx, `SELECT id,work_item_id,attachment_id,display_name,sort_key,created_at,removed_at
+		FROM work_item_attachments WHERE removed_at IS NULL ORDER BY work_item_id,sort_key,id`)
+	if err != nil {
+		return snap, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var ref AttachmentRef
+		if err := rows.Scan(&ref.ID, &ref.WorkItemID, &ref.AttachmentID, &ref.DisplayName,
+			&ref.SortKey, &ref.CreatedAt, &ref.RemovedAt); err != nil {
+			return snap, err
+		}
+		snap.Attachments = append(snap.Attachments, ref)
+	}
+	if err := rows.Close(); err != nil {
+		return snap, err
+	}
+	rows, err = s.db.QueryContext(ctx, `SELECT revision,work_item_id,kind,actor,payload,created_at
+		FROM work_item_activity ORDER BY revision`)
+	if err != nil {
+		return snap, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var activity Activity
+		if err := rows.Scan(&activity.Revision, &activity.WorkItemID, &activity.Kind, &activity.Actor,
+			&activity.Payload, &activity.CreatedAt); err != nil {
+			return snap, err
+		}
+		snap.Activities = append(snap.Activities, activity)
+	}
 	return snap, rows.Err()
 }
 
@@ -944,19 +1124,21 @@ func updateChangePayload(ctx context.Context, tx *sql.Tx, revision uint64, paylo
 	return err
 }
 
-func insertActivity(ctx context.Context, tx *sql.Tx, revision uint64, itemID, kind string, actor Actor, payload any, now int64) error {
+func insertActivity(ctx context.Context, tx *sql.Tx, revision uint64, itemID, kind string, actor Actor, payload any, now int64) (Activity, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return err
+		return Activity{}, err
 	}
 	actorType := actor.Type
 	if actorType == "" {
 		actorType = ActorSystem
 	}
+	activity := Activity{Revision: revision, WorkItemID: itemID, Kind: kind, Actor: actorType,
+		Payload: string(body), CreatedAt: now}
 	_, err = tx.ExecContext(ctx, `INSERT INTO work_item_activity
 		(revision,work_item_id,kind,actor,payload,created_at) VALUES(?,?,?,?,?,?)`,
 		revision, itemID, kind, actorType, string(body), now)
-	return err
+	return activity, err
 }
 
 func newID(prefix string) string {

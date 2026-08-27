@@ -21,13 +21,14 @@ type Command struct {
 	SessionID string
 	RequestID string
 
-	DeviceID   string
-	DeviceName string
-	AuthToken  string
-	ReplayAck  bool
-	BatchID    string
-	Revision   uint64
-	Read       bool
+	DeviceID      string
+	DeviceName    string
+	ClientSurface string
+	AuthToken     string
+	ReplayAck     bool
+	BatchID       string
+	Revision      uint64
+	Read          bool
 
 	Name            string
 	Cwd             string
@@ -115,6 +116,8 @@ type Command struct {
 	DependsOnID       string
 	WorkLinkID        string
 	CommentID         string
+	WorkAttachmentID  string
+	AttachmentID      string
 	RunID             string
 	RunKind           string
 	Body              string
@@ -134,13 +137,14 @@ func (AppV1) ParseCommand(in protocol.Inbound) Command {
 		SessionID: in.SessionID,
 		RequestID: in.RequestID,
 
-		DeviceID:   in.DeviceID,
-		DeviceName: in.DeviceName,
-		AuthToken:  in.AuthToken,
-		ReplayAck:  in.ReplayAck,
-		BatchID:    in.BatchID,
-		Revision:   in.Revision,
-		Read:       in.Read,
+		DeviceID:      in.DeviceID,
+		DeviceName:    in.DeviceName,
+		ClientSurface: in.ClientSurface,
+		AuthToken:     in.AuthToken,
+		ReplayAck:     in.ReplayAck,
+		BatchID:       in.BatchID,
+		Revision:      in.Revision,
+		Read:          in.Read,
 
 		Name:            in.Name,
 		Cwd:             in.Cwd,
@@ -233,6 +237,8 @@ func (AppV1) ParseCommand(in protocol.Inbound) Command {
 		DependsOnID:       in.DependsOnID,
 		WorkLinkID:        in.WorkLinkID,
 		CommentID:         in.CommentID,
+		WorkAttachmentID:  in.WorkAttachmentID,
+		AttachmentID:      in.AttachmentID,
 		RunID:             in.RunID,
 		RunKind:           in.RunKind,
 		Body:              in.Body,
