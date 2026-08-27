@@ -101,3 +101,19 @@ func TestCompactionRespectsActiveDeviceAndExpiresStaleCursor(t *testing.T) {
 		t.Fatalf("expired device should require snapshot: compacted=%v err=%v", compacted, err)
 	}
 }
+
+func TestDiagnosticsReportsBoundedSyncState(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	item := seedItem(t, s, "p1", "i1")
+	if err := s.AckSync(ctx, "note20", item.ActivityRevision, item.ActivityRevision); err != nil {
+		t.Fatal(err)
+	}
+	diagnostics, err := s.Diagnostics(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if diagnostics.Projects != 1 || diagnostics.Items != 1 || diagnostics.ActiveDevices != 1 || diagnostics.Revision == 0 {
+		t.Fatalf("diagnostics=%+v", diagnostics)
+	}
+}

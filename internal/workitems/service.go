@@ -106,3 +106,7 @@ func (s *Service) StartRun(ctx context.Context, in StartRunInput) (Run, WorkItem
 func (s *Service) AdvanceRun(ctx context.Context, sessionID, requestID, status, reason string) (RunUpdate, error) {
 	return s.store.AdvanceRun(ctx, sessionID, requestID, status, reason)
 }
+
+func (s *Service) Diagnostics(ctx context.Context) (Diagnostics, error) {
+	return s.store.Diagnostics(ctx)
+}

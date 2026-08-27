@@ -105,6 +105,23 @@ func TestNotifyFansOutAndInvalidatesOnlyFailedDevice(t *testing.T) {
 	}
 }
 
+func TestWorkAttentionCarriesStableDedupFacts(t *testing.T) {
+	var got v1message
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	n := testNotifier(filepath.Join(t.TempDir(), "fcm_tokens.json"), server.URL, server.Client())
+	n.SetToken("note20", "token")
+	n.NotifyWorkAttention("morrie", "wi1", "Review release", 42, "review_ready")
+	data := got.Message.Data
+	if data["type"] != "work_attention" || data["authority_instance_id"] != "morrie" ||
+		data["work_item_id"] != "wi1" || data["activity_revision"] != "42" || data["kind"] != "review_ready" {
+		t.Fatalf("work attention payload=%+v", data)
+	}
+}
+
 func TestSummarizeStripsMarkdown(t *testing.T) {
 	got := summarize("Here is **bold** and `code` and a [link](http://x).")
 	if strings.ContainsAny(got, "*`") {

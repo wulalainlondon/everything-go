@@ -294,6 +294,11 @@ type WorkError struct {
 	Message    string `json:"message"`
 }
 
+type WorkDiagnostics struct {
+	Type string `json:"type"`
+	workitems.Diagnostics
+}
+
 type SessionControlState struct {
 	Type           string `json:"type"`
 	SessionID      string `json:"session_id"`

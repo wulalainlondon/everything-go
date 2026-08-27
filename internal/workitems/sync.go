@@ -15,6 +15,42 @@ const (
 	minimumChangeTail  = 512
 )
 
+type Diagnostics struct {
+	Revision        uint64 `json:"revision"`
+	Projects        int    `json:"projects"`
+	Items           int    `json:"items"`
+	ActiveRuns      int    `json:"active_runs"`
+	RetainedChanges int    `json:"retained_changes"`
+	ActiveDevices   int    `json:"active_devices"`
+}
+
+func (s *Store) Diagnostics(ctx context.Context) (Diagnostics, error) {
+	var d Diagnostics
+	queries := []struct {
+		query string
+		dest  any
+	}{
+		{"SELECT COALESCE(MAX(revision),0) FROM work_changes", &d.Revision},
+		{"SELECT COUNT(*) FROM work_projects WHERE archived_at IS NULL", &d.Projects},
+		{"SELECT COUNT(*) FROM work_items WHERE archived_at IS NULL", &d.Items},
+		{"SELECT COUNT(*) FROM work_item_runs WHERE finished_at IS NULL", &d.ActiveRuns},
+		{"SELECT COUNT(*) FROM work_changes", &d.RetainedChanges},
+		{"SELECT COUNT(*) FROM work_device_cursors WHERE authority_instance_id=? AND updated_at>=?", &d.ActiveDevices},
+	}
+	for i, query := range queries {
+		var err error
+		if i == len(queries)-1 {
+			err = s.db.QueryRowContext(ctx, query.query, s.instanceID, s.now().Add(-deviceCursorTTL).UnixMilli()).Scan(query.dest)
+		} else {
+			err = s.db.QueryRowContext(ctx, query.query).Scan(query.dest)
+		}
+		if err != nil {
+			return d, err
+		}
+	}
+	return d, nil
+}
+
 func (s *Store) SnapshotForDevice(ctx context.Context, deviceID string) (DeviceSnapshot, error) {
 	base, err := s.Snapshot(ctx)
 	if err != nil {

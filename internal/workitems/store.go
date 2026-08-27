@@ -60,6 +60,8 @@ CREATE TABLE IF NOT EXISTS work_items (
 
 CREATE INDEX IF NOT EXISTS work_items_project_column
   ON work_items(project_id, lifecycle, sort_key, id);
+CREATE INDEX IF NOT EXISTS work_items_search_projection
+  ON work_items(project_id, title COLLATE NOCASE, updated_at DESC);
 
 CREATE TABLE IF NOT EXISTS work_item_session_links (
   id TEXT PRIMARY KEY,

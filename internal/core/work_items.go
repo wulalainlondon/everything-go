@@ -279,6 +279,11 @@ func (h *Hub) completeWorkMutation(c *Client, mutationID string, event protocol.
 	}
 	c.enqueue(raw)
 	h.broadcastWorkRevision(event.Revision)
+	go func() {
+		if _, err := h.work.CompactChanges(context.Background()); err != nil {
+			log.Printf("[work] compact changes: %v", err)
+		}
+	}()
 }
 
 func (h *Hub) sendWorkError(c *Client, mutationID string, err error) {
