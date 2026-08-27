@@ -84,6 +84,49 @@ func TestWorkStartRunUsesSessionActorAndProjectsSuccessToReview(t *testing.T) {
 	t.Fatalf("explicit successful run did not reach review: %+v", item)
 }
 
+func TestWorkRequestOwnershipRemainsDurableAfterTerminalProjection(t *testing.T) {
+	h, _ := newTestHub(t)
+	service := attachWorkService(t, h, t.TempDir())
+	ctx := context.Background()
+	project, err := service.CreateProject(ctx, workitems.CreateProjectInput{ID: "p1", Name: "P"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err := service.CreateItem(ctx, workitems.CreateItemInput{ID: "wi1", ProjectID: project.ID, Title: "Deliver", Actor: workitems.Actor{Type: workitems.ActorUser}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err = service.MoveItem(ctx, workitems.MoveItemInput{ID: item.ID, Lifecycle: workitems.LifecycleReady, ExpectedVersion: item.Version, Actor: workitems.Actor{Type: workitems.ActorUser}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, item, err = service.LinkSession(ctx, workitems.LinkSessionInput{ID: "link1", WorkItemID: item.ID, SessionID: "s1", ExpectedVersion: item.Version, Actor: workitems.Actor{Type: workitems.ActorUser}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = service.StartRun(ctx, workitems.StartRunInput{ID: "run1", WorkItemID: item.ID, SessionID: "s1", RequestID: "req1", ExpectedVersion: item.Version, Actor: workitems.Actor{Type: workitems.ActorMobile}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = service.AdvanceRun(ctx, "s1", "req1", "succeeded", ""); err != nil {
+		t.Fatal(err)
+	}
+	owned, err := service.OwnsRequest(ctx, "s1", "req1")
+	if err != nil || !owned {
+		t.Fatalf("terminal work request ownership: owned=%v err=%v", owned, err)
+	}
+	owned, err = service.OwnsRequest(ctx, "s1", "ordinary")
+	if err != nil || owned {
+		t.Fatalf("ordinary request ownership: owned=%v err=%v", owned, err)
+	}
+	if h.shouldNotifyTaskDone("s1", "req1") {
+		t.Fatal("work request would also send legacy task_done notification")
+	}
+	if !h.shouldNotifyTaskDone("s1", "ordinary") {
+		t.Fatal("ordinary request lost legacy task_done notification")
+	}
+}
+
 func TestWorkHelloAdvertisesCapabilityAndReconcilesFromClientCursor(t *testing.T) {
 	h, _ := newTestHub(t)
 	attachWorkService(t, h, t.TempDir())

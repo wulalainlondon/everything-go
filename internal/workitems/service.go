@@ -111,6 +111,10 @@ func (s *Service) StartRun(ctx context.Context, in StartRunInput) (Run, WorkItem
 	return s.store.StartRun(ctx, in)
 }
 
+func (s *Service) OwnsRequest(ctx context.Context, sessionID, requestID string) (bool, error) {
+	return s.store.OwnsRequest(ctx, sessionID, requestID)
+}
+
 func (s *Service) AdvanceRun(ctx context.Context, sessionID, requestID, status, reason string) (RunUpdate, error) {
 	return s.store.AdvanceRun(ctx, sessionID, requestID, status, reason)
 }

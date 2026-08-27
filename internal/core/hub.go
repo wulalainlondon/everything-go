@@ -457,6 +457,14 @@ func (h *Hub) accumulateTurn(event any) {
 		if h.fcm == nil || text == "" {
 			return
 		}
+		// Explicit WorkItem runs have their own durable attention notification,
+		// emitted by projectWorkRun after the authoritative lifecycle update. Do
+		// not also send the legacy task_done push for the same request. Ownership
+		// is read from SQLite (including terminal runs), not an in-memory flag, so
+		// event ordering and Bridge restarts cannot reintroduce duplicates.
+		if !h.shouldNotifyTaskDone(e.SessionID, e.RequestID) {
+			return
+		}
 		name := e.SessionID
 		if s, ok := h.registry.Get(e.SessionID); ok {
 			if n := s.Name(); n != "" {
@@ -469,6 +477,25 @@ func (h *Hub) accumulateTurn(event any) {
 		delete(h.turnText, e.SessionID)
 		h.turnMu.Unlock()
 	}
+}
+
+func (h *Hub) shouldNotifyTaskDone(sessionID, requestID string) bool {
+	if h.work == nil || requestID == "" {
+		return true
+	}
+	owned, err := h.work.OwnsRequest(context.Background(), sessionID, requestID)
+	if err != nil {
+		// Preserve the established notification path if the Work store is
+		// temporarily unreadable; losing every completion push is worse than a
+		// possible duplicate, and the error remains observable.
+		log.Printf("[fcm] work request ownership lookup failed session=%s request=%s: %v", sessionID, requestID, err)
+		return true
+	}
+	if owned {
+		log.Printf("[fcm] task_done suppressed for work request session=%s request=%s", sessionID, requestID)
+		return false
+	}
+	return true
 }
 
 // scanAndEmitMedia scans accumulated turn text for file paths and emits

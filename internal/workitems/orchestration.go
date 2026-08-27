@@ -79,6 +79,23 @@ func (s *Store) StartRun(ctx context.Context, in StartRunInput) (Run, WorkItem, 
 	return run, updated, err
 }
 
+// OwnsRequest reports whether the exact session request was explicitly started
+// as a WorkItem run. Terminal runs remain owned: completion notification
+// routing happens independently from lifecycle projection, and may run before
+// or after AdvanceRun records finished_at (including after a Bridge restart).
+func (s *Store) OwnsRequest(ctx context.Context, sessionID, requestID string) (bool, error) {
+	if sessionID == "" || requestID == "" {
+		return false, nil
+	}
+	var exists int
+	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(
+		SELECT 1 FROM work_item_runs r
+		JOIN work_item_session_links l ON l.id=r.session_link_id
+		WHERE l.session_id=? AND r.request_id=?
+	)`, sessionID, requestID).Scan(&exists)
+	return exists == 1, err
+}
+
 // AdvanceRun projects only explicitly-started WorkItem runs. Ordinary messages
 // in a linked session never move the human-owned WorkItem lifecycle.
 func (s *Store) AdvanceRun(ctx context.Context, sessionID, requestID, status, reason string) (RunUpdate, error) {

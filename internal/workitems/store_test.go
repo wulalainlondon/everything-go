@@ -307,6 +307,14 @@ func TestExplicitRunProjectsToReviewButOrdinaryLinkedSessionDoesNot(t *testing.T
 	if err != nil || !update.Changed || update.Item.Lifecycle != LifecycleReview || update.Attention != "review_ready" {
 		t.Fatalf("success update=%+v err=%v", update, err)
 	}
+	owned, err := s.OwnsRequest(ctx, "s1", "req1")
+	if err != nil || !owned {
+		t.Fatalf("terminal run lost request ownership: owned=%v err=%v", owned, err)
+	}
+	owned, err = s.OwnsRequest(ctx, "s1", "ordinary")
+	if err != nil || owned {
+		t.Fatalf("ordinary request claimed by work: owned=%v err=%v", owned, err)
+	}
 	snap, err := s.Snapshot(ctx)
 	if err != nil || len(snap.Runs) != 1 || snap.Runs[0].FinishedAt == nil {
 		t.Fatalf("run snapshot=%+v err=%v", snap.Runs, err)
