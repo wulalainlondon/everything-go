@@ -32,18 +32,43 @@ LAUNCH="$RUNTIME_DIR/everything_go_launch.sh"
 SESSION_STORE="${EVERYTHING_GO_SESSION_STORE:-$HOME/.claude-bridge-runtime/saved_sessions.json}"
 SERVICE_BIN="$BIN"
 PERMISSION_TARGET="$BIN"
-BROWSER_ORIGIN_MODE="${BRIDGE_BROWSER_ORIGIN_MODE:-ask}"
-BROWSER_ALLOWED_ORIGINS="${BRIDGE_BROWSER_ALLOWED_ORIGINS:-}"
-BROWSER_MANAGE_AUTO_REVIEW="${BRIDGE_BROWSER_MANAGE_AUTO_REVIEW:-1}"
-BROWSER_ENABLE_NETWORK="${BRIDGE_BROWSER_ENABLE_NETWORK:-1}"
-CODEX_SESSIONS_DIR="${EVERYTHING_GO_CODEX_SESSIONS_DIR:-${CODEX_HOME:-$HOME/.codex}/sessions}"
-CODEX_IGNORE_CWD_GLOBS="${EVERYTHING_GO_CODEX_IGNORE_CWD_GLOBS:-}"
-CODEX_IGNORE_NAME_PREFIXES="${EVERYTHING_GO_CODEX_IGNORE_NAME_PREFIXES:-}"
-CODEX_ROLLOVER_ENABLED="${EVERYTHING_GO_CODEX_ROLLOVER_ENABLED:-false}"
-CODEX_COLD_RESUME_MAX_BYTES="${EVERYTHING_GO_CODEX_COLD_RESUME_MAX_BYTES:-268435456}"
-CODEX_CHECKPOINT_MAX_BYTES="${EVERYTHING_GO_CODEX_CHECKPOINT_MAX_BYTES:-131072}"
-CODEX_APP_SERVER_MODE="${EVERYTHING_GO_CODEX_APP_SERVER_MODE:-daemon}"
-CODEX_APP_SERVER_SOCKET="${EVERYTHING_GO_CODEX_APP_SERVER_SOCKET:-}"
+
+# Preserve generated launch-wrapper settings across upgrades unless the caller
+# explicitly supplies an environment override. Replacing these with defaults
+# can change source-policy fingerprints, force multi-gigabyte reindexing, or
+# silently switch Codex transport behavior.
+existing_launch_export() {
+  local name="$1"
+  [ -f "$LAUNCH" ] || return 0
+  sed -n "s/^export ${name}=\"\(.*\)\"$/\1/p" "$LAUNCH" | tail -1
+}
+
+resolve_launch_export() {
+  local name="$1" fallback="$2" existing
+  if printenv "$name" >/dev/null 2>&1; then
+    printenv "$name"
+    return 0
+  fi
+  existing=$(existing_launch_export "$name")
+  if [ -n "$existing" ]; then
+    printf '%s\n' "$existing"
+  else
+    printf '%s\n' "$fallback"
+  fi
+}
+
+BROWSER_ORIGIN_MODE=$(resolve_launch_export BRIDGE_BROWSER_ORIGIN_MODE ask)
+BROWSER_ALLOWED_ORIGINS=$(resolve_launch_export BRIDGE_BROWSER_ALLOWED_ORIGINS "")
+BROWSER_MANAGE_AUTO_REVIEW=$(resolve_launch_export BRIDGE_BROWSER_MANAGE_AUTO_REVIEW 1)
+BROWSER_ENABLE_NETWORK=$(resolve_launch_export BRIDGE_BROWSER_ENABLE_NETWORK 1)
+CODEX_SESSIONS_DIR=$(resolve_launch_export EVERYTHING_GO_CODEX_SESSIONS_DIR "${CODEX_HOME:-$HOME/.codex}/sessions")
+CODEX_IGNORE_CWD_GLOBS=$(resolve_launch_export EVERYTHING_GO_CODEX_IGNORE_CWD_GLOBS "")
+CODEX_IGNORE_NAME_PREFIXES=$(resolve_launch_export EVERYTHING_GO_CODEX_IGNORE_NAME_PREFIXES "")
+CODEX_ROLLOVER_ENABLED=$(resolve_launch_export EVERYTHING_GO_CODEX_ROLLOVER_ENABLED false)
+CODEX_COLD_RESUME_MAX_BYTES=$(resolve_launch_export EVERYTHING_GO_CODEX_COLD_RESUME_MAX_BYTES 268435456)
+CODEX_CHECKPOINT_MAX_BYTES=$(resolve_launch_export EVERYTHING_GO_CODEX_CHECKPOINT_MAX_BYTES 131072)
+CODEX_APP_SERVER_MODE=$(resolve_launch_export EVERYTHING_GO_CODEX_APP_SERVER_MODE daemon)
+CODEX_APP_SERVER_SOCKET=$(resolve_launch_export EVERYTHING_GO_CODEX_APP_SERVER_SOCKET "")
 
 say()  { printf '\033[1;36m[everything-go]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[everything-go]\033[0m %s\n' "$*" >&2; }
