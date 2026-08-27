@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestPerDeviceReadAndRestart(t *testing.T) {
@@ -112,8 +113,50 @@ func TestProgressIsRevisionedDedupedAndPersists(t *testing.T) {
 	if changed || regressed.Stage != "waiting_model" || regressed.Revision != waiting.Revision {
 		t.Fatalf("out-of-order stage regressed runtime: %+v changed=%v", regressed, changed)
 	}
+	s.Flush()
 	reloaded := New(dir).Snapshot("phone", []string{"s1"})[0]
 	if reloaded.Stage != "waiting_model" || reloaded.StageMessage != "Codex accepted the turn" || reloaded.StageStartedAt == 0 {
 		t.Fatalf("restart lost stage: %+v", reloaded)
+	}
+}
+
+func TestProgressWritesAreCoalescedButTerminalIsImmediate(t *testing.T) {
+	dir := t.TempDir()
+	s := New(dir)
+	s.Update("s1", "running", "r1", 0, "", "")
+	baseline := s.writes
+	s.Progress("s1", "r1", "resuming_thread", "Loading conversation")
+	s.Progress("s1", "r1", "waiting_model", "Waiting for Codex")
+	if got := s.writes; got != baseline {
+		t.Fatalf("progress wrote synchronously: writes=%d baseline=%d", got, baseline)
+	}
+	s.Flush()
+	if got := s.writes; got != baseline+1 {
+		t.Fatalf("coalesced progress writes=%d want=%d", got, baseline+1)
+	}
+
+	completed, _ := s.Update("s1", "completed", "r1", 0, "completed", "")
+	reloaded := New(dir).Snapshot("phone", []string{"s1"})[0]
+	if reloaded.Revision != completed.Revision || reloaded.Phase != "completed" {
+		t.Fatalf("terminal transition was not durable: got=%+v want=%+v", reloaded, completed)
+	}
+}
+
+func TestProgressFlushesAutomatically(t *testing.T) {
+	dir := t.TempDir()
+	s := New(dir)
+	s.Update("s1", "running", "r1", 0, "", "")
+	s.Progress("s1", "r1", "waiting_model", "Waiting for Codex")
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		reloaded := New(dir).Snapshot("phone", []string{"s1"})[0]
+		if reloaded.Stage == "waiting_model" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("coalesced progress did not flush: %+v", reloaded)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }

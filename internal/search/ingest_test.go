@@ -15,8 +15,28 @@ type countingSource struct {
 func (s *countingSource) name() string       { return "codex" }
 func (s *countingSource) enabled() bool      { return true }
 func (s *countingSource) discover() []string { return []string{s.path} }
-func (s *countingSource) iterMessages(string, int64) ([]searchableMessage, int64) {
-	return nil, 0
+func (s *countingSource) iterMessages(path string, _ int64) ([]searchableMessage, int64) {
+	info, _ := os.Stat(path)
+	return nil, info.Size()
+}
+
+func TestIngestMetricsDistinguishChangedAndIdlePasses(t *testing.T) {
+	idx := newTestIndex(t)
+	path := filepath.Join(t.TempDir(), "rollout-metrics.jsonl")
+	contents := []byte("{}\n{}\n")
+	if err := os.WriteFile(path, contents, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	idx.sources = []source{&countingSource{path: path, include: true}}
+
+	changed := idx.ingestAllMetrics()
+	if changed.FilesSeen != 1 || changed.FilesChanged != 1 || changed.FilesQueued != 1 || changed.BytesRead != int64(len(contents)) {
+		t.Fatalf("changed metrics=%+v", changed)
+	}
+	idle := idx.ingestAllMetrics()
+	if idle.FilesSeen != 1 || idle.FilesChanged != 0 || idle.FilesQueued != 0 || idle.BytesRead != 0 {
+		t.Fatalf("idle metrics=%+v", idle)
+	}
 }
 func (s *countingSource) headSignature(string) string { return "head" }
 func (s *countingSource) sessionIDFor(string) string  { return "codex:test" }

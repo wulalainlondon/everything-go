@@ -9,8 +9,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	_ "embed"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -149,13 +151,14 @@ func main() {
 	// the heap-heavy parse of every transcript lands in a process that exits and
 	// returns its memory to the OS (see runSearchIndexerLoop).
 	ctx := context.Background()
+	searchWake := make(chan struct{}, 1)
 	if !*disableSearch {
 		if idx, err := search.New(filepath.Join(*dataDir, "everything_go_search.db")); err != nil {
 			log.Printf("search index disabled: %v", err)
 		} else {
 			hub.SetSearch(idx)
 			if exePath, err := os.Executable(); err == nil {
-				go runSearchIndexerLoop(ctx, idx, exePath, *dataDir, 60*time.Second)
+				go runSearchIndexerLoop(ctx, idx, exePath, *dataDir, searchWake, time.Minute, 15*time.Minute)
 			} else {
 				log.Printf("[search] cannot locate binary for indexer child (%v); serving existing index only", err)
 			}
@@ -207,7 +210,12 @@ func main() {
 	// Network presence services (P3 discovery + P4 tunnel). They are opt-in so
 	// the fixed-endpoint P2 path stays deterministic and easy to debug.
 	if !*disableNativeWatcher {
-		hub.StartNativeWatcher(ctx)
+		hub.StartNativeWatcher(ctx, func() {
+			select {
+			case searchWake <- struct{}{}:
+			default:
+			}
+		})
 	} else {
 		log.Printf("native session watcher disabled by flag")
 	}
@@ -277,37 +285,107 @@ func runSearchIndexer(dataDir string) int {
 	defer idx.Close()
 
 	t0 := time.Now()
-	n := idx.RunOnce()
-	log.Printf("[indexer] ingested %d messages in %s", n, time.Since(t0).Round(time.Millisecond))
+	metrics := idx.RunOnceMetrics()
+	log.Printf("[indexer] files_seen=%d files_changed=%d files_queued=%d messages=%d bytes_read=%d db_bytes_delta=%d duration=%s",
+		metrics.FilesSeen, metrics.FilesChanged, metrics.FilesQueued, metrics.MessagesAdded,
+		metrics.BytesRead, metrics.DBBytesDelta, time.Since(t0).Round(time.Millisecond))
+	if data, err := json.Marshal(metrics); err == nil {
+		fmt.Printf("%s%s\n", indexResultPrefix, data)
+	}
 	return 0
 }
 
-// runSearchIndexerLoop keeps the search index fresh by spawning a `--mode=index`
-// child, waiting for it to finish, then sleeping. Spawn-and-wait serializes runs
-// (never two at once from this bridge) and each child's exit returns its ingest
-// memory to the OS. The first run does the full parse; later runs are cheap
-// incremental passes (ingest_state skips unchanged files).
-func runSearchIndexerLoop(ctx context.Context, idx *search.Index, exePath, dataDir string, interval time.Duration) {
+const indexResultPrefix = "EVERYTHING_GO_INDEX_RESULT="
+
+// runSearchIndexerLoop performs a full stat-based reconciliation at an
+// adaptive interval. Native watcher notifications wake it immediately; quiet
+// systems back off to maxInterval. Spawn-and-wait serializes runs and each
+// child's exit returns its transcript parsing heap to the OS.
+func runSearchIndexerLoop(ctx context.Context, idx *search.Index, exePath, dataDir string, wake <-chan struct{}, minInterval, maxInterval time.Duration) {
+	idleCycles := 0
 	for {
 		idx.SetIndexing(true)
 		cmd := exec.CommandContext(ctx, exePath, "--mode=index", "--data-dir", dataDir)
-		cmd.Stdout = os.Stdout
+		var childOut bytes.Buffer
+		cmd.Stdout = io.MultiWriter(os.Stdout, &childOut)
 		cmd.Stderr = os.Stderr
 		err := cmd.Run()
 		idx.SetIndexing(false)
+		metrics, metricsOK := parseIndexMetrics(childOut.String())
 		if err != nil {
 			if ctx.Err() != nil {
 				return
 			}
 			log.Printf("[search] indexer child failed: %v", err)
+			idleCycles = 0
 		} else {
 			idx.MarkReady()
+			if !metricsOK || metrics.FilesChanged > 0 || metrics.MessagesAdded > 0 {
+				idleCycles = 0
+			} else {
+				idleCycles++
+			}
 		}
+		delay := indexBackoff(minInterval, maxInterval, idleCycles)
+		log.Printf("[search] next reconciliation in %s (idle_cycles=%d)", delay, idleCycles)
+		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
+			stopTimer(timer)
 			return
-		case <-time.After(interval):
+		case <-wake:
+			stopTimer(timer)
+			idleCycles = 0
+			log.Printf("[search] transcript change detected; reconciling now")
+		case <-timer.C:
 		}
+	}
+}
+
+func parseIndexMetrics(output string) (search.IngestMetrics, bool) {
+	for _, line := range strings.Split(output, "\n") {
+		if !strings.HasPrefix(line, indexResultPrefix) {
+			continue
+		}
+		var metrics search.IngestMetrics
+		if json.Unmarshal([]byte(strings.TrimPrefix(line, indexResultPrefix)), &metrics) == nil {
+			return metrics, true
+		}
+	}
+	return search.IngestMetrics{}, false
+}
+
+func indexBackoff(minInterval, maxInterval time.Duration, idleCycles int) time.Duration {
+	if minInterval <= 0 {
+		minInterval = time.Minute
+	}
+	if maxInterval < minInterval {
+		maxInterval = minInterval
+	}
+	multipliers := [...]int{1, 2, 5, 15}
+	// The first completed idle pass still gets the minimum follow-up delay.
+	if idleCycles > 0 {
+		idleCycles--
+	} else {
+		idleCycles = 0
+	}
+	if idleCycles >= len(multipliers) {
+		return maxInterval
+	}
+	delay := time.Duration(multipliers[idleCycles]) * minInterval
+	if delay > maxInterval {
+		return maxInterval
+	}
+	return delay
+}
+
+func stopTimer(timer *time.Timer) {
+	if timer == nil || timer.Stop() {
+		return
+	}
+	select {
+	case <-timer.C:
+	default:
 	}
 }
 

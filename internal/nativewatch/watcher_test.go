@@ -1,6 +1,7 @@
 package nativewatch
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -21,6 +22,43 @@ func TestUsePollingMode(t *testing.T) {
 	t.Setenv("EVERYTHING_GO_NATIVEWATCH_MODE", "")
 	if got, want := usePolling(), runtime.GOOS == "darwin"; got != want {
 		t.Fatalf("default usePolling=%v, want %v (GOOS=%s)", got, want, runtime.GOOS)
+	}
+}
+
+func TestWatchChangesDoesNotSignalInitialImport(t *testing.T) {
+	t.Setenv("EVERYTHING_GO_NATIVEWATCH_MODE", "poll")
+	root := t.TempDir()
+	path := filepath.Join(root, "123e4567-e89b-12d3-a456-426614174000.jsonl")
+	line := `{"type":"user","cwd":"/tmp/repo","message":{"content":[{"type":"text","text":"Initial"}]}}` + "\n"
+	if err := os.WriteFile(path, []byte(line), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opts := Options{ClaudeProjectsDir: root, PollInterval: 20 * time.Millisecond, Debounce: time.Millisecond, InitialLookback: time.Hour}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	imports := make(chan NativeSession, 2)
+	changes := make(chan struct{}, 2)
+	go WatchChanges(ctx, opts, func(ns NativeSession) { imports <- ns }, func() { changes <- struct{}{} })
+	select {
+	case <-imports:
+	case <-time.After(time.Second):
+		t.Fatal("initial session was not imported")
+	}
+	select {
+	case <-changes:
+		t.Fatal("initial import was reported as a transcript change")
+	case <-time.After(60 * time.Millisecond):
+	}
+	if f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0); err != nil {
+		t.Fatal(err)
+	} else {
+		_, _ = f.WriteString(line)
+		_ = f.Close()
+	}
+	select {
+	case <-changes:
+	case <-time.After(time.Second):
+		t.Fatal("appended transcript did not signal a change")
 	}
 }
 

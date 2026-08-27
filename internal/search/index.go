@@ -42,6 +42,19 @@ type ingestProgress struct {
 	cycleDone     time.Time
 }
 
+// IngestMetrics describes one complete reconciliation pass. Byte counters are
+// transcript bytes consumed by incremental readers; DBBytesDelta is the signed
+// change in the database + WAL footprint, not an estimate of physical SSD I/O.
+type IngestMetrics struct {
+	FilesSeen     int   `json:"files_seen"`
+	FilesChanged  int   `json:"files_changed"`
+	FilesQueued   int   `json:"files_queued"`
+	MessagesAdded int   `json:"messages_added"`
+	BytesRead     int64 `json:"bytes_read"`
+	DBBytesDelta  int64 `json:"db_bytes_delta"`
+	DurationMS    int64 `json:"duration_ms"`
+}
+
 // New opens (creating if needed) the search index at dbPath and registers the
 // Claude + Codex sources. It does not ingest — the bridge issues read-only
 // queries while the `--mode=index` child calls RunOnce.
@@ -62,6 +75,14 @@ func New(dbPath string) (*Index, error) {
 // short-lived process that does the heap-heavy parse and then exits, handing all
 // of its memory back to the OS so the resident bridge stays lightweight.
 func (idx *Index) RunOnce() int {
+	return idx.RunOnceMetrics().MessagesAdded
+}
+
+// RunOnceMetrics is RunOnce with operational counters used by the resident
+// scheduler to distinguish a genuinely idle pass from useful indexing work.
+func (idx *Index) RunOnceMetrics() IngestMetrics {
+	started := time.Now()
+	before := databaseFootprint(idx.path)
 	if err := idx.refreshSourcePolicyFingerprint(); err != nil {
 		log.Printf("[search] source policy fingerprint: %v", err)
 	}
@@ -75,7 +96,20 @@ func (idx *Index) RunOnce() int {
 	} else if removed > 0 {
 		log.Printf("[search] pruned %d framework-noise message(s)", removed)
 	}
-	return idx.ingestAll()
+	metrics := idx.ingestAllMetrics()
+	metrics.DBBytesDelta = databaseFootprint(idx.path) - before
+	metrics.DurationMS = time.Since(started).Milliseconds()
+	return metrics
+}
+
+func databaseFootprint(path string) int64 {
+	var total int64
+	for _, candidate := range []string{path, path + "-wal"} {
+		if info, err := os.Stat(candidate); err == nil {
+			total += info.Size()
+		}
+	}
+	return total
 }
 
 // refreshSourcePolicyFingerprint invalidates only Codex ingest cursors when

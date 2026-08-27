@@ -67,6 +67,13 @@ func DefaultOptions() Options {
 // then uses fsnotify for low-latency updates. If fsnotify cannot start, it
 // falls back to polling.
 func Watch(ctx context.Context, opts Options, onSession func(NativeSession)) {
+	WatchChanges(ctx, opts, onSession, nil)
+}
+
+// WatchChanges is Watch with a notification that fires only for transcript
+// changes observed after the initial import. This lets downstream indexers
+// wake promptly without treating the startup catalog as thousands of edits.
+func WatchChanges(ctx context.Context, opts Options, onSession func(NativeSession), onTranscriptChange func()) {
 	if opts.PollInterval <= 0 {
 		opts.PollInterval = 30 * time.Second
 	}
@@ -78,6 +85,12 @@ func Watch(ctx context.Context, opts Options, onSession func(NativeSession)) {
 	}
 
 	scanRecent(opts, onSession)
+	onChange := func(session NativeSession) {
+		onSession(session)
+		if onTranscriptChange != nil {
+			onTranscriptChange()
+		}
+	}
 	if usePolling() {
 		// macOS fsnotify is backed by kqueue, which must hold an open file
 		// descriptor for every file in every watched directory. Watching the
@@ -86,12 +99,12 @@ func Watch(ctx context.Context, opts Options, onSession func(NativeSession)) {
 		// lifetime — the dominant cause of the bridge's FD/RSS bloat. Polling
 		// is stat-only and cheap; ~PollInterval latency is fine for surfacing
 		// externally-created native sessions in the dashboard.
-		poll(ctx, opts, onSession)
+		poll(ctx, opts, onChange)
 		return
 	}
-	if err := watchFS(ctx, opts, onSession); err != nil {
+	if err := watchFS(ctx, opts, onChange); err != nil {
 		log.Printf("[nativewatch] fsnotify unavailable (%v), falling back to polling", err)
-		poll(ctx, opts, onSession)
+		poll(ctx, opts, onChange)
 	}
 }
 

@@ -19,11 +19,11 @@ type ingestJob struct {
 // the stored byte offset, detects rotation/truncation via head signature + size,
 // upserts the session row, inserts new messages, and records ingest_state.
 // Mirrors bridge/search/ingest/single_file.py (condensed).
-func (idx *Index) ingestFile(job ingestJob) (extracted int, err error) {
+func (idx *Index) ingestFile(job ingestJob) (extracted int, bytesRead int64, err error) {
 	src, path := job.src, job.path
 	info, statErr := os.Stat(path)
 	if statErr != nil {
-		return 0, statErr
+		return 0, 0, statErr
 	}
 	size := info.Size()
 	mtime := float64(info.ModTime().UnixNano()) / 1e9
@@ -37,7 +37,7 @@ func (idx *Index) ingestFile(job ingestJob) (extracted int, err error) {
 	if scanErr := row.Scan(&startOffset, &prevSHA); scanErr == sql.ErrNoRows {
 		startOffset, prevSHA = 0, ""
 	} else if scanErr != nil {
-		return 0, scanErr
+		return 0, 0, scanErr
 	}
 
 	rotated := prevSHA != "" && prevSHA != headSHA
@@ -46,10 +46,14 @@ func (idx *Index) ingestFile(job ingestJob) (extracted int, err error) {
 		startOffset = 0 // re-ingest from the top
 	}
 	if startOffset == size && !rotated {
-		return 0, nil // nothing new
+		return 0, 0, nil // nothing new
 	}
 
 	msgs, finalOffset := src.iterMessages(path, startOffset)
+	bytesRead = finalOffset - startOffset
+	if bytesRead < 0 {
+		bytesRead = 0
+	}
 	meta := job.meta
 	sid := src.sessionIDFor(path)
 
@@ -58,7 +62,7 @@ func (idx *Index) ingestFile(job ingestJob) (extracted int, err error) {
 
 	tx, err := idx.db.Begin()
 	if err != nil {
-		return 0, err
+		return 0, bytesRead, err
 	}
 	defer tx.Rollback()
 
@@ -111,7 +115,7 @@ func (idx *Index) ingestFile(job ingestJob) (extracted int, err error) {
 			VALUES(?,?,?,?,?,?,?)
 			ON CONFLICT(session_id, msg_uuid) DO NOTHING`)
 		if perr != nil {
-			return 0, perr
+			return 0, bytesRead, perr
 		}
 		for _, m := range msgs {
 			sub := 0
@@ -121,7 +125,7 @@ func (idx *Index) ingestFile(job ingestJob) (extracted int, err error) {
 			if _, e := stmt.Exec(m.SessionID, m.MsgUUID, nullStr(m.ParentUUID),
 				m.Role, m.Timestamp, sub, m.Text); e != nil {
 				stmt.Close()
-				return 0, e
+				return 0, bytesRead, e
 			}
 		}
 		stmt.Close()
@@ -142,9 +146,9 @@ func (idx *Index) ingestFile(job ingestJob) (extracted int, err error) {
 		path, size, mtime, finalOffset, headSHA, now, len(msgs))
 
 	if err := tx.Commit(); err != nil {
-		return 0, err
+		return 0, bytesRead, err
 	}
-	return len(msgs), nil
+	return len(msgs), bytesRead, nil
 }
 
 type cachedState struct {
@@ -156,6 +160,11 @@ type cachedState struct {
 // It loads the entire ingest_state table in one query so unchanged files can
 // be filtered out before any file I/O, keeping incremental cycles fast.
 func (idx *Index) discoverJobs() []ingestJob {
+	jobs, _, _ := idx.discoverJobsMetrics()
+	return jobs
+}
+
+func (idx *Index) discoverJobsMetrics() (jobs []ingestJob, filesSeen, filesChanged int) {
 	// Bulk-load ingest_state in a single query (~3000+ rows but one round-trip).
 	known := make(map[string]cachedState)
 	if rows, err := idx.db.Query("SELECT source_path, file_size, last_mtime FROM ingest_state"); err == nil {
@@ -169,7 +178,6 @@ func (idx *Index) discoverJobs() []ingestJob {
 		rows.Close()
 	}
 
-	var jobs []ingestJob
 	for _, src := range idx.sources {
 		if !src.enabled() {
 			continue
@@ -179,6 +187,7 @@ func (idx *Index) discoverJobs() []ingestJob {
 			if err != nil {
 				continue
 			}
+			filesSeen++
 			// Skip files whose size and mtime are unchanged — nothing to ingest.
 			if s, ok := known[path]; ok {
 				mtime := float64(info.ModTime().UnixNano()) / 1e9
@@ -186,6 +195,7 @@ func (idx *Index) discoverJobs() []ingestJob {
 					continue
 				}
 			}
+			filesChanged++
 			// Metadata can require opening and parsing the rollout. Do it only
 			// after the stat-based unchanged-file gate; the previous ordering
 			// reread every Codex file on every nominally incremental cycle.
@@ -200,7 +210,7 @@ func (idx *Index) discoverJobs() []ingestJob {
 	sort.SliceStable(jobs, func(i, j int) bool {
 		return jobs[i].mtime.After(jobs[j].mtime)
 	})
-	return jobs
+	return jobs, filesSeen, filesChanged
 }
 
 func (idx *Index) markSkippedFile(src source, path string, info os.FileInfo) {
@@ -221,12 +231,13 @@ func (idx *Index) markSkippedFile(src source, path string, info os.FileInfo) {
 
 // ingestBatch processes a bounded slice of work. It returns the remaining jobs
 // and the number of messages added in this batch.
-func (idx *Index) ingestBatch(jobs []ingestJob, maxFiles int, maxDuration time.Duration) ([]ingestJob, int) {
+func (idx *Index) ingestBatch(jobs []ingestJob, maxFiles int, maxDuration time.Duration) ([]ingestJob, int, int64) {
 	if maxFiles <= 0 {
 		maxFiles = 1
 	}
 	deadline := time.Now().Add(maxDuration)
 	total := 0
+	var bytesRead int64
 	done := 0
 	for done < len(jobs) && done < maxFiles {
 		job := jobs[done]
@@ -235,7 +246,8 @@ func (idx *Index) ingestBatch(jobs []ingestJob, maxFiles int, maxDuration time.D
 			p.currentSource = job.src.name()
 		})
 
-		n, err := idx.ingestFile(job)
+		n, read, err := idx.ingestFile(job)
+		bytesRead += read
 		if err != nil {
 			log.Printf("[search] ingest %s: %v", job.path, err)
 			idx.setProgress(func(p *ingestProgress) {
@@ -252,19 +264,25 @@ func (idx *Index) ingestBatch(jobs []ingestJob, maxFiles int, maxDuration time.D
 			break
 		}
 	}
-	return jobs[done:], total
+	return jobs[done:], total, bytesRead
 }
 
 // ingestAll scans every source's files once. Returns total messages added.
 func (idx *Index) ingestAll() int {
-	jobs := idx.discoverJobs()
-	total := 0
+	return idx.ingestAllMetrics().MessagesAdded
+}
+
+func (idx *Index) ingestAllMetrics() IngestMetrics {
+	jobs, filesSeen, filesChanged := idx.discoverJobsMetrics()
+	metrics := IngestMetrics{FilesSeen: filesSeen, FilesChanged: filesChanged, FilesQueued: len(jobs)}
 	for len(jobs) > 0 {
 		var added int
-		jobs, added = idx.ingestBatch(jobs, len(jobs), 24*time.Hour)
-		total += added
+		var bytesRead int64
+		jobs, added, bytesRead = idx.ingestBatch(jobs, len(jobs), 24*time.Hour)
+		metrics.MessagesAdded += added
+		metrics.BytesRead += bytesRead
 	}
-	return total
+	return metrics
 }
 
 func nullStr(s string) any {

@@ -13,7 +13,10 @@ import (
 	"time"
 )
 
-const maxSessions = 2000
+const (
+	maxSessions        = 2000
+	progressFlushDelay = 200 * time.Millisecond
+)
 
 type Terminal struct {
 	Revision  uint64 `json:"revision"`
@@ -64,10 +67,13 @@ type snapshot struct {
 }
 
 type Store struct {
-	mu      sync.Mutex
-	path    string
-	records map[string]*Record
-	now     func() time.Time
+	mu         sync.Mutex
+	path       string
+	records    map[string]*Record
+	now        func() time.Time
+	flushTimer *time.Timer
+	dirty      bool
+	writes     uint64
 }
 
 func New(dataDir string) *Store {
@@ -120,6 +126,16 @@ func (s *Store) Update(sessionID, phase, requestID string, queueLength int, term
 	return viewLocked(r, ""), true
 }
 
+// Flush synchronously persists any coalesced progress. Lifecycle transitions,
+// terminal results and device cursors remain synchronous and do not require it.
+func (s *Store) Flush() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.dirty {
+		s.saveLocked()
+	}
+}
+
 // Progress advances the fine-grained, server-authoritative activity within an
 // active phase. It is separate from Update so a cold thread resume can expose
 // each meaningful step without pretending the turn itself changed phase.
@@ -145,7 +161,7 @@ func (s *Store) Progress(sessionID, requestID, stage, message string) (View, boo
 	r.StageMessage = message
 	r.StageStartedAt = s.now().UnixMilli()
 	r.UpdatedAt = r.StageStartedAt
-	s.saveLocked()
+	s.scheduleSaveLocked()
 	return viewLocked(r, ""), true
 }
 
@@ -400,6 +416,38 @@ func (s *Store) load() {
 }
 
 func (s *Store) saveLocked() {
+	if s.flushTimer != nil {
+		s.flushTimer.Stop()
+		s.flushTimer = nil
+	}
+	if !s.dirty {
+		// Callers of synchronous state transitions have already modified memory,
+		// so they must still write even when no progress flush is pending.
+		s.writeLocked()
+		return
+	}
+	s.dirty = false
+	s.writeLocked()
+}
+
+func (s *Store) scheduleSaveLocked() {
+	s.dirty = true
+	if s.path == "" || s.flushTimer != nil {
+		return
+	}
+	s.flushTimer = time.AfterFunc(progressFlushDelay, func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.flushTimer = nil
+		if !s.dirty {
+			return
+		}
+		s.dirty = false
+		s.writeLocked()
+	})
+}
+
+func (s *Store) writeLocked() {
 	if s.path == "" || os.MkdirAll(filepath.Dir(s.path), 0o700) != nil {
 		return
 	}
@@ -409,6 +457,8 @@ func (s *Store) saveLocked() {
 	}
 	tmp := s.path + ".tmp"
 	if os.WriteFile(tmp, data, 0o600) == nil {
-		_ = os.Rename(tmp, s.path)
+		if os.Rename(tmp, s.path) == nil {
+			s.writes++
+		}
 	}
 }
