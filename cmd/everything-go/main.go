@@ -42,6 +42,7 @@ import (
 	"everything-go/internal/search"
 	"everything-go/internal/session"
 	"everything-go/internal/sourcepolicy"
+	"everything-go/internal/workitems"
 )
 
 //go:embed keys/fcm_service_account.json
@@ -122,6 +123,12 @@ func main() {
 		CodexRemote:  codexRemoteEndpoint(),
 	}
 	hub := core.NewHub(reg, cfg, pairing, *port)
+	workService, err := workitems.OpenService(*dataDir, instanceID)
+	if err != nil {
+		log.Fatalf("open native work items: %v", err)
+	}
+	defer workService.Close()
+	hub.SetWorkItems(workService)
 
 	switch *execName {
 	case "go":

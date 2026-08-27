@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -165,5 +166,51 @@ func TestRestartPreservesSnapshotAndRevision(t *testing.T) {
 	}
 	if _, err := filepath.Abs(filepath.Join(dir, "everything_go_work_items.db")); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRelatedEntitiesAreTransactionalAndAppearInDeltas(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	item := seedItem(t, s, "p1", "i1")
+	link, item, err := s.LinkSession(ctx, LinkSessionInput{ID: "link1", WorkItemID: item.ID,
+		SessionID: "s1", ExpectedVersion: item.Version, Actor: Actor{Type: ActorUser}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	changes, _, _, err := s.ChangesSince(ctx, item.ActivityRevision-1, 10)
+	if err != nil || len(changes) != 1 || !strings.Contains(string(changes[0].Payload), `"link"`) {
+		t.Fatalf("link delta=%+v err=%v", changes, err)
+	}
+	link, item, err = s.UnlinkSession(ctx, UnlinkSessionInput{LinkID: link.ID,
+		ExpectedVersion: item.Version, Actor: Actor{Type: ActorUser}})
+	if err != nil || link.UnlinkedAt == nil {
+		t.Fatalf("unlink=%+v item=%+v err=%v", link, item, err)
+	}
+
+	comment, item, err := s.AddComment(ctx, AddCommentInput{ID: "comment1", WorkItemID: item.ID,
+		ExpectedVersion: item.Version, Body: "  ready for review  ", Actor: Actor{Type: ActorMobile, DeviceID: "phone"}})
+	if err != nil || comment.Body != "ready for review" {
+		t.Fatalf("comment=%+v err=%v", comment, err)
+	}
+	comment, item, err = s.EditComment(ctx, EditCommentInput{CommentID: comment.ID,
+		ExpectedVersion: item.Version, Body: "approved soon", Actor: Actor{Type: ActorMobile, DeviceID: "phone"}})
+	if err != nil || comment.EditedAt == nil {
+		t.Fatalf("edited comment=%+v err=%v", comment, err)
+	}
+	item, err = s.ArchiveItem(ctx, ArchiveItemInput{ID: item.ID, ExpectedVersion: item.Version, Actor: Actor{Type: ActorUser}})
+	if err != nil || item.ArchivedAt == nil {
+		t.Fatalf("archive=%+v err=%v", item, err)
+	}
+	item, err = s.ArchiveItem(ctx, ArchiveItemInput{ID: item.ID, ExpectedVersion: item.Version, Restore: true, Actor: Actor{Type: ActorUser}})
+	if err != nil || item.ArchivedAt != nil {
+		t.Fatalf("restore=%+v err=%v", item, err)
+	}
+	snap, err := s.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.SessionLinks) != 0 || len(snap.Comments) != 1 || snap.Comments[0].Body != "approved soon" {
+		t.Fatalf("snapshot after related mutations=%+v", snap)
 	}
 }

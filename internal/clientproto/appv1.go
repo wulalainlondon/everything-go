@@ -101,6 +101,27 @@ type Command struct {
 	ClientDedupKey string
 	ContentType    string
 
+	ProjectID         string
+	WorkItemID        string
+	MutationID        string
+	ExpectedVersion   uint64
+	Lifecycle         string
+	Priority          string
+	SortKey           int64
+	Description       string
+	WorkspacePath     string
+	ThreadID          string
+	Role              string
+	DependsOnID       string
+	WorkLinkID        string
+	CommentID         string
+	Body              string
+	BlockedReasonCode string
+	BlockedNote       string
+	DeliveredRevision uint64
+	AckedRevision     uint64
+	Fields            []string
+
 	Images []backend.ImageAttachment
 	Files  []backend.FileAttachment
 }
@@ -196,6 +217,27 @@ func (AppV1) ParseCommand(in protocol.Inbound) Command {
 		ClientDedupKey: in.ClientDedupKey,
 		ContentType:    in.ContentType,
 
+		ProjectID:         in.ProjectID,
+		WorkItemID:        in.WorkItemID,
+		MutationID:        in.MutationID,
+		ExpectedVersion:   in.ExpectedVersion,
+		Lifecycle:         in.Lifecycle,
+		Priority:          in.Priority,
+		SortKey:           in.SortKey,
+		Description:       in.Description,
+		WorkspacePath:     in.WorkspacePath,
+		ThreadID:          in.ThreadID,
+		Role:              in.Role,
+		DependsOnID:       in.DependsOnID,
+		WorkLinkID:        in.WorkLinkID,
+		CommentID:         in.CommentID,
+		Body:              in.Body,
+		BlockedReasonCode: in.BlockedReasonCode,
+		BlockedNote:       in.BlockedNote,
+		DeliveredRevision: in.DeliveredRevision,
+		AckedRevision:     in.AckedRevision,
+		Fields:            append([]string(nil), in.Fields...),
+
 		Images: inboundImagesToBackend(in.Images),
 		Files:  inboundFilesToBackend(in.Files),
 	}
@@ -247,6 +289,7 @@ type HelloInput struct {
 	LanIP        string
 	TunnelURL    string
 	Backends     []backend.Definition
+	Capabilities []string
 }
 
 func (AppV1) HelloAck(in HelloInput) protocol.HelloAck {
@@ -267,6 +310,7 @@ func (AppV1) HelloAck(in HelloInput) protocol.HelloAck {
 		LanIP:           in.LanIP,
 		TunnelURL:       in.TunnelURL,
 		Backends:        backendDefinitionsToWire(in.Backends),
+		Capabilities:    append([]string(nil), in.Capabilities...),
 	}
 }
 

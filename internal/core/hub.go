@@ -34,6 +34,7 @@ import (
 	"everything-go/internal/runtimejournal"
 	"everything-go/internal/search"
 	"everything-go/internal/session"
+	"everything-go/internal/workitems"
 )
 
 // Config carries the connection-identity fields surfaced in hello_ack so the
@@ -68,6 +69,7 @@ type Hub struct {
 	attachments *attachmentjournal.Store
 	controls    *governance.SessionControlStore
 	runtimes    *runtimejournal.Store
+	work        *workitems.Service
 	cfg         Config
 	client      clientproto.AppV1
 	gen         string // per-boot generation id
@@ -114,6 +116,11 @@ type Hub struct {
 
 	attachmentReplayMu sync.Mutex
 	attachmentReplays  map[string]*attachmentReplayLease // device_id + session_id -> lease
+
+	// WorkItem mutations are serialized around the durable device/mutation-id
+	// lookup and result write. Entity versions still provide DB-level conflict
+	// safety; this lock prevents two concurrent retry frames from both running.
+	workMutationMu sync.Mutex
 }
 
 func NewHub(reg *session.Registry, cfg Config, pairing *governance.Pairing, port int) *Hub {
@@ -204,6 +211,10 @@ func (h *Hub) SetFeed(f *feed.Store) { h.feed = f }
 
 // SetInbox wires the file-push inbox (nil → push_file/get_inbox answer empty/no-op).
 func (h *Hub) SetInbox(i *inbox.Store) { h.inbox = i }
+
+// SetWorkItems wires the native WorkItem authority. nil keeps compatibility
+// for tests and legacy deployments that do not advertise work_items_v1.
+func (h *Hub) SetWorkItems(service *workitems.Service) { h.work = service }
 
 // SetRestart wires the bridge-restart action (nil → restart_bridge is a no-op
 // that answers "not configured"). main wires this to a self-re-exec.

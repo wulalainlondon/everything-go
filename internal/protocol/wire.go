@@ -7,7 +7,11 @@
 // renders identically against either backend.
 package protocol
 
-import "encoding/json"
+import (
+	"encoding/json"
+
+	"everything-go/internal/workitems"
+)
 
 // Inbound is a flat superset of every client→bridge frame we currently handle.
 // All fields are optional; only `Type` is always present. New command fields can
@@ -128,6 +132,29 @@ type Inbound struct {
 	URL            string `json:"url"`
 	ClientDedupKey string `json:"client_dedup_key"`
 	ContentType    string `json:"content_type"`
+
+	// Native WorkItem commands. Revision is reused as the sync/read cursor;
+	// command-specific fields stay flat for backward-compatible decoding.
+	ProjectID         string   `json:"project_id"`
+	WorkItemID        string   `json:"work_item_id"`
+	MutationID        string   `json:"mutation_id"`
+	ExpectedVersion   uint64   `json:"expected_version"`
+	Lifecycle         string   `json:"lifecycle"`
+	Priority          string   `json:"priority"`
+	SortKey           int64    `json:"sort_key"`
+	Description       string   `json:"description"`
+	WorkspacePath     string   `json:"workspace_path"`
+	ThreadID          string   `json:"thread_id"`
+	Role              string   `json:"role"`
+	DependsOnID       string   `json:"depends_on_id"`
+	WorkLinkID        string   `json:"work_link_id"`
+	CommentID         string   `json:"comment_id"`
+	Body              string   `json:"body"`
+	BlockedReasonCode string   `json:"blocked_reason_code"`
+	BlockedNote       string   `json:"blocked_note"`
+	DeliveredRevision uint64   `json:"delivered_revision"`
+	AckedRevision     uint64   `json:"acked_revision"`
+	Fields            []string `json:"fields"`
 }
 
 // InboundImage is one attached image on a message (app strips the data-URL
@@ -184,6 +211,81 @@ type HelloAck struct {
 	LanIP           string              `json:"lan_ip,omitempty"`
 	TunnelURL       string              `json:"tunnel_url,omitempty"`
 	Backends        []BackendDefinition `json:"backend_registry,omitempty"`
+	Capabilities    []string            `json:"capabilities,omitempty"`
+}
+
+type WorkSnapshot struct {
+	Type string `json:"type"`
+	workitems.DeviceSnapshot
+}
+
+func NewWorkSnapshot(snapshot workitems.DeviceSnapshot) WorkSnapshot {
+	if snapshot.Projects == nil {
+		snapshot.Projects = []workitems.Project{}
+	}
+	if snapshot.Items == nil {
+		snapshot.Items = []workitems.ItemView{}
+	}
+	if snapshot.SessionLinks == nil {
+		snapshot.SessionLinks = []workitems.SessionLink{}
+	}
+	if snapshot.Dependencies == nil {
+		snapshot.Dependencies = []workitems.Dependency{}
+	}
+	if snapshot.Comments == nil {
+		snapshot.Comments = []workitems.Comment{}
+	}
+	return WorkSnapshot{Type: "work_snapshot", DeviceSnapshot: snapshot}
+}
+
+type WorkDeltaBatch struct {
+	Type         string             `json:"type"`
+	FromRevision uint64             `json:"from_revision"`
+	ToRevision   uint64             `json:"to_revision"`
+	Latest       uint64             `json:"latest_revision"`
+	Changes      []workitems.Change `json:"changes"`
+}
+
+func NewWorkDeltaBatch(from, latest uint64, changes []workitems.Change) WorkDeltaBatch {
+	if changes == nil {
+		changes = []workitems.Change{}
+	}
+	to := from
+	if len(changes) > 0 {
+		to = changes[len(changes)-1].Revision
+	}
+	return WorkDeltaBatch{Type: "work_delta_batch", FromRevision: from,
+		ToRevision: to, Latest: latest, Changes: changes}
+}
+
+type WorkMutationAck struct {
+	Type          string                 `json:"type"`
+	MutationID    string                 `json:"mutation_id"`
+	EntityVersion uint64                 `json:"entity_version"`
+	Revision      uint64                 `json:"revision"`
+	Project       *workitems.Project     `json:"project,omitempty"`
+	Item          *workitems.WorkItem    `json:"item,omitempty"`
+	Link          *workitems.SessionLink `json:"link,omitempty"`
+	Comment       *workitems.Comment     `json:"comment,omitempty"`
+}
+
+type WorkConflict struct {
+	Type       string             `json:"type"`
+	MutationID string             `json:"mutation_id"`
+	Reason     string             `json:"reason"`
+	Current    workitems.WorkItem `json:"current"`
+}
+
+type WorkReadAck struct {
+	Type string             `json:"type"`
+	Item workitems.ItemView `json:"item"`
+}
+
+type WorkError struct {
+	Type       string `json:"type"`
+	MutationID string `json:"mutation_id,omitempty"`
+	Code       string `json:"code"`
+	Message    string `json:"message"`
 }
 
 type SessionControlState struct {

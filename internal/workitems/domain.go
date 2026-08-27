@@ -3,6 +3,7 @@
 package workitems
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -100,6 +101,17 @@ type Dependency struct {
 	CreatedAt  int64  `json:"created_at"`
 }
 
+type Comment struct {
+	ID             string    `json:"id"`
+	WorkItemID     string    `json:"work_item_id"`
+	AuthorType     ActorType `json:"author_type"`
+	AuthorDeviceID string    `json:"author_device_id,omitempty"`
+	Body           string    `json:"body"`
+	CreatedAt      int64     `json:"created_at"`
+	EditedAt       *int64    `json:"edited_at,omitempty"`
+	DeletedAt      *int64    `json:"deleted_at,omitempty"`
+}
+
 type Activity struct {
 	Revision   uint64    `json:"revision"`
 	WorkItemID string    `json:"work_item_id"`
@@ -110,12 +122,21 @@ type Activity struct {
 }
 
 type Change struct {
-	Revision  uint64 `json:"revision"`
-	Entity    string `json:"entity"`
-	EntityID  string `json:"entity_id"`
-	Kind      string `json:"kind"`
-	Payload   string `json:"payload"`
-	CreatedAt int64  `json:"created_at"`
+	Revision  uint64          `json:"revision"`
+	Entity    string          `json:"entity"`
+	EntityID  string          `json:"entity_id"`
+	Kind      string          `json:"kind"`
+	Payload   json.RawMessage `json:"payload"`
+	CreatedAt int64           `json:"created_at"`
+}
+
+// ChangePayload is the native delta envelope. A single transaction can update
+// an item and one related entity without forcing clients to race a second sync.
+type ChangePayload struct {
+	Item       *WorkItem    `json:"item,omitempty"`
+	Link       *SessionLink `json:"link,omitempty"`
+	Dependency *Dependency  `json:"dependency,omitempty"`
+	Comment    *Comment     `json:"comment,omitempty"`
 }
 
 type Snapshot struct {
@@ -124,6 +145,21 @@ type Snapshot struct {
 	Items        []WorkItem    `json:"items"`
 	SessionLinks []SessionLink `json:"session_links"`
 	Dependencies []Dependency  `json:"dependencies"`
+	Comments     []Comment     `json:"comments"`
+}
+
+type ItemView struct {
+	WorkItem
+	Unread int `json:"unread"`
+}
+
+type DeviceSnapshot struct {
+	Revision     uint64        `json:"revision"`
+	Projects     []Project     `json:"projects"`
+	Items        []ItemView    `json:"items"`
+	SessionLinks []SessionLink `json:"session_links"`
+	Dependencies []Dependency  `json:"dependencies"`
+	Comments     []Comment     `json:"comments"`
 }
 
 type ConflictError struct {

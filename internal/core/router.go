@@ -60,6 +60,9 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 			helloInput.LanIP = h.cfg.LanIP
 			helloInput.TunnelURL = tunnelURL
 			helloInput.Backends = h.cfg.Backends
+			if h.work != nil {
+				helloInput.Capabilities = []string{"work_items_v1"}
+			}
 		}
 		c.enqueueEvent(h.client.HelloAck(helloInput))
 		// A provisional LAN client receives only enough information to complete
@@ -76,6 +79,9 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		// Python bridge so the app reconciles before replayed events arrive.
 		c.enqueueEvent(h.client.SessionsList(h.sessionSummaries()))
 		c.enqueueEvent(h.runtimeSnapshot(c.deviceID))
+		if h.work != nil {
+			h.sendWorkSnapshot(c)
+		}
 		// Goal is durable state. Send the full latest snapshot before transient
 		// replay so a dropped historical goal_update cannot leave the UI stale.
 		c.enqueueEvent(h.goals.Snapshot())
@@ -154,6 +160,18 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 
 	case "request_runtime_snapshot":
 		c.enqueueEvent(h.runtimeSnapshot(c.deviceID))
+
+	case "work_sync_request":
+		h.sendWorkSync(c, cmd.Revision)
+
+	case "work_sync_ack":
+		h.handleWorkSyncAck(c, cmd)
+
+	case "work_project_create", "work_item_create", "work_item_update", "work_item_move",
+		"work_item_archive", "work_item_restore", "work_item_link_session", "work_item_unlink_session",
+		"work_item_dependency_add", "work_item_dependency_remove", "work_item_comment_add",
+		"work_item_comment_edit", "work_item_read":
+		h.handleWorkCommand(c, cmd)
 
 	case "handoff_to_desktop":
 		h.handleDesktopHandoff(c, cmd.SessionID)

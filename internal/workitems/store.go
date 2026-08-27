@@ -306,7 +306,7 @@ func (s *Store) CreateItem(ctx context.Context, in CreateItemInput) (WorkItem, e
 		item.Lifecycle, item.Priority, item.SortKey, item.Version, now, now); err != nil {
 		return WorkItem{}, err
 	}
-	revision, err := recordChange(ctx, tx, "work_item", item.ID, "created", item, now)
+	revision, err := recordChange(ctx, tx, "work_item", item.ID, "created", ChangePayload{Item: &item}, now)
 	if err != nil {
 		return WorkItem{}, err
 	}
@@ -317,7 +317,7 @@ func (s *Store) CreateItem(ctx context.Context, in CreateItemInput) (WorkItem, e
 	if err := insertActivity(ctx, tx, revision, item.ID, "created", in.Actor, item, now); err != nil {
 		return WorkItem{}, err
 	}
-	if err := updateChangePayload(ctx, tx, revision, item); err != nil {
+	if err := updateChangePayload(ctx, tx, revision, ChangePayload{Item: &item}); err != nil {
 		return WorkItem{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -373,7 +373,7 @@ func (s *Store) UpdateItem(ctx context.Context, in UpdateItemInput) (WorkItem, e
 	}
 	current.Version++
 	current.UpdatedAt = s.now().UnixMilli()
-	return s.writeItemMutation(ctx, tx, current, "updated", in.Actor)
+	return s.writeItemMutation(ctx, tx, current, "updated", in.Actor, ChangePayload{})
 }
 
 type MoveItemInput struct {
@@ -417,16 +417,16 @@ func (s *Store) MoveItem(ctx context.Context, in MoveItemInput) (WorkItem, error
 	} else {
 		current.CancelledAt = nil
 	}
-	return s.writeItemMutation(ctx, tx, current, "moved", in.Actor)
+	return s.writeItemMutation(ctx, tx, current, "moved", in.Actor, ChangePayload{})
 }
 
-func (s *Store) writeItemMutation(ctx context.Context, tx *sql.Tx, item WorkItem, kind string, actor Actor) (WorkItem, error) {
+func (s *Store) writeItemMutation(ctx context.Context, tx *sql.Tx, item WorkItem, kind string, actor Actor, payload ChangePayload) (WorkItem, error) {
 	result, err := tx.ExecContext(ctx, `UPDATE work_items SET
 		title=?,description=?,lifecycle=?,priority=?,sort_key=?,version=?,
-		blocked_reason_code=?,blocked_note=?,updated_at=?,accepted_at=?,cancelled_at=?
+		blocked_reason_code=?,blocked_note=?,updated_at=?,accepted_at=?,cancelled_at=?,archived_at=?
 		WHERE id=? AND version=?`, item.Title, item.Description, item.Lifecycle, item.Priority,
 		item.SortKey, item.Version, item.BlockedReasonCode, item.BlockedNote, item.UpdatedAt,
-		item.AcceptedAt, item.CancelledAt, item.ID, item.Version-1)
+		item.AcceptedAt, item.CancelledAt, item.ArchivedAt, item.ID, item.Version-1)
 	if err != nil {
 		return WorkItem{}, err
 	}
@@ -437,7 +437,8 @@ func (s *Store) writeItemMutation(ctx context.Context, tx *sql.Tx, item WorkItem
 		}
 		return WorkItem{}, &ConflictError{Expected: item.Version - 1, Current: latest}
 	}
-	revision, err := recordChange(ctx, tx, "work_item", item.ID, kind, item, item.UpdatedAt)
+	payload.Item = &item
+	revision, err := recordChange(ctx, tx, "work_item", item.ID, kind, payload, item.UpdatedAt)
 	if err != nil {
 		return WorkItem{}, err
 	}
@@ -448,7 +449,8 @@ func (s *Store) writeItemMutation(ctx context.Context, tx *sql.Tx, item WorkItem
 	if err := insertActivity(ctx, tx, revision, item.ID, kind, actor, item, item.UpdatedAt); err != nil {
 		return WorkItem{}, err
 	}
-	if err := updateChangePayload(ctx, tx, revision, item); err != nil {
+	payload.Item = &item
+	if err := updateChangePayload(ctx, tx, revision, payload); err != nil {
 		return WorkItem{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -505,11 +507,55 @@ func (s *Store) LinkSession(ctx context.Context, in LinkSessionInput) (SessionLi
 	}
 	item.Version++
 	item.UpdatedAt = now
-	updated, err := s.writeItemMutation(ctx, tx, item, "session_linked", in.Actor)
+	updated, err := s.writeItemMutation(ctx, tx, item, "session_linked", in.Actor, ChangePayload{Link: &link})
 	if err != nil {
 		return SessionLink{}, WorkItem{}, err
 	}
 	return link, updated, nil
+}
+
+type UnlinkSessionInput struct {
+	LinkID          string
+	ExpectedVersion uint64
+	Actor           Actor
+}
+
+func (s *Store) UnlinkSession(ctx context.Context, in UnlinkSessionInput) (SessionLink, WorkItem, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return SessionLink{}, WorkItem{}, err
+	}
+	defer tx.Rollback()
+	var link SessionLink
+	err = tx.QueryRowContext(ctx, `SELECT id,work_item_id,session_id,thread_id_snapshot,role,linked_at,unlinked_at
+		FROM work_item_session_links WHERE id=?`, in.LinkID).Scan(&link.ID, &link.WorkItemID,
+		&link.SessionID, &link.ThreadIDSnapshot, &link.Role, &link.LinkedAt, &link.UnlinkedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return SessionLink{}, WorkItem{}, ErrNotFound
+	}
+	if err != nil {
+		return SessionLink{}, WorkItem{}, err
+	}
+	item, err := getItemTx(ctx, tx, link.WorkItemID)
+	if err != nil {
+		return SessionLink{}, WorkItem{}, err
+	}
+	if item.Version != in.ExpectedVersion {
+		return SessionLink{}, WorkItem{}, &ConflictError{Expected: in.ExpectedVersion, Current: item}
+	}
+	if link.UnlinkedAt != nil {
+		return link, item, nil
+	}
+	now := s.now().UnixMilli()
+	link.UnlinkedAt = &now
+	if _, err := tx.ExecContext(ctx, `UPDATE work_item_session_links SET unlinked_at=?
+		WHERE id=? AND unlinked_at IS NULL`, now, link.ID); err != nil {
+		return SessionLink{}, WorkItem{}, err
+	}
+	item.Version++
+	item.UpdatedAt = now
+	updated, err := s.writeItemMutation(ctx, tx, item, "session_unlinked", in.Actor, ChangePayload{Link: &link})
+	return link, updated, err
 }
 
 type AddDependencyInput struct {
@@ -559,9 +605,165 @@ func (s *Store) AddDependency(ctx context.Context, in AddDependencyInput) (WorkI
 		VALUES(?,?,?)`, in.WorkItemID, in.DependsOnID, now); err != nil {
 		return WorkItem{}, err
 	}
+	dependency := Dependency{WorkItemID: in.WorkItemID, DependsOn: in.DependsOnID, CreatedAt: now}
 	item.Version++
 	item.UpdatedAt = now
-	return s.writeItemMutation(ctx, tx, item, "dependency_added", in.Actor)
+	return s.writeItemMutation(ctx, tx, item, "dependency_added", in.Actor, ChangePayload{Dependency: &dependency})
+}
+
+func (s *Store) RemoveDependency(ctx context.Context, in AddDependencyInput) (WorkItem, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return WorkItem{}, err
+	}
+	defer tx.Rollback()
+	item, err := getItemTx(ctx, tx, in.WorkItemID)
+	if err != nil {
+		return WorkItem{}, err
+	}
+	if item.Version != in.ExpectedVersion {
+		return WorkItem{}, &ConflictError{Expected: in.ExpectedVersion, Current: item}
+	}
+	result, err := tx.ExecContext(ctx, `DELETE FROM work_item_dependencies
+		WHERE work_item_id=? AND depends_on_id=?`, in.WorkItemID, in.DependsOnID)
+	if err != nil {
+		return WorkItem{}, err
+	}
+	if n, _ := result.RowsAffected(); n != 1 {
+		return WorkItem{}, ErrNotFound
+	}
+	now := s.now().UnixMilli()
+	dep := Dependency{WorkItemID: in.WorkItemID, DependsOn: in.DependsOnID, CreatedAt: now}
+	item.Version++
+	item.UpdatedAt = now
+	return s.writeItemMutation(ctx, tx, item, "dependency_removed", in.Actor, ChangePayload{Dependency: &dep})
+}
+
+type ArchiveItemInput struct {
+	ID              string
+	ExpectedVersion uint64
+	Restore         bool
+	Actor           Actor
+}
+
+func (s *Store) ArchiveItem(ctx context.Context, in ArchiveItemInput) (WorkItem, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return WorkItem{}, err
+	}
+	defer tx.Rollback()
+	item, err := getItemTx(ctx, tx, in.ID)
+	if err != nil {
+		return WorkItem{}, err
+	}
+	if item.Version != in.ExpectedVersion {
+		return WorkItem{}, &ConflictError{Expected: in.ExpectedVersion, Current: item}
+	}
+	now := s.now().UnixMilli()
+	kind := "archived"
+	if in.Restore {
+		item.ArchivedAt = nil
+		kind = "restored"
+	} else {
+		item.ArchivedAt = &now
+	}
+	item.Version++
+	item.UpdatedAt = now
+	return s.writeItemMutation(ctx, tx, item, kind, in.Actor, ChangePayload{})
+}
+
+type AddCommentInput struct {
+	ID              string
+	WorkItemID      string
+	ExpectedVersion uint64
+	Body            string
+	Actor           Actor
+}
+
+func (s *Store) AddComment(ctx context.Context, in AddCommentInput) (Comment, WorkItem, error) {
+	body := strings.TrimSpace(in.Body)
+	if body == "" {
+		return Comment{}, WorkItem{}, errors.New("comment body is required")
+	}
+	if in.ID == "" {
+		in.ID = newID("wc")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Comment{}, WorkItem{}, err
+	}
+	defer tx.Rollback()
+	item, err := getItemTx(ctx, tx, in.WorkItemID)
+	if err != nil {
+		return Comment{}, WorkItem{}, err
+	}
+	if item.Version != in.ExpectedVersion {
+		return Comment{}, WorkItem{}, &ConflictError{Expected: in.ExpectedVersion, Current: item}
+	}
+	now := s.now().UnixMilli()
+	author := in.Actor.Type
+	if author == "" {
+		author = ActorUser
+	}
+	comment := Comment{ID: in.ID, WorkItemID: in.WorkItemID, AuthorType: author,
+		AuthorDeviceID: in.Actor.DeviceID, Body: body, CreatedAt: now}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO work_item_comments
+		(id,work_item_id,author_type,author_device_id,body,created_at) VALUES(?,?,?,?,?,?)`,
+		comment.ID, comment.WorkItemID, comment.AuthorType, comment.AuthorDeviceID, comment.Body, now); err != nil {
+		return Comment{}, WorkItem{}, err
+	}
+	item.Version++
+	item.UpdatedAt = now
+	updated, err := s.writeItemMutation(ctx, tx, item, "comment_added", in.Actor, ChangePayload{Comment: &comment})
+	return comment, updated, err
+}
+
+type EditCommentInput struct {
+	CommentID       string
+	ExpectedVersion uint64
+	Body            string
+	Actor           Actor
+}
+
+func (s *Store) EditComment(ctx context.Context, in EditCommentInput) (Comment, WorkItem, error) {
+	body := strings.TrimSpace(in.Body)
+	if body == "" {
+		return Comment{}, WorkItem{}, errors.New("comment body is required")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Comment{}, WorkItem{}, err
+	}
+	defer tx.Rollback()
+	var comment Comment
+	err = tx.QueryRowContext(ctx, `SELECT id,work_item_id,author_type,author_device_id,body,
+		created_at,edited_at,deleted_at FROM work_item_comments WHERE id=?`, in.CommentID).Scan(
+		&comment.ID, &comment.WorkItemID, &comment.AuthorType, &comment.AuthorDeviceID, &comment.Body,
+		&comment.CreatedAt, &comment.EditedAt, &comment.DeletedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Comment{}, WorkItem{}, ErrNotFound
+	}
+	if err != nil {
+		return Comment{}, WorkItem{}, err
+	}
+	item, err := getItemTx(ctx, tx, comment.WorkItemID)
+	if err != nil {
+		return Comment{}, WorkItem{}, err
+	}
+	if item.Version != in.ExpectedVersion {
+		return Comment{}, WorkItem{}, &ConflictError{Expected: in.ExpectedVersion, Current: item}
+	}
+	now := s.now().UnixMilli()
+	comment.Body = body
+	comment.EditedAt = &now
+	if _, err := tx.ExecContext(ctx, `UPDATE work_item_comments SET body=?,edited_at=? WHERE id=?`,
+		body, now, comment.ID); err != nil {
+		return Comment{}, WorkItem{}, err
+	}
+	item.Version++
+	item.UpdatedAt = now
+	updated, err := s.writeItemMutation(ctx, tx, item, "comment_edited", in.Actor, ChangePayload{Comment: &comment})
+	return comment, updated, err
 }
 
 func (s *Store) GetItem(ctx context.Context, id string) (WorkItem, error) {
@@ -606,7 +808,7 @@ func (s *Store) Snapshot(ctx context.Context) (Snapshot, error) {
 		return snap, err
 	}
 	rows, err = s.db.QueryContext(ctx, `SELECT id,work_item_id,session_id,thread_id_snapshot,role,linked_at,unlinked_at
-		FROM work_item_session_links ORDER BY linked_at,id`)
+		FROM work_item_session_links WHERE unlinked_at IS NULL ORDER BY linked_at,id`)
 	if err != nil {
 		return snap, err
 	}
@@ -634,6 +836,23 @@ func (s *Store) Snapshot(ctx context.Context) (Snapshot, error) {
 			return snap, err
 		}
 		snap.Dependencies = append(snap.Dependencies, dep)
+	}
+	if err := rows.Close(); err != nil {
+		return snap, err
+	}
+	rows, err = s.db.QueryContext(ctx, `SELECT id,work_item_id,author_type,author_device_id,body,
+		created_at,edited_at,deleted_at FROM work_item_comments WHERE deleted_at IS NULL ORDER BY created_at,id`)
+	if err != nil {
+		return snap, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var comment Comment
+		if err := rows.Scan(&comment.ID, &comment.WorkItemID, &comment.AuthorType, &comment.AuthorDeviceID,
+			&comment.Body, &comment.CreatedAt, &comment.EditedAt, &comment.DeletedAt); err != nil {
+			return snap, err
+		}
+		snap.Comments = append(snap.Comments, comment)
 	}
 	return snap, rows.Err()
 }
