@@ -5,6 +5,7 @@
 package runtimejournal
 
 import (
+	"bufio"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -66,9 +67,18 @@ type snapshot struct {
 	Records map[string]*Record `json:"records"`
 }
 
+type cursorEntry struct {
+	SessionID string `json:"session_id"`
+	DeviceID  string `json:"device_id"`
+	Acked     uint64 `json:"acked"`
+	Read      uint64 `json:"read"`
+	At        int64  `json:"at"`
+}
+
 type Store struct {
 	mu         sync.Mutex
 	path       string
+	cursorPath string
 	records    map[string]*Record
 	now        func() time.Time
 	flushTimer *time.Timer
@@ -80,6 +90,7 @@ func New(dataDir string) *Store {
 	s := &Store{records: make(map[string]*Record), now: time.Now}
 	if dataDir != "" {
 		s.path = filepath.Join(dataDir, "session_runtime.json")
+		s.cursorPath = filepath.Join(dataDir, "session_runtime_cursors.jsonl")
 	}
 	s.load()
 	return s
@@ -306,7 +317,13 @@ func (s *Store) Ack(deviceID, sessionID string, revision uint64, read bool) (Vie
 		changed = true
 	}
 	if changed {
-		s.saveLocked()
+		entry := cursorEntry{SessionID: sessionID, DeviceID: deviceID,
+			Acked: r.AckedByDevice[deviceID], Read: r.ReadByDevice[deviceID], At: s.now().UnixMilli()}
+		if s.appendCursorLocked(entry) != nil {
+			// A cursor is delivery reliability state. If the compact append path is
+			// unavailable, retain the previous synchronous full-snapshot fallback.
+			s.saveLocked()
+		}
 	}
 	return viewLocked(r, deviceID), changed
 }
@@ -398,21 +415,75 @@ func (s *Store) enforceCapLocked() {
 }
 
 func (s *Store) load() {
-	if s.path == "" {
-		return
-	}
-	data, err := os.ReadFile(s.path)
-	if err != nil {
-		return
-	}
-	var snap snapshot
-	if json.Unmarshal(data, &snap) == nil && snap.Records != nil {
-		s.records = snap.Records
+	if s.path != "" {
+		data, err := os.ReadFile(s.path)
+		if err == nil {
+			var snap snapshot
+			if json.Unmarshal(data, &snap) == nil && snap.Records != nil {
+				s.records = snap.Records
+			}
+		}
 	}
 	for id := range s.records {
 		s.ensureLocked(id)
 	}
+	s.loadCursorLog()
 	s.enforceCapLocked()
+}
+
+func (s *Store) loadCursorLog() {
+	if s.cursorPath == "" {
+		return
+	}
+	f, err := os.Open(s.cursorPath)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		var entry cursorEntry
+		if json.Unmarshal(scanner.Bytes(), &entry) != nil || entry.SessionID == "" || entry.DeviceID == "" {
+			continue
+		}
+		r := s.records[entry.SessionID]
+		if r == nil {
+			// Cursor records never resurrect a Session removed from the canonical
+			// lifecycle snapshot.
+			continue
+		}
+		s.ensureLocked(entry.SessionID)
+		if entry.Acked > r.AckedByDevice[entry.DeviceID] {
+			r.AckedByDevice[entry.DeviceID] = entry.Acked
+		}
+		if entry.Read > r.ReadByDevice[entry.DeviceID] {
+			r.ReadByDevice[entry.DeviceID] = entry.Read
+		}
+	}
+}
+
+func (s *Store) appendCursorLocked(entry cursorEntry) error {
+	if s.cursorPath == "" {
+		return os.ErrInvalid
+	}
+	if err := os.MkdirAll(filepath.Dir(s.cursorPath), 0o700); err != nil {
+		return err
+	}
+	data, err := json.Marshal(entry)
+	if err != nil {
+		return err
+	}
+	f, err := os.OpenFile(s.cursorPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	_, writeErr := f.Write(append(data, '\n'))
+	closeErr := f.Close()
+	if writeErr != nil {
+		return writeErr
+	}
+	return closeErr
 }
 
 func (s *Store) saveLocked() {
@@ -459,6 +530,11 @@ func (s *Store) writeLocked() {
 	if os.WriteFile(tmp, data, 0o600) == nil {
 		if os.Rename(tmp, s.path) == nil {
 			s.writes++
+			// The canonical snapshot now contains every cursor. Only touch the
+			// append journal when it has content, avoiding an idle truncate event.
+			if info, err := os.Stat(s.cursorPath); err == nil && info.Size() > 0 {
+				_ = os.WriteFile(s.cursorPath, nil, 0o600)
+			}
 		}
 	}
 }

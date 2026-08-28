@@ -59,6 +59,51 @@ func TestDuplicateAckDoesNotRewriteJournal(t *testing.T) {
 		t.Fatalf("duplicate ACK rewrote journal: before=%v/%d after=%v/%d",
 			before.ModTime(), before.Size(), after.ModTime(), after.Size())
 	}
+	cursorPath := filepath.Join(dir, "session_runtime_cursors.jsonl")
+	cursorBefore, err := os.Stat(cursorPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, changed := s.Ack("phone", "s1", completed.Revision, true); changed {
+		t.Fatal("second duplicate ACK reported a change")
+	}
+	cursorAfter, err := os.Stat(cursorPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cursorAfter.Size() != cursorBefore.Size() || !cursorAfter.ModTime().Equal(cursorBefore.ModTime()) {
+		t.Fatalf("duplicate ACK rewrote cursor log: before=%v/%d after=%v/%d",
+			cursorBefore.ModTime(), cursorBefore.Size(), cursorAfter.ModTime(), cursorAfter.Size())
+	}
+}
+
+func TestCursorAppendSurvivesCrashWithoutFullSnapshotRewrite(t *testing.T) {
+	dir := t.TempDir()
+	s := New(dir)
+	completed, _ := s.Update("s1", "completed", "r1", 0, "completed", "")
+	journalPath := filepath.Join(dir, "session_runtime.json")
+	before, err := os.Stat(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, changed := s.Ack("phone", "s1", completed.Revision, true); !changed {
+		t.Fatal("ACK did not advance cursor")
+	}
+	after, err := os.Stat(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !after.ModTime().Equal(before.ModTime()) || after.Size() != before.Size() {
+		t.Fatalf("cursor ACK rewrote lifecycle snapshot: before=%v/%d after=%v/%d",
+			before.ModTime(), before.Size(), after.ModTime(), after.Size())
+	}
+	if info, err := os.Stat(filepath.Join(dir, "session_runtime_cursors.jsonl")); err != nil || info.Size() == 0 {
+		t.Fatalf("cursor append missing: info=%v err=%v", info, err)
+	}
+	reloaded := New(dir)
+	if got := reloaded.Snapshot("phone", []string{"s1"})[0].Unread; got != 0 {
+		t.Fatalf("cursor append was not replayed after crash: unread=%d", got)
+	}
 }
 
 func TestTerminalHistoryIsBounded(t *testing.T) {
