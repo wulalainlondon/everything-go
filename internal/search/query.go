@@ -374,6 +374,20 @@ func (idx *Index) Health() HealthResponse {
 	h.IngestProgress["files_total"] = p.filesTotal
 	h.IngestProgress["files_done"] = p.filesDone
 	h.IngestProgress["last_added"] = p.lastAdded
+	if p.lastMetrics.Mode != "" {
+		h.IngestProgress["mode"] = p.lastMetrics.Mode
+		h.IngestProgress["files_seen"] = p.lastMetrics.FilesSeen
+		h.IngestProgress["files_changed"] = p.lastMetrics.FilesChanged
+		h.IngestProgress["files_queued"] = p.lastMetrics.FilesQueued
+		h.IngestProgress["bytes_read"] = p.lastMetrics.BytesRead
+		h.IngestProgress["duration_ms"] = p.lastMetrics.DurationMS
+		h.IngestProgress["maintenance_rows"] = p.lastMetrics.MaintenanceRows
+		h.IngestProgress["wal_bytes_before"] = p.lastMetrics.WALBytesBefore
+		h.IngestProgress["wal_bytes_after"] = p.lastMetrics.WALBytesAfter
+		h.IngestProgress["checkpoint_busy"] = p.lastMetrics.CheckpointBusy
+		h.IngestProgress["checkpoint_log_pages"] = p.lastMetrics.CheckpointLog
+		h.IngestProgress["checkpointed_pages"] = p.lastMetrics.CheckpointDone
+	}
 	if p.currentFile != "" {
 		h.IngestProgress["current_file"] = p.currentFile
 	}

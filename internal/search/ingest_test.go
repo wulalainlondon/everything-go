@@ -13,8 +13,12 @@ type countingSource struct {
 	include   bool
 }
 
-func (s *countingSource) name() string       { return "codex" }
-func (s *countingSource) enabled() bool      { return true }
+func (s *countingSource) name() string  { return "codex" }
+func (s *countingSource) enabled() bool { return true }
+func (s *countingSource) owns(path string) bool {
+	want, _ := filepath.EvalSymlinks(s.path)
+	return path == want
+}
 func (s *countingSource) discover() []string { return []string{s.path} }
 func (s *countingSource) iterMessages(path string, _ int64) ([]searchableMessage, int64) {
 	info, _ := os.Stat(path)
@@ -36,6 +40,75 @@ func TestIngestMetricsDistinguishChangedAndIdlePasses(t *testing.T) {
 	}
 	idle := idx.ingestAllMetrics()
 	if idle.FilesSeen != 1 || idle.FilesChanged != 0 || idle.FilesQueued != 0 || idle.BytesRead != 0 {
+		t.Fatalf("idle metrics=%+v", idle)
+	}
+}
+
+func TestExplicitPathsOnlyTouchDirtyTranscript(t *testing.T) {
+	idx := newTestIndex(t)
+	dir := t.TempDir()
+	dirty := filepath.Join(dir, "rollout-dirty.jsonl")
+	other := filepath.Join(dir, "rollout-other.jsonl")
+	for _, path := range []string{dirty, other} {
+		if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	src := &countingSource{path: dirty, include: true}
+	idx.sources = []source{src}
+
+	metrics := idx.ingestPathsMetrics([]string{dirty, dirty, other, filepath.Join(dir, "missing.jsonl")})
+	if metrics.Mode != "incremental" || metrics.FilesSeen != 1 || metrics.FilesChanged != 1 || metrics.FilesQueued != 1 {
+		t.Fatalf("explicit metrics=%+v", metrics)
+	}
+	if src.metaReads != 1 {
+		t.Fatalf("dirty metadata reads=%d want 1", src.metaReads)
+	}
+
+	idle := idx.ingestPathsMetrics([]string{dirty})
+	if idle.FilesSeen != 1 || idle.FilesChanged != 0 || idle.FilesQueued != 0 || src.metaReads != 1 {
+		t.Fatalf("idle explicit metrics=%+v reads=%d", idle, src.metaReads)
+	}
+}
+
+func TestSourceOwnershipRejectsSymlinkEscape(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside.jsonl")
+	if err := os.WriteFile(outside, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "linked.jsonl")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Fatal(err)
+	}
+	src := claudeSource{root: root}
+	if src.owns(link) {
+		t.Fatal("source accepted symlink escaping its root")
+	}
+}
+
+func TestIdleRunDoesNotRepeatGlobalMaintenanceWrites(t *testing.T) {
+	idx := newTestIndex(t)
+	path := filepath.Join(t.TempDir(), "rollout-maintenance.jsonl")
+	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	idx.sources = []source{&countingSource{path: path, include: true}}
+	idx.RunOnceMetrics()
+
+	var before int64
+	if err := idx.db.QueryRow("SELECT total_changes()").Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	idle := idx.RunOnceMetrics()
+	var after int64
+	if err := idx.db.QueryRow("SELECT total_changes()").Scan(&after); err != nil {
+		t.Fatal(err)
+	}
+	if after != before {
+		t.Fatalf("idle maintenance wrote rows: before=%d after=%d metrics=%+v", before, after, idle)
+	}
+	if idle.MaintenanceRows != 0 || idle.FilesChanged != 0 {
 		t.Fatalf("idle metrics=%+v", idle)
 	}
 }

@@ -73,7 +73,7 @@ func Watch(ctx context.Context, opts Options, onSession func(NativeSession)) {
 // WatchChanges is Watch with a notification that fires only for transcript
 // changes observed after the initial import. This lets downstream indexers
 // wake promptly without treating the startup catalog as thousands of edits.
-func WatchChanges(ctx context.Context, opts Options, onSession func(NativeSession), onTranscriptChange func()) {
+func WatchChanges(ctx context.Context, opts Options, onSession func(NativeSession), onTranscriptChange func(string)) {
 	if opts.PollInterval <= 0 {
 		opts.PollInterval = 30 * time.Second
 	}
@@ -88,7 +88,7 @@ func WatchChanges(ctx context.Context, opts Options, onSession func(NativeSessio
 	onChange := func(session NativeSession) {
 		onSession(session)
 		if onTranscriptChange != nil {
-			onTranscriptChange()
+			onTranscriptChange(session.Path)
 		}
 	}
 	if usePolling() {

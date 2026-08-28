@@ -218,3 +218,12 @@ func TestSetIndexingStatus(t *testing.T) {
 		t.Fatalf("status after child indexer exits = %v, want ready", got)
 	}
 }
+
+func TestHealthReportsLastChildMetrics(t *testing.T) {
+	idx := newTestIndex(t)
+	idx.RecordIngestMetrics(IngestMetrics{Mode: "incremental", FilesSeen: 1, FilesChanged: 1, FilesQueued: 1, DurationMS: 42})
+	progress := idx.Health().IngestProgress
+	if progress["mode"] != "incremental" || progress["files_seen"] != 1 || progress["duration_ms"] != int64(42) {
+		t.Fatalf("ingest progress=%+v", progress)
+	}
+}

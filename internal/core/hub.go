@@ -227,7 +227,7 @@ func (h *Hub) SetRestart(fn func()) { h.restart = fn }
 
 // StartNativeWatcher imports native Claude/Codex CLI JSONL sessions into the
 // bridge registry so desktop CLI work appears in the app's normal session list.
-func (h *Hub) StartNativeWatcher(ctx context.Context, onTranscriptChange ...func()) {
+func (h *Hub) StartNativeWatcher(ctx context.Context, onTranscriptChange ...func(string)) {
 	if os.Getenv("EVERYTHING_GO_NATIVE_WATCH") == "0" {
 		log.Printf("[nativewatch] disabled by EVERYTHING_GO_NATIVE_WATCH=0")
 		return
@@ -270,10 +270,10 @@ func (h *Hub) StartNativeWatcher(ctx context.Context, onTranscriptChange ...func
 		}
 	}()
 
-	notifyTranscriptChange := func() {
+	notifyTranscriptChange := func(path string) {
 		for _, notify := range onTranscriptChange {
 			if notify != nil {
-				notify()
+				notify(path)
 			}
 		}
 	}

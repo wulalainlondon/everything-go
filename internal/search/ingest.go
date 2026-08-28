@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"log"
 	"os"
+	"path/filepath"
 	"sort"
 	"time"
 )
@@ -233,6 +234,69 @@ func (idx *Index) discoverJobsMetrics() (jobs []ingestJob, filesSeen, filesChang
 	return jobs, filesSeen, filesChanged
 }
 
+// discoverPathJobsMetrics performs the same cursor and source-policy checks as
+// full reconciliation, but touches only the explicitly dirty transcript paths.
+// Paths are canonicalized, source-root validated and deduplicated here so both
+// scheduler bugs and hostile child input fail closed.
+func (idx *Index) discoverPathJobsMetrics(paths []string) (jobs []ingestJob, filesSeen, filesChanged int) {
+	known := make(map[string]cachedState)
+	if rows, err := idx.db.Query("SELECT source_path, file_size, last_mtime FROM ingest_state"); err == nil {
+		for rows.Next() {
+			var path string
+			var state cachedState
+			if rows.Scan(&path, &state.size, &state.mtime) == nil {
+				known[path] = state
+			}
+		}
+		rows.Close()
+	}
+
+	seen := make(map[string]struct{}, len(paths))
+	for _, candidate := range paths {
+		resolved, err := filepath.EvalSymlinks(candidate)
+		if err != nil {
+			continue
+		}
+		resolved, err = filepath.Abs(resolved)
+		if err != nil {
+			continue
+		}
+		if _, duplicate := seen[resolved]; duplicate {
+			continue
+		}
+		seen[resolved] = struct{}{}
+
+		var owner source
+		for _, src := range idx.sources {
+			if src.enabled() && src.owns(resolved) {
+				owner = src
+				break
+			}
+		}
+		if owner == nil {
+			continue
+		}
+		info, err := os.Stat(resolved)
+		if err != nil || info.IsDir() {
+			continue
+		}
+		filesSeen++
+		mtime := float64(info.ModTime().UnixNano()) / 1e9
+		if state, ok := known[resolved]; ok && info.Size() == state.size && mtime == state.mtime {
+			continue
+		}
+		filesChanged++
+		meta := owner.sessionMeta(resolved)
+		if filter, ok := owner.(interface{ includeMeta(sessionMeta) bool }); ok && !filter.includeMeta(meta) {
+			idx.markSkippedFile(owner, resolved, info)
+			continue
+		}
+		jobs = append(jobs, ingestJob{src: owner, path: resolved, mtime: info.ModTime(), meta: meta})
+	}
+	sort.SliceStable(jobs, func(i, j int) bool { return jobs[i].mtime.After(jobs[j].mtime) })
+	return jobs, filesSeen, filesChanged
+}
+
 func (idx *Index) markSkippedFile(src source, path string, info os.FileInfo) {
 	mtime := float64(info.ModTime().UnixNano()) / 1e9
 	now := float64(time.Now().UnixNano()) / 1e9
@@ -295,6 +359,19 @@ func (idx *Index) ingestAll() int {
 func (idx *Index) ingestAllMetrics() IngestMetrics {
 	jobs, filesSeen, filesChanged := idx.discoverJobsMetrics()
 	metrics := IngestMetrics{FilesSeen: filesSeen, FilesChanged: filesChanged, FilesQueued: len(jobs)}
+	for len(jobs) > 0 {
+		var added int
+		var bytesRead int64
+		jobs, added, bytesRead = idx.ingestBatch(jobs, len(jobs), 24*time.Hour)
+		metrics.MessagesAdded += added
+		metrics.BytesRead += bytesRead
+	}
+	return metrics
+}
+
+func (idx *Index) ingestPathsMetrics(paths []string) IngestMetrics {
+	jobs, filesSeen, filesChanged := idx.discoverPathJobsMetrics(paths)
+	metrics := IngestMetrics{Mode: "incremental", FilesSeen: filesSeen, FilesChanged: filesChanged, FilesQueued: len(jobs)}
 	for len(jobs) > 0 {
 		var added int
 		var bytesRead int64

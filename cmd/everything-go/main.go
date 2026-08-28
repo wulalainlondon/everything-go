@@ -72,13 +72,23 @@ func main() {
 	disableSearch := flag.Bool("disable-search", false, "disable transcript search and background indexing")
 	disableNativeWatcher := flag.Bool("disable-native-watcher", false, "disable native session discovery outside bridge-created sessions")
 	mode := flag.String("mode", "bridge", "run mode: bridge (resident server) | index (one-shot search ingest, then exit)")
+	indexPathsStdin := flag.Bool("index-paths-stdin", false, "index only newline-delimited transcript paths read from stdin")
 	flag.Parse()
 
 	// `--mode=index` is the short-lived indexer child: it ingests the search DB
 	// to completion and exits, keeping the heap-heavy transcript parse out of the
 	// resident bridge. It needs nothing else, so branch before any server setup.
 	if *mode == "index" {
-		os.Exit(runSearchIndexer(*dataDir))
+		var paths []string
+		if *indexPathsStdin {
+			var readErr error
+			paths, readErr = readIndexPaths(os.Stdin, defaultDirtyPathLimit)
+			if readErr != nil {
+				log.Printf("[indexer] read dirty paths: %v", readErr)
+				os.Exit(2)
+			}
+		}
+		os.Exit(runSearchIndexer(*dataDir, paths, *indexPathsStdin))
 	}
 
 	sessionStorePath := *sessionStore
@@ -159,14 +169,15 @@ func main() {
 	// returns its memory to the OS (see runSearchIndexerLoop).
 	ctx := context.Background()
 	hub.StartWorkScheduler(ctx)
-	searchWake := make(chan struct{}, 1)
+	searchDirty := newDirtyPathQueue(defaultDirtyPathLimit)
+	nativeWatcherActive := !*disableNativeWatcher && strings.TrimSpace(os.Getenv("EVERYTHING_GO_NATIVE_WATCH")) != "0"
 	if !*disableSearch {
 		if idx, err := search.New(filepath.Join(*dataDir, "everything_go_search.db")); err != nil {
 			log.Printf("search index disabled: %v", err)
 		} else {
 			hub.SetSearch(idx)
 			if exePath, err := os.Executable(); err == nil {
-				go runSearchIndexerLoop(ctx, idx, exePath, *dataDir, searchWake, time.Minute, 15*time.Minute)
+				go runSearchIndexerLoop(ctx, idx, exePath, *dataDir, searchDirty, incrementalSearchEnabled() && nativeWatcherActive)
 			} else {
 				log.Printf("[search] cannot locate binary for indexer child (%v); serving existing index only", err)
 			}
@@ -218,12 +229,7 @@ func main() {
 	// Network presence services (P3 discovery + P4 tunnel). They are opt-in so
 	// the fixed-endpoint P2 path stays deterministic and easy to debug.
 	if !*disableNativeWatcher {
-		hub.StartNativeWatcher(ctx, func() {
-			select {
-			case searchWake <- struct{}{}:
-			default:
-			}
-		})
+		hub.StartNativeWatcher(ctx, searchDirty.Add)
 	} else {
 		log.Printf("native session watcher disabled by flag")
 	}
@@ -278,7 +284,7 @@ func codexRemoteEndpoint() string {
 // runs to completion and exits, so the heap-heavy transcript parse happens in a
 // throwaway process rather than the resident bridge. A flock prevents two
 // indexers from writing the WAL DB at once (e.g. across a bridge restart).
-func runSearchIndexer(dataDir string) int {
+func runSearchIndexer(dataDir string, paths []string, explicitPaths bool) int {
 	unlock, err := acquireIndexLock(dataDir)
 	if err != nil {
 		log.Printf("[indexer] another indexer is running (%v); exiting", err)
@@ -294,10 +300,16 @@ func runSearchIndexer(dataDir string) int {
 	defer idx.Close()
 
 	t0 := time.Now()
-	metrics := idx.RunOnceMetrics()
-	log.Printf("[indexer] files_seen=%d files_changed=%d files_queued=%d messages=%d bytes_read=%d db_bytes_delta=%d duration=%s",
-		metrics.FilesSeen, metrics.FilesChanged, metrics.FilesQueued, metrics.MessagesAdded,
-		metrics.BytesRead, metrics.DBBytesDelta, time.Since(t0).Round(time.Millisecond))
+	var metrics search.IngestMetrics
+	if explicitPaths {
+		metrics = idx.RunPathsMetrics(paths)
+	} else {
+		metrics = idx.RunOnceMetrics()
+	}
+	log.Printf("[indexer] mode=%s files_seen=%d files_changed=%d files_queued=%d messages=%d bytes_read=%d db_bytes_delta=%d maintenance_rows=%d wal_before=%d wal_after=%d checkpoint=%d/%d busy=%d duration=%s",
+		metrics.Mode, metrics.FilesSeen, metrics.FilesChanged, metrics.FilesQueued, metrics.MessagesAdded,
+		metrics.BytesRead, metrics.DBBytesDelta, metrics.MaintenanceRows, metrics.WALBytesBefore, metrics.WALBytesAfter,
+		metrics.CheckpointDone, metrics.CheckpointLog, metrics.CheckpointBusy, time.Since(t0).Round(time.Millisecond))
 	if data, err := json.Marshal(metrics); err == nil {
 		fmt.Printf("%s%s\n", indexResultPrefix, data)
 	}
@@ -310,7 +322,7 @@ const indexResultPrefix = "EVERYTHING_GO_INDEX_RESULT="
 // adaptive interval. Native watcher notifications wake it immediately; quiet
 // systems back off to maxInterval. Spawn-and-wait serializes runs and each
 // child's exit returns its transcript parsing heap to the OS.
-func runSearchIndexerLoop(ctx context.Context, idx *search.Index, exePath, dataDir string, wake <-chan struct{}, minInterval, maxInterval time.Duration) {
+func runLegacySearchIndexerLoop(ctx context.Context, idx *search.Index, exePath, dataDir string, dirty *dirtyPathQueue, minInterval, maxInterval time.Duration) {
 	idleCycles := 0
 	for {
 		idx.SetIndexing(true)
@@ -329,6 +341,9 @@ func runSearchIndexerLoop(ctx context.Context, idx *search.Index, exePath, dataD
 			idleCycles = 0
 		} else {
 			idx.MarkReady()
+			if metricsOK {
+				idx.RecordIngestMetrics(metrics)
+			}
 			if !metricsOK || metrics.FilesChanged > 0 || metrics.MessagesAdded > 0 {
 				idleCycles = 0
 			} else {
@@ -342,8 +357,9 @@ func runSearchIndexerLoop(ctx context.Context, idx *search.Index, exePath, dataD
 		case <-ctx.Done():
 			stopTimer(timer)
 			return
-		case <-wake:
+		case <-dirty.Notify():
 			stopTimer(timer)
+			dirty.Drain()
 			idleCycles = 0
 			log.Printf("[search] transcript change detected; reconciling now")
 		case <-timer.C:

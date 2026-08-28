@@ -39,6 +39,7 @@ type sessionMeta struct {
 type source interface {
 	name() string
 	enabled() bool
+	owns(path string) bool
 	discover() []string
 	// iterMessages reads complete lines from startOffset to EOF, returning the
 	// extracted messages and the byte offset after the last complete line.
@@ -116,6 +117,10 @@ func (c claudeSource) name() string { return "claude" }
 func (c claudeSource) enabled() bool {
 	info, err := os.Stat(c.root)
 	return err == nil && info.IsDir()
+}
+
+func (c claudeSource) owns(path string) bool {
+	return pathWithinRoot(path, c.root) && strings.HasSuffix(filepath.Base(path), ".jsonl")
 }
 
 func (c claudeSource) discover() []string {
@@ -282,6 +287,11 @@ func (c codexSource) enabled() bool {
 	return err == nil && info.IsDir()
 }
 
+func (c codexSource) owns(path string) bool {
+	name := filepath.Base(path)
+	return pathWithinRoot(path, c.root) && strings.HasPrefix(name, "rollout-") && strings.HasSuffix(name, ".jsonl")
+}
+
 func (c codexSource) discover() []string {
 	matches, _ := filepath.Glob(filepath.Join(c.root, "*", "*", "*", "rollout-*.jsonl"))
 	return matches
@@ -413,6 +423,25 @@ func isCodexBootstrap(text string) bool {
 	return strings.HasPrefix(s, "# AGENTS.md instructions") &&
 		strings.Contains(s, "<environment_context>") &&
 		strings.Contains(s, "<INSTRUCTIONS>")
+}
+
+// pathWithinRoot resolves symlinks before comparing paths. Dirty paths enter
+// the indexer through a local child-process boundary, so the source must still
+// reject traversal and symlink escapes rather than trusting its caller.
+func pathWithinRoot(path, root string) bool {
+	if strings.TrimSpace(path) == "" || strings.TrimSpace(root) == "" {
+		return false
+	}
+	resolvedPath, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return false
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(resolvedRoot, resolvedPath)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // blocksToText extracts text from a content field that is either a JSON string

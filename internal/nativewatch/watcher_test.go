@@ -37,8 +37,8 @@ func TestWatchChangesDoesNotSignalInitialImport(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	imports := make(chan NativeSession, 2)
-	changes := make(chan struct{}, 2)
-	go WatchChanges(ctx, opts, func(ns NativeSession) { imports <- ns }, func() { changes <- struct{}{} })
+	changes := make(chan string, 2)
+	go WatchChanges(ctx, opts, func(ns NativeSession) { imports <- ns }, func(path string) { changes <- path })
 	select {
 	case <-imports:
 	case <-time.After(time.Second):
@@ -56,7 +56,10 @@ func TestWatchChangesDoesNotSignalInitialImport(t *testing.T) {
 		_ = f.Close()
 	}
 	select {
-	case <-changes:
+	case changedPath := <-changes:
+		if changedPath != path {
+			t.Fatalf("change path=%q want %q", changedPath, path)
+		}
 	case <-time.After(time.Second):
 		t.Fatal("appended transcript did not signal a change")
 	}

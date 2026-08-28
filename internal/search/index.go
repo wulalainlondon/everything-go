@@ -40,19 +40,27 @@ type ingestProgress struct {
 	lastError     string
 	cycleStarted  time.Time
 	cycleDone     time.Time
+	lastMetrics   IngestMetrics
 }
 
 // IngestMetrics describes one complete reconciliation pass. Byte counters are
 // transcript bytes consumed by incremental readers; DBBytesDelta is the signed
 // change in the database + WAL footprint, not an estimate of physical SSD I/O.
 type IngestMetrics struct {
-	FilesSeen     int   `json:"files_seen"`
-	FilesChanged  int   `json:"files_changed"`
-	FilesQueued   int   `json:"files_queued"`
-	MessagesAdded int   `json:"messages_added"`
-	BytesRead     int64 `json:"bytes_read"`
-	DBBytesDelta  int64 `json:"db_bytes_delta"`
-	DurationMS    int64 `json:"duration_ms"`
+	Mode            string `json:"mode,omitempty"`
+	FilesSeen       int    `json:"files_seen"`
+	FilesChanged    int    `json:"files_changed"`
+	FilesQueued     int    `json:"files_queued"`
+	MessagesAdded   int    `json:"messages_added"`
+	BytesRead       int64  `json:"bytes_read"`
+	DBBytesDelta    int64  `json:"db_bytes_delta"`
+	DurationMS      int64  `json:"duration_ms"`
+	MaintenanceRows int64  `json:"maintenance_rows,omitempty"`
+	WALBytesBefore  int64  `json:"wal_bytes_before,omitempty"`
+	WALBytesAfter   int64  `json:"wal_bytes_after,omitempty"`
+	CheckpointBusy  int    `json:"checkpoint_busy,omitempty"`
+	CheckpointLog   int    `json:"checkpoint_log_pages,omitempty"`
+	CheckpointDone  int    `json:"checkpointed_pages,omitempty"`
 }
 
 // New opens (creating if needed) the search index at dbPath and registers the
@@ -83,23 +91,73 @@ func (idx *Index) RunOnce() int {
 func (idx *Index) RunOnceMetrics() IngestMetrics {
 	started := time.Now()
 	before := databaseFootprint(idx.path)
-	if err := idx.refreshSourcePolicyFingerprint(); err != nil {
-		log.Printf("[search] source policy fingerprint: %v", err)
-	}
-	if removed, err := idx.pruneExcludedCodexSessions(); err != nil {
-		log.Printf("[search] prune excluded Codex sessions: %v", err)
-	} else if removed > 0 {
-		log.Printf("[search] pruned %d excluded Codex session(s)", removed)
-	}
-	if removed, err := idx.pruneFrameworkNoiseMessages(); err != nil {
-		log.Printf("[search] prune framework-noise messages: %v", err)
-	} else if removed > 0 {
-		log.Printf("[search] pruned %d framework-noise message(s)", removed)
-	}
+	walBefore := fileSize(idx.path + "-wal")
+	maintenanceRows := idx.runVersionedMaintenance()
 	metrics := idx.ingestAllMetrics()
+	metrics.Mode = "full"
+	metrics.MaintenanceRows = maintenanceRows
+	metrics.WALBytesBefore = walBefore
+	metrics.CheckpointBusy, metrics.CheckpointLog, metrics.CheckpointDone = idx.maybeCheckpointWAL()
+	metrics.WALBytesAfter = fileSize(idx.path + "-wal")
 	metrics.DBBytesDelta = databaseFootprint(idx.path) - before
 	metrics.DurationMS = time.Since(started).Milliseconds()
 	return metrics
+}
+
+// RunPathsMetrics indexes only validated dirty transcript paths. A periodic
+// RunOnceMetrics remains the correctness backstop for missed notifications,
+// deletions and policy changes.
+func (idx *Index) RunPathsMetrics(paths []string) IngestMetrics {
+	started := time.Now()
+	before := databaseFootprint(idx.path)
+	maintenanceRows := idx.runVersionedMaintenance()
+	metrics := idx.ingestPathsMetrics(paths)
+	metrics.MaintenanceRows = maintenanceRows
+	metrics.DBBytesDelta = databaseFootprint(idx.path) - before
+	metrics.DurationMS = time.Since(started).Milliseconds()
+	return metrics
+}
+
+const frameworkNoiseMaintenanceVersion = "1"
+
+func (idx *Index) runVersionedMaintenance() int64 {
+	var changed int64
+	policyChanged, err := idx.refreshSourcePolicyFingerprint()
+	if err != nil {
+		log.Printf("[search] source policy fingerprint: %v", err)
+	}
+	if policyChanged {
+		if removed, pruneErr := idx.pruneExcludedCodexSessions(); pruneErr != nil {
+			log.Printf("[search] prune excluded Codex sessions: %v", pruneErr)
+		} else if removed > 0 {
+			changed += int64(removed)
+			log.Printf("[search] pruned %d excluded Codex session(s)", removed)
+		}
+	}
+
+	const maintenanceKey = "framework_noise_maintenance_version"
+	var current string
+	err = idx.db.QueryRow("SELECT value FROM schema_meta WHERE key=?", maintenanceKey).Scan(&current)
+	if err != nil && err != sql.ErrNoRows {
+		log.Printf("[search] framework-noise maintenance version: %v", err)
+		return changed
+	}
+	if current != frameworkNoiseMaintenanceVersion {
+		removed, pruneErr := idx.pruneFrameworkNoiseMessages()
+		if pruneErr != nil {
+			log.Printf("[search] prune framework-noise messages: %v", pruneErr)
+			return changed
+		}
+		changed += removed
+		if removed > 0 {
+			log.Printf("[search] pruned %d framework-noise message(s)", removed)
+		}
+		if _, writeErr := idx.db.Exec(`INSERT INTO schema_meta(key,value) VALUES(?,?)
+			ON CONFLICT(key) DO UPDATE SET value=excluded.value`, maintenanceKey, frameworkNoiseMaintenanceVersion); writeErr != nil {
+			log.Printf("[search] persist framework-noise maintenance version: %v", writeErr)
+		}
+	}
+	return changed
 }
 
 func databaseFootprint(path string) int64 {
@@ -112,11 +170,36 @@ func databaseFootprint(path string) int64 {
 	return total
 }
 
+func fileSize(path string) int64 {
+	if info, err := os.Stat(path); err == nil {
+		return info.Size()
+	}
+	return 0
+}
+
+const passiveCheckpointThreshold = 32 << 20
+
+// maybeCheckpointWAL copies committed frames back to the main database only
+// during low-frequency full reconciliation. PASSIVE never waits for readers
+// and deliberately leaves the WAL allocated for reuse; it avoids the I/O and
+// coordination spikes of TRUNCATE/VACUUM on an actively queried index.
+func (idx *Index) maybeCheckpointWAL() (busy, logPages, checkpointed int) {
+	if fileSize(idx.path+"-wal") < passiveCheckpointThreshold {
+		return 0, 0, 0
+	}
+	if err := idx.db.QueryRow("PRAGMA wal_checkpoint(PASSIVE)").Scan(&busy, &logPages, &checkpointed); err != nil {
+		log.Printf("[search] passive WAL checkpoint: %v", err)
+		return 0, 0, 0
+	}
+	log.Printf("[search] passive WAL checkpoint busy=%d log_pages=%d checkpointed=%d", busy, logPages, checkpointed)
+	return busy, logPages, checkpointed
+}
+
 // refreshSourcePolicyFingerprint invalidates only Codex ingest cursors when
 // ignore rules actually change. Ignored files can therefore keep a lightweight
 // stat cursor during normal cycles without becoming permanently invisible if a
 // later policy starts including them.
-func (idx *Index) refreshSourcePolicyFingerprint() error {
+func (idx *Index) refreshSourcePolicyFingerprint() (bool, error) {
 	parts := append([]string(nil), sourcepolicy.CodexIgnoreCWDGlobs()...)
 	parts = append(parts, "\x00")
 	parts = append(parts, sourcepolicy.CodexIgnoreNamePrefixes()...)
@@ -127,24 +210,27 @@ func (idx *Index) refreshSourcePolicyFingerprint() error {
 	err := idx.db.QueryRow("SELECT value FROM schema_meta WHERE key=?", key).Scan(&previous)
 	if err == sql.ErrNoRows {
 		_, err = idx.db.Exec("INSERT INTO schema_meta(key,value) VALUES(?,?)", key, fingerprint)
-		return err
+		return err == nil, err
 	}
 	if err != nil || previous == fingerprint {
-		return err
+		return false, err
 	}
 	root := filepath.Clean(sourcepolicy.CodexSessionsDir()) + string(os.PathSeparator) + "%"
 	tx, err := idx.db.Begin()
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer tx.Rollback()
 	if _, err := tx.Exec("DELETE FROM ingest_state WHERE source_path LIKE ?", root); err != nil {
-		return err
+		return false, err
 	}
 	if _, err := tx.Exec("UPDATE schema_meta SET value=? WHERE key=?", fingerprint, key); err != nil {
-		return err
+		return false, err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (idx *Index) pruneFrameworkNoiseMessages() (int64, error) {
@@ -165,11 +251,13 @@ func (idx *Index) pruneFrameworkNoiseMessages() (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	if _, err := tx.Exec(`
+	if removed > 0 {
+		if _, err := tx.Exec(`
 		UPDATE sessions
 		SET msg_count=(SELECT COUNT(*) FROM messages WHERE messages.session_id=sessions.session_id)
 		WHERE source='codex'`); err != nil {
-		return 0, err
+			return 0, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
@@ -239,6 +327,15 @@ func (idx *Index) MarkReady() {
 	idx.mu.Lock()
 	idx.ready = true
 	idx.mu.Unlock()
+}
+
+// RecordIngestMetrics copies child-process counters into the resident search
+// health view. The paths themselves never cross into diagnostics.
+func (idx *Index) RecordIngestMetrics(metrics IngestMetrics) {
+	idx.setProgress(func(p *ingestProgress) {
+		p.lastMetrics = metrics
+		p.lastAdded = metrics.MessagesAdded
+	})
 }
 
 // SetIndexing records whether a child indexer is currently running so Health()
