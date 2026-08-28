@@ -22,6 +22,7 @@ import (
 	"everything-go/internal/attachmentjournal"
 	"everything-go/internal/backend"
 	"everything-go/internal/clientproto"
+	"everything-go/internal/eventinbox"
 	"everything-go/internal/executor"
 	"everything-go/internal/fcm"
 	"everything-go/internal/feed"
@@ -71,6 +72,7 @@ type Hub struct {
 	controls    *governance.SessionControlStore
 	runtimes    *runtimejournal.Store
 	work        *workitems.Service
+	events      *eventinbox.Store
 	cfg         Config
 	client      clientproto.AppV1
 	gen         string // per-boot generation id
@@ -220,6 +222,9 @@ func (h *Hub) SetInbox(i *inbox.Store) { h.inbox = i }
 // SetWorkItems wires the native WorkItem authority. nil keeps compatibility
 // for tests and legacy deployments that do not advertise work_items_v1.
 func (h *Hub) SetWorkItems(service *workitems.Service) { h.work = service }
+
+// SetEventInbox wires the source-neutral, durable external event authority.
+func (h *Hub) SetEventInbox(store *eventinbox.Store) { h.events = store }
 
 // SetRestart wires the bridge-restart action (nil → restart_bridge is a no-op
 // that answers "not configured"). main wires this to a self-re-exec.
@@ -400,6 +405,24 @@ func (h *Hub) Emit(event any) {
 	// original event. This preserves text -> attachment -> done ordering for
 	// existing clients while still making reconnect state durable.
 	h.driveRuntimeState(event)
+}
+
+// broadcastOnline delivers canonical state changes to clients that are
+// currently connected without writing the legacy global offline journal.
+// Callers must have their own durable reconnect source (for example the Event
+// Inbox store); otherwise an offline device would miss the event.
+func (h *Hub) broadcastOnline(event any) error {
+	data, err := json.Marshal(event)
+	if err != nil {
+		return err
+	}
+	logOutbound(event)
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for c := range h.clients {
+		c.enqueue(data)
+	}
+	return nil
 }
 
 // replayOffline flushes buffered events to a single reconnecting client, in

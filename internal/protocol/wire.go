@@ -10,6 +10,7 @@ package protocol
 import (
 	"encoding/json"
 
+	"everything-go/internal/eventinbox"
 	"everything-go/internal/workitems"
 )
 
@@ -127,6 +128,7 @@ type Inbound struct {
 
 	// feed: feed_push carries the article; fetch/mark_read/delete carry feed_id.
 	FeedID         string `json:"feed_id"`
+	EventID        string `json:"event_id"`
 	Title          string `json:"title"`
 	HTML           string `json:"html"`
 	Source         string `json:"source"`
@@ -1435,6 +1437,41 @@ type FeedUpdated struct {
 
 func NewFeedUpdated(feedID string, read, deleted bool) FeedUpdated {
 	return FeedUpdated{Type: "feed_updated", FeedID: feedID, Read: read, Deleted: deleted}
+}
+
+// --- Source-neutral external event inbox ----------------------------------
+
+type ExternalEventSnapshot struct {
+	Type     string            `json:"type"`
+	Revision uint64            `json:"revision"`
+	Items    []eventinbox.View `json:"items"`
+}
+
+func NewExternalEventSnapshot(snapshot eventinbox.Snapshot) ExternalEventSnapshot {
+	if snapshot.Items == nil {
+		snapshot.Items = []eventinbox.View{}
+	}
+	return ExternalEventSnapshot{Type: "external_event_snapshot", Revision: snapshot.Revision, Items: snapshot.Items}
+}
+
+type ExternalEventUpsert struct {
+	Type string          `json:"type"`
+	Item eventinbox.View `json:"item"`
+}
+
+func NewExternalEventUpsert(item eventinbox.View) ExternalEventUpsert {
+	return ExternalEventUpsert{Type: "external_event_upsert", Item: item}
+}
+
+type ExternalEventState struct {
+	Type      string `json:"type"`
+	EventID   string `json:"event_id"`
+	Read      bool   `json:"read"`
+	Dismissed bool   `json:"dismissed"`
+}
+
+func NewExternalEventState(item eventinbox.View) ExternalEventState {
+	return ExternalEventState{Type: "external_event_state", EventID: item.ID, Read: item.Read, Dismissed: item.Dismissed}
 }
 
 // --- Interactions: AskUserQuestion (bridge↔app) ----------------------------

@@ -122,6 +122,23 @@ func TestWorkAttentionCarriesStableDedupFacts(t *testing.T) {
 	}
 }
 
+func TestExternalEventCarriesCanonicalIdentity(t *testing.T) {
+	var got v1message
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	n := testNotifier(filepath.Join(t.TempDir(), "fcm_tokens.json"), server.URL, server.Client())
+	n.SetToken("note20", "token")
+	n.NotifyExternalEvent("wulala", "evt_1", "github", "ci_failed", "error", "CI failed", "race test")
+	data := got.Message.Data
+	if data["type"] != "external_event" || data["authority_instance_id"] != "wulala" ||
+		data["event_id"] != "evt_1" || data["source"] != "github" || data["kind"] != "ci_failed" {
+		t.Fatalf("external event payload=%+v", data)
+	}
+}
+
 func TestSummarizeStripsMarkdown(t *testing.T) {
 	got := summarize("Here is **bold** and `code` and a [link](http://x).")
 	if strings.ContainsAny(got, "*`") {

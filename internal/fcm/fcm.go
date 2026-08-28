@@ -200,6 +200,24 @@ func (n *Notifier) NotifyWorkAttention(instanceID, workItemID, title string, rev
 	n.sendAll(msg, "work_attention")
 }
 
+// NotifyExternalEvent surfaces a durable Event Inbox record. FCM is only a
+// wake-up hint; the app always reconciles canonical content from the Bridge.
+func (n *Notifier) NotifyExternalEvent(instanceID, eventID, source, kind, severity, title, body string) {
+	msg := v1message{}
+	msg.Message.Notification.Title = title
+	msg.Message.Notification.Body = summarize(body)
+	if msg.Message.Notification.Body == "" {
+		msg.Message.Notification.Body = source
+	}
+	msg.Message.Data = map[string]string{
+		"type": "external_event", "event_id": eventID, "source": source,
+		"kind": kind, "severity": severity, "title": title,
+		"authority_instance_id": instanceID,
+		"deep_link":             "bridge://inbox/events/" + eventID,
+	}
+	n.sendAll(msg, "external_event")
+}
+
 type v1message struct {
 	Message struct {
 		Token        string `json:"token"`

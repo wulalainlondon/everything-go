@@ -65,7 +65,10 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 				// work_coordination_v1 is the stable product capability. Keep the
 				// provisional work_items_v1 token during the released-client
 				// migration window; both names address the same wire schema.
-				helloInput.Capabilities = []string{"work_coordination_v1", "work_items_v1"}
+				helloInput.Capabilities = append(helloInput.Capabilities, "work_coordination_v1", "work_items_v1")
+			}
+			if h.events != nil {
+				helloInput.Capabilities = append(helloInput.Capabilities, "event_inbox_v1")
 			}
 		}
 		c.enqueueEvent(h.client.HelloAck(helloInput))
@@ -83,6 +86,13 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		// Python bridge so the app reconciles before replayed events arrive.
 		c.enqueueEvent(h.client.SessionsList(h.sessionSummaries()))
 		c.enqueueEvent(h.runtimeSnapshot(c.deviceID))
+		if h.events != nil {
+			if snapshot, err := h.events.Snapshot(ctx, c.deviceID, 0); err == nil {
+				c.enqueueEvent(h.client.ExternalEventSnapshot(snapshot))
+			} else {
+				log.Printf("[events] snapshot device=%s: %v", c.deviceID, err)
+			}
+		}
 		// Work reconciliation is client-cursor driven. The client responds to
 		// the advertised capability with work_sync_request using the revision it
 		// has durably applied. Pushing an unconditional snapshot here made every
@@ -657,6 +667,38 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		}
 		if m, ok := h.feed.Delete(cmd.FeedID); ok {
 			h.Emit(h.client.FeedUpdated(m.FeedID, m.Read, m.Deleted))
+		}
+
+	case "external_event_list_request":
+		if h.events == nil {
+			return
+		}
+		if snapshot, err := h.events.Snapshot(ctx, c.deviceID, 0); err == nil {
+			c.enqueueEvent(h.client.ExternalEventSnapshot(snapshot))
+		} else {
+			c.enqueueEvent(h.client.Error("", "", "Event inbox unavailable: "+err.Error()))
+		}
+
+	case "external_event_mark_read":
+		if h.events == nil {
+			return
+		}
+		read := true
+		if item, err := h.events.Mark(ctx, cmd.EventID, c.deviceID, &read, nil); err == nil {
+			c.enqueueEvent(h.client.ExternalEventState(item))
+		} else {
+			c.enqueueEvent(h.client.Error("", "", "Event update failed: "+err.Error()))
+		}
+
+	case "external_event_dismiss":
+		if h.events == nil {
+			return
+		}
+		dismissed := true
+		if item, err := h.events.Mark(ctx, cmd.EventID, c.deviceID, nil, &dismissed); err == nil {
+			c.enqueueEvent(h.client.ExternalEventState(item))
+		} else {
+			c.enqueueEvent(h.client.Error("", "", "Event update failed: "+err.Error()))
 		}
 
 	// --- Interactions: AskUserQuestion ------------------------------------

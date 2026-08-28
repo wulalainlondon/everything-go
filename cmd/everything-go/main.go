@@ -29,6 +29,7 @@ import (
 
 	"everything-go/internal/backend"
 	"everything-go/internal/core"
+	"everything-go/internal/eventinbox"
 	"everything-go/internal/executor"
 	"everything-go/internal/executor/goexec"
 	"everything-go/internal/executor/remote"
@@ -139,6 +140,12 @@ func main() {
 	}
 	defer workService.Close()
 	hub.SetWorkItems(workService)
+	eventStore, err := eventinbox.Open(*dataDir, instanceID)
+	if err != nil {
+		log.Fatalf("open external event inbox: %v", err)
+	}
+	defer eventStore.Close()
+	hub.SetEventInbox(eventStore)
 
 	switch *execName {
 	case "go":
@@ -260,6 +267,7 @@ func main() {
 	mux.Handle("/upload", filetransfer.UploadHandler())
 	mux.Handle("/files", filetransfer.DownloadHandler())
 	mux.HandleFunc("/api/work/v1/items/", hub.ServeWorkAPI)
+	mux.HandleFunc("/api/events/v1/events", hub.ServeEventAPI)
 	mux.HandleFunc("/", hub.ServeWS)
 
 	addr := fmt.Sprintf(":%d", *port)

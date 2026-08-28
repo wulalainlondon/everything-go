@@ -4,6 +4,7 @@ package clientproto
 
 import (
 	"everything-go/internal/backend"
+	"everything-go/internal/eventinbox"
 	"everything-go/internal/protocol"
 	"everything-go/internal/workitems"
 )
@@ -96,6 +97,7 @@ type Command struct {
 	ForkAfterMessageID string
 
 	FeedID         string
+	EventID        string
 	Title          string
 	HTML           string
 	Source         string
@@ -230,6 +232,7 @@ func (AppV1) ParseCommand(in protocol.Inbound) Command {
 		ForkAfterMessageID: in.ForkAfterMessageID,
 
 		FeedID:         in.FeedID,
+		EventID:        in.EventID,
 		Title:          in.Title,
 		HTML:           in.HTML,
 		Source:         in.Source,
@@ -543,6 +546,18 @@ func (AppV1) FeedDetail(feedID, html, contentType string) protocol.FeedDetail {
 
 func (AppV1) FeedUpdated(feedID string, read, deleted bool) protocol.FeedUpdated {
 	return protocol.NewFeedUpdated(feedID, read, deleted)
+}
+
+func (AppV1) ExternalEventSnapshot(snapshot eventinbox.Snapshot) protocol.ExternalEventSnapshot {
+	return protocol.NewExternalEventSnapshot(snapshot)
+}
+
+func (AppV1) ExternalEventUpsert(item eventinbox.View) protocol.ExternalEventUpsert {
+	return protocol.NewExternalEventUpsert(item)
+}
+
+func (AppV1) ExternalEventState(item eventinbox.View) protocol.ExternalEventState {
+	return protocol.NewExternalEventState(item)
 }
 
 func (AppV1) PendingInteractionsList(items []backend.UserInputPayload) protocol.PendingInteractionsList {
