@@ -136,30 +136,33 @@ type Inbound struct {
 
 	// Native WorkItem commands. Revision is reused as the sync/read cursor;
 	// command-specific fields stay flat for backward-compatible decoding.
-	ProjectID         string   `json:"project_id"`
-	WorkItemID        string   `json:"work_item_id"`
-	MutationID        string   `json:"mutation_id"`
-	ExpectedVersion   uint64   `json:"expected_version"`
-	Lifecycle         string   `json:"lifecycle"`
-	Priority          string   `json:"priority"`
-	SortKey           int64    `json:"sort_key"`
-	Description       string   `json:"description"`
-	WorkspacePath     string   `json:"workspace_path"`
-	ThreadID          string   `json:"thread_id"`
-	Role              string   `json:"role"`
-	DependsOnID       string   `json:"depends_on_id"`
-	WorkLinkID        string   `json:"work_link_id"`
-	CommentID         string   `json:"comment_id"`
-	WorkAttachmentID  string   `json:"work_attachment_id"`
-	AttachmentID      string   `json:"attachment_id"`
-	RunID             string   `json:"run_id"`
-	RunKind           string   `json:"run_kind"`
-	Body              string   `json:"body"`
-	BlockedReasonCode string   `json:"blocked_reason_code"`
-	BlockedNote       string   `json:"blocked_note"`
-	DeliveredRevision uint64   `json:"delivered_revision"`
-	AckedRevision     uint64   `json:"acked_revision"`
-	Fields            []string `json:"fields"`
+	ProjectID          string   `json:"project_id"`
+	WorkItemID         string   `json:"work_item_id"`
+	MutationID         string   `json:"mutation_id"`
+	ExpectedVersion    uint64   `json:"expected_version"`
+	Lifecycle          string   `json:"lifecycle"`
+	Priority           string   `json:"priority"`
+	SortKey            int64    `json:"sort_key"`
+	Description        string   `json:"description"`
+	Outcome            string   `json:"outcome"`
+	NextStep           string   `json:"next_step"`
+	AcceptanceCriteria string   `json:"acceptance_criteria"`
+	WorkspacePath      string   `json:"workspace_path"`
+	ThreadID           string   `json:"thread_id"`
+	Role               string   `json:"role"`
+	DependsOnID        string   `json:"depends_on_id"`
+	WorkLinkID         string   `json:"work_link_id"`
+	CommentID          string   `json:"comment_id"`
+	WorkAttachmentID   string   `json:"work_attachment_id"`
+	AttachmentID       string   `json:"attachment_id"`
+	RunID              string   `json:"run_id"`
+	RunKind            string   `json:"run_kind"`
+	Body               string   `json:"body"`
+	BlockedReasonCode  string   `json:"blocked_reason_code"`
+	BlockedNote        string   `json:"blocked_note"`
+	DeliveredRevision  uint64   `json:"delivered_revision"`
+	AckedRevision      uint64   `json:"acked_revision"`
+	Fields             []string `json:"fields"`
 }
 
 // InboundImage is one attached image on a message (app strips the data-URL

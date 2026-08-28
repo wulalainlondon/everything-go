@@ -27,6 +27,10 @@ func (s *Service) CreateItem(ctx context.Context, in CreateItemInput) (WorkItem,
 	return s.store.CreateItem(ctx, in)
 }
 
+func (s *Service) ImportSessionDraft(ctx context.Context, in ImportSessionDraftInput) (ImportSessionDraftResult, error) {
+	return s.store.ImportSessionDraft(ctx, in)
+}
+
 func (s *Service) UpdateItem(ctx context.Context, in UpdateItemInput) (WorkItem, error) {
 	return s.store.UpdateItem(ctx, in)
 }

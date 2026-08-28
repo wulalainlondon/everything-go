@@ -112,7 +112,8 @@ func (h *Hub) handleWorkCommand(c *Client, cmd clientproto.Command) {
 	case "work_item_create":
 		item, err := h.work.CreateItem(ctx, workitems.CreateItemInput{
 			ID: cmd.WorkItemID, ProjectID: cmd.ProjectID, Title: cmd.Title,
-			Description: cmd.Description, Priority: workitems.Priority(cmd.Priority),
+			Description: cmd.Description, Outcome: cmd.Outcome, NextStep: cmd.NextStep,
+			AcceptanceCriteria: cmd.AcceptanceCriteria, Priority: workitems.Priority(cmd.Priority),
 			SortKey: cmd.SortKey, Actor: actor,
 		})
 		if err != nil {
@@ -121,6 +122,36 @@ func (h *Hub) handleWorkCommand(c *Client, cmd clientproto.Command) {
 		}
 		h.completeWorkMutation(c, cmd.MutationID, protocol.WorkMutationAck{Type: "work_mutation_ack",
 			MutationID: cmd.MutationID, EntityVersion: item.Version, Revision: item.ActivityRevision, Item: &item})
+
+	case "work_session_import":
+		s, ok := h.registry.Get(cmd.SessionID)
+		if !ok {
+			h.sendWorkError(c, cmd.MutationID, errors.New("cannot import an unknown Bridge session"))
+			return
+		}
+		snapshot := s.Snapshot()
+		// Session identity and workspace come from the Bridge registry, never
+		// from client-provided metadata. The user still confirms all semantic
+		// fields before this command is sent.
+		result, err := h.work.ImportSessionDraft(ctx, workitems.ImportSessionDraftInput{
+			ProjectID: cmd.ProjectID, ProjectName: cmd.Name, WorkspacePath: snapshot.Cwd,
+			WorkItemID: cmd.WorkItemID, SessionID: snapshot.ID, ThreadIDSnapshot: snapshot.ResumeID,
+			Title: cmd.Title, Description: cmd.Description, Outcome: cmd.Outcome,
+			NextStep: cmd.NextStep, AcceptanceCriteria: cmd.AcceptanceCriteria,
+			Priority: workitems.Priority(cmd.Priority), SortKey: cmd.SortKey, Actor: actor,
+		})
+		if err != nil {
+			h.sendWorkError(c, cmd.MutationID, err)
+			return
+		}
+		ack := protocol.WorkMutationAck{Type: "work_mutation_ack", MutationID: cmd.MutationID,
+			EntityVersion: result.Item.Version, Revision: result.Item.ActivityRevision,
+			Project: &result.Project, Item: &result.Item, Link: &result.Link}
+		if result.AlreadyLinked {
+			h.completeWorkMutationWithoutBroadcast(c, cmd.MutationID, ack)
+		} else {
+			h.completeWorkMutationRange(c, cmd.MutationID, ack, result.FirstRevision)
+		}
 
 	case "work_item_update":
 		if len(cmd.Fields) == 0 {
@@ -134,6 +165,12 @@ func (h *Hub) handleWorkCommand(c *Client, cmd clientproto.Command) {
 				input.Title = &cmd.Title
 			case "description":
 				input.Description = &cmd.Description
+			case "outcome":
+				input.Outcome = &cmd.Outcome
+			case "next_step":
+				input.NextStep = &cmd.NextStep
+			case "acceptance_criteria":
+				input.AcceptanceCriteria = &cmd.AcceptanceCriteria
 			case "priority":
 				priority := workitems.Priority(cmd.Priority)
 				input.Priority = &priority
@@ -309,7 +346,7 @@ func (h *Hub) handleWorkCommand(c *Client, cmd clientproto.Command) {
 		// Reuse the ordinary Session actor and mobile/desktop control lease. The
 		// durable run exists before submission, so runtime projection is ordered.
 		h.route(ctx, c, clientproto.Command{Kind: "message", SessionID: cmd.SessionID,
-			RequestID: cmd.RequestID, Content: cmd.Content})
+			RequestID: cmd.RequestID, Content: workRunContent(item, cmd.Content)})
 
 	case "work_item_read":
 		view, err := h.work.MarkRead(ctx, c.deviceID, cmd.WorkItemID, cmd.Revision)
@@ -321,7 +358,51 @@ func (h *Hub) handleWorkCommand(c *Client, cmd clientproto.Command) {
 	}
 }
 
+func workRunContent(item workitems.WorkItem, instruction string) string {
+	var contract strings.Builder
+	contract.WriteString("[Bridge Work Item]\nTitle: ")
+	contract.WriteString(item.Title)
+	if item.Outcome != "" {
+		contract.WriteString("\nDesired outcome: ")
+		contract.WriteString(item.Outcome)
+	}
+	if item.NextStep != "" {
+		contract.WriteString("\nCurrent next step: ")
+		contract.WriteString(item.NextStep)
+	}
+	if item.AcceptanceCriteria != "" {
+		contract.WriteString("\nAcceptance criteria:\n")
+		contract.WriteString(item.AcceptanceCriteria)
+	}
+	contract.WriteString("\n\nComplete the requested work and report verifiable evidence. Do not declare this Work Item accepted or done; only the user can accept it.\n\n[User instruction]\n")
+	contract.WriteString(strings.TrimSpace(instruction))
+	return contract.String()
+}
+
 func (h *Hub) completeWorkMutation(c *Client, mutationID string, event protocol.WorkMutationAck) {
+	h.completeWorkMutationRange(c, mutationID, event, event.Revision)
+}
+
+func (h *Hub) completeWorkMutationRange(c *Client, mutationID string, event protocol.WorkMutationAck, firstRevision uint64) {
+	if !h.rememberAndSendWorkMutation(c, mutationID, event) {
+		return
+	}
+	if firstRevision == 0 {
+		firstRevision = event.Revision
+	}
+	h.broadcastWorkRange(firstRevision)
+	go func() {
+		if _, err := h.work.CompactChanges(context.Background()); err != nil {
+			log.Printf("[work] compact changes: %v", err)
+		}
+	}()
+}
+
+func (h *Hub) completeWorkMutationWithoutBroadcast(c *Client, mutationID string, event protocol.WorkMutationAck) {
+	h.rememberAndSendWorkMutation(c, mutationID, event)
+}
+
+func (h *Hub) rememberAndSendWorkMutation(c *Client, mutationID string, event protocol.WorkMutationAck) bool {
 	if event.Attachment != nil {
 		materialized := h.materializeWorkAttachment(*event.Attachment)
 		event.Attachment = &materialized
@@ -329,19 +410,14 @@ func (h *Hub) completeWorkMutation(c *Client, mutationID string, event protocol.
 	raw, err := json.Marshal(event)
 	if err != nil {
 		h.sendWorkError(c, mutationID, err)
-		return
+		return false
 	}
 	if err := h.work.RememberMutation(context.Background(), c.deviceID, mutationID, raw); err != nil {
 		h.sendWorkError(c, mutationID, err)
-		return
+		return false
 	}
 	c.enqueue(raw)
-	h.broadcastWorkRevision(event.Revision)
-	go func() {
-		if _, err := h.work.CompactChanges(context.Background()); err != nil {
-			log.Printf("[work] compact changes: %v", err)
-		}
-	}()
+	return true
 }
 
 func (h *Hub) sendWorkError(c *Client, mutationID string, err error) {
@@ -370,18 +446,22 @@ func (h *Hub) sendWorkError(c *Client, mutationID string, err error) {
 }
 
 func (h *Hub) broadcastWorkRevision(revision uint64) {
-	if h.work == nil || revision == 0 {
+	h.broadcastWorkRange(revision)
+}
+
+func (h *Hub) broadcastWorkRange(firstRevision uint64) {
+	if h.work == nil || firstRevision == 0 {
 		return
 	}
-	changes, latest, compacted, err := h.work.ChangesSince(context.Background(), revision-1, 16)
+	changes, latest, compacted, err := h.work.ChangesSince(context.Background(), firstRevision-1, 16)
 	if err != nil || compacted || len(changes) == 0 {
 		if err != nil {
-			log.Printf("[work] broadcast delta revision=%d: %v", revision, err)
+			log.Printf("[work] broadcast delta revision=%d: %v", firstRevision, err)
 		}
 		return
 	}
 	h.materializeWorkChanges(changes)
-	event := protocol.NewWorkDeltaBatch(revision-1, latest, changes)
+	event := protocol.NewWorkDeltaBatch(firstRevision-1, latest, changes)
 	h.mu.RLock()
 	clients := make([]*Client, 0, len(h.clients))
 	for client := range h.clients {

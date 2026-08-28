@@ -67,22 +67,25 @@ type Project struct {
 }
 
 type WorkItem struct {
-	ID                string    `json:"id"`
-	ProjectID         string    `json:"project_id"`
-	Title             string    `json:"title"`
-	Description       string    `json:"description,omitempty"`
-	Lifecycle         Lifecycle `json:"lifecycle"`
-	Priority          Priority  `json:"priority"`
-	SortKey           int64     `json:"sort_key"`
-	Version           uint64    `json:"version"`
-	ActivityRevision  uint64    `json:"activity_revision"`
-	BlockedReasonCode string    `json:"blocked_reason_code,omitempty"`
-	BlockedNote       string    `json:"blocked_note,omitempty"`
-	CreatedAt         int64     `json:"created_at"`
-	UpdatedAt         int64     `json:"updated_at"`
-	AcceptedAt        *int64    `json:"accepted_at,omitempty"`
-	CancelledAt       *int64    `json:"cancelled_at,omitempty"`
-	ArchivedAt        *int64    `json:"archived_at,omitempty"`
+	ID                 string    `json:"id"`
+	ProjectID          string    `json:"project_id"`
+	Title              string    `json:"title"`
+	Description        string    `json:"description,omitempty"`
+	Outcome            string    `json:"outcome,omitempty"`
+	NextStep           string    `json:"next_step,omitempty"`
+	AcceptanceCriteria string    `json:"acceptance_criteria,omitempty"`
+	Lifecycle          Lifecycle `json:"lifecycle"`
+	Priority           Priority  `json:"priority"`
+	SortKey            int64     `json:"sort_key"`
+	Version            uint64    `json:"version"`
+	ActivityRevision   uint64    `json:"activity_revision"`
+	BlockedReasonCode  string    `json:"blocked_reason_code,omitempty"`
+	BlockedNote        string    `json:"blocked_note,omitempty"`
+	CreatedAt          int64     `json:"created_at"`
+	UpdatedAt          int64     `json:"updated_at"`
+	AcceptedAt         *int64    `json:"accepted_at,omitempty"`
+	CancelledAt        *int64    `json:"cancelled_at,omitempty"`
+	ArchivedAt         *int64    `json:"archived_at,omitempty"`
 }
 
 type SessionLink struct {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -62,7 +63,7 @@ func TestWorkStartRunUsesSessionActorAndProjectsSuccessToReview(t *testing.T) {
 	linked := waitForType(t, c, "work_mutation_ack")
 	version = uint64(linked["entity_version"].(float64))
 	exec.onSend = func(s *session.Session, reqID, content string) {
-		if content != "implement it" {
+		if !strings.Contains(content, "Title: Deliver") || !strings.Contains(content, "[User instruction]\nimplement it") || !strings.Contains(content, "only the user can accept it") {
 			t.Errorf("run content=%q", content)
 		}
 		h.Emit(protocol.NewDone(s.ID, reqID))
@@ -142,6 +143,46 @@ func TestWorkHelloAdvertisesCapabilityAndReconcilesFromClientCursor(t *testing.T
 	snapshot := waitForType(t, c, "work_snapshot")
 	if _, ok := snapshot["projects"].([]any); !ok {
 		t.Fatalf("work snapshot collections must be arrays: %+v", snapshot)
+	}
+}
+
+func TestWorkSessionImportUsesRegistryIdentityAndBroadcastsWholeTransaction(t *testing.T) {
+	h, _ := newTestHub(t)
+	service := attachWorkService(t, h, t.TempDir())
+	owner := newTestClient(h)
+	owner.deviceID = "phone"
+	owner.clientSurface = "android"
+	observer := newTestClient(h)
+	observer.deviceID = "desktop"
+	route(h, owner, `{"type":"new_session","session_id":"s-import","name":"Verified session","cwd":"/verified/repo","backend":"codex","resume_claude_id":"thread-verified"}`)
+	_ = waitForType(t, owner, "session_created")
+	route(h, owner, `{"type":"work_session_import","session_id":"s-import","project_id":"p-import","work_item_id":"wi-import","mutation_id":"m-import","name":"Verified repo","workspace_path":"/untrusted/path","title":"Confirm imported outcome","outcome":"A durable draft","next_step":"Review scope","acceptance_criteria":"User accepts result"}`)
+	ack := waitForType(t, owner, "work_mutation_ack")
+	if ack["project"].(map[string]any)["workspace_path"] != "/verified/repo" {
+		t.Fatalf("client workspace escaped registry authority: %+v", ack)
+	}
+	item := ack["item"].(map[string]any)
+	if item["lifecycle"] != "inbox" || item["next_step"] != "Review scope" {
+		t.Fatalf("imported draft=%+v", item)
+	}
+	if ack["link"].(map[string]any)["thread_id_snapshot"] != "thread-verified" {
+		t.Fatalf("thread snapshot was not registry authoritative: %+v", ack)
+	}
+	delta := waitForType(t, observer, "work_delta_batch")
+	if len(delta["changes"].([]any)) != 2 {
+		t.Fatalf("observer missed atomic project/item changes: %+v", delta)
+	}
+	snapshot, err := service.Snapshot(context.Background())
+	if err != nil || len(snapshot.Projects) != 1 || len(snapshot.Items) != 1 || len(snapshot.SessionLinks) != 1 {
+		t.Fatalf("import snapshot=%+v err=%v", snapshot, err)
+	}
+
+	// A second semantic request for the same Session returns the original link
+	// without another change or duplicate WorkItem.
+	route(h, owner, `{"type":"work_session_import","session_id":"s-import","project_id":"p-other","work_item_id":"wi-other","mutation_id":"m-retry","name":"Other","title":"Duplicate"}`)
+	retry := waitForType(t, owner, "work_mutation_ack")
+	if retry["item"].(map[string]any)["id"] != "wi-import" {
+		t.Fatalf("semantic retry did not return existing item: %+v", retry)
 	}
 }
 

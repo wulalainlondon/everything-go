@@ -16,7 +16,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 2
+const schemaVersion = 3
 
 const schema = `
 CREATE TABLE IF NOT EXISTS work_schema (
@@ -44,6 +44,9 @@ CREATE TABLE IF NOT EXISTS work_items (
   project_id TEXT NOT NULL REFERENCES work_projects(id),
   title TEXT NOT NULL,
   description TEXT NOT NULL DEFAULT '',
+  outcome TEXT NOT NULL DEFAULT '',
+  next_step TEXT NOT NULL DEFAULT '',
+  acceptance_criteria TEXT NOT NULL DEFAULT '',
   lifecycle TEXT NOT NULL CHECK (lifecycle IN ('inbox','ready','active','review','done','cancelled')),
   priority TEXT NOT NULL CHECK (priority IN ('none','low','medium','high','urgent')),
   sort_key INTEGER NOT NULL,
@@ -206,10 +209,10 @@ func (s *Store) backupLegacySchema(ctx context.Context) error {
 	if errors.Is(err, sql.ErrNoRows) || (err != nil && strings.Contains(err.Error(), "no such table")) {
 		return nil
 	}
-	if err != nil || version != 1 {
+	if err != nil || (version != 1 && version != 2) {
 		return err
 	}
-	backupPath := s.dbPath + ".pre-v2.bak"
+	backupPath := s.dbPath + fmt.Sprintf(".pre-v%d.bak", version+1)
 	if _, err := os.Stat(backupPath); err == nil {
 		return nil
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -258,6 +261,20 @@ func (s *Store) migrate(ctx context.Context) error {
 			if _, err := tx.ExecContext(ctx, "ALTER TABLE work_item_attachments ADD COLUMN removed_at INTEGER"); err != nil {
 				return err
 			}
+			fallthrough
+		case 2:
+			for _, column := range []struct {
+				name       string
+				definition string
+			}{
+				{"outcome", "TEXT NOT NULL DEFAULT ''"},
+				{"next_step", "TEXT NOT NULL DEFAULT ''"},
+				{"acceptance_criteria", "TEXT NOT NULL DEFAULT ''"},
+			} {
+				if err := addColumnIfMissing(ctx, tx, "work_items", column.name, column.definition); err != nil {
+					return err
+				}
+			}
 			if _, err := tx.ExecContext(ctx, "UPDATE work_schema SET version=?", schemaVersion); err != nil {
 				return err
 			}
@@ -271,6 +288,35 @@ func (s *Store) migrate(ctx context.Context) error {
 		return err
 	}
 	return tx.Commit()
+}
+
+func addColumnIfMissing(ctx context.Context, tx *sql.Tx, table, column, definition string) error {
+	rows, err := tx.QueryContext(ctx, "PRAGMA table_info("+table+")")
+	if err != nil {
+		return err
+	}
+	found := false
+	for rows.Next() {
+		var cid int
+		var name, kind string
+		var notNull, primaryKey int
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &kind, &notNull, &defaultValue, &primaryKey); err != nil {
+			rows.Close()
+			return err
+		}
+		if name == column {
+			found = true
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if found {
+		return nil
+	}
+	_, err = tx.ExecContext(ctx, "ALTER TABLE "+table+" ADD COLUMN "+column+" "+definition)
+	return err
 }
 
 type CreateProjectInput struct {
@@ -312,13 +358,16 @@ func (s *Store) CreateProject(ctx context.Context, in CreateProjectInput) (Proje
 }
 
 type CreateItemInput struct {
-	ID          string
-	ProjectID   string
-	Title       string
-	Description string
-	Priority    Priority
-	SortKey     int64
-	Actor       Actor
+	ID                 string
+	ProjectID          string
+	Title              string
+	Description        string
+	Outcome            string
+	NextStep           string
+	AcceptanceCriteria string
+	Priority           Priority
+	SortKey            int64
+	Actor              Actor
 }
 
 func (s *Store) CreateItem(ctx context.Context, in CreateItemInput) (WorkItem, error) {
@@ -348,11 +397,14 @@ func (s *Store) CreateItem(ctx context.Context, in CreateItemInput) (WorkItem, e
 		return WorkItem{}, err
 	}
 	item := WorkItem{ID: in.ID, ProjectID: in.ProjectID, Title: title,
-		Description: in.Description, Lifecycle: LifecycleInbox, Priority: in.Priority,
+		Description: strings.TrimSpace(in.Description), Outcome: strings.TrimSpace(in.Outcome),
+		NextStep: strings.TrimSpace(in.NextStep), AcceptanceCriteria: strings.TrimSpace(in.AcceptanceCriteria),
+		Lifecycle: LifecycleInbox, Priority: in.Priority,
 		SortKey: in.SortKey, Version: 1, CreatedAt: now, UpdatedAt: now}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO work_items
-		(id,project_id,title,description,lifecycle,priority,sort_key,version,created_at,updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?)`, item.ID, item.ProjectID, item.Title, item.Description,
+		(id,project_id,title,description,outcome,next_step,acceptance_criteria,lifecycle,priority,sort_key,version,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, item.ID, item.ProjectID, item.Title, item.Description,
+		item.Outcome, item.NextStep, item.AcceptanceCriteria,
 		item.Lifecycle, item.Priority, item.SortKey, item.Version, now, now); err != nil {
 		return WorkItem{}, err
 	}
@@ -378,14 +430,17 @@ func (s *Store) CreateItem(ctx context.Context, in CreateItemInput) (WorkItem, e
 }
 
 type UpdateItemInput struct {
-	ID                string
-	ExpectedVersion   uint64
-	Title             *string
-	Description       *string
-	Priority          *Priority
-	BlockedReasonCode *string
-	BlockedNote       *string
-	Actor             Actor
+	ID                 string
+	ExpectedVersion    uint64
+	Title              *string
+	Description        *string
+	Outcome            *string
+	NextStep           *string
+	AcceptanceCriteria *string
+	Priority           *Priority
+	BlockedReasonCode  *string
+	BlockedNote        *string
+	Actor              Actor
 }
 
 func (s *Store) UpdateItem(ctx context.Context, in UpdateItemInput) (WorkItem, error) {
@@ -408,7 +463,16 @@ func (s *Store) UpdateItem(ctx context.Context, in UpdateItemInput) (WorkItem, e
 		}
 	}
 	if in.Description != nil {
-		current.Description = *in.Description
+		current.Description = strings.TrimSpace(*in.Description)
+	}
+	if in.Outcome != nil {
+		current.Outcome = strings.TrimSpace(*in.Outcome)
+	}
+	if in.NextStep != nil {
+		current.NextStep = strings.TrimSpace(*in.NextStep)
+	}
+	if in.AcceptanceCriteria != nil {
+		current.AcceptanceCriteria = strings.TrimSpace(*in.AcceptanceCriteria)
 	}
 	if in.Priority != nil {
 		if !validPriority(*in.Priority) {
@@ -473,9 +537,10 @@ func (s *Store) MoveItem(ctx context.Context, in MoveItemInput) (WorkItem, error
 
 func (s *Store) writeItemMutation(ctx context.Context, tx *sql.Tx, item WorkItem, kind string, actor Actor, payload ChangePayload) (WorkItem, error) {
 	result, err := tx.ExecContext(ctx, `UPDATE work_items SET
-		title=?,description=?,lifecycle=?,priority=?,sort_key=?,version=?,
+		title=?,description=?,outcome=?,next_step=?,acceptance_criteria=?,lifecycle=?,priority=?,sort_key=?,version=?,
 		blocked_reason_code=?,blocked_note=?,updated_at=?,accepted_at=?,cancelled_at=?,archived_at=?
-		WHERE id=? AND version=?`, item.Title, item.Description, item.Lifecycle, item.Priority,
+		WHERE id=? AND version=?`, item.Title, item.Description, item.Outcome, item.NextStep,
+		item.AcceptanceCriteria, item.Lifecycle, item.Priority,
 		item.SortKey, item.Version, item.BlockedReasonCode, item.BlockedNote, item.UpdatedAt,
 		item.AcceptedAt, item.CancelledAt, item.ArchivedAt, item.ID, item.Version-1)
 	if err != nil {
@@ -1070,7 +1135,7 @@ func (s *Store) requireProject(ctx context.Context, tx *sql.Tx, id string) error
 	return nil
 }
 
-const itemSelect = `SELECT id,project_id,title,description,lifecycle,priority,sort_key,version,
+const itemSelect = `SELECT id,project_id,title,description,outcome,next_step,acceptance_criteria,lifecycle,priority,sort_key,version,
 	activity_revision,blocked_reason_code,blocked_note,created_at,updated_at,accepted_at,cancelled_at,archived_at
 	FROM work_items`
 
@@ -1078,7 +1143,8 @@ type rowScanner interface{ Scan(...any) error }
 
 func scanItem(row rowScanner) (WorkItem, error) {
 	var item WorkItem
-	err := row.Scan(&item.ID, &item.ProjectID, &item.Title, &item.Description, &item.Lifecycle,
+	err := row.Scan(&item.ID, &item.ProjectID, &item.Title, &item.Description, &item.Outcome,
+		&item.NextStep, &item.AcceptanceCriteria, &item.Lifecycle,
 		&item.Priority, &item.SortKey, &item.Version, &item.ActivityRevision,
 		&item.BlockedReasonCode, &item.BlockedNote, &item.CreatedAt, &item.UpdatedAt,
 		&item.AcceptedAt, &item.CancelledAt, &item.ArchivedAt)

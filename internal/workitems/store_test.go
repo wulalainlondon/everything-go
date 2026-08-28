@@ -171,6 +171,72 @@ func TestRestartPreservesSnapshotAndRevision(t *testing.T) {
 	}
 }
 
+func TestImportSessionDraftIsAtomicAndSemanticallyIdempotent(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	result, err := s.ImportSessionDraft(ctx, ImportSessionDraftInput{
+		ProjectID: "p-import", ProjectName: "Bridge", WorkspacePath: "/repo/bridge",
+		WorkItemID: "wi-import", SessionID: "session-1", ThreadIDSnapshot: "thread-1",
+		Title: "Ship session import", Outcome: "Existing work is visible",
+		NextStep: "Confirm the draft", AcceptanceCriteria: "Session opens from the item",
+		Actor: Actor{Type: ActorMobile, DeviceID: "phone"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.AlreadyLinked || result.Item.Lifecycle != LifecycleInbox || result.Link.SessionID != "session-1" {
+		t.Fatalf("import result=%+v", result)
+	}
+	if result.Item.Outcome != "Existing work is visible" || result.Item.NextStep != "Confirm the draft" || result.Item.AcceptanceCriteria != "Session opens from the item" {
+		t.Fatalf("semantic draft fields=%+v", result.Item)
+	}
+	before, err := s.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retry, err := s.ImportSessionDraft(ctx, ImportSessionDraftInput{
+		ProjectID: "other-project", ProjectName: "Duplicate", WorkItemID: "other-item",
+		SessionID: "session-1", Title: "Must not duplicate", Actor: Actor{Type: ActorDesktop},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := s.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !retry.AlreadyLinked || retry.Item.ID != result.Item.ID || after.Revision != before.Revision || len(after.Items) != 1 || len(after.Projects) != 1 {
+		t.Fatalf("idempotent retry=%+v before=%+v after=%+v", retry, before, after)
+	}
+}
+
+func TestImportSessionDraftRollsBackProjectOnItemFailure(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	_ = seedItem(t, s, "existing-project", "duplicate-item")
+	_, err := s.ImportSessionDraft(ctx, ImportSessionDraftInput{
+		ProjectID: "must-rollback", ProjectName: "Rollback", WorkItemID: "duplicate-item",
+		SessionID: "session-rollback", Title: "Draft", Actor: Actor{Type: ActorUser},
+	})
+	if err == nil {
+		t.Fatal("duplicate item import unexpectedly succeeded")
+	}
+	snapshot, snapErr := s.Snapshot(ctx)
+	if snapErr != nil {
+		t.Fatal(snapErr)
+	}
+	for _, project := range snapshot.Projects {
+		if project.ID == "must-rollback" {
+			t.Fatalf("failed import left project behind: %+v", snapshot)
+		}
+	}
+	for _, link := range snapshot.SessionLinks {
+		if link.SessionID == "session-rollback" {
+			t.Fatalf("failed import left link behind: %+v", snapshot)
+		}
+	}
+}
+
 func TestRelatedEntitiesAreTransactionalAndAppearInDeltas(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
@@ -276,6 +342,42 @@ func TestSchemaV1MigrationBacksUpAndAddsAttachmentTombstone(t *testing.T) {
 	}
 	if _, err := os.Stat(path + ".pre-v2.bak"); err != nil {
 		t.Fatalf("migration backup missing: %v", err)
+	}
+}
+
+func TestSchemaV2MigrationBacksUpAndAddsOutcomeFields(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "everything_go_work_items.db")
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`CREATE TABLE work_schema(version INTEGER NOT NULL);
+		INSERT INTO work_schema(version) VALUES(2);
+		CREATE TABLE work_items(id TEXT PRIMARY KEY, project_id TEXT NOT NULL, title TEXT NOT NULL,
+		description TEXT NOT NULL DEFAULT '', lifecycle TEXT NOT NULL, priority TEXT NOT NULL,
+		sort_key INTEGER NOT NULL, version INTEGER NOT NULL, activity_revision INTEGER NOT NULL DEFAULT 0,
+		blocked_reason_code TEXT NOT NULL DEFAULT '', blocked_note TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL,
+		updated_at INTEGER NOT NULL, accepted_at INTEGER, cancelled_at INTEGER, archived_at INTEGER);`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(dir, "bridge-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	for _, column := range []string{"outcome", "next_step", "acceptance_criteria"} {
+		var found string
+		if err := s.db.QueryRow(`SELECT name FROM pragma_table_info('work_items') WHERE name=?`, column).Scan(&found); err != nil || found != column {
+			t.Fatalf("column %q missing: found=%q err=%v", column, found, err)
+		}
+	}
+	if _, err := os.Stat(path + ".pre-v3.bak"); err != nil {
+		t.Fatalf("v2 migration backup missing: %v", err)
 	}
 }
 
