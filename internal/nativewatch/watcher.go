@@ -52,8 +52,12 @@ type Options struct {
 
 func DefaultOptions() Options {
 	home, _ := os.UserHomeDir()
+	claudeProjectsDir := strings.TrimSpace(os.Getenv("EVERYTHING_GO_CLAUDE_PROJECTS_DIR"))
+	if claudeProjectsDir == "" {
+		claudeProjectsDir = filepath.Join(home, ".claude", "projects")
+	}
 	return Options{
-		ClaudeProjectsDir:       filepath.Join(home, ".claude", "projects"),
+		ClaudeProjectsDir:       claudeProjectsDir,
 		CodexSessionsDir:        sourcepolicy.CodexSessionsDir(),
 		CodexIgnoreCWDGlobs:     sourcepolicy.CodexIgnoreCWDGlobs(),
 		CodexIgnoreNamePrefixes: sourcepolicy.CodexIgnoreNamePrefixes(),

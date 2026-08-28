@@ -25,6 +25,14 @@ func TestUsePollingMode(t *testing.T) {
 	}
 }
 
+func TestDefaultOptionsHonorClaudeProjectsOverride(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("EVERYTHING_GO_CLAUDE_PROJECTS_DIR", dir)
+	if got := DefaultOptions().ClaudeProjectsDir; got != dir {
+		t.Fatalf("ClaudeProjectsDir=%q want %q", got, dir)
+	}
+}
+
 func TestWatchChangesDoesNotSignalInitialImport(t *testing.T) {
 	t.Setenv("EVERYTHING_GO_NATIVEWATCH_MODE", "poll")
 	root := t.TempDir()

@@ -108,6 +108,9 @@ func lineReaderUntil(path string, startOffset int64, fn func(raw []byte, lineNum
 type claudeSource struct{ root string }
 
 func newClaudeSource() claudeSource {
+	if configured := strings.TrimSpace(os.Getenv("EVERYTHING_GO_CLAUDE_PROJECTS_DIR")); configured != "" {
+		return claudeSource{root: configured}
+	}
 	home, _ := os.UserHomeDir()
 	return claudeSource{root: filepath.Join(home, ".claude", "projects")}
 }
