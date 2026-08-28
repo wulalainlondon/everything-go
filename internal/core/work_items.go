@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"os"
 	"strings"
@@ -99,7 +100,7 @@ func (h *Hub) handleWorkCommand(c *Client, cmd clientproto.Command) {
 	switch cmd.Kind {
 	case "work_project_create":
 		project, err := h.work.CreateProject(ctx, workitems.CreateProjectInput{
-			ID: cmd.ProjectID, Name: cmd.Name, WorkspacePath: cmd.WorkspacePath,
+			ID: cmd.ProjectID, Name: cmd.Name, WorkspacePath: cmd.WorkspacePath, Context: cmd.ProjectContext,
 		})
 		if err != nil {
 			h.sendWorkError(c, cmd.MutationID, err)
@@ -114,7 +115,8 @@ func (h *Hub) handleWorkCommand(c *Client, cmd clientproto.Command) {
 			ID: cmd.WorkItemID, ProjectID: cmd.ProjectID, Title: cmd.Title,
 			Description: cmd.Description, Outcome: cmd.Outcome, NextStep: cmd.NextStep,
 			AcceptanceCriteria: cmd.AcceptanceCriteria, Priority: workitems.Priority(cmd.Priority),
-			SortKey: cmd.SortKey, Actor: actor,
+			SortKey: cmd.SortKey, Assignee: cmd.Assignee, DueAt: cmd.DueAt, Labels: cmd.Labels,
+			AutomationMode: cmd.AutomationMode, WorkflowID: cmd.WorkflowID, WorkflowNodeID: cmd.WorkflowNodeID, Actor: actor,
 		})
 		if err != nil {
 			h.sendWorkError(c, cmd.MutationID, err)
@@ -178,6 +180,19 @@ func (h *Hub) handleWorkCommand(c *Client, cmd clientproto.Command) {
 				input.BlockedReasonCode = &cmd.BlockedReasonCode
 			case "blocked_note":
 				input.BlockedNote = &cmd.BlockedNote
+			case "assignee":
+				input.Assignee = &cmd.Assignee
+			case "due_at":
+				due := cmd.DueAt
+				input.DueAt = &due
+			case "labels":
+				input.Labels = &cmd.Labels
+			case "automation_mode":
+				input.AutomationMode = &cmd.AutomationMode
+			case "workflow_id":
+				input.WorkflowID = &cmd.WorkflowID
+			case "workflow_node_id":
+				input.WorkflowNodeID = &cmd.WorkflowNodeID
 			default:
 				h.sendWorkError(c, cmd.MutationID, errors.New("unsupported work item field: "+field))
 				return
@@ -190,6 +205,18 @@ func (h *Hub) handleWorkCommand(c *Client, cmd clientproto.Command) {
 		}
 		h.completeWorkMutation(c, cmd.MutationID, protocol.WorkMutationAck{Type: "work_mutation_ack",
 			MutationID: cmd.MutationID, EntityVersion: item.Version, Revision: item.ActivityRevision, Item: &item})
+
+	case "work_workflow_create":
+		workflow, err := h.work.CreateWorkflow(ctx, workitems.CreateWorkflowInput{ID: cmd.WorkflowID,
+			ProjectID: cmd.ProjectID, Name: cmd.WorkflowName, Description: cmd.WorkflowDescription,
+			Definition: cmd.WorkflowDefinition})
+		if err != nil {
+			h.sendWorkError(c, cmd.MutationID, err)
+			return
+		}
+		snapshot, _ := h.work.SnapshotForDevice(ctx, c.deviceID)
+		h.completeWorkMutation(c, cmd.MutationID, protocol.WorkMutationAck{Type: "work_mutation_ack",
+			MutationID: cmd.MutationID, EntityVersion: workflow.Version, Revision: snapshot.Revision, Workflow: &workflow})
 
 	case "work_item_move":
 		item, err := h.work.MoveItem(ctx, workitems.MoveItemInput{ID: cmd.WorkItemID,
@@ -334,9 +361,24 @@ func (h *Hub) handleWorkCommand(c *Client, cmd clientproto.Command) {
 		}
 		run, item, err := h.work.StartRun(ctx, workitems.StartRunInput{
 			ID: cmd.RunID, WorkItemID: cmd.WorkItemID, SessionID: cmd.SessionID,
-			RequestID: cmd.RequestID, Kind: cmd.RunKind, ExpectedVersion: cmd.ExpectedVersion, Actor: actor,
+			RequestID: cmd.RequestID, Kind: cmd.RunKind, Instruction: cmd.Content,
+			ExpectedVersion: cmd.ExpectedVersion, Actor: actor,
 		})
 		if err != nil {
+			h.sendWorkError(c, cmd.MutationID, err)
+			return
+		}
+		pack, err := h.work.BuildContextPack(ctx, item.ID, 24_000)
+		if err != nil {
+			_, _ = h.work.AdvanceRun(ctx, cmd.SessionID, cmd.RequestID, "failed", "context compilation failed: "+err.Error())
+			h.sendWorkError(c, cmd.MutationID, err)
+			return
+		}
+		for i := range pack.Attachments {
+			pack.Attachments[i] = h.materializeWorkAttachment(pack.Attachments[i])
+		}
+		pack.Prompt, pack.Truncated = workitems.RenderContextPrompt(pack, 24_000, pack.Truncated)
+		if err := h.work.MarkRunSubmitted(ctx, run.ID); err != nil {
 			h.sendWorkError(c, cmd.MutationID, err)
 			return
 		}
@@ -346,7 +388,7 @@ func (h *Hub) handleWorkCommand(c *Client, cmd clientproto.Command) {
 		// Reuse the ordinary Session actor and mobile/desktop control lease. The
 		// durable run exists before submission, so runtime projection is ordered.
 		h.route(ctx, c, clientproto.Command{Kind: "message", SessionID: cmd.SessionID,
-			RequestID: cmd.RequestID, Content: workRunContent(item, cmd.Content)})
+			RequestID: cmd.RequestID, Content: workRunContent(pack, cmd.Content, h.cfg.Port)})
 
 	case "work_item_read":
 		view, err := h.work.MarkRead(ctx, c.deviceID, cmd.WorkItemID, cmd.Revision)
@@ -358,25 +400,12 @@ func (h *Hub) handleWorkCommand(c *Client, cmd clientproto.Command) {
 	}
 }
 
-func workRunContent(item workitems.WorkItem, instruction string) string {
-	var contract strings.Builder
-	contract.WriteString("[Bridge Work Item]\nTitle: ")
-	contract.WriteString(item.Title)
-	if item.Outcome != "" {
-		contract.WriteString("\nDesired outcome: ")
-		contract.WriteString(item.Outcome)
+func workRunContent(pack workitems.ContextPack, instruction string, port int) string {
+	api := ""
+	if pack.Item.ID != "" {
+		api = fmt.Sprintf("\n## Bridge Work API\nRead current context: GET http://127.0.0.1:%d/api/work/v1/items/%s/context\nRecord progress with POST http://127.0.0.1:%d/api/work/v1/items/%s/events using the current expected_version. Allowed actions: comment, progress, update_next_step, blocked, clear_blocked, request_review. The API cannot mark work done.\n", port, pack.Item.ID, port, pack.Item.ID)
 	}
-	if item.NextStep != "" {
-		contract.WriteString("\nCurrent next step: ")
-		contract.WriteString(item.NextStep)
-	}
-	if item.AcceptanceCriteria != "" {
-		contract.WriteString("\nAcceptance criteria:\n")
-		contract.WriteString(item.AcceptanceCriteria)
-	}
-	contract.WriteString("\n\nComplete the requested work and report verifiable evidence. Do not declare this Work Item accepted or done; only the user can accept it.\n\n[User instruction]\n")
-	contract.WriteString(strings.TrimSpace(instruction))
-	return contract.String()
+	return pack.Prompt + api + "\n[User instruction]\n" + strings.TrimSpace(instruction)
 }
 
 func (h *Hub) completeWorkMutation(c *Client, mutationID string, event protocol.WorkMutationAck) {

@@ -48,6 +48,7 @@ type Config struct {
 	TailscaleIP  string
 	Backends     []backend.Definition
 	CodexRemote  string
+	Port         int
 }
 
 // Hub owns the set of connected clients and the session registry, and acts as
@@ -121,9 +122,12 @@ type Hub struct {
 	// lookup and result write. Entity versions still provide DB-level conflict
 	// safety; this lock prevents two concurrent retry frames from both running.
 	workMutationMu sync.Mutex
+	workWake       chan struct{}
+	workScheduler  atomic.Bool
 }
 
 func NewHub(reg *session.Registry, cfg Config, pairing *governance.Pairing, port int) *Hub {
+	cfg.Port = port
 	h := &Hub{
 		registry:          reg,
 		pairing:           pairing,
@@ -143,6 +147,7 @@ func NewHub(reg *session.Registry, cfg Config, pairing *governance.Pairing, port
 		controls:          governance.NewSessionControlStore(cfg.DataDir),
 		runtimes:          runtimejournal.New(cfg.DataDir),
 		attachmentReplays: make(map[string]*attachmentReplayLease),
+		workWake:          make(chan struct{}, 1),
 	}
 	// No Session worker can be active while a new Hub is being constructed.
 	// Recover stale persisted phases exactly once here, never during reconnect.

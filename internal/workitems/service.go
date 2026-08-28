@@ -27,6 +27,10 @@ func (s *Service) CreateItem(ctx context.Context, in CreateItemInput) (WorkItem,
 	return s.store.CreateItem(ctx, in)
 }
 
+func (s *Service) CreateWorkflow(ctx context.Context, in CreateWorkflowInput) (Workflow, error) {
+	return s.store.CreateWorkflow(ctx, in)
+}
+
 func (s *Service) ImportSessionDraft(ctx context.Context, in ImportSessionDraftInput) (ImportSessionDraftResult, error) {
 	return s.store.ImportSessionDraft(ctx, in)
 }
@@ -79,6 +83,10 @@ func (s *Service) GetItem(ctx context.Context, id string) (WorkItem, error) {
 	return s.store.GetItem(ctx, id)
 }
 
+func (s *Service) BuildContextPack(ctx context.Context, itemID string, maxCharacters int) (ContextPack, error) {
+	return s.store.BuildContextPack(ctx, itemID, maxCharacters)
+}
+
 func (s *Service) Snapshot(ctx context.Context) (Snapshot, error) {
 	return s.store.Snapshot(ctx)
 }
@@ -113,6 +121,20 @@ func (s *Service) CompactChanges(ctx context.Context) (int64, error) {
 
 func (s *Service) StartRun(ctx context.Context, in StartRunInput) (Run, WorkItem, error) {
 	return s.store.StartRun(ctx, in)
+}
+
+func (s *Service) RecoverQueue(ctx context.Context) (int64, error) { return s.store.RecoverQueue(ctx) }
+func (s *Service) MarkRunSubmitted(ctx context.Context, runID string) error {
+	return s.store.MarkRunSubmitted(ctx, runID)
+}
+func (s *Service) ClaimNextRun(ctx context.Context, now int64) (Run, WorkItem, bool, error) {
+	return s.store.ClaimNextRun(ctx, now)
+}
+func (s *Service) DeferRun(ctx context.Context, runID string, availableAt int64, reason string) (Run, WorkItem, error) {
+	return s.store.DeferRun(ctx, runID, availableAt, reason)
+}
+func (s *Service) EnqueueAutomaticRuns(ctx context.Context) ([]Run, error) {
+	return s.store.EnqueueAutomaticRuns(ctx)
 }
 
 func (s *Service) OwnsRequest(ctx context.Context, sessionID, requestID string) (bool, error) {

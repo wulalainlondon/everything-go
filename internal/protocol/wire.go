@@ -136,33 +136,43 @@ type Inbound struct {
 
 	// Native WorkItem commands. Revision is reused as the sync/read cursor;
 	// command-specific fields stay flat for backward-compatible decoding.
-	ProjectID          string   `json:"project_id"`
-	WorkItemID         string   `json:"work_item_id"`
-	MutationID         string   `json:"mutation_id"`
-	ExpectedVersion    uint64   `json:"expected_version"`
-	Lifecycle          string   `json:"lifecycle"`
-	Priority           string   `json:"priority"`
-	SortKey            int64    `json:"sort_key"`
-	Description        string   `json:"description"`
-	Outcome            string   `json:"outcome"`
-	NextStep           string   `json:"next_step"`
-	AcceptanceCriteria string   `json:"acceptance_criteria"`
-	WorkspacePath      string   `json:"workspace_path"`
-	ThreadID           string   `json:"thread_id"`
-	Role               string   `json:"role"`
-	DependsOnID        string   `json:"depends_on_id"`
-	WorkLinkID         string   `json:"work_link_id"`
-	CommentID          string   `json:"comment_id"`
-	WorkAttachmentID   string   `json:"work_attachment_id"`
-	AttachmentID       string   `json:"attachment_id"`
-	RunID              string   `json:"run_id"`
-	RunKind            string   `json:"run_kind"`
-	Body               string   `json:"body"`
-	BlockedReasonCode  string   `json:"blocked_reason_code"`
-	BlockedNote        string   `json:"blocked_note"`
-	DeliveredRevision  uint64   `json:"delivered_revision"`
-	AckedRevision      uint64   `json:"acked_revision"`
-	Fields             []string `json:"fields"`
+	ProjectID           string                       `json:"project_id"`
+	WorkItemID          string                       `json:"work_item_id"`
+	MutationID          string                       `json:"mutation_id"`
+	ExpectedVersion     uint64                       `json:"expected_version"`
+	Lifecycle           string                       `json:"lifecycle"`
+	Priority            string                       `json:"priority"`
+	SortKey             int64                        `json:"sort_key"`
+	Description         string                       `json:"description"`
+	Outcome             string                       `json:"outcome"`
+	NextStep            string                       `json:"next_step"`
+	AcceptanceCriteria  string                       `json:"acceptance_criteria"`
+	WorkspacePath       string                       `json:"workspace_path"`
+	ThreadID            string                       `json:"thread_id"`
+	Role                string                       `json:"role"`
+	DependsOnID         string                       `json:"depends_on_id"`
+	WorkLinkID          string                       `json:"work_link_id"`
+	CommentID           string                       `json:"comment_id"`
+	WorkAttachmentID    string                       `json:"work_attachment_id"`
+	AttachmentID        string                       `json:"attachment_id"`
+	RunID               string                       `json:"run_id"`
+	RunKind             string                       `json:"run_kind"`
+	Body                string                       `json:"body"`
+	BlockedReasonCode   string                       `json:"blocked_reason_code"`
+	BlockedNote         string                       `json:"blocked_note"`
+	Assignee            string                       `json:"assignee"`
+	DueAt               *int64                       `json:"due_at"`
+	Labels              []string                     `json:"labels"`
+	AutomationMode      string                       `json:"automation_mode"`
+	WorkflowID          string                       `json:"workflow_id"`
+	WorkflowNodeID      string                       `json:"workflow_node_id"`
+	WorkflowName        string                       `json:"workflow_name"`
+	WorkflowDescription string                       `json:"workflow_description"`
+	WorkflowDefinition  workitems.WorkflowDefinition `json:"workflow_definition"`
+	ProjectContext      string                       `json:"project_context"`
+	DeliveredRevision   uint64                       `json:"delivered_revision"`
+	AckedRevision       uint64                       `json:"acked_revision"`
+	Fields              []string                     `json:"fields"`
 }
 
 // InboundImage is one attached image on a message (app strips the data-URL
@@ -253,6 +263,9 @@ func NewWorkSnapshot(snapshot workitems.DeviceSnapshot, authoritativeReset ...bo
 	if snapshot.Activities == nil {
 		snapshot.Activities = []workitems.Activity{}
 	}
+	if snapshot.Workflows == nil {
+		snapshot.Workflows = []workitems.Workflow{}
+	}
 	reset := len(authoritativeReset) > 0 && authoritativeReset[0]
 	return WorkSnapshot{Type: "work_snapshot", AuthoritativeReset: reset, DeviceSnapshot: snapshot}
 }
@@ -288,6 +301,7 @@ type WorkMutationAck struct {
 	Comment       *workitems.Comment       `json:"comment,omitempty"`
 	Run           *workitems.Run           `json:"run,omitempty"`
 	Attachment    *workitems.AttachmentRef `json:"attachment,omitempty"`
+	Workflow      *workitems.Workflow      `json:"workflow,omitempty"`
 }
 
 type WorkConflict struct {

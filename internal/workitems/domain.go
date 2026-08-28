@@ -60,6 +60,7 @@ type Project struct {
 	AuthorityInstanceID string `json:"authority_instance_id"`
 	Name                string `json:"name"`
 	WorkspacePath       string `json:"workspace_path,omitempty"`
+	Context             string `json:"context,omitempty"`
 	Version             uint64 `json:"version"`
 	CreatedAt           int64  `json:"created_at"`
 	UpdatedAt           int64  `json:"updated_at"`
@@ -81,6 +82,12 @@ type WorkItem struct {
 	ActivityRevision   uint64    `json:"activity_revision"`
 	BlockedReasonCode  string    `json:"blocked_reason_code,omitempty"`
 	BlockedNote        string    `json:"blocked_note,omitempty"`
+	Assignee           string    `json:"assignee,omitempty"`
+	DueAt              *int64    `json:"due_at,omitempty"`
+	Labels             []string  `json:"labels"`
+	AutomationMode     string    `json:"automation_mode"`
+	WorkflowID         string    `json:"workflow_id,omitempty"`
+	WorkflowNodeID     string    `json:"workflow_node_id,omitempty"`
 	CreatedAt          int64     `json:"created_at"`
 	UpdatedAt          int64     `json:"updated_at"`
 	AcceptedAt         *int64    `json:"accepted_at,omitempty"`
@@ -125,6 +132,42 @@ type Run struct {
 	StartedAt      int64  `json:"started_at"`
 	FinishedAt     *int64 `json:"finished_at,omitempty"`
 	TerminalReason string `json:"terminal_reason,omitempty"`
+	SessionID      string `json:"session_id,omitempty"`
+	Instruction    string `json:"instruction,omitempty"`
+	AvailableAt    int64  `json:"available_at"`
+	Attempt        int    `json:"attempt"`
+	MaxAttempts    int    `json:"max_attempts"`
+	ClaimedAt      *int64 `json:"claimed_at,omitempty"`
+	QueueReason    string `json:"queue_reason,omitempty"`
+}
+
+type WorkflowNode struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Kind        string `json:"kind"`
+	Description string `json:"description,omitempty"`
+}
+
+type WorkflowEdge struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+}
+
+type WorkflowDefinition struct {
+	Nodes []WorkflowNode `json:"nodes"`
+	Edges []WorkflowEdge `json:"edges"`
+}
+
+type Workflow struct {
+	ID          string             `json:"id"`
+	ProjectID   string             `json:"project_id"`
+	Name        string             `json:"name"`
+	Description string             `json:"description,omitempty"`
+	Version     uint64             `json:"version"`
+	Definition  WorkflowDefinition `json:"definition"`
+	CreatedAt   int64              `json:"created_at"`
+	UpdatedAt   int64              `json:"updated_at"`
+	ArchivedAt  *int64             `json:"archived_at,omitempty"`
 }
 
 // AttachmentRef stores only the durable relationship to the canonical
@@ -172,6 +215,7 @@ type ChangePayload struct {
 	Run        *Run           `json:"run,omitempty"`
 	Attachment *AttachmentRef `json:"attachment,omitempty"`
 	Activity   *Activity      `json:"activity,omitempty"`
+	Workflow   *Workflow      `json:"workflow,omitempty"`
 }
 
 type Snapshot struct {
@@ -184,6 +228,7 @@ type Snapshot struct {
 	Runs         []Run           `json:"runs"`
 	Attachments  []AttachmentRef `json:"attachments"`
 	Activities   []Activity      `json:"activities"`
+	Workflows    []Workflow      `json:"workflows"`
 }
 
 type ItemView struct {
@@ -201,6 +246,24 @@ type DeviceSnapshot struct {
 	Runs         []Run           `json:"runs"`
 	Attachments  []AttachmentRef `json:"attachments"`
 	Activities   []Activity      `json:"activities"`
+	Workflows    []Workflow      `json:"workflows"`
+}
+
+// ContextPack is the durable WorkItem projection supplied to an agent before a
+// run. It deliberately contains stable identities and canonical attachment
+// references; transport-specific media URLs are materialized by core.
+type ContextPack struct {
+	Version      int             `json:"version"`
+	GeneratedAt  int64           `json:"generated_at"`
+	Project      Project         `json:"project"`
+	Item         WorkItem        `json:"item"`
+	Dependencies []WorkItem      `json:"dependencies"`
+	Comments     []Comment       `json:"comments"`
+	Runs         []Run           `json:"runs"`
+	Attachments  []AttachmentRef `json:"attachments"`
+	SessionLinks []SessionLink   `json:"session_links"`
+	Prompt       string          `json:"prompt"`
+	Truncated    bool            `json:"truncated"`
 }
 
 type ConflictError struct {

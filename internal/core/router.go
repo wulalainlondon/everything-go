@@ -186,7 +186,7 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		"work_item_archive", "work_item_restore", "work_item_link_session", "work_item_unlink_session",
 		"work_item_dependency_add", "work_item_dependency_remove", "work_item_comment_add",
 		"work_item_comment_edit", "work_item_attachment_add", "work_item_attachment_remove",
-		"work_item_start_run", "work_item_read":
+		"work_item_start_run", "work_item_read", "work_workflow_create":
 		h.handleWorkCommand(c, cmd)
 
 	case "handoff_to_desktop":

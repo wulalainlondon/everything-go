@@ -5,6 +5,7 @@ package clientproto
 import (
 	"everything-go/internal/backend"
 	"everything-go/internal/protocol"
+	"everything-go/internal/workitems"
 )
 
 // AppV1 builds outbound frames for the mobile app's current JSON protocol.
@@ -102,33 +103,43 @@ type Command struct {
 	ClientDedupKey string
 	ContentType    string
 
-	ProjectID          string
-	WorkItemID         string
-	MutationID         string
-	ExpectedVersion    uint64
-	Lifecycle          string
-	Priority           string
-	SortKey            int64
-	Description        string
-	Outcome            string
-	NextStep           string
-	AcceptanceCriteria string
-	WorkspacePath      string
-	ThreadID           string
-	Role               string
-	DependsOnID        string
-	WorkLinkID         string
-	CommentID          string
-	WorkAttachmentID   string
-	AttachmentID       string
-	RunID              string
-	RunKind            string
-	Body               string
-	BlockedReasonCode  string
-	BlockedNote        string
-	DeliveredRevision  uint64
-	AckedRevision      uint64
-	Fields             []string
+	ProjectID           string
+	WorkItemID          string
+	MutationID          string
+	ExpectedVersion     uint64
+	Lifecycle           string
+	Priority            string
+	SortKey             int64
+	Description         string
+	Outcome             string
+	NextStep            string
+	AcceptanceCriteria  string
+	WorkspacePath       string
+	ThreadID            string
+	Role                string
+	DependsOnID         string
+	WorkLinkID          string
+	CommentID           string
+	WorkAttachmentID    string
+	AttachmentID        string
+	RunID               string
+	RunKind             string
+	Body                string
+	BlockedReasonCode   string
+	BlockedNote         string
+	Assignee            string
+	DueAt               *int64
+	Labels              []string
+	AutomationMode      string
+	WorkflowID          string
+	WorkflowNodeID      string
+	WorkflowName        string
+	WorkflowDescription string
+	WorkflowDefinition  workitems.WorkflowDefinition
+	ProjectContext      string
+	DeliveredRevision   uint64
+	AckedRevision       uint64
+	Fields              []string
 
 	Images []backend.ImageAttachment
 	Files  []backend.FileAttachment
@@ -226,33 +237,43 @@ func (AppV1) ParseCommand(in protocol.Inbound) Command {
 		ClientDedupKey: in.ClientDedupKey,
 		ContentType:    in.ContentType,
 
-		ProjectID:          in.ProjectID,
-		WorkItemID:         in.WorkItemID,
-		MutationID:         in.MutationID,
-		ExpectedVersion:    in.ExpectedVersion,
-		Lifecycle:          in.Lifecycle,
-		Priority:           in.Priority,
-		SortKey:            in.SortKey,
-		Description:        in.Description,
-		Outcome:            in.Outcome,
-		NextStep:           in.NextStep,
-		AcceptanceCriteria: in.AcceptanceCriteria,
-		WorkspacePath:      in.WorkspacePath,
-		ThreadID:           in.ThreadID,
-		Role:               in.Role,
-		DependsOnID:        in.DependsOnID,
-		WorkLinkID:         in.WorkLinkID,
-		CommentID:          in.CommentID,
-		WorkAttachmentID:   in.WorkAttachmentID,
-		AttachmentID:       in.AttachmentID,
-		RunID:              in.RunID,
-		RunKind:            in.RunKind,
-		Body:               in.Body,
-		BlockedReasonCode:  in.BlockedReasonCode,
-		BlockedNote:        in.BlockedNote,
-		DeliveredRevision:  in.DeliveredRevision,
-		AckedRevision:      in.AckedRevision,
-		Fields:             append([]string(nil), in.Fields...),
+		ProjectID:           in.ProjectID,
+		WorkItemID:          in.WorkItemID,
+		MutationID:          in.MutationID,
+		ExpectedVersion:     in.ExpectedVersion,
+		Lifecycle:           in.Lifecycle,
+		Priority:            in.Priority,
+		SortKey:             in.SortKey,
+		Description:         in.Description,
+		Outcome:             in.Outcome,
+		NextStep:            in.NextStep,
+		AcceptanceCriteria:  in.AcceptanceCriteria,
+		WorkspacePath:       in.WorkspacePath,
+		ThreadID:            in.ThreadID,
+		Role:                in.Role,
+		DependsOnID:         in.DependsOnID,
+		WorkLinkID:          in.WorkLinkID,
+		CommentID:           in.CommentID,
+		WorkAttachmentID:    in.WorkAttachmentID,
+		AttachmentID:        in.AttachmentID,
+		RunID:               in.RunID,
+		RunKind:             in.RunKind,
+		Body:                in.Body,
+		BlockedReasonCode:   in.BlockedReasonCode,
+		BlockedNote:         in.BlockedNote,
+		Assignee:            in.Assignee,
+		DueAt:               in.DueAt,
+		Labels:              in.Labels,
+		AutomationMode:      in.AutomationMode,
+		WorkflowID:          in.WorkflowID,
+		WorkflowNodeID:      in.WorkflowNodeID,
+		WorkflowName:        in.WorkflowName,
+		WorkflowDescription: in.WorkflowDescription,
+		WorkflowDefinition:  in.WorkflowDefinition,
+		ProjectContext:      in.ProjectContext,
+		DeliveredRevision:   in.DeliveredRevision,
+		AckedRevision:       in.AckedRevision,
+		Fields:              append([]string(nil), in.Fields...),
 
 		Images: inboundImagesToBackend(in.Images),
 		Files:  inboundFilesToBackend(in.Files),

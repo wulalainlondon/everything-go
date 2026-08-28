@@ -10,13 +10,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 3
+const schemaVersion = 4
 
 const schema = `
 CREATE TABLE IF NOT EXISTS work_schema (
@@ -33,6 +34,7 @@ CREATE TABLE IF NOT EXISTS work_projects (
   authority_instance_id TEXT NOT NULL,
   name TEXT NOT NULL,
   workspace_path TEXT NOT NULL DEFAULT '',
+  context TEXT NOT NULL DEFAULT '',
   version INTEGER NOT NULL DEFAULT 1,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
@@ -54,6 +56,12 @@ CREATE TABLE IF NOT EXISTS work_items (
   activity_revision INTEGER NOT NULL DEFAULT 0,
   blocked_reason_code TEXT NOT NULL DEFAULT '',
   blocked_note TEXT NOT NULL DEFAULT '',
+  assignee TEXT NOT NULL DEFAULT '',
+  due_at INTEGER,
+  labels TEXT NOT NULL DEFAULT '[]',
+  automation_mode TEXT NOT NULL DEFAULT 'manual' CHECK (automation_mode IN ('manual','auto')),
+  workflow_id TEXT NOT NULL DEFAULT '',
+  workflow_node_id TEXT NOT NULL DEFAULT '',
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   accepted_at INTEGER,
@@ -90,7 +98,27 @@ CREATE TABLE IF NOT EXISTS work_item_runs (
   started_at INTEGER NOT NULL,
   finished_at INTEGER,
   terminal_reason TEXT NOT NULL DEFAULT ''
+  ,session_id TEXT NOT NULL DEFAULT ''
+  ,instruction TEXT NOT NULL DEFAULT ''
+  ,available_at INTEGER NOT NULL DEFAULT 0
+  ,attempt INTEGER NOT NULL DEFAULT 0
+  ,max_attempts INTEGER NOT NULL DEFAULT 3
+  ,claimed_at INTEGER
+  ,queue_reason TEXT NOT NULL DEFAULT ''
 );
+
+CREATE TABLE IF NOT EXISTS work_workflows (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES work_projects(id),
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  version INTEGER NOT NULL DEFAULT 1,
+  definition TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  archived_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS work_workflows_project ON work_workflows(project_id, updated_at, id);
 
 CREATE TABLE IF NOT EXISTS work_item_comments (
   id TEXT PRIMARY KEY,
@@ -209,7 +237,7 @@ func (s *Store) backupLegacySchema(ctx context.Context) error {
 	if errors.Is(err, sql.ErrNoRows) || (err != nil && strings.Contains(err.Error(), "no such table")) {
 		return nil
 	}
-	if err != nil || (version != 1 && version != 2) {
+	if err != nil || (version != 1 && version != 2 && version != 3) {
 		return err
 	}
 	backupPath := s.dbPath + fmt.Sprintf(".pre-v%d.bak", version+1)
@@ -275,6 +303,32 @@ func (s *Store) migrate(ctx context.Context) error {
 					return err
 				}
 			}
+			fallthrough
+		case 3:
+			for _, column := range []struct {
+				table      string
+				name       string
+				definition string
+			}{
+				{"work_projects", "context", "TEXT NOT NULL DEFAULT ''"},
+				{"work_items", "assignee", "TEXT NOT NULL DEFAULT ''"},
+				{"work_items", "due_at", "INTEGER"},
+				{"work_items", "labels", "TEXT NOT NULL DEFAULT '[]'"},
+				{"work_items", "automation_mode", "TEXT NOT NULL DEFAULT 'manual'"},
+				{"work_items", "workflow_id", "TEXT NOT NULL DEFAULT ''"},
+				{"work_items", "workflow_node_id", "TEXT NOT NULL DEFAULT ''"},
+				{"work_item_runs", "session_id", "TEXT NOT NULL DEFAULT ''"},
+				{"work_item_runs", "instruction", "TEXT NOT NULL DEFAULT ''"},
+				{"work_item_runs", "available_at", "INTEGER NOT NULL DEFAULT 0"},
+				{"work_item_runs", "attempt", "INTEGER NOT NULL DEFAULT 0"},
+				{"work_item_runs", "max_attempts", "INTEGER NOT NULL DEFAULT 3"},
+				{"work_item_runs", "claimed_at", "INTEGER"},
+				{"work_item_runs", "queue_reason", "TEXT NOT NULL DEFAULT ''"},
+			} {
+				if err := addColumnIfMissing(ctx, tx, column.table, column.name, column.definition); err != nil {
+					return err
+				}
+			}
 			if _, err := tx.ExecContext(ctx, "UPDATE work_schema SET version=?", schemaVersion); err != nil {
 				return err
 			}
@@ -285,6 +339,10 @@ func (s *Store) migrate(ctx context.Context) error {
 	}
 	if _, err := tx.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS work_attachment_active_identity
 		ON work_item_attachments(work_item_id, attachment_id) WHERE removed_at IS NULL`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS work_runs_queue
+		ON work_item_runs(status, available_at, started_at, id)`); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -323,6 +381,7 @@ type CreateProjectInput struct {
 	ID            string
 	Name          string
 	WorkspacePath string
+	Context       string
 }
 
 func (s *Store) CreateProject(ctx context.Context, in CreateProjectInput) (Project, error) {
@@ -341,11 +400,11 @@ func (s *Store) CreateProject(ctx context.Context, in CreateProjectInput) (Proje
 	}
 	defer tx.Rollback()
 	project := Project{ID: id, AuthorityInstanceID: s.instanceID, Name: name,
-		WorkspacePath: strings.TrimSpace(in.WorkspacePath), Version: 1, CreatedAt: now, UpdatedAt: now}
+		WorkspacePath: strings.TrimSpace(in.WorkspacePath), Context: strings.TrimSpace(in.Context), Version: 1, CreatedAt: now, UpdatedAt: now}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO work_projects
-		(id,authority_instance_id,name,workspace_path,version,created_at,updated_at)
-		VALUES(?,?,?,?,?,?,?)`, project.ID, project.AuthorityInstanceID, project.Name,
-		project.WorkspacePath, project.Version, now, now); err != nil {
+		(id,authority_instance_id,name,workspace_path,context,version,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?)`, project.ID, project.AuthorityInstanceID, project.Name,
+		project.WorkspacePath, project.Context, project.Version, now, now); err != nil {
 		return Project{}, err
 	}
 	if _, err := recordChange(ctx, tx, "project", id, "created", project, now); err != nil {
@@ -367,6 +426,12 @@ type CreateItemInput struct {
 	AcceptanceCriteria string
 	Priority           Priority
 	SortKey            int64
+	Assignee           string
+	DueAt              *int64
+	Labels             []string
+	AutomationMode     string
+	WorkflowID         string
+	WorkflowNodeID     string
 	Actor              Actor
 }
 
@@ -387,6 +452,12 @@ func (s *Store) CreateItem(ctx context.Context, in CreateItemInput) (WorkItem, e
 	if in.SortKey == 0 {
 		in.SortKey = 1_000_000
 	}
+	if in.AutomationMode == "" {
+		in.AutomationMode = "manual"
+	}
+	if in.AutomationMode != "manual" && in.AutomationMode != "auto" {
+		return WorkItem{}, errors.New("invalid automation mode")
+	}
 	now := s.now().UnixMilli()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -396,16 +467,24 @@ func (s *Store) CreateItem(ctx context.Context, in CreateItemInput) (WorkItem, e
 	if err := s.requireProject(ctx, tx, in.ProjectID); err != nil {
 		return WorkItem{}, err
 	}
+	if err := s.requireWorkflow(ctx, tx, in.WorkflowID, in.ProjectID, in.WorkflowNodeID); err != nil {
+		return WorkItem{}, err
+	}
 	item := WorkItem{ID: in.ID, ProjectID: in.ProjectID, Title: title,
 		Description: strings.TrimSpace(in.Description), Outcome: strings.TrimSpace(in.Outcome),
 		NextStep: strings.TrimSpace(in.NextStep), AcceptanceCriteria: strings.TrimSpace(in.AcceptanceCriteria),
 		Lifecycle: LifecycleInbox, Priority: in.Priority,
-		SortKey: in.SortKey, Version: 1, CreatedAt: now, UpdatedAt: now}
+		SortKey: in.SortKey, Assignee: strings.TrimSpace(in.Assignee), DueAt: in.DueAt,
+		Labels: normalizeLabels(in.Labels), AutomationMode: in.AutomationMode,
+		WorkflowID: strings.TrimSpace(in.WorkflowID), WorkflowNodeID: strings.TrimSpace(in.WorkflowNodeID),
+		Version: 1, CreatedAt: now, UpdatedAt: now}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO work_items
-		(id,project_id,title,description,outcome,next_step,acceptance_criteria,lifecycle,priority,sort_key,version,created_at,updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, item.ID, item.ProjectID, item.Title, item.Description,
+		(id,project_id,title,description,outcome,next_step,acceptance_criteria,lifecycle,priority,sort_key,
+		 assignee,due_at,labels,automation_mode,workflow_id,workflow_node_id,version,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, item.ID, item.ProjectID, item.Title, item.Description,
 		item.Outcome, item.NextStep, item.AcceptanceCriteria,
-		item.Lifecycle, item.Priority, item.SortKey, item.Version, now, now); err != nil {
+		item.Lifecycle, item.Priority, item.SortKey, item.Assignee, item.DueAt, labelsJSON(item.Labels),
+		item.AutomationMode, item.WorkflowID, item.WorkflowNodeID, item.Version, now, now); err != nil {
 		return WorkItem{}, err
 	}
 	revision, err := recordChange(ctx, tx, "work_item", item.ID, "created", ChangePayload{Item: &item}, now)
@@ -440,6 +519,12 @@ type UpdateItemInput struct {
 	Priority           *Priority
 	BlockedReasonCode  *string
 	BlockedNote        *string
+	Assignee           *string
+	DueAt              **int64
+	Labels             *[]string
+	AutomationMode     *string
+	WorkflowID         *string
+	WorkflowNodeID     *string
 	Actor              Actor
 }
 
@@ -485,6 +570,30 @@ func (s *Store) UpdateItem(ctx context.Context, in UpdateItemInput) (WorkItem, e
 	}
 	if in.BlockedNote != nil {
 		current.BlockedNote = strings.TrimSpace(*in.BlockedNote)
+	}
+	if in.Assignee != nil {
+		current.Assignee = strings.TrimSpace(*in.Assignee)
+	}
+	if in.DueAt != nil {
+		current.DueAt = *in.DueAt
+	}
+	if in.Labels != nil {
+		current.Labels = normalizeLabels(*in.Labels)
+	}
+	if in.AutomationMode != nil {
+		if *in.AutomationMode != "manual" && *in.AutomationMode != "auto" {
+			return WorkItem{}, errors.New("invalid automation mode")
+		}
+		current.AutomationMode = *in.AutomationMode
+	}
+	if in.WorkflowID != nil {
+		current.WorkflowID = strings.TrimSpace(*in.WorkflowID)
+	}
+	if in.WorkflowNodeID != nil {
+		current.WorkflowNodeID = strings.TrimSpace(*in.WorkflowNodeID)
+	}
+	if err := s.requireWorkflow(ctx, tx, current.WorkflowID, current.ProjectID, current.WorkflowNodeID); err != nil {
+		return WorkItem{}, err
 	}
 	current.Version++
 	current.UpdatedAt = s.now().UnixMilli()
@@ -538,10 +647,12 @@ func (s *Store) MoveItem(ctx context.Context, in MoveItemInput) (WorkItem, error
 func (s *Store) writeItemMutation(ctx context.Context, tx *sql.Tx, item WorkItem, kind string, actor Actor, payload ChangePayload) (WorkItem, error) {
 	result, err := tx.ExecContext(ctx, `UPDATE work_items SET
 		title=?,description=?,outcome=?,next_step=?,acceptance_criteria=?,lifecycle=?,priority=?,sort_key=?,version=?,
-		blocked_reason_code=?,blocked_note=?,updated_at=?,accepted_at=?,cancelled_at=?,archived_at=?
+		blocked_reason_code=?,blocked_note=?,assignee=?,due_at=?,labels=?,automation_mode=?,workflow_id=?,workflow_node_id=?,
+		updated_at=?,accepted_at=?,cancelled_at=?,archived_at=?
 		WHERE id=? AND version=?`, item.Title, item.Description, item.Outcome, item.NextStep,
 		item.AcceptanceCriteria, item.Lifecycle, item.Priority,
-		item.SortKey, item.Version, item.BlockedReasonCode, item.BlockedNote, item.UpdatedAt,
+		item.SortKey, item.Version, item.BlockedReasonCode, item.BlockedNote, item.Assignee, item.DueAt,
+		labelsJSON(item.Labels), item.AutomationMode, item.WorkflowID, item.WorkflowNodeID, item.UpdatedAt,
 		item.AcceptedAt, item.CancelledAt, item.ArchivedAt, item.ID, item.Version-1)
 	if err != nil {
 		return WorkItem{}, err
@@ -988,14 +1099,14 @@ func (s *Store) Snapshot(ctx context.Context) (Snapshot, error) {
 	if err := s.db.QueryRowContext(ctx, "SELECT COALESCE(MAX(revision),0) FROM work_changes").Scan(&snap.Revision); err != nil {
 		return snap, err
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id,authority_instance_id,name,workspace_path,version,
+	rows, err := s.db.QueryContext(ctx, `SELECT id,authority_instance_id,name,workspace_path,context,version,
 		created_at,updated_at,archived_at FROM work_projects ORDER BY created_at,id`)
 	if err != nil {
 		return snap, err
 	}
 	for rows.Next() {
 		var p Project
-		if err := rows.Scan(&p.ID, &p.AuthorityInstanceID, &p.Name, &p.WorkspacePath, &p.Version,
+		if err := rows.Scan(&p.ID, &p.AuthorityInstanceID, &p.Name, &p.WorkspacePath, &p.Context, &p.Version,
 			&p.CreatedAt, &p.UpdatedAt, &p.ArchivedAt); err != nil {
 			rows.Close()
 			return snap, err
@@ -1071,7 +1182,8 @@ func (s *Store) Snapshot(ctx context.Context) (Snapshot, error) {
 		return snap, err
 	}
 	rows, err = s.db.QueryContext(ctx, `SELECT id,work_item_id,session_link_id,request_id,kind,status,
-		started_at,finished_at,terminal_reason FROM work_item_runs ORDER BY started_at,id`)
+		started_at,finished_at,terminal_reason,session_id,instruction,available_at,attempt,max_attempts,claimed_at,queue_reason
+		FROM work_item_runs ORDER BY started_at,id`)
 	if err != nil {
 		return snap, err
 	}
@@ -1079,7 +1191,9 @@ func (s *Store) Snapshot(ctx context.Context) (Snapshot, error) {
 	for rows.Next() {
 		var run Run
 		if err := rows.Scan(&run.ID, &run.WorkItemID, &run.SessionLinkID, &run.RequestID,
-			&run.Kind, &run.Status, &run.StartedAt, &run.FinishedAt, &run.TerminalReason); err != nil {
+			&run.Kind, &run.Status, &run.StartedAt, &run.FinishedAt, &run.TerminalReason,
+			&run.SessionID, &run.Instruction, &run.AvailableAt, &run.Attempt, &run.MaxAttempts,
+			&run.ClaimedAt, &run.QueueReason); err != nil {
 			return snap, err
 		}
 		snap.Runs = append(snap.Runs, run)
@@ -1118,7 +1232,11 @@ func (s *Store) Snapshot(ctx context.Context) (Snapshot, error) {
 		}
 		snap.Activities = append(snap.Activities, activity)
 	}
-	return snap, rows.Err()
+	if err := rows.Close(); err != nil {
+		return snap, err
+	}
+	snap.Workflows, err = s.listWorkflows(ctx)
+	return snap, err
 }
 
 func (s *Store) requireProject(ctx context.Context, tx *sql.Tx, id string) error {
@@ -1136,19 +1254,51 @@ func (s *Store) requireProject(ctx context.Context, tx *sql.Tx, id string) error
 }
 
 const itemSelect = `SELECT id,project_id,title,description,outcome,next_step,acceptance_criteria,lifecycle,priority,sort_key,version,
-	activity_revision,blocked_reason_code,blocked_note,created_at,updated_at,accepted_at,cancelled_at,archived_at
+	activity_revision,blocked_reason_code,blocked_note,assignee,due_at,labels,automation_mode,workflow_id,workflow_node_id,
+	created_at,updated_at,accepted_at,cancelled_at,archived_at
 	FROM work_items`
 
 type rowScanner interface{ Scan(...any) error }
 
 func scanItem(row rowScanner) (WorkItem, error) {
 	var item WorkItem
+	var labels string
 	err := row.Scan(&item.ID, &item.ProjectID, &item.Title, &item.Description, &item.Outcome,
 		&item.NextStep, &item.AcceptanceCriteria, &item.Lifecycle,
 		&item.Priority, &item.SortKey, &item.Version, &item.ActivityRevision,
-		&item.BlockedReasonCode, &item.BlockedNote, &item.CreatedAt, &item.UpdatedAt,
+		&item.BlockedReasonCode, &item.BlockedNote, &item.Assignee, &item.DueAt, &labels,
+		&item.AutomationMode, &item.WorkflowID, &item.WorkflowNodeID, &item.CreatedAt, &item.UpdatedAt,
 		&item.AcceptedAt, &item.CancelledAt, &item.ArchivedAt)
+	if err == nil {
+		_ = json.Unmarshal([]byte(labels), &item.Labels)
+		if item.Labels == nil {
+			item.Labels = []string{}
+		}
+		if item.AutomationMode == "" {
+			item.AutomationMode = "manual"
+		}
+	}
 	return item, err
+}
+
+func normalizeLabels(labels []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(labels))
+	for _, label := range labels {
+		label = strings.TrimSpace(label)
+		if label == "" || seen[label] {
+			continue
+		}
+		seen[label] = true
+		out = append(out, label)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func labelsJSON(labels []string) string {
+	body, _ := json.Marshal(normalizeLabels(labels))
+	return string(body)
 }
 
 func getItemTx(ctx context.Context, tx *sql.Tx, id string) (WorkItem, error) {

@@ -158,6 +158,7 @@ func main() {
 	// the heap-heavy parse of every transcript lands in a process that exits and
 	// returns its memory to the OS (see runSearchIndexerLoop).
 	ctx := context.Background()
+	hub.StartWorkScheduler(ctx)
 	searchWake := make(chan struct{}, 1)
 	if !*disableSearch {
 		if idx, err := search.New(filepath.Join(*dataDir, "everything_go_search.db")); err != nil {
@@ -252,6 +253,7 @@ func main() {
 	mux.Handle("/media/", media.Handler())
 	mux.Handle("/upload", filetransfer.UploadHandler())
 	mux.Handle("/files", filetransfer.DownloadHandler())
+	mux.HandleFunc("/api/work/v1/items/", hub.ServeWorkAPI)
 	mux.HandleFunc("/", hub.ServeWS)
 
 	addr := fmt.Sprintf(":%d", *port)

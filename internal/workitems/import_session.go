@@ -93,13 +93,15 @@ func (s *Store) ImportSessionDraft(ctx context.Context, in ImportSessionDraftInp
 		Description: strings.TrimSpace(in.Description), Outcome: strings.TrimSpace(in.Outcome),
 		NextStep: strings.TrimSpace(in.NextStep), AcceptanceCriteria: strings.TrimSpace(in.AcceptanceCriteria),
 		Lifecycle: LifecycleInbox, Priority: in.Priority, SortKey: in.SortKey,
+		Labels: []string{}, AutomationMode: "manual",
 		Version: 1, CreatedAt: now, UpdatedAt: now,
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO work_items
-		(id,project_id,title,description,outcome,next_step,acceptance_criteria,lifecycle,priority,sort_key,version,created_at,updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, item.ID, item.ProjectID, item.Title, item.Description,
+		(id,project_id,title,description,outcome,next_step,acceptance_criteria,lifecycle,priority,sort_key,
+		 labels,automation_mode,version,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, item.ID, item.ProjectID, item.Title, item.Description,
 		item.Outcome, item.NextStep, item.AcceptanceCriteria, item.Lifecycle, item.Priority,
-		item.SortKey, item.Version, now, now); err != nil {
+		item.SortKey, labelsJSON(item.Labels), item.AutomationMode, item.Version, now, now); err != nil {
 		return ImportSessionDraftResult{}, err
 	}
 	link := SessionLink{
@@ -140,9 +142,9 @@ func (s *Store) ImportSessionDraft(ctx context.Context, in ImportSessionDraftInp
 
 func (s *Store) ensureImportProjectTx(ctx context.Context, tx *sql.Tx, in ImportSessionDraftInput, now int64) (Project, bool, error) {
 	var project Project
-	err := tx.QueryRowContext(ctx, `SELECT id,authority_instance_id,name,workspace_path,version,created_at,updated_at,archived_at
+	err := tx.QueryRowContext(ctx, `SELECT id,authority_instance_id,name,workspace_path,context,version,created_at,updated_at,archived_at
 		FROM work_projects WHERE id=?`, in.ProjectID).Scan(&project.ID, &project.AuthorityInstanceID,
-		&project.Name, &project.WorkspacePath, &project.Version, &project.CreatedAt, &project.UpdatedAt, &project.ArchivedAt)
+		&project.Name, &project.WorkspacePath, &project.Context, &project.Version, &project.CreatedAt, &project.UpdatedAt, &project.ArchivedAt)
 	if err == nil {
 		if project.AuthorityInstanceID != s.instanceID || project.ArchivedAt != nil {
 			return Project{}, false, errors.New("project is unavailable for this authority")
@@ -162,9 +164,9 @@ func (s *Store) ensureImportProjectTx(ctx context.Context, tx *sql.Tx, in Import
 	project = Project{ID: in.ProjectID, AuthorityInstanceID: s.instanceID, Name: name,
 		WorkspacePath: strings.TrimSpace(in.WorkspacePath), Version: 1, CreatedAt: now, UpdatedAt: now}
 	_, err = tx.ExecContext(ctx, `INSERT INTO work_projects
-		(id,authority_instance_id,name,workspace_path,version,created_at,updated_at)
-		VALUES(?,?,?,?,?,?,?)`, project.ID, project.AuthorityInstanceID, project.Name,
-		project.WorkspacePath, project.Version, now, now)
+		(id,authority_instance_id,name,workspace_path,context,version,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?)`, project.ID, project.AuthorityInstanceID, project.Name,
+		project.WorkspacePath, project.Context, project.Version, now, now)
 	return project, true, err
 }
 
@@ -184,8 +186,8 @@ func (s *Store) importedSessionTx(ctx context.Context, tx *sql.Tx, sessionID str
 		return ImportSessionDraftResult{}, false, err
 	}
 	var project Project
-	err = tx.QueryRowContext(ctx, `SELECT id,authority_instance_id,name,workspace_path,version,created_at,updated_at,archived_at
+	err = tx.QueryRowContext(ctx, `SELECT id,authority_instance_id,name,workspace_path,context,version,created_at,updated_at,archived_at
 		FROM work_projects WHERE id=?`, item.ProjectID).Scan(&project.ID, &project.AuthorityInstanceID,
-		&project.Name, &project.WorkspacePath, &project.Version, &project.CreatedAt, &project.UpdatedAt, &project.ArchivedAt)
+		&project.Name, &project.WorkspacePath, &project.Context, &project.Version, &project.CreatedAt, &project.UpdatedAt, &project.ArchivedAt)
 	return ImportSessionDraftResult{Project: project, Item: item, Link: link}, err == nil, err
 }
