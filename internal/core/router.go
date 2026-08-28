@@ -62,7 +62,10 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 			helloInput.TunnelURL = tunnelURL
 			helloInput.Backends = h.cfg.Backends
 			if h.work != nil {
-				helloInput.Capabilities = []string{"work_items_v1"}
+				// work_coordination_v1 is the stable product capability. Keep the
+				// provisional work_items_v1 token during the released-client
+				// migration window; both names address the same wire schema.
+				helloInput.Capabilities = []string{"work_coordination_v1", "work_items_v1"}
 			}
 		}
 		c.enqueueEvent(h.client.HelloAck(helloInput))

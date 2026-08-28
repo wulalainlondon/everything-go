@@ -134,7 +134,7 @@ func TestWorkHelloAdvertisesCapabilityAndReconcilesFromClientCursor(t *testing.T
 	route(h, c, `{"type":"hello","device_id":"phone"}`)
 	hello := waitForType(t, c, "hello_ack")
 	capabilities, ok := hello["capabilities"].([]any)
-	if !ok || len(capabilities) != 1 || capabilities[0] != "work_items_v1" {
+	if !ok || len(capabilities) != 2 || capabilities[0] != "work_coordination_v1" || capabilities[1] != "work_items_v1" {
 		t.Fatalf("hello capabilities=%v", hello["capabilities"])
 	}
 	assertNoTypeWithin(t, c, "work_snapshot", 50*time.Millisecond)
