@@ -52,7 +52,7 @@ type threadsConversationResponse struct {
 	} `json:"error,omitempty"`
 }
 
-func (connector MetaThreadsConnector) Poll(ctx context.Context, account Account, _ PollState, secrets SecretResolver) (PollBatch, error) {
+func (connector MetaThreadsConnector) Poll(ctx context.Context, account Account, state PollState, secrets SecretResolver) (PollBatch, error) {
 	token, err := secrets.Resolve(account.CredentialRef)
 	if err != nil {
 		return PollBatch{}, err
@@ -70,13 +70,20 @@ func (connector MetaThreadsConnector) Poll(ctx context.Context, account Account,
 		return PollBatch{}, fmt.Errorf("threads_http_%d", posts.Error.Code)
 	}
 	batch := PollBatch{}
+	cursor := metaCursor{}
+	_ = json.Unmarshal(state.Cursor, &cursor)
+	initialBaseline := cursor.SinceMS == 0
+	maxSeen := cursor.SinceMS
 	for _, post := range posts.Data {
 		occurred := parseMetaTime(post.Timestamp)
+		maxSeen = maxInt64(maxSeen, occurred)
 		data, _ := json.Marshal(map[string]any{"account_id": account.ExternalAccountID, "thread_id": post.ID, "has_replies": post.HasReplies})
-		batch.Events = append(batch.Events, eventinbox.Input{Source: "meta.threads." + account.ID,
-			EventKey: "post:" + post.ID + ":" + strconv.FormatInt(occurred, 10), Kind: "post.observed", Severity: "info",
-			Title: account.DisplayName + " Threads post", Body: post.Text, URL: post.Permalink, Data: data, OccurredAt: occurred})
-		if !post.HasReplies {
+		if !initialBaseline && occurred > cursor.SinceMS {
+			batch.Events = append(batch.Events, eventinbox.Input{Source: "meta.threads." + account.ID,
+				EventKey: "post:" + post.ID + ":" + strconv.FormatInt(occurred, 10), Kind: "post.observed", Severity: "info",
+				Title: account.DisplayName + " Threads post", Body: post.Text, URL: post.Permalink, Data: data, OccurredAt: occurred})
+		}
+		if initialBaseline || !post.HasReplies {
 			continue
 		}
 		replyQuery := url.Values{"fields": {"id,text,timestamp,username,is_reply,is_reply_owned_by_me,root_post,replied_to"},
@@ -93,15 +100,21 @@ func (connector MetaThreadsConnector) Poll(ctx context.Context, account Account,
 				continue
 			}
 			replyAt := parseMetaTime(reply.Timestamp)
+			maxSeen = maxInt64(maxSeen, replyAt)
 			replyData, _ := json.Marshal(map[string]string{"account_id": account.ExternalAccountID, "thread_id": post.ID,
 				"reply_id": reply.ID, "username": reply.Username, "replied_to_id": reply.RepliedTo.ID})
-			batch.Events = append(batch.Events, eventinbox.Input{Source: "meta.threads." + account.ID,
-				EventKey: "reply:" + reply.ID, Kind: "reply.created", Severity: "info",
-				Title: account.DisplayName + " received a Threads reply", Body: reply.Text,
-				URL: post.Permalink, Data: replyData, OccurredAt: replyAt})
+			if replyAt > cursor.SinceMS {
+				batch.Events = append(batch.Events, eventinbox.Input{Source: "meta.threads." + account.ID,
+					EventKey: "reply:" + reply.ID, Kind: "reply.created", Severity: "info",
+					Title: account.DisplayName + " received a Threads reply", Body: reply.Text,
+					URL: post.Permalink, Data: replyData, OccurredAt: replyAt})
+			}
 		}
 	}
-	batch.Cursor, _ = json.Marshal(map[string]int64{"polled_at": time.Now().UnixMilli()})
+	if maxSeen == 0 {
+		maxSeen = time.Now().UnixMilli()
+	}
+	batch.Cursor, _ = json.Marshal(metaCursor{SinceMS: maxSeen})
 	return batch, nil
 }
 

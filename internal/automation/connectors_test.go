@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -71,8 +72,14 @@ func TestMetaFacebookPollNormalizesPostsAndCommentsWithoutCredentialData(t *test
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
 	})}
 	connector := MetaFacebookConnector{Client: client}
-	batch, err := connector.Poll(context.Background(), Account{ID: "judge", ExternalAccountID: "page1", DisplayName: "Judge", CredentialRef: "env:TOKEN"},
+	baseline, err := connector.Poll(context.Background(), Account{ID: "judge", ExternalAccountID: "page1", DisplayName: "Judge", CredentialRef: "env:TOKEN"},
 		PollState{Cursor: json.RawMessage(`{}`)}, staticSecrets{"env:TOKEN": "secret-token"})
+	if err != nil || len(baseline.Events) != 0 || len(baseline.Cursor) == 0 {
+		t.Fatalf("baseline=%+v err=%v", baseline, err)
+	}
+	since := time.Date(2026, 8, 29, 7, 59, 0, 0, time.UTC).UnixMilli()
+	batch, err := connector.Poll(context.Background(), Account{ID: "judge", ExternalAccountID: "page1", DisplayName: "Judge", CredentialRef: "env:TOKEN"},
+		PollState{Cursor: json.RawMessage(`{"since_ms":` + strconv.FormatInt(since, 10) + `}`)}, staticSecrets{"env:TOKEN": "secret-token"})
 	if err != nil || len(batch.Events) != 2 {
 		t.Fatalf("batch=%+v err=%v", batch, err)
 	}
@@ -135,7 +142,12 @@ func TestMetaThreadsPollsRepliesAndPublishesOnlyApprovedTextShape(t *testing.T) 
 	})}
 	connector := MetaThreadsConnector{Client: client}
 	account := Account{ID: "threads", ExternalAccountID: "user", DisplayName: "Threads", CredentialRef: "env:THREADS"}
-	batch, err := connector.Poll(context.Background(), account, PollState{}, staticSecrets{"env:THREADS": "threads-secret"})
+	baseline, err := connector.Poll(context.Background(), account, PollState{}, staticSecrets{"env:THREADS": "threads-secret"})
+	if err != nil || len(baseline.Events) != 0 {
+		t.Fatalf("baseline=%+v err=%v", baseline, err)
+	}
+	since := time.Date(2026, 8, 29, 7, 59, 0, 0, time.UTC).UnixMilli()
+	batch, err := connector.Poll(context.Background(), account, PollState{Cursor: json.RawMessage(`{"since_ms":` + strconv.FormatInt(since, 10) + `}`)}, staticSecrets{"env:THREADS": "threads-secret"})
 	if err != nil || len(batch.Events) != 2 || batch.Events[1].Kind != "reply.created" || batch.Events[1].EventKey != "reply:reply1" {
 		t.Fatalf("batch=%+v err=%v", batch, err)
 	}

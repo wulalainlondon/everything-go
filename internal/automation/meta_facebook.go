@@ -83,7 +83,12 @@ func (connector MetaFacebookConnector) Poll(ctx context.Context, account Account
 	}
 	batch := PollBatch{}
 	maxSeen := cursor.SinceMS
-	for page := 0; next != "" && page < 5; page++ {
+	initialBaseline := cursor.SinceMS == 0
+	maxPages := 5
+	if initialBaseline {
+		maxPages = 1
+	}
+	for page := 0; next != "" && page < maxPages; page++ {
 		parsed, parseErr := url.Parse(next)
 		if parseErr != nil || parsed.Scheme != "https" || parsed.Hostname() != "graph.facebook.com" {
 			return PollBatch{}, errors.New("meta_invalid_paging_url")
@@ -114,24 +119,31 @@ func (connector MetaFacebookConnector) Poll(ctx context.Context, account Account
 			}
 			maxSeen = maxInt64(maxSeen, updated)
 			data, _ := json.Marshal(map[string]any{"account_id": account.ExternalAccountID, "post_id": post.ID})
-			batch.Events = append(batch.Events, eventinbox.Input{Source: "meta.facebook." + account.ID,
-				EventKey: "post:" + post.ID + ":" + strconv.FormatInt(updated, 10), Kind: "post.updated", Severity: "info",
-				Title: account.DisplayName + " Facebook post updated", Body: post.Message, URL: post.PermalinkURL,
-				Data: data, OccurredAt: updated})
+			if !initialBaseline && updated > cursor.SinceMS {
+				batch.Events = append(batch.Events, eventinbox.Input{Source: "meta.facebook." + account.ID,
+					EventKey: "post:" + post.ID + ":" + strconv.FormatInt(updated, 10), Kind: "post.updated", Severity: "info",
+					Title: account.DisplayName + " post updated", Body: post.Message, URL: post.PermalinkURL,
+					Data: data, OccurredAt: updated})
+			}
 			for _, comment := range post.Comments.Data {
 				occurred := parseMetaTime(comment.CreatedTime)
 				maxSeen = maxInt64(maxSeen, occurred)
 				commentData, _ := json.Marshal(map[string]any{"account_id": account.ExternalAccountID, "post_id": post.ID,
 					"comment_id": comment.ID, "author_id": comment.From.ID, "author_name": comment.From.Name})
-				batch.Events = append(batch.Events, eventinbox.Input{Source: "meta.facebook." + account.ID,
-					EventKey: "comment:" + comment.ID, Kind: "comment.created", Severity: "info",
-					Title: account.DisplayName + " received a Facebook comment", Body: comment.Message,
-					URL: post.PermalinkURL, Data: commentData, OccurredAt: occurred})
+				if !initialBaseline && occurred > cursor.SinceMS {
+					batch.Events = append(batch.Events, eventinbox.Input{Source: "meta.facebook." + account.ID,
+						EventKey: "comment:" + comment.ID, Kind: "comment.created", Severity: "info",
+						Title: account.DisplayName + " received a comment", Body: comment.Message,
+						URL: post.PermalinkURL, Data: commentData, OccurredAt: occurred})
+				}
 			}
 		}
 		next = payload.Paging.Next
 	}
 	cursor.SinceMS = maxSeen
+	if cursor.SinceMS == 0 {
+		cursor.SinceMS = time.Now().UnixMilli()
+	}
 	batch.Cursor, _ = json.Marshal(cursor)
 	return batch, nil
 }
