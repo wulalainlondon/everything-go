@@ -262,10 +262,16 @@ func main() {
 		}()
 	}
 
+	transfers, err := filetransfer.NewService(*dataDir, *rootDir, hub.HTTPAuthorized)
+	if err != nil {
+		log.Fatalf("initialize file transfer: %v", err)
+	}
 	mux := http.NewServeMux()
 	mux.Handle("/media/", media.Handler())
-	mux.Handle("/upload", filetransfer.UploadHandler())
-	mux.Handle("/files", filetransfer.DownloadHandler())
+	mux.Handle("/upload", transfers.UploadHandler())
+	mux.Handle("/files", transfers.DownloadHandler())
+	mux.Handle("/api/drop/v1/uploads", transfers.DropHandler())
+	mux.Handle("/api/drop/v1/uploads/", transfers.DropHandler())
 	mux.HandleFunc("/api/work/v1/items/", hub.ServeWorkAPI)
 	mux.HandleFunc("/api/events/v1/events", hub.ServeEventAPI)
 	mux.HandleFunc("/hooks/github", hub.ServeGitHubWebhook)

@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -186,6 +187,18 @@ func (h *Hub) authValid(provided string) bool {
 		return h.pairing.LockedTo(provided)
 	}
 	return false
+}
+
+// HTTPAuthorized applies the same paired-device credential used by the
+// WebSocket handshake to auxiliary HTTP APIs. Bearer headers are preferred;
+// the query form exists only for browser media elements that cannot attach a
+// header and must never be logged or persisted as canonical data.
+func (h *Hub) HTTPAuthorized(r *http.Request) bool {
+	provided := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+	if provided == "" {
+		provided = strings.TrimSpace(r.URL.Query().Get("auth_token"))
+	}
+	return h.authValid(provided)
 }
 
 // SetSearch wires the search index (nil disables the search command family).
