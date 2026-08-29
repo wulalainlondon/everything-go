@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"time"
@@ -142,6 +143,12 @@ func (s *Store) Insert(ctx context.Context, in Input) (Event, bool, error) {
 	}
 	if in.Title == "" || len(in.Title) > 240 || len(in.Body) > 32*1024 || len(in.URL) > 2048 {
 		return Event{}, false, errors.New("event title, body, or URL exceeds its size limit")
+	}
+	if in.URL != "" {
+		parsed, err := url.Parse(in.URL)
+		if err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" {
+			return Event{}, false, errors.New("event URL must be an absolute HTTP or HTTPS URL")
+		}
 	}
 	switch in.Severity {
 	case "info", "success", "warning", "error", "critical":

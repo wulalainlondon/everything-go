@@ -268,6 +268,7 @@ func main() {
 	mux.Handle("/files", filetransfer.DownloadHandler())
 	mux.HandleFunc("/api/work/v1/items/", hub.ServeWorkAPI)
 	mux.HandleFunc("/api/events/v1/events", hub.ServeEventAPI)
+	mux.HandleFunc("/hooks/github", hub.ServeGitHubWebhook)
 	mux.HandleFunc("/", hub.ServeWS)
 
 	addr := fmt.Sprintf(":%d", *port)

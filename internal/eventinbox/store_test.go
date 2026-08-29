@@ -76,4 +76,7 @@ func TestInsertRejectsExpiredOrInvalidData(t *testing.T) {
 	if _, _, err := store.Insert(context.Background(), Input{Source: "", EventKey: "missing-source", Kind: "x", Severity: "info", Title: "x"}); err == nil {
 		t.Fatal("missing canonical source accepted")
 	}
+	if _, _, err := store.Insert(context.Background(), Input{Source: "x", EventKey: "unsafe-url", Kind: "x", Severity: "info", Title: "x", URL: "javascript:alert(1)"}); err == nil {
+		t.Fatal("unsafe canonical URL accepted")
+	}
 }

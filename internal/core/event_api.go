@@ -103,20 +103,28 @@ func (h *Hub) ServeEventAPI(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "store event: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if !deduped {
-		if err := h.broadcastOnline(h.client.ExternalEventUpsert(eventinbox.View{Event: event})); err != nil {
-			http.Error(w, "encode event: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-		if h.fcm != nil {
-			go h.fcm.NotifyExternalEvent(h.cfg.InstanceID, event.ID, event.Source, event.Kind, event.Severity, event.Title, event.Body)
-		}
+	if err := h.publishExternalEvent(event, deduped); err != nil {
+		http.Error(w, "encode event: "+err.Error(), http.StatusInternalServerError)
+		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"event_id": event.ID, "sequence": event.Sequence, "deduplicated": deduped, "status": "accepted",
 	})
+}
+
+func (h *Hub) publishExternalEvent(event eventinbox.Event, deduped bool) error {
+	if deduped {
+		return nil
+	}
+	if err := h.broadcastOnline(h.client.ExternalEventUpsert(eventinbox.View{Event: event})); err != nil {
+		return err
+	}
+	if h.fcm != nil {
+		go h.fcm.NotifyExternalEvent(h.cfg.InstanceID, event.ID, event.Source, event.Kind, event.Severity, event.Title, event.Body)
+	}
+	return nil
 }
 
 func (h *Hub) eventIngressAuthorized(r *http.Request) bool {
