@@ -94,7 +94,7 @@ func (h *Hub) ServeGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if ignored {
-		writeGitHubWebhookResponse(w, http.StatusAccepted, map[string]any{"status": "ignored"})
+		writeWebhookResponse(w, http.StatusAccepted, map[string]any{"status": "ignored"})
 		return
 	}
 	event, deduped, err := h.events.Insert(r.Context(), input)
@@ -106,7 +106,7 @@ func (h *Hub) ServeGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "encode github event: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	writeGitHubWebhookResponse(w, http.StatusAccepted, map[string]any{
+	writeWebhookResponse(w, http.StatusAccepted, map[string]any{
 		"status": "accepted", "event_id": event.ID, "deduplicated": deduped,
 	})
 }
@@ -238,7 +238,7 @@ func clipUTF8Bytes(value string, limit int) string {
 	return strings.TrimSpace(value[:end]) + "…"
 }
 
-func writeGitHubWebhookResponse(w http.ResponseWriter, status int, payload map[string]any) {
+func writeWebhookResponse(w http.ResponseWriter, status int, payload map[string]any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(payload)
