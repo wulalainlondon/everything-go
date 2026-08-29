@@ -65,7 +65,7 @@ func (h *Hub) projectWorkRun(sessionID, requestID, phase, reason string) {
 		status = "succeeded"
 	case "waiting":
 		status = "waiting_user"
-	case "running", "queued", "failed", "interrupted":
+	case "running", "failed", "interrupted":
 	default:
 		return
 	}

@@ -181,7 +181,7 @@ func (s *Store) RecoverQueue(ctx context.Context) (int64, error) {
 
 func (s *Store) MarkRunSubmitted(ctx context.Context, runID string) error {
 	result, err := s.db.ExecContext(ctx, `UPDATE work_item_runs SET status='submitted',queue_reason='client_submitted'
-		WHERE id=? AND finished_at IS NULL AND status='queued'`, runID)
+		WHERE id=? AND finished_at IS NULL AND status IN ('queued','dispatching')`, runID)
 	if err != nil {
 		return err
 	}
@@ -200,10 +200,15 @@ func (s *Store) ClaimNextRun(ctx context.Context, now int64) (Run, WorkItem, boo
 	}
 	defer tx.Rollback()
 	var run Run
-	err = tx.QueryRowContext(ctx, `SELECT id,work_item_id,session_link_id,request_id,kind,status,
+	err = tx.QueryRowContext(ctx, `SELECT r.id,r.work_item_id,r.session_link_id,r.request_id,r.kind,r.status,
 		started_at,finished_at,terminal_reason,session_id,instruction,available_at,attempt,max_attempts,claimed_at,queue_reason
-		FROM work_item_runs WHERE finished_at IS NULL AND status IN ('queued','deferred')
-		AND available_at<=? AND attempt<max_attempts ORDER BY available_at,started_at,id LIMIT 1`, now).Scan(
+		FROM work_item_runs r JOIN work_items w ON w.id=r.work_item_id
+		WHERE r.finished_at IS NULL AND r.status IN ('queued','deferred')
+		AND r.available_at<=? AND r.attempt<r.max_attempts
+		ORDER BY CASE w.priority
+			WHEN 'urgent' THEN 400 WHEN 'high' THEN 300 WHEN 'medium' THEN 200
+			WHEN 'low' THEN 100 ELSE 0 END DESC,
+			r.available_at,r.started_at,r.id LIMIT 1`, now).Scan(
 		&run.ID, &run.WorkItemID, &run.SessionLinkID, &run.RequestID, &run.Kind, &run.Status,
 		&run.StartedAt, &run.FinishedAt, &run.TerminalReason, &run.SessionID, &run.Instruction,
 		&run.AvailableAt, &run.Attempt, &run.MaxAttempts, &run.ClaimedAt, &run.QueueReason)
@@ -268,7 +273,9 @@ func (s *Store) DeferRun(ctx context.Context, runID string, availableAt int64, r
 func (s *Store) EnqueueAutomaticRuns(ctx context.Context) ([]Run, error) {
 	rows, err := s.db.QueryContext(ctx, itemSelect+` WHERE lifecycle='ready' AND automation_mode='auto'
 		AND archived_at IS NULL AND NOT EXISTS (SELECT 1 FROM work_item_runs r WHERE r.work_item_id=work_items.id AND r.finished_at IS NULL)
-		ORDER BY priority DESC,sort_key,id`)
+		ORDER BY CASE priority
+			WHEN 'urgent' THEN 400 WHEN 'high' THEN 300 WHEN 'medium' THEN 200
+			WHEN 'low' THEN 100 ELSE 0 END DESC,sort_key,id`)
 	if err != nil {
 		return nil, err
 	}

@@ -69,6 +69,19 @@ func (s *Session) QueueLen() int {
 	return len(mb)
 }
 
+// CanDispatchAutomatic reports whether an automatic durable Run may be handed
+// to this Session without pre-filling its in-memory mailbox. Human commands
+// that race after this check are still serialized by Submit; this gate keeps a
+// busy Session's automatic work authoritative in the durable Work queue.
+func (s *Session) CanDispatchAutomatic() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state != Idle {
+		return false
+	}
+	return s.mailbox == nil || len(s.mailbox) == 0
+}
+
 // Submit enqueues a turn for serial execution. The worker runs fn, then waits
 // for the turn's terminal event (EndTurn) before pulling the next one, so two
 // turns for the same session never overlap. Returns false if the session is

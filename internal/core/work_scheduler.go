@@ -77,6 +77,10 @@ func (h *Hub) dispatchQueuedRun(ctx context.Context, run workitems.Run) bool {
 		h.deferQueuedRun(ctx, run, time.Now().Add(time.Minute), "session_unavailable")
 		return false
 	}
+	if !s.CanDispatchAutomatic() {
+		h.deferQueuedRun(ctx, run, time.Now().Add(5*time.Second), "session_busy")
+		return false
+	}
 	if !h.controls.MobileMayWrite(run.SessionID) {
 		h.deferQueuedRun(ctx, run, time.Now().Add(30*time.Second), "desktop_controlled")
 		return false
@@ -95,8 +99,13 @@ func (h *Hub) dispatchQueuedRun(ctx context.Context, run workitems.Run) bool {
 	}
 	pack.Prompt, pack.Truncated = workitems.RenderContextPrompt(pack, 24_000, pack.Truncated)
 	content := workRunContent(pack, run.Instruction, h.cfg.Port)
-	h.updateRuntime(run.SessionID, "queued", run.RequestID, s.QueueLen()+1, "", "")
 	accepted := s.Submit(func() {
+		if err := h.work.MarkRunSubmitted(context.Background(), run.ID); err != nil {
+			log.Printf("[work-queue] mark submitted %s: %v", run.ID, err)
+			h.updateRuntime(run.SessionID, "failed", run.RequestID, 0, "failed", "durable dispatch receipt failed")
+			s.EndTurn()
+			return
+		}
 		h.updateRuntime(run.SessionID, "running", run.RequestID, s.QueueLen(), "", "")
 		if err := h.exec.Send(context.Background(), s, run.RequestID, content, nil, nil); err != nil {
 			if errors.Is(err, backend.ErrThreadActiveWriter) {
@@ -109,6 +118,7 @@ func (h *Hub) dispatchQueuedRun(ctx context.Context, run workitems.Run) bool {
 		h.updateRuntime(run.SessionID, "failed", run.RequestID, 0, "failed", "session is closed")
 		return false
 	}
+	h.updateRuntime(run.SessionID, "queued", run.RequestID, s.QueueLen(), "", "")
 	return true
 }
 

@@ -2,9 +2,9 @@ package workitems
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestContextPackIncludesProjectAndPreservesHumanAcceptanceContract(t *testing.T) {
@@ -85,8 +85,8 @@ func TestPersistentRunQueueClaimsOnceDefersAndRecovers(t *testing.T) {
 	if err != nil || !ok || claimed.Attempt != 2 {
 		t.Fatalf("deferred claim=%+v ok=%v err=%v", claimed, ok, err)
 	}
-	if err := s.MarkRunSubmitted(ctx, run.ID); !errors.Is(err, ErrConflict) {
-		t.Fatalf("dispatching run marked submitted: %v", err)
+	if err := s.MarkRunSubmitted(ctx, run.ID); err != nil {
+		t.Fatalf("dispatching run receipt failed: %v", err)
 	}
 	if count, err := s.RecoverQueue(ctx); err != nil || count != 1 {
 		t.Fatalf("recover count=%d err=%v", count, err)
@@ -94,5 +94,43 @@ func TestPersistentRunQueueClaimsOnceDefersAndRecovers(t *testing.T) {
 	claimed, _, ok, err = s.ClaimNextRun(ctx, run.AvailableAt+5000)
 	if err != nil || !ok || claimed.QueueReason != "" {
 		t.Fatalf("recovered claim=%+v ok=%v err=%v", claimed, ok, err)
+	}
+}
+
+func TestPersistentRunQueueUsesSemanticPriorityOrder(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	if _, err := s.CreateProject(ctx, CreateProjectInput{ID: "p1", Name: "P"}); err != nil {
+		t.Fatal(err)
+	}
+	createRun := func(itemID, sessionID string, priority Priority) {
+		item, err := s.CreateItem(ctx, CreateItemInput{ID: itemID, ProjectID: "p1", Title: itemID, Priority: priority})
+		if err != nil {
+			t.Fatal(err)
+		}
+		item = move(t, s, item, LifecycleReady, ActorUser)
+		_, item, err = s.LinkSession(ctx, LinkSessionInput{ID: "link-" + itemID, WorkItemID: item.ID,
+			SessionID: sessionID, ExpectedVersion: item.Version, Actor: Actor{Type: ActorUser}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := s.StartRun(ctx, StartRunInput{ID: "run-" + itemID, WorkItemID: item.ID,
+			SessionID: sessionID, RequestID: "req-" + itemID, ExpectedVersion: item.Version,
+			Actor: Actor{Type: ActorUser}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	createRun("low", "s-low", PriorityLow)
+	createRun("urgent", "s-urgent", PriorityUrgent)
+	createRun("high", "s-high", PriorityHigh)
+
+	for _, want := range []string{"run-urgent", "run-high", "run-low"} {
+		run, _, ok, err := s.ClaimNextRun(ctx, s.now().UnixMilli())
+		if err != nil || !ok || run.ID != want {
+			t.Fatalf("claim=%+v ok=%v err=%v want=%s", run, ok, err, want)
+		}
+		if _, _, err := s.DeferRun(ctx, run.ID, s.now().Add(time.Hour).UnixMilli(), "test_complete"); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

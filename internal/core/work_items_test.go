@@ -85,6 +85,64 @@ func TestWorkStartRunUsesSessionActorAndProjectsSuccessToReview(t *testing.T) {
 	t.Fatalf("explicit successful run did not reach review: %+v", item)
 }
 
+func TestAutomaticWorkRunStaysDurableWhileSessionBusy(t *testing.T) {
+	h, exec := newTestHub(t)
+	sent := make(chan struct{}, 1)
+	exec.onSend = func(_ *session.Session, _, _ string) { sent <- struct{}{} }
+	service := attachWorkService(t, h, t.TempDir())
+	c := newTestClient(h)
+	route(h, c, `{"type":"new_session","session_id":"s-busy","name":"Busy","backend":"codex"}`)
+	_ = waitForType(t, c, "session_created")
+	s, ok := h.registry.Get("s-busy")
+	if !ok {
+		t.Fatal("session missing")
+	}
+	s.Submit(func() {})
+	deadline := time.Now().Add(time.Second)
+	for s.State() != session.Streaming && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	ctx := context.Background()
+	project, err := service.CreateProject(ctx, workitems.CreateProjectInput{ID: "p-busy", Name: "P"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err := service.CreateItem(ctx, workitems.CreateItemInput{ID: "wi-busy", ProjectID: project.ID, Title: "Queued"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err = service.MoveItem(ctx, workitems.MoveItemInput{ID: item.ID, ExpectedVersion: item.Version,
+		Lifecycle: workitems.LifecycleReady, Actor: workitems.Actor{Type: workitems.ActorUser}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, item, err = service.LinkSession(ctx, workitems.LinkSessionInput{ID: "link-busy", WorkItemID: item.ID,
+		SessionID: s.ID, ExpectedVersion: item.Version, Actor: workitems.Actor{Type: workitems.ActorUser}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, _, err := service.StartRun(ctx, workitems.StartRunInput{ID: "run-busy", WorkItemID: item.ID,
+		SessionID: s.ID, RequestID: "req-busy", ExpectedVersion: item.Version, Actor: workitems.Actor{Type: workitems.ActorSystem}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, _, claimedOK, err := service.ClaimNextRun(ctx, run.AvailableAt)
+	if err != nil || !claimedOK {
+		t.Fatalf("claim=%+v ok=%v err=%v", claimed, claimedOK, err)
+	}
+	if h.dispatchQueuedRun(ctx, claimed) {
+		t.Fatal("busy session accepted automatic run")
+	}
+	if len(sent) != 0 || s.QueueLen() != 0 {
+		t.Fatalf("automatic run entered in-memory queue: sends=%d queued=%d", len(sent), s.QueueLen())
+	}
+	snapshot, err := service.Snapshot(ctx)
+	if err != nil || len(snapshot.Runs) != 1 || snapshot.Runs[0].Status != "deferred" || snapshot.Runs[0].QueueReason != "session_busy" {
+		t.Fatalf("snapshot=%+v err=%v", snapshot, err)
+	}
+	s.EndTurn()
+}
+
 func TestWorkRequestOwnershipRemainsDurableAfterTerminalProjection(t *testing.T) {
 	h, _ := newTestHub(t)
 	service := attachWorkService(t, h, t.TempDir())
