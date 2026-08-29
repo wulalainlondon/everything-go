@@ -388,7 +388,7 @@ func (h *Hub) handleWorkCommand(c *Client, cmd clientproto.Command) {
 		// Reuse the ordinary Session actor and mobile/desktop control lease. The
 		// durable run exists before submission, so runtime projection is ordered.
 		h.route(ctx, c, clientproto.Command{Kind: "message", SessionID: cmd.SessionID,
-			RequestID: cmd.RequestID, Content: workRunContent(pack, cmd.Content, h.cfg.Port)})
+			RequestID: cmd.RequestID, Content: h.workRunContent(pack, cmd.Content, h.cfg.Port)})
 
 	case "work_item_read":
 		view, err := h.work.MarkRead(ctx, c.deviceID, cmd.WorkItemID, cmd.Revision)
@@ -400,10 +400,13 @@ func (h *Hub) handleWorkCommand(c *Client, cmd clientproto.Command) {
 	}
 }
 
-func workRunContent(pack workitems.ContextPack, instruction string, port int) string {
+func (h *Hub) workRunContent(pack workitems.ContextPack, instruction string, port int) string {
 	api := ""
 	if pack.Item.ID != "" {
 		api = fmt.Sprintf("\n## Bridge Work API\nRead current context: GET http://127.0.0.1:%d/api/work/v1/items/%s/context\nRecord progress with POST http://127.0.0.1:%d/api/work/v1/items/%s/events using the current expected_version. Allowed actions: comment, progress, update_next_step, blocked, clear_blocked, request_review. The API cannot mark work done.\n", port, pack.Item.ID, port, pack.Item.ID)
+	}
+	if h.automation != nil {
+		api += fmt.Sprintf("If and only if the trusted operator policy explicitly asks for a provider action draft, propose one with POST http://127.0.0.1:%d/api/automation/v1/proposals using JSON fields: id, connector_account_id, work_item_id, run_id, action_type, target_id, payload, display_preview. Allowed initial actions are facebook.page_post.publish, facebook.comment.reply, instagram.comment.reply, and threads.post.publish; payload is {\"message\":\"...\"}. Proposal creation does not execute it; a human must approve the exact payload hash.\n", port)
 	}
 	return pack.Prompt + api + "\n[User instruction]\n" + strings.TrimSpace(instruction)
 }
@@ -420,6 +423,7 @@ func (h *Hub) completeWorkMutationRange(c *Client, mutationID string, event prot
 		firstRevision = event.Revision
 	}
 	h.broadcastWorkRange(firstRevision)
+	h.WakeAutomationScheduler()
 	go func() {
 		if _, err := h.work.CompactChanges(context.Background()); err != nil {
 			log.Printf("[work] compact changes: %v", err)

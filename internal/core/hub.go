@@ -21,6 +21,7 @@ import (
 	"github.com/pion/webrtc/v4"
 
 	"everything-go/internal/attachmentjournal"
+	"everything-go/internal/automation"
 	"everything-go/internal/backend"
 	"everything-go/internal/clientproto"
 	"everything-go/internal/eventinbox"
@@ -57,26 +58,28 @@ type Config struct {
 // the executor.Sink (Emit broadcasts an event to connected clients, or buffers
 // it when none are connected so a reconnecting client can recover it).
 type Hub struct {
-	registry    *session.Registry
-	exec        executor.Executor
-	shells      *runtime.ShellManager
-	pairing     *governance.Pairing
-	perms       *governance.PermissionManager
-	offline     *governance.OfflineBuffer
-	goals       *governance.GoalStateStore
-	search      *search.Index
-	fcm         *fcm.Notifier
-	feed        *feed.Store
-	inbox       *inbox.Store
-	mediaScan   *media.Scanner
-	attachments *attachmentjournal.Store
-	controls    *governance.SessionControlStore
-	runtimes    *runtimejournal.Store
-	work        *workitems.Service
-	events      *eventinbox.Store
-	cfg         Config
-	client      clientproto.AppV1
-	gen         string // per-boot generation id
+	registry          *session.Registry
+	exec              executor.Executor
+	shells            *runtime.ShellManager
+	pairing           *governance.Pairing
+	perms             *governance.PermissionManager
+	offline           *governance.OfflineBuffer
+	goals             *governance.GoalStateStore
+	search            *search.Index
+	fcm               *fcm.Notifier
+	feed              *feed.Store
+	inbox             *inbox.Store
+	mediaScan         *media.Scanner
+	attachments       *attachmentjournal.Store
+	controls          *governance.SessionControlStore
+	runtimes          *runtimejournal.Store
+	work              *workitems.Service
+	events            *eventinbox.Store
+	automation        *automation.Store
+	automationManager *automation.Manager
+	cfg               Config
+	client            clientproto.AppV1
+	gen               string // per-boot generation id
 
 	iceServers []webrtc.ICEServer // STUN/TURN for WebRTC answers (default: Google STUN)
 
@@ -124,9 +127,11 @@ type Hub struct {
 	// WorkItem mutations are serialized around the durable device/mutation-id
 	// lookup and result write. Entity versions still provide DB-level conflict
 	// safety; this lock prevents two concurrent retry frames from both running.
-	workMutationMu sync.Mutex
-	workWake       chan struct{}
-	workScheduler  atomic.Bool
+	workMutationMu      sync.Mutex
+	workWake            chan struct{}
+	workScheduler       atomic.Bool
+	automationWake      chan struct{}
+	automationScheduler atomic.Bool
 }
 
 func NewHub(reg *session.Registry, cfg Config, pairing *governance.Pairing, port int) *Hub {
@@ -151,6 +156,7 @@ func NewHub(reg *session.Registry, cfg Config, pairing *governance.Pairing, port
 		runtimes:          runtimejournal.New(cfg.DataDir),
 		attachmentReplays: make(map[string]*attachmentReplayLease),
 		workWake:          make(chan struct{}, 1),
+		automationWake:    make(chan struct{}, 1),
 	}
 	// No Session worker can be active while a new Hub is being constructed.
 	// Recover stale persisted phases exactly once here, never during reconnect.

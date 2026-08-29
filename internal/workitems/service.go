@@ -87,6 +87,10 @@ func (s *Service) BuildContextPack(ctx context.Context, itemID string, maxCharac
 	return s.store.BuildContextPack(ctx, itemID, maxCharacters)
 }
 
+func (s *Service) HasActiveRun(ctx context.Context, workItemID string) (bool, error) {
+	return s.store.HasActiveRun(ctx, workItemID)
+}
+
 func (s *Service) Snapshot(ctx context.Context) (Snapshot, error) {
 	return s.store.Snapshot(ctx)
 }

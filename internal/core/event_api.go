@@ -124,6 +124,7 @@ func (h *Hub) publishExternalEvent(event eventinbox.Event, deduped bool) error {
 	if h.fcm != nil {
 		go h.fcm.NotifyExternalEvent(h.cfg.InstanceID, event.ID, event.Source, event.Kind, event.Severity, event.Title, event.Body)
 	}
+	h.routeExternalEvent(event)
 	return nil
 }
 

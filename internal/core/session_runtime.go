@@ -75,8 +75,10 @@ func (h *Hub) projectWorkRun(sessionID, requestID, phase, reason string) {
 		return
 	}
 	if !update.Changed {
+		h.projectAutomationRun(requestID, status, reason)
 		return
 	}
+	h.projectAutomationRun(requestID, status, reason)
 	h.broadcastWorkRevision(update.Item.ActivityRevision)
 	if update.Attention != "" && h.fcm != nil {
 		go h.fcm.NotifyWorkAttention(h.cfg.InstanceID, update.Item.ID, update.Item.Title,

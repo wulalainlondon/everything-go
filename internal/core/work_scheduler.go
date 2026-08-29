@@ -98,7 +98,7 @@ func (h *Hub) dispatchQueuedRun(ctx context.Context, run workitems.Run) bool {
 		pack.Attachments[i] = h.materializeWorkAttachment(pack.Attachments[i])
 	}
 	pack.Prompt, pack.Truncated = workitems.RenderContextPrompt(pack, 24_000, pack.Truncated)
-	content := workRunContent(pack, run.Instruction, h.cfg.Port)
+	content := h.workRunContent(pack, run.Instruction, h.cfg.Port)
 	accepted := s.Submit(func() {
 		if err := h.work.MarkRunSubmitted(context.Background(), run.ID); err != nil {
 			log.Printf("[work-queue] mark submitted %s: %v", run.ID, err)

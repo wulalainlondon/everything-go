@@ -70,6 +70,9 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 			if h.events != nil {
 				helloInput.Capabilities = append(helloInput.Capabilities, "event_inbox_v1")
 			}
+			if h.automation != nil {
+				helloInput.Capabilities = append(helloInput.Capabilities, "external_automation_v1")
+			}
 		}
 		c.enqueueEvent(h.client.HelloAck(helloInput))
 		// A provisional LAN client receives only enough information to complete
@@ -92,6 +95,9 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 			} else {
 				log.Printf("[events] snapshot device=%s: %v", c.deviceID, err)
 			}
+		}
+		if h.automation != nil {
+			c.enqueueEvent(h.automationSnapshotEvent())
 		}
 		// Work reconciliation is client-cursor driven. The client responds to
 		// the advertised capability with work_sync_request using the revision it

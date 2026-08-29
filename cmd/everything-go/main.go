@@ -27,6 +27,7 @@ import (
 	"syscall"
 	"time"
 
+	"everything-go/internal/automation"
 	"everything-go/internal/backend"
 	"everything-go/internal/core"
 	"everything-go/internal/eventinbox"
@@ -146,6 +147,17 @@ func main() {
 	}
 	defer eventStore.Close()
 	hub.SetEventInbox(eventStore)
+	automationStore, err := automation.Open(*dataDir, instanceID)
+	if err != nil {
+		log.Fatalf("open external automation: %v", err)
+	}
+	defer automationStore.Close()
+	if created, bootstrapErr := automation.BootstrapAccountsFromEnv(context.Background(), automationStore); bootstrapErr != nil {
+		log.Printf("bootstrap connector accounts: %v", bootstrapErr)
+	} else if created > 0 {
+		log.Printf("bootstrapped %d connector account(s)", created)
+	}
+	hub.SetAutomation(automationStore)
 
 	switch *execName {
 	case "go":
@@ -176,6 +188,7 @@ func main() {
 	// returns its memory to the OS (see runSearchIndexerLoop).
 	ctx := context.Background()
 	hub.StartWorkScheduler(ctx)
+	hub.StartAutomationScheduler(ctx)
 	searchDirty := newDirtyPathQueue(defaultDirtyPathLimit)
 	nativeWatcherActive := !*disableNativeWatcher && strings.TrimSpace(os.Getenv("EVERYTHING_GO_NATIVE_WATCH")) != "0"
 	if !*disableSearch {
@@ -274,9 +287,11 @@ func main() {
 	mux.Handle("/api/drop/v1/uploads/", transfers.DropHandler())
 	mux.HandleFunc("/api/work/v1/items/", hub.ServeWorkAPI)
 	mux.HandleFunc("/api/events/v1/events", hub.ServeEventAPI)
+	mux.HandleFunc("/api/automation/v1/", hub.ServeAutomationAPI)
 	mux.HandleFunc("/hooks/github", hub.ServeGitHubWebhook)
 	mux.HandleFunc("/hooks/apple-app-store", hub.ServeAppStoreWebhook)
 	mux.HandleFunc("/hooks/apple-app-store/", hub.ServeAppStoreWebhook)
+	mux.HandleFunc("/hooks/meta/", hub.ServeMetaWebhook)
 	mux.HandleFunc("/", hub.ServeWS)
 
 	addr := fmt.Sprintf(":%d", *port)
