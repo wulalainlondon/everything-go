@@ -54,4 +54,4 @@ jobs:
         run: |
           cd "$RUNNER_TEMP/input"
           shasum -a 256 "$ASSET_NAME" > "$ASSET_NAME.sha256"
-          gh release upload "$RELEASE_TAG" "$ASSET_NAME" "$ASSET_NAME.sha256" --clobber
+          gh release upload "$RELEASE_TAG" "$ASSET_NAME" "$ASSET_NAME.sha256" --clobber --repo "$GITHUB_REPOSITORY"
