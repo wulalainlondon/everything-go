@@ -32,7 +32,19 @@ func BootstrapAccountsFromEnv(ctx context.Context, store *Store) (int, error) {
 		if account.ExternalAccountID == "" {
 			continue
 		}
-		if _, err := store.GetAccount(ctx, account.ID); err == nil {
+		if existing, err := store.GetAccount(ctx, account.ID); err == nil {
+			if strings.HasPrefix(existing.Provider, "meta.") && webhookReady && !existing.WebhookEnabled {
+				existing.WebhookEnabled = true
+				if existing.AppSecretRef == "" {
+					existing.AppSecretRef = account.AppSecretRef
+				}
+				if existing.VerifyTokenRef == "" {
+					existing.VerifyTokenRef = account.VerifyTokenRef
+				}
+				if _, _, updateErr := store.UpsertAccount(ctx, existing, 0); updateErr != nil {
+					return created, updateErr
+				}
+			}
 			continue
 		} else if !errors.Is(err, ErrNotFound) {
 			return created, err

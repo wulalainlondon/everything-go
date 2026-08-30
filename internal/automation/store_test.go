@@ -248,3 +248,32 @@ func TestBootstrapAccountsRequiresRuntimeCapabilitiesAndPreservesExistingConfig(
 		t.Fatal("bootstrap overwrote operator configuration")
 	}
 }
+
+func TestBootstrapPromotesExistingMetaWebhookOnlyWhenSecretsAreComplete(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	t.Setenv("FB_JUDGE_PAGE_ID", "judge-page")
+	t.Setenv("FB_JUDGE_PAGE_TOKEN", "page-token")
+	t.Setenv("META_GRAPH_API_VERSION", "v26.0")
+	if _, _, err := store.UpsertAccount(ctx, Account{ID: "facebook-judge", Provider: "meta.facebook",
+		ExternalAccountID: "judge-page", DisplayName: "Judge", CredentialRef: "env:FB_JUDGE_PAGE_TOKEN",
+		Enabled: true, WebhookEnabled: false, PollEnabled: true, PollIntervalSeconds: 300}, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := BootstrapAccountsFromEnv(ctx, store); err != nil {
+		t.Fatal(err)
+	}
+	account, _ := store.GetAccount(ctx, "facebook-judge")
+	if account.WebhookEnabled {
+		t.Fatal("incomplete webhook secrets enabled an existing account")
+	}
+	t.Setenv("META_APP_SECRET", "app-secret")
+	t.Setenv("META_WEBHOOK_VERIFY_TOKEN", "verify-secret")
+	if _, err := BootstrapAccountsFromEnv(ctx, store); err != nil {
+		t.Fatal(err)
+	}
+	account, _ = store.GetAccount(ctx, "facebook-judge")
+	if !account.WebhookEnabled || account.AppSecretRef != "env:META_APP_SECRET" || account.VerifyTokenRef != "env:META_WEBHOOK_VERIFY_TOKEN" {
+		t.Fatalf("account was not safely promoted: %+v", account)
+	}
+}
