@@ -132,6 +132,53 @@ func TestRouteBatchesBurstEventsByProviderObject(t *testing.T) {
 	}
 }
 
+func TestRemoteRouteRequiresReviewOnlyAndPreservesBatchEventOrder(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	base := Route{ID: "relay", Name: "Relay player reports", Enabled: true,
+		SourcePattern: "meta.facebook.judge", KindPattern: "message.received", HandlingMode: AnalyzeForReview,
+		TargetInstanceID: "morrie", TargetWorkItemID: "wi-player", TargetSessionID: "session-player",
+		Priority: "high", DebounceSeconds: 10, MaxBatchEvents: 10}
+	if _, _, err := store.UpsertRoute(ctx, base, 0); err == nil {
+		t.Fatal("remote route without review_only was accepted")
+	}
+	base.ReviewOnly = true
+	if _, _, err := store.UpsertRoute(ctx, base, 0); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"m1", "m2"} {
+		data, _ := json.Marshal(map[string]string{"conversation_id": "player-1"})
+		if _, _, err := store.RouteEvent(ctx, eventinbox.Event{ID: id, Source: "meta.facebook.judge",
+			Kind: "message.received", Severity: "info", Title: id, Data: data}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil || len(snapshot.Batches) != 1 {
+		t.Fatalf("snapshot=%+v err=%v", snapshot, err)
+	}
+	leader, ok, err := store.ClaimNextBinding(ctx, snapshot.Batches[0].ClosesAt)
+	if err != nil || !ok || leader.TargetInstanceID != "morrie" || !leader.ReviewOnly {
+		t.Fatalf("leader=%+v ok=%v err=%v", leader, ok, err)
+	}
+	ids, err := store.EventIDsForBinding(ctx, leader)
+	if err != nil || strings.Join(ids, ",") != "m1,m2" {
+		t.Fatalf("ids=%v err=%v", ids, err)
+	}
+	if err := store.BindRun(ctx, leader.ID, "relay-job", "relay-job"); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := store.CompleteRelay(ctx, "relay-job", "review_ready", "", "Check reward ledger and restore the missing items."); err != nil || !changed {
+		t.Fatalf("complete changed=%v err=%v", changed, err)
+	}
+	snapshot, _ = store.Snapshot(ctx)
+	for _, binding := range snapshot.Bindings {
+		if binding.Status != "review" || !strings.Contains(binding.Result, "reward ledger") {
+			t.Fatalf("relay result not projected: %+v", binding)
+		}
+	}
+}
+
 func TestProposalApprovalBindsExactPayloadHashAndIsIdempotent(t *testing.T) {
 	store := openTestStore(t)
 	ctx := context.Background()

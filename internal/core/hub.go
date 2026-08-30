@@ -33,6 +33,7 @@ import (
 	"everything-go/internal/media"
 	"everything-go/internal/nativewatch"
 	"everything-go/internal/protocol"
+	"everything-go/internal/relay"
 	"everything-go/internal/runtime"
 	"everything-go/internal/runtimejournal"
 	"everything-go/internal/search"
@@ -77,6 +78,8 @@ type Hub struct {
 	events            *eventinbox.Store
 	automation        *automation.Store
 	automationManager *automation.Manager
+	relay             *relay.Store
+	relayPeers        relay.Peers
 	cfg               Config
 	client            clientproto.AppV1
 	gen               string // per-boot generation id
@@ -132,6 +135,10 @@ type Hub struct {
 	workScheduler       atomic.Bool
 	automationWake      chan struct{}
 	automationScheduler atomic.Bool
+	relayWake           chan struct{}
+	relayScheduler      atomic.Bool
+	relayNonceMu        sync.Mutex
+	relayNonces         map[string]int64
 }
 
 func NewHub(reg *session.Registry, cfg Config, pairing *governance.Pairing, port int) *Hub {
@@ -157,6 +164,8 @@ func NewHub(reg *session.Registry, cfg Config, pairing *governance.Pairing, port
 		attachmentReplays: make(map[string]*attachmentReplayLease),
 		workWake:          make(chan struct{}, 1),
 		automationWake:    make(chan struct{}, 1),
+		relayWake:         make(chan struct{}, 1),
+		relayNonces:       make(map[string]int64),
 	}
 	// No Session worker can be active while a new Hub is being constructed.
 	// Recover stale persisted phases exactly once here, never during reconnect.
@@ -179,6 +188,10 @@ func NewHub(reg *session.Registry, cfg Config, pairing *governance.Pairing, port
 // SetExecutor wires the backend after construction (the executor needs the Hub
 // as its Sink, so the Hub is built first).
 func (h *Hub) SetExecutor(e executor.Executor) { h.exec = e }
+
+func (h *Hub) SetRelay(store *relay.Store, peers relay.Peers) {
+	h.relay, h.relayPeers = store, peers
+}
 
 // authValid mirrors bridge_v2.py:_is_auth_token_valid. BRIDGE_AUTH_TOKEN (a
 // manual override) takes priority; otherwise, if the bridge is claimed, only the
@@ -497,6 +510,7 @@ func (h *Hub) accumulateTurn(event any) {
 		if b != nil {
 			text = b.String()
 		}
+		h.completeRelayRun(e.RequestID, "succeeded", "", text)
 
 		// Scan for media/document paths regardless of FCM being configured.
 		h.scanAndEmitMedia(e.SessionID, e.RequestID, text)

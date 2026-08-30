@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"strings"
@@ -11,6 +12,7 @@ import (
 
 	"everything-go/internal/automation"
 	"everything-go/internal/eventinbox"
+	"everything-go/internal/relay"
 	"everything-go/internal/workitems"
 )
 
@@ -29,6 +31,7 @@ func (h *Hub) StartAutomationScheduler(ctx context.Context) {
 		ticker := time.NewTicker(automationSchedulerInterval)
 		defer ticker.Stop()
 		for {
+			h.drainExternalAttachmentQueue(ctx)
 			h.drainAutomationQueue(ctx)
 			h.drainConnectorWork(ctx)
 			select {
@@ -110,6 +113,9 @@ func (h *Hub) drainAutomationQueue(ctx context.Context) {
 }
 
 func (h *Hub) dispatchAutomationBinding(ctx context.Context, binding automation.Binding) bool {
+	if binding.TargetInstanceID != "" {
+		return h.dispatchRelayBinding(ctx, binding)
+	}
 	item, err := h.work.GetItem(ctx, binding.WorkItemID)
 	if err != nil {
 		h.deferAutomation(binding, "work_item_unavailable", time.Minute)
@@ -150,6 +156,72 @@ func (h *Hub) dispatchAutomationBinding(ctx context.Context, binding automation.
 	h.broadcastWorkRevision(updated.ActivityRevision)
 	h.broadcastAutomationSnapshot()
 	h.WakeWorkScheduler()
+	return true
+}
+
+func (h *Hub) dispatchRelayBinding(ctx context.Context, binding automation.Binding) bool {
+	if h.relay == nil || h.events == nil {
+		h.deferAutomation(binding, "relay_unavailable", time.Minute)
+		return false
+	}
+	if _, ok := h.relayPeers[binding.TargetInstanceID]; !ok {
+		h.deferAutomation(binding, "relay_peer_unavailable", time.Minute)
+		return false
+	}
+	eventIDs, err := h.automation.EventIDsForBinding(ctx, binding)
+	if err != nil || len(eventIDs) == 0 {
+		h.deferAutomation(binding, "event_unavailable", time.Minute)
+		return false
+	}
+	var event eventinbox.Event
+	descriptors := make([]relay.Attachment, 0)
+	missing := 0
+	for eventIndex, eventID := range eventIDs {
+		current, getErr := h.events.Get(ctx, eventID)
+		if getErr != nil {
+			h.deferAutomation(binding, "event_unavailable", time.Minute)
+			return false
+		}
+		if eventIndex == 0 {
+			event = current
+		}
+		for _, attachment := range current.Attachments {
+			switch attachment.Status {
+			case "available":
+				descriptors = append(descriptors, relay.Attachment{ID: attachment.ID, Ordinal: len(descriptors),
+					MIMEType: attachment.MIMEType, DisplayName: attachment.DisplayName,
+					SizeBytes: attachment.SizeBytes, SHA256: attachment.SHA256})
+			case "missing":
+				missing++
+			default:
+				h.deferAutomation(binding, "attachments_materializing", 10*time.Second)
+				return false
+			}
+		}
+	}
+	instruction := binding.Instruction
+	if missing > 0 {
+		instruction += "\nEvidence warning: " + fmt.Sprint(missing) + " attachment(s) could not be materialized; continue with available evidence and report the limitation."
+	}
+	now := time.Now().UnixMilli()
+	jobID := "rjob_" + shortRelayID(binding.ID)
+	job := relay.Job{SchemaVersion: 1, ID: jobID, OriginInstanceID: h.cfg.InstanceID,
+		TargetInstanceID: binding.TargetInstanceID, EventID: event.ID, EventKey: event.EventKey,
+		EventIDs: eventIDs,
+		Source:   event.Source, Kind: event.Kind, Title: event.Title, Body: event.Body, Data: event.Data,
+		TargetWorkItemID: binding.TargetWorkItemID, TargetSessionID: binding.TargetSessionID,
+		Instruction: instruction, ReviewOnly: binding.ReviewOnly, Attachments: descriptors,
+		CreatedAt: now, ExpiresAt: now + int64(30*24*time.Hour/time.Millisecond), TraceID: binding.ID}
+	if _, err := h.relay.EnqueueOutbound(ctx, job); err != nil {
+		h.deferAutomation(binding, "relay_enqueue_failed", time.Minute)
+		return false
+	}
+	if err := h.automation.BindRun(ctx, binding.ID, job.ID, job.ID); err != nil {
+		log.Printf("[relay] bind automation binding=%s job=%s: %v", binding.ID, job.ID, err)
+		return false
+	}
+	h.broadcastAutomationSnapshot()
+	h.WakeRelayScheduler()
 	return true
 }
 

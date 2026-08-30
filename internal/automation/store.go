@@ -79,6 +79,10 @@ type Route struct {
 	MinSeverity         string       `json:"min_severity,omitempty"`
 	WorkItemID          string       `json:"work_item_id,omitempty"`
 	SessionID           string       `json:"session_id,omitempty"`
+	TargetInstanceID    string       `json:"target_instance_id,omitempty"`
+	TargetWorkItemID    string       `json:"target_work_item_id,omitempty"`
+	TargetSessionID     string       `json:"target_session_id,omitempty"`
+	ReviewOnly          bool         `json:"review_only"`
 	HandlingMode        HandlingMode `json:"handling_mode"`
 	RunKind             string       `json:"run_kind"`
 	Priority            string       `json:"priority"`
@@ -91,21 +95,26 @@ type Route struct {
 }
 
 type Binding struct {
-	ID          string `json:"id"`
-	EventID     string `json:"event_id"`
-	RouteID     string `json:"route_id"`
-	BatchID     string `json:"batch_id,omitempty"`
-	WorkItemID  string `json:"work_item_id,omitempty"`
-	SessionID   string `json:"session_id,omitempty"`
-	RequestID   string `json:"request_id,omitempty"`
-	RunID       string `json:"run_id,omitempty"`
-	Status      string `json:"status"`
-	Reason      string `json:"reason,omitempty"`
-	Instruction string `json:"instruction,omitempty"`
-	Attempt     int    `json:"attempt"`
-	AvailableAt int64  `json:"available_at"`
-	CreatedAt   int64  `json:"created_at"`
-	UpdatedAt   int64  `json:"updated_at"`
+	ID               string `json:"id"`
+	EventID          string `json:"event_id"`
+	RouteID          string `json:"route_id"`
+	BatchID          string `json:"batch_id,omitempty"`
+	WorkItemID       string `json:"work_item_id,omitempty"`
+	SessionID        string `json:"session_id,omitempty"`
+	TargetInstanceID string `json:"target_instance_id,omitempty"`
+	TargetWorkItemID string `json:"target_work_item_id,omitempty"`
+	TargetSessionID  string `json:"target_session_id,omitempty"`
+	ReviewOnly       bool   `json:"review_only"`
+	RequestID        string `json:"request_id,omitempty"`
+	RunID            string `json:"run_id,omitempty"`
+	Status           string `json:"status"`
+	Reason           string `json:"reason,omitempty"`
+	Result           string `json:"result,omitempty"`
+	Instruction      string `json:"instruction,omitempty"`
+	Attempt          int    `json:"attempt"`
+	AvailableAt      int64  `json:"available_at"`
+	CreatedAt        int64  `json:"created_at"`
+	UpdatedAt        int64  `json:"updated_at"`
 }
 
 type Batch struct {
@@ -190,6 +199,8 @@ CREATE TABLE IF NOT EXISTS external_event_routes (
   handling_mode TEXT NOT NULL, run_kind TEXT NOT NULL, priority TEXT NOT NULL,
   debounce_seconds INTEGER NOT NULL DEFAULT 0, max_batch_events INTEGER NOT NULL DEFAULT 1,
   trusted_instruction TEXT NOT NULL DEFAULT '', version INTEGER NOT NULL DEFAULT 1,
+  target_instance_id TEXT NOT NULL DEFAULT '', target_work_item_id TEXT NOT NULL DEFAULT '',
+  target_session_id TEXT NOT NULL DEFAULT '', review_only INTEGER NOT NULL DEFAULT 1,
   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS automation_routes_match ON external_event_routes(authority_instance_id,enabled,source_pattern,kind_pattern,id);
@@ -204,6 +215,9 @@ CREATE TABLE IF NOT EXISTS external_event_bindings (
   work_item_id TEXT NOT NULL DEFAULT '', session_id TEXT NOT NULL DEFAULT '', request_id TEXT NOT NULL DEFAULT '',
   run_id TEXT NOT NULL DEFAULT '', status TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '', instruction TEXT NOT NULL DEFAULT '',
   attempt INTEGER NOT NULL DEFAULT 0, available_at INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+  target_instance_id TEXT NOT NULL DEFAULT '', target_work_item_id TEXT NOT NULL DEFAULT '',
+  target_session_id TEXT NOT NULL DEFAULT '', review_only INTEGER NOT NULL DEFAULT 1,
+  result TEXT NOT NULL DEFAULT '',
   UNIQUE(event_id,route_id)
 );
 CREATE INDEX IF NOT EXISTS automation_bindings_queue ON external_event_bindings(status,available_at,created_at,id);
@@ -229,6 +243,22 @@ func Open(dataDir, instanceID string) (*Store, error) {
 	if _, err := db.Exec(ddl); err != nil {
 		db.Close()
 		return nil, err
+	}
+	for _, migration := range []string{
+		"ALTER TABLE external_event_routes ADD COLUMN target_instance_id TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE external_event_routes ADD COLUMN target_work_item_id TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE external_event_routes ADD COLUMN target_session_id TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE external_event_routes ADD COLUMN review_only INTEGER NOT NULL DEFAULT 1",
+		"ALTER TABLE external_event_bindings ADD COLUMN target_instance_id TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE external_event_bindings ADD COLUMN target_work_item_id TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE external_event_bindings ADD COLUMN target_session_id TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE external_event_bindings ADD COLUMN review_only INTEGER NOT NULL DEFAULT 1",
+		"ALTER TABLE external_event_bindings ADD COLUMN result TEXT NOT NULL DEFAULT ''",
+	} {
+		if _, err := db.Exec(migration); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
+			db.Close()
+			return nil, fmt.Errorf("automation schema migration: %w", err)
+		}
 	}
 	now := time.Now().UnixMilli()
 	_, _ = db.Exec(`UPDATE external_event_bindings SET status='deferred',reason='bridge_restarted',
@@ -333,8 +363,12 @@ func (s *Store) UpsertRoute(ctx context.Context, route Route, expectedVersion ui
 	if route.ID == "" || route.Name == "" || !validatePattern(route.SourcePattern) || !validatePattern(route.KindPattern) || !validMode(route.HandlingMode) {
 		return Route{}, 0, errors.New("invalid route identity, pattern or handling mode")
 	}
-	if route.HandlingMode != NotifyOnly && (route.WorkItemID == "" || route.SessionID == "") {
-		return Route{}, 0, errors.New("executable routes require work_item_id and session_id")
+	remote := strings.TrimSpace(route.TargetInstanceID) != ""
+	if route.HandlingMode != NotifyOnly && !remote && (route.WorkItemID == "" || route.SessionID == "") {
+		return Route{}, 0, errors.New("local executable routes require work_item_id and session_id")
+	}
+	if remote && (route.TargetWorkItemID == "" || route.TargetSessionID == "" || !route.ReviewOnly) {
+		return Route{}, 0, errors.New("remote routes require a target work item/session and review_only")
 	}
 	if route.RunKind == "" {
 		route.RunKind = "research"
@@ -377,17 +411,21 @@ func (s *Store) UpsertRoute(ctx context.Context, route Route, expectedVersion ui
 	route.AuthorityInstanceID, route.Version, route.CreatedAt, route.UpdatedAt = s.instanceID, currentVersion+1, created, now
 	_, err = tx.ExecContext(ctx, `INSERT INTO external_event_routes
 		(id,authority_instance_id,name,enabled,connector_account_id,source_pattern,kind_pattern,min_severity,
-		work_item_id,session_id,handling_mode,run_kind,priority,debounce_seconds,max_batch_events,trusted_instruction,version,created_at,updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
+		work_item_id,session_id,handling_mode,run_kind,priority,debounce_seconds,max_batch_events,trusted_instruction,version,created_at,updated_at,
+		target_instance_id,target_work_item_id,target_session_id,review_only)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
 		name=excluded.name,enabled=excluded.enabled,connector_account_id=excluded.connector_account_id,
 		source_pattern=excluded.source_pattern,kind_pattern=excluded.kind_pattern,min_severity=excluded.min_severity,
 		work_item_id=excluded.work_item_id,session_id=excluded.session_id,handling_mode=excluded.handling_mode,
 		run_kind=excluded.run_kind,priority=excluded.priority,debounce_seconds=excluded.debounce_seconds,
 		max_batch_events=excluded.max_batch_events,trusted_instruction=excluded.trusted_instruction,
+		target_instance_id=excluded.target_instance_id,target_work_item_id=excluded.target_work_item_id,
+		target_session_id=excluded.target_session_id,review_only=excluded.review_only,
 		version=excluded.version,updated_at=excluded.updated_at`,
 		route.ID, route.AuthorityInstanceID, route.Name, boolInt(route.Enabled), route.AccountID, route.SourcePattern,
 		route.KindPattern, route.MinSeverity, route.WorkItemID, route.SessionID, route.HandlingMode, route.RunKind,
-		route.Priority, route.DebounceSeconds, route.MaxBatchEvents, route.TrustedInstruction, route.Version, created, now)
+		route.Priority, route.DebounceSeconds, route.MaxBatchEvents, route.TrustedInstruction, route.Version, created, now,
+		route.TargetInstanceID, route.TargetWorkItemID, route.TargetSessionID, boolInt(route.ReviewOnly))
 	if err != nil {
 		return Route{}, 0, err
 	}
@@ -477,6 +515,7 @@ func (s *Store) RouteEvent(ctx context.Context, event eventinbox.Event) ([]Bindi
 	rows, err := s.db.QueryContext(ctx, `SELECT r.id,r.authority_instance_id,r.name,r.enabled,r.connector_account_id,
 		source_pattern,kind_pattern,min_severity,work_item_id,session_id,handling_mode,run_kind,priority,
 		debounce_seconds,max_batch_events,trusted_instruction,r.version,r.created_at,r.updated_at,COALESCE(a.provider,'')
+		,target_instance_id,target_work_item_id,target_session_id,review_only
 		FROM external_event_routes r LEFT JOIN connector_accounts a ON a.id=r.connector_account_id
 		WHERE r.authority_instance_id=? AND r.enabled=1 ORDER BY r.id`, s.instanceID)
 	if err != nil {
@@ -485,16 +524,18 @@ func (s *Store) RouteEvent(ctx context.Context, event eventinbox.Event) ([]Bindi
 	var routes []Route
 	for rows.Next() {
 		var route Route
-		var enabled int
+		var enabled, reviewOnly int
 		var accountProvider string
 		if err := rows.Scan(&route.ID, &route.AuthorityInstanceID, &route.Name, &enabled, &route.AccountID,
 			&route.SourcePattern, &route.KindPattern, &route.MinSeverity, &route.WorkItemID, &route.SessionID,
 			&route.HandlingMode, &route.RunKind, &route.Priority, &route.DebounceSeconds, &route.MaxBatchEvents,
-			&route.TrustedInstruction, &route.Version, &route.CreatedAt, &route.UpdatedAt, &accountProvider); err != nil {
+			&route.TrustedInstruction, &route.Version, &route.CreatedAt, &route.UpdatedAt, &accountProvider,
+			&route.TargetInstanceID, &route.TargetWorkItemID, &route.TargetSessionID, &reviewOnly); err != nil {
 			rows.Close()
 			return nil, 0, err
 		}
 		route.Enabled = enabled == 1
+		route.ReviewOnly = reviewOnly == 1
 		accountMatches := route.AccountID == "" || event.Source == accountProvider+"."+route.AccountID
 		if accountMatches && matches(route.SourcePattern, event.Source) && matches(route.KindPattern, event.Kind) &&
 			(route.MinSeverity == "" || severityRank(event.Severity) >= severityRank(route.MinSeverity)) {
@@ -515,7 +556,9 @@ func (s *Store) RouteEvent(ctx context.Context, event eventinbox.Event) ([]Bindi
 	for _, route := range routes {
 		binding := Binding{ID: bindingID(event.ID, route.ID), EventID: event.ID, RouteID: route.ID,
 			WorkItemID: route.WorkItemID, SessionID: route.SessionID, Status: "pending", AvailableAt: now,
-			Instruction: compileInstruction(route, event), CreatedAt: now, UpdatedAt: now}
+			Instruction: compileInstruction(route, event), CreatedAt: now, UpdatedAt: now,
+			TargetInstanceID: route.TargetInstanceID, TargetWorkItemID: route.TargetWorkItemID,
+			TargetSessionID: route.TargetSessionID, ReviewOnly: route.ReviewOnly}
 		if route.HandlingMode == NotifyOnly {
 			binding.Status = "notified"
 		}
@@ -552,9 +595,11 @@ func (s *Store) RouteEvent(ctx context.Context, event eventinbox.Event) ([]Bindi
 			}
 		}
 		result, insertErr := tx.ExecContext(ctx, `INSERT OR IGNORE INTO external_event_bindings
-			(id,event_id,route_id,batch_id,work_item_id,session_id,request_id,run_id,status,reason,instruction,attempt,available_at,created_at,updated_at)
-			VALUES(?,?,?,?,?,?,'','',?,'',?,0,?,?,?)`, binding.ID, binding.EventID, binding.RouteID, binding.BatchID,
-			binding.WorkItemID, binding.SessionID, binding.Status, binding.Instruction, binding.AvailableAt, now, now)
+			(id,event_id,route_id,batch_id,work_item_id,session_id,request_id,run_id,status,reason,instruction,attempt,available_at,created_at,updated_at,
+			target_instance_id,target_work_item_id,target_session_id,review_only)
+			VALUES(?,?,?,?,?,?,'','',?,'',?,0,?,?,?,?,?,?,?)`, binding.ID, binding.EventID, binding.RouteID, binding.BatchID,
+			binding.WorkItemID, binding.SessionID, binding.Status, binding.Instruction, binding.AvailableAt, now, now,
+			binding.TargetInstanceID, binding.TargetWorkItemID, binding.TargetSessionID, boolInt(binding.ReviewOnly))
 		if insertErr != nil {
 			return nil, 0, insertErr
 		}
@@ -580,22 +625,29 @@ func (s *Store) ClaimNextBinding(ctx context.Context, now int64) (Binding, bool,
 	}
 	defer tx.Rollback()
 	var binding Binding
+	var reviewOnly int
 	err = tx.QueryRowContext(ctx, `SELECT b.id,b.event_id,b.route_id,b.batch_id,b.work_item_id,b.session_id,b.request_id,b.run_id,
-		b.status,b.reason,b.instruction,b.attempt,b.available_at,b.created_at,b.updated_at
+		b.status,b.reason,b.instruction,b.attempt,b.available_at,b.created_at,b.updated_at,
+		b.target_instance_id,b.target_work_item_id,b.target_session_id,b.review_only
+		,b.result
 		FROM external_event_bindings b JOIN external_event_routes r ON r.id=b.route_id
 		WHERE b.status IN ('pending','deferred') AND b.available_at<=? AND b.attempt<5 AND r.enabled=1
-		AND NOT EXISTS (SELECT 1 FROM external_event_bindings active WHERE active.work_item_id=b.work_item_id
+		AND NOT EXISTS (SELECT 1 FROM external_event_bindings active
+			WHERE (CASE WHEN active.target_work_item_id<>'' THEN active.target_instance_id||':'||active.target_work_item_id ELSE active.work_item_id END)
+			=(CASE WHEN b.target_work_item_id<>'' THEN b.target_instance_id||':'||b.target_work_item_id ELSE b.work_item_id END)
 			AND active.id<>b.id AND active.status IN ('dispatching','queued','running'))
 		ORDER BY CASE r.priority WHEN 'urgent' THEN 400 WHEN 'high' THEN 300 WHEN 'medium' THEN 200 WHEN 'low' THEN 100 ELSE 0 END DESC,
 		b.available_at,b.created_at,b.id LIMIT 1`, now).Scan(&binding.ID, &binding.EventID, &binding.RouteID,
 		&binding.BatchID, &binding.WorkItemID, &binding.SessionID, &binding.RequestID, &binding.RunID, &binding.Status,
-		&binding.Reason, &binding.Instruction, &binding.Attempt, &binding.AvailableAt, &binding.CreatedAt, &binding.UpdatedAt)
+		&binding.Reason, &binding.Instruction, &binding.Attempt, &binding.AvailableAt, &binding.CreatedAt, &binding.UpdatedAt,
+		&binding.TargetInstanceID, &binding.TargetWorkItemID, &binding.TargetSessionID, &reviewOnly, &binding.Result)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Binding{}, false, nil
 	}
 	if err != nil {
 		return Binding{}, false, err
 	}
+	binding.ReviewOnly = reviewOnly == 1
 	binding.Status, binding.Reason, binding.Attempt, binding.UpdatedAt = "dispatching", "", binding.Attempt+1, now
 	result, err := tx.ExecContext(ctx, `UPDATE external_event_bindings SET status='dispatching',reason='',attempt=?,updated_at=?
 		WHERE id=? AND status IN ('pending','deferred')`, binding.Attempt, now, binding.ID)
@@ -614,13 +666,35 @@ func (s *Store) ClaimNextBinding(ctx context.Context, now int64) (Binding, bool,
 	return binding, true, tx.Commit()
 }
 
+func (s *Store) EventIDsForBinding(ctx context.Context, binding Binding) ([]string, error) {
+	if binding.BatchID == "" {
+		return []string{binding.EventID}, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT event_id FROM external_event_bindings
+    WHERE batch_id=? ORDER BY created_at,id`, binding.BatchID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 func (s *Store) DeferBinding(ctx context.Context, id, reason string, availableAt int64) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	result, err := tx.ExecContext(ctx, `UPDATE external_event_bindings SET status='deferred',reason=?,available_at=?,updated_at=?
+	result, err := tx.ExecContext(ctx, `UPDATE external_event_bindings SET status='deferred',reason=?,available_at=?,
+		attempt=CASE WHEN attempt>0 THEN attempt-1 ELSE 0 END,updated_at=?
 		WHERE id=? AND status='dispatching'`, reason, availableAt, s.now().UnixMilli(), id)
 	if err != nil {
 		return err
@@ -695,6 +769,63 @@ func (s *Store) AdvanceRun(ctx context.Context, requestID, status, reason string
 	return true, tx.Commit()
 }
 
+func (s *Store) SetRelayProgress(ctx context.Context, requestID, status, reason string) (bool, error) {
+	if status != "queued" && status != "running" && status != "waiting_user" {
+		return false, errors.New("invalid relay progress")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `UPDATE external_event_bindings SET status=?,reason=?,updated_at=?
+    WHERE request_id=? AND status<>?`, status, reason, s.now().UnixMilli(), requestID, status)
+	if err != nil {
+		return false, err
+	}
+	affected, _ := result.RowsAffected()
+	if affected == 0 {
+		return false, nil
+	}
+	if _, err := s.bump(tx); err != nil {
+		return false, err
+	}
+	return true, tx.Commit()
+}
+
+func (s *Store) CompleteRelay(ctx context.Context, requestID, status, reason, resultText string) (bool, error) {
+	if len(reason) > 2000 {
+		reason = reason[:2000]
+	}
+	if len(resultText) > 64*1024 {
+		resultText = resultText[:64*1024]
+	}
+	mapped := "failed"
+	if status == "review_ready" {
+		mapped = "review"
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `UPDATE external_event_bindings SET status=?,reason=?,result=?,updated_at=?
+    WHERE request_id=? AND status IN ('queued','running','waiting_user')`, mapped, reason, resultText, s.now().UnixMilli(), requestID)
+	if err != nil {
+		return false, err
+	}
+	affected, _ := result.RowsAffected()
+	if affected == 0 {
+		return false, nil
+	}
+	_, _ = tx.ExecContext(ctx, `UPDATE external_event_batches SET status=?,updated_at=? WHERE id IN
+    (SELECT batch_id FROM external_event_bindings WHERE request_id=? AND batch_id<>'')`, mapped, s.now().UnixMilli(), requestID)
+	if _, err := s.bump(tx); err != nil {
+		return false, err
+	}
+	return true, tx.Commit()
+}
+
 func (s *Store) Snapshot(ctx context.Context) (Snapshot, error) {
 	var snapshot Snapshot
 	if err := s.db.QueryRowContext(ctx, `SELECT revision FROM automation_meta WHERE singleton=1`).Scan(&snapshot.Revision); err != nil {
@@ -739,38 +870,45 @@ func (s *Store) Snapshot(ctx context.Context) (Snapshot, error) {
 	}
 	rows.Close()
 	rows, err = s.db.QueryContext(ctx, `SELECT id,authority_instance_id,name,enabled,connector_account_id,source_pattern,kind_pattern,
-		min_severity,work_item_id,session_id,handling_mode,run_kind,priority,debounce_seconds,max_batch_events,trusted_instruction,version,created_at,updated_at
+		min_severity,work_item_id,session_id,handling_mode,run_kind,priority,debounce_seconds,max_batch_events,trusted_instruction,version,created_at,updated_at,
+		target_instance_id,target_work_item_id,target_session_id,review_only
 		FROM external_event_routes ORDER BY name,id`)
 	if err != nil {
 		return snapshot, err
 	}
 	for rows.Next() {
 		var item Route
-		var enabled int
+		var enabled, reviewOnly int
 		if err := rows.Scan(&item.ID, &item.AuthorityInstanceID, &item.Name, &enabled, &item.AccountID, &item.SourcePattern,
 			&item.KindPattern, &item.MinSeverity, &item.WorkItemID, &item.SessionID, &item.HandlingMode,
 			&item.RunKind, &item.Priority, &item.DebounceSeconds, &item.MaxBatchEvents, &item.TrustedInstruction,
-			&item.Version, &item.CreatedAt, &item.UpdatedAt); err != nil {
+			&item.Version, &item.CreatedAt, &item.UpdatedAt, &item.TargetInstanceID, &item.TargetWorkItemID,
+			&item.TargetSessionID, &reviewOnly); err != nil {
 			rows.Close()
 			return snapshot, err
 		}
 		item.Enabled = enabled == 1
+		item.ReviewOnly = reviewOnly == 1
 		snapshot.Routes = append(snapshot.Routes, item)
 	}
 	rows.Close()
 	rows, err = s.db.QueryContext(ctx, `SELECT id,event_id,route_id,batch_id,work_item_id,session_id,request_id,run_id,status,reason,instruction,
-		attempt,available_at,created_at,updated_at FROM external_event_bindings ORDER BY created_at DESC,id LIMIT 1000`)
+		attempt,available_at,created_at,updated_at,target_instance_id,target_work_item_id,target_session_id,review_only,result
+		FROM external_event_bindings ORDER BY created_at DESC,id LIMIT 1000`)
 	if err != nil {
 		return snapshot, err
 	}
 	for rows.Next() {
 		var item Binding
+		var reviewOnly int
 		if err := rows.Scan(&item.ID, &item.EventID, &item.RouteID, &item.BatchID, &item.WorkItemID, &item.SessionID, &item.RequestID,
 			&item.RunID, &item.Status, &item.Reason, &item.Instruction, &item.Attempt, &item.AvailableAt,
-			&item.CreatedAt, &item.UpdatedAt); err != nil {
+			&item.CreatedAt, &item.UpdatedAt, &item.TargetInstanceID, &item.TargetWorkItemID,
+			&item.TargetSessionID, &reviewOnly, &item.Result); err != nil {
 			rows.Close()
 			return snapshot, err
 		}
+		item.ReviewOnly = reviewOnly == 1
 		snapshot.Bindings = append(snapshot.Bindings, item)
 	}
 	rows.Close()

@@ -75,8 +75,14 @@ func (h *Hub) projectWorkRun(sessionID, requestID, phase, reason string) {
 		return
 	}
 	if !update.Changed {
+		if status != "succeeded" {
+			h.completeRelayRun(requestID, status, reason, "")
+		}
 		h.projectAutomationRun(requestID, status, reason)
 		return
+	}
+	if status != "succeeded" {
+		h.completeRelayRun(requestID, status, reason, "")
 	}
 	h.projectAutomationRun(requestID, status, reason)
 	h.broadcastWorkRevision(update.Item.ActivityRevision)

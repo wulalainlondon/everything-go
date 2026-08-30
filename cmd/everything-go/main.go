@@ -41,6 +41,7 @@ import (
 	"everything-go/internal/inbox"
 	"everything-go/internal/media"
 	"everything-go/internal/netsvc"
+	"everything-go/internal/relay"
 	"everything-go/internal/search"
 	"everything-go/internal/session"
 	"everything-go/internal/sourcepolicy"
@@ -158,6 +159,16 @@ func main() {
 		log.Printf("bootstrapped %d connector account(s)", created)
 	}
 	hub.SetAutomation(automationStore)
+	relayStore, err := relay.Open(*dataDir)
+	if err != nil {
+		log.Fatalf("open bridge relay: %v", err)
+	}
+	defer relayStore.Close()
+	relayPeers, err := relay.LoadPeers()
+	if err != nil {
+		log.Fatalf("load bridge relay peers: %v", err)
+	}
+	hub.SetRelay(relayStore, relayPeers)
 
 	switch *execName {
 	case "go":
@@ -189,6 +200,7 @@ func main() {
 	ctx := context.Background()
 	hub.StartWorkScheduler(ctx)
 	hub.StartAutomationScheduler(ctx)
+	hub.StartRelayScheduler(ctx)
 	searchDirty := newDirtyPathQueue(defaultDirtyPathLimit)
 	nativeWatcherActive := !*disableNativeWatcher && strings.TrimSpace(os.Getenv("EVERYTHING_GO_NATIVE_WATCH")) != "0"
 	if !*disableSearch {
@@ -288,6 +300,7 @@ func main() {
 	mux.HandleFunc("/api/work/v1/items/", hub.ServeWorkAPI)
 	mux.HandleFunc("/api/events/v1/events", hub.ServeEventAPI)
 	mux.HandleFunc("/api/automation/v1/", hub.ServeAutomationAPI)
+	mux.HandleFunc("/api/relay/v1/", hub.ServeRelayAPI)
 	mux.HandleFunc("/hooks/github", hub.ServeGitHubWebhook)
 	mux.HandleFunc("/hooks/apple-app-store", hub.ServeAppStoreWebhook)
 	mux.HandleFunc("/hooks/apple-app-store/", hub.ServeAppStoreWebhook)
