@@ -34,7 +34,7 @@ func TestMetaWebhookChallengeSignatureNormalizationAndDedupe(t *testing.T) {
 	if response.Code != http.StatusOK || response.Body.String() != "12345" {
 		t.Fatalf("challenge status=%d body=%q", response.Code, response.Body.String())
 	}
-	body := []byte(`{"object":"page","entry":[{"id":"page-id","time":1800000000,"changes":[{"field":"feed","value":{"item":"comment","verb":"add","comment_id":"comment-1","post_id":"post-1","message":"Please review this"}}],"messaging":[{"sender":{"id":"user-1"},"recipient":{"id":"page-id"},"timestamp":1800000000123,"message":{"mid":"mid-1","text":"Hello"}}]}]}`)
+	body := []byte(`{"object":"page","entry":[{"id":"page-id","time":1800000000,"changes":[{"field":"feed","value":{"item":"comment","verb":"add","comment_id":"comment-1","post_id":"post-1","message":"Please review this"}}],"messaging":[{"sender":{"id":"user-1"},"recipient":{"id":"page-id"},"timestamp":1800000000123,"message":{"mid":"mid-1","text":"Hello","attachments":[{"type":"image","payload":{"url":"https://cdn.example/proof.jpg"}}]}}]}]}`)
 	post := func(signature string) *httptest.ResponseRecorder {
 		request := httptest.NewRequest(http.MethodPost, "/hooks/meta/judge", strings.NewReader(string(body)))
 		request.Header.Set("X-Hub-Signature-256", signature)
@@ -60,6 +60,10 @@ func TestMetaWebhookChallengeSignatureNormalizationAndDedupe(t *testing.T) {
 	if snapshot.Items[0].Kind != "message.received" || snapshot.Items[1].Kind != "comment.created" ||
 		strings.Contains(string(snapshot.Items[0].Data), "app-secret") {
 		t.Fatalf("items=%+v", snapshot.Items)
+	}
+	if len(snapshot.Items[0].Attachments) != 1 || snapshot.Items[0].Attachments[0].Status != "pending" ||
+		!strings.Contains(string(snapshot.Items[0].Data), `"conversation_id":"user-1"`) {
+		t.Fatalf("message attachment/conversation not normalized: %+v", snapshot.Items[0])
 	}
 }
 

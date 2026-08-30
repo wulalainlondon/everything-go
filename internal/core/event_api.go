@@ -118,6 +118,7 @@ func (h *Hub) publishExternalEvent(event eventinbox.Event, deduped bool) error {
 	if deduped {
 		return nil
 	}
+	h.materializeExternalEvent(&event)
 	if err := h.broadcastOnline(h.client.ExternalEventUpsert(eventinbox.View{Event: event})); err != nil {
 		return err
 	}
@@ -126,6 +127,20 @@ func (h *Hub) publishExternalEvent(event eventinbox.Event, deduped bool) error {
 	}
 	h.routeExternalEvent(event)
 	return nil
+}
+
+func (h *Hub) publishExternalEventUpdate(event eventinbox.Event) error {
+	h.materializeExternalEvent(&event)
+	return h.broadcastOnline(h.client.ExternalEventUpsert(eventinbox.View{Event: event}))
+}
+
+func (h *Hub) materializeExternalEvent(event *eventinbox.Event) {
+	for index := range event.Attachments {
+		attachment := &event.Attachments[index]
+		if attachment.Status == "available" && attachment.LocalPath != "" {
+			attachment.URL = h.mediaScan.LocalURL(attachment.LocalPath)
+		}
+	}
 }
 
 func (h *Hub) eventIngressAuthorized(r *http.Request) bool {

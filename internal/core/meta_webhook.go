@@ -77,7 +77,7 @@ func (h *Hub) ServeMetaWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 	accepted, deduplicated := 0, 0
 	for _, input := range inputs {
-		event, deduped, insertErr := h.events.Insert(r.Context(), input)
+		event, deduped, insertErr := h.events.InsertWithAttachments(r.Context(), input, input.Attachments)
 		if insertErr != nil {
 			http.Error(w, "store Meta event", http.StatusInternalServerError)
 			return
@@ -210,8 +210,14 @@ func normalizeMetaMessage(accountID, provider, displayName, entryID string, occu
 		} `json:"recipient"`
 		Timestamp int64 `json:"timestamp"`
 		Message   struct {
-			MID  string `json:"mid"`
-			Text string `json:"text"`
+			MID         string `json:"mid"`
+			Text        string `json:"text"`
+			Attachments []struct {
+				Type    string `json:"type"`
+				Payload struct {
+					URL string `json:"url"`
+				} `json:"payload"`
+			} `json:"attachments"`
 		} `json:"message"`
 	}
 	if json.Unmarshal(raw, &value) != nil || value.Message.MID == "" {
@@ -220,10 +226,33 @@ func normalizeMetaMessage(accountID, provider, displayName, entryID string, occu
 	if value.Timestamp > 0 {
 		occurredAt = value.Timestamp
 	}
-	data, _ := json.Marshal(map[string]string{"sender_id": value.Sender.ID, "recipient_id": value.Recipient.ID, "message_id": value.Message.MID})
+	data, _ := json.Marshal(map[string]string{"sender_id": value.Sender.ID, "recipient_id": value.Recipient.ID,
+		"message_id": value.Message.MID, "conversation_id": value.Sender.ID})
+	attachments := make([]eventinbox.AttachmentInput, 0, len(value.Message.Attachments))
+	for index, attachment := range value.Message.Attachments {
+		if strings.TrimSpace(attachment.Payload.URL) == "" {
+			continue
+		}
+		attachments = append(attachments, eventinbox.AttachmentInput{ExternalID: fmt.Sprintf("%s:%d", value.Message.MID, index),
+			SourceURL: attachment.Payload.URL, MIMEType: metaAttachmentMIME(attachment.Type),
+			DisplayName: fmt.Sprintf("Messenger %s %d", attachment.Type, index+1), Ordinal: index})
+	}
 	return eventinbox.Input{Source: provider + "." + accountID, EventKey: "message:" + value.Message.MID,
 		Kind: "message.received", Severity: "info", Title: displayName + " received a message",
-		Body: value.Message.Text, Data: data, OccurredAt: occurredAt}, nil
+		Body: value.Message.Text, Data: data, OccurredAt: occurredAt, Attachments: attachments}, nil
+}
+
+func metaAttachmentMIME(kind string) string {
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "image":
+		return "image/jpeg"
+	case "video":
+		return "video/mp4"
+	case "audio":
+		return "audio/mpeg"
+	default:
+		return "application/octet-stream"
+	}
 }
 
 func stringValue(value map[string]any, keys ...string) string {

@@ -3,6 +3,7 @@ package eventinbox
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -78,5 +79,36 @@ func TestInsertRejectsExpiredOrInvalidData(t *testing.T) {
 	}
 	if _, _, err := store.Insert(context.Background(), Input{Source: "x", EventKey: "unsafe-url", Kind: "x", Severity: "info", Title: "x", URL: "javascript:alert(1)"}); err == nil {
 		t.Fatal("unsafe canonical URL accepted")
+	}
+}
+
+func TestAttachmentFetchStateIsDurableURLFreeAndIdempotent(t *testing.T) {
+	store := openTestStore(t)
+	input := Input{Source: "meta.facebook.judge", EventKey: "message:mid-1", Kind: "message.received",
+		Severity: "info", Title: "Player report"}
+	attachments := []AttachmentInput{{ExternalID: "mid-1:0", SourceURL: "https://cdn.example/proof.jpg",
+		MIMEType: "image/jpeg", DisplayName: "proof.jpg", Ordinal: 0}}
+	event, deduped, err := store.InsertWithAttachments(context.Background(), input, attachments)
+	if err != nil || deduped || len(event.Attachments) != 1 || event.Attachments[0].Status != "pending" {
+		t.Fatalf("event=%+v deduped=%v err=%v", event, deduped, err)
+	}
+	job, ok, err := store.ClaimAttachmentFetch(context.Background(), "worker", time.Now().UnixMilli(), time.Minute)
+	if err != nil || !ok || job.SourceURL == "" || job.Attempt != 1 {
+		t.Fatalf("job=%+v ok=%v err=%v", job, ok, err)
+	}
+	if err := store.CompleteAttachmentFetch(context.Background(), job.ID, "worker", "/private/proof.jpg", "image/jpeg", strings.Repeat("a", 64), 42); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := store.Get(context.Background(), event.ID)
+	if err != nil || stored.Attachments[0].Status != "available" || stored.Attachments[0].LocalPath == "" || stored.Attachments[0].URL != "" {
+		t.Fatalf("stored=%+v err=%v", stored, err)
+	}
+	_, deduped, err = store.InsertWithAttachments(context.Background(), input, attachments)
+	if err != nil || !deduped {
+		t.Fatalf("duplicate deduped=%v err=%v", deduped, err)
+	}
+	stored, _ = store.Get(context.Background(), event.ID)
+	if len(stored.Attachments) != 1 {
+		t.Fatalf("duplicate created attachments: %+v", stored.Attachments)
 	}
 }

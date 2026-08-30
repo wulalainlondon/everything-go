@@ -680,6 +680,9 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 			return
 		}
 		if snapshot, err := h.events.Snapshot(ctx, c.deviceID, 0); err == nil {
+			for index := range snapshot.Items {
+				h.materializeExternalEvent(&snapshot.Items[index].Event)
+			}
 			c.enqueueEvent(h.client.ExternalEventSnapshot(snapshot))
 		} else {
 			c.enqueueEvent(h.client.Error("", "", "Event inbox unavailable: "+err.Error()))

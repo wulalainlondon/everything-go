@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -87,6 +88,35 @@ func (s *Store) Add(event any) (Record, bool) {
 	stored := r
 	s.records = append(s.records, &stored)
 	s.byID[r.AttachmentID] = &stored
+	s.enforceCapLocked()
+	s.saveLocked()
+	return cloneRecord(&stored), true
+}
+
+// AddCanonical registers bytes materialized by a trusted Bridge subsystem
+// (for example cross-Bridge relay). Transport URLs never enter this boundary.
+func (s *Store) AddCanonical(record Record) (Record, bool) {
+	record.SessionID = strings.TrimSpace(record.SessionID)
+	record.RequestID = strings.TrimSpace(record.RequestID)
+	record.Path = filepath.Clean(strings.TrimSpace(record.Path))
+	if record.SessionID == "" || record.Path == "." || record.Path == "" || !filepath.IsAbs(record.Path) || (record.Kind != "media" && record.Kind != "document") {
+		return Record{}, false
+	}
+	record.AttachmentID = stableID(record)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if existing := s.byID[record.AttachmentID]; existing != nil {
+		return cloneRecord(existing), false
+	}
+	s.gcLocked()
+	s.nextSequence++
+	record.Sequence = s.nextSequence
+	record.CreatedAt = s.now().UnixMilli()
+	record.AckedByDevice = make(map[string]bool)
+	record.PinnedByWork = make(map[string]bool)
+	stored := record
+	s.records = append(s.records, &stored)
+	s.byID[stored.AttachmentID] = &stored
 	s.enforceCapLocked()
 	s.saveLocked()
 	return cloneRecord(&stored), true
