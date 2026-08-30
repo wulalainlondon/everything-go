@@ -33,7 +33,15 @@ else
   submit_args=(--key "$KEY_PATH" --key-id "$KEY_ID" --issuer "$ISSUER_ID")
 fi
 
-xcrun notarytool submit "$ZIP_PATH" "${submit_args[@]}" --wait
+SUBMIT_JSON="$WORK_DIR/submission.json"
+xcrun notarytool submit "$ZIP_PATH" "${submit_args[@]}" --wait --output-format json | tee "$SUBMIT_JSON"
+SUBMISSION_ID="$(plutil -extract id raw -o - "$SUBMIT_JSON")"
+SUBMISSION_STATUS="$(plutil -extract status raw -o - "$SUBMIT_JSON")"
+if [ "$SUBMISSION_STATUS" != "Accepted" ]; then
+  xcrun notarytool log "$SUBMISSION_ID" "${submit_args[@]}" || true
+  echo "notarization failed: Apple status $SUBMISSION_STATUS" >&2
+  exit 1
+fi
 
 ditto -x -k "$ZIP_PATH" "$WORK_DIR/unzipped"
 APP_PATH="$(find "$WORK_DIR/unzipped" -maxdepth 1 -name '*.app' -type d | head -n 1)"
