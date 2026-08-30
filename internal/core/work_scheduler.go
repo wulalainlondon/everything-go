@@ -86,9 +86,13 @@ func (h *Hub) dispatchQueuedRun(ctx context.Context, run workitems.Run) bool {
 		return false
 	}
 	// Relay review jobs must remain read-only at the moment of dispatch, not
-	// merely when the remote envelope was accepted. This closes the queue-time
-	// race where an operator changes Session sandbox while the job is waiting.
-	if strings.HasPrefix(run.RequestID, "rjob_") && s.Snapshot().Sandbox != "read-only" {
+	// merely when the remote envelope was accepted. Codex supports a per-turn
+	// sandbox override, so an ordinary writable conversation can safely host a
+	// review turn without permanently changing its interactive policy. Other
+	// backends still require a read-only Session.
+	reviewOnly := strings.HasPrefix(run.RequestID, "rjob_")
+	snap := s.Snapshot()
+	if reviewOnly && snap.Sandbox != "read-only" && snap.Backend != backend.Codex {
 		h.deferQueuedRun(ctx, run, time.Now().Add(30*time.Second), "review_only_session_required")
 		return false
 	}
@@ -114,7 +118,11 @@ func (h *Hub) dispatchQueuedRun(ctx context.Context, run workitems.Run) bool {
 			return
 		}
 		h.updateRuntime(run.SessionID, "running", run.RequestID, s.QueueLen(), "", "")
-		if err := h.exec.Send(context.Background(), s, run.RequestID, content, nil, nil); err != nil {
+		sendCtx := context.Background()
+		if reviewOnly {
+			sendCtx = backend.WithSandboxOverride(sendCtx, "read-only")
+		}
+		if err := h.exec.Send(sendCtx, s, run.RequestID, content, nil, nil); err != nil {
 			if errors.Is(err, backend.ErrThreadActiveWriter) {
 				h.markDesktopWriter(s)
 			}

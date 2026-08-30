@@ -124,6 +124,21 @@ type Executor interface {
 	Close(ctx context.Context, s *session.Session) error
 }
 
+type sandboxOverrideContextKey struct{}
+
+// WithSandboxOverride applies a server-authoritative sandbox to one submitted
+// turn. Backends that support per-turn policy overrides must honor it instead
+// of trusting the Session's ordinary interactive sandbox.
+func WithSandboxOverride(ctx context.Context, sandbox string) context.Context {
+	return context.WithValue(ctx, sandboxOverrideContextKey{}, sandbox)
+}
+
+// SandboxOverride returns the sandbox explicitly attached to this turn.
+func SandboxOverride(ctx context.Context) (string, bool) {
+	value, ok := ctx.Value(sandboxOverrideContextKey{}).(string)
+	return value, ok && value != ""
+}
+
 // SteerResult identifies the active turn that accepted a same-turn user
 // message. RequestID is the original request that owns the turn; clients use it
 // to keep subsequent streaming events attached to the same lifecycle.

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"everything-go/internal/attachmentjournal"
+	"everything-go/internal/backend"
 	"everything-go/internal/relay"
 	"everything-go/internal/workitems"
 )
@@ -269,7 +270,7 @@ func (h *Hub) drainRelayInbound(ctx context.Context) {
 		h.deferRelayInbound(record, "target_session_unavailable", time.Minute)
 		return
 	}
-	if snap := sess.Snapshot(); record.Job.ReviewOnly && snap.Sandbox != "read-only" {
+	if snap := sess.Snapshot(); record.Job.ReviewOnly && snap.Sandbox != "read-only" && snap.Backend != backend.Codex {
 		h.deferRelayInbound(record, "target_session_not_read_only", time.Minute)
 		return
 	}

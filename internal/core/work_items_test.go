@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"everything-go/internal/backend"
 	"everything-go/internal/protocol"
 	"everything-go/internal/session"
 	"everything-go/internal/workitems"
@@ -143,8 +144,13 @@ func TestAutomaticWorkRunStaysDurableWhileSessionBusy(t *testing.T) {
 	s.EndTurn()
 }
 
-func TestRelayReviewRunRechecksReadOnlySandboxAtDispatch(t *testing.T) {
-	h, _ := newTestHub(t)
+func TestRelayReviewRunForcesReadOnlySandboxOnWritableCodexSession(t *testing.T) {
+	h, exec := newTestHub(t)
+	policy := make(chan string, 1)
+	exec.onSendContext = func(ctx context.Context, _ *session.Session, _, _ string) {
+		value, _ := backend.SandboxOverride(ctx)
+		policy <- value
+	}
 	service := attachWorkService(t, h, t.TempDir())
 	c := newTestClient(h)
 	route(h, c, `{"type":"new_session","session_id":"s-review","name":"Review","backend":"codex","sandbox":"danger-full-access"}`)
@@ -178,11 +184,44 @@ func TestRelayReviewRunRechecksReadOnlySandboxAtDispatch(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("claim=%+v ok=%v err=%v", claimed, ok, err)
 	}
+	if !h.dispatchQueuedRun(ctx, claimed) {
+		t.Fatal("review relay was not accepted by writable Codex Session")
+	}
+	select {
+	case got := <-policy:
+		if got != "read-only" {
+			t.Fatalf("sandbox override=%q, want read-only", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("review run was not submitted")
+	}
+}
+
+func TestRelayReviewRunStillRejectsWritableNonCodexSession(t *testing.T) {
+	h, _ := newTestHub(t)
+	service := attachWorkService(t, h, t.TempDir())
+	c := newTestClient(h)
+	route(h, c, `{"type":"new_session","session_id":"s-review-other","name":"Review","backend":"claude","sandbox":"danger-full-access"}`)
+	_ = waitForType(t, c, "session_created")
+	ctx := context.Background()
+	project, _ := service.CreateProject(ctx, workitems.CreateProjectInput{ID: "p-review-other", Name: "Review"})
+	item, _ := service.CreateItem(ctx, workitems.CreateItemInput{ID: "wi-review-other", ProjectID: project.ID, Title: "Player report"})
+	item, _ = service.MoveItem(ctx, workitems.MoveItemInput{ID: item.ID, ExpectedVersion: item.Version,
+		Lifecycle: workitems.LifecycleReady, Actor: workitems.Actor{Type: workitems.ActorSystem}})
+	_, item, _ = service.LinkSession(ctx, workitems.LinkSessionInput{ID: "link-review-other", WorkItemID: item.ID,
+		SessionID: "s-review-other", ExpectedVersion: item.Version, Actor: workitems.Actor{Type: workitems.ActorSystem}})
+	run, _, _ := service.StartRun(ctx, workitems.StartRunInput{ID: "run-review-other", WorkItemID: item.ID,
+		SessionID: "s-review-other", RequestID: "rjob_player_report_other", ExpectedVersion: item.Version,
+		Actor: workitems.Actor{Type: workitems.ActorSystem}})
+	claimed, _, ok, err := service.ClaimNextRun(ctx, run.AvailableAt)
+	if err != nil || !ok {
+		t.Fatalf("claim=%+v ok=%v err=%v", claimed, ok, err)
+	}
 	if h.dispatchQueuedRun(ctx, claimed) {
-		t.Fatal("review relay ran in a writable Session")
+		t.Fatal("review relay ran in a writable non-Codex Session")
 	}
 	snapshot, _ := service.Snapshot(ctx)
-	if len(snapshot.Runs) != 1 || snapshot.Runs[0].Status != "deferred" || snapshot.Runs[0].QueueReason != "review_only_session_required" {
+	if len(snapshot.Runs) != 1 || snapshot.Runs[0].QueueReason != "review_only_session_required" {
 		t.Fatalf("snapshot=%+v", snapshot)
 	}
 }

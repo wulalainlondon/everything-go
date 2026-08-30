@@ -20,12 +20,16 @@ import (
 // injectable onSend so a test decides what a "turn" emits (a full turn with
 // done, or a long-running turn that emits nothing until stopped).
 type fakeExec struct {
-	sink    executor.Sink
-	onSend  func(s *session.Session, reqID, content string)
-	onSteer func(s *session.Session, reqID, content string) (backend.SteerResult, error)
+	sink          executor.Sink
+	onSend        func(s *session.Session, reqID, content string)
+	onSendContext func(ctx context.Context, s *session.Session, reqID, content string)
+	onSteer       func(s *session.Session, reqID, content string) (backend.SteerResult, error)
 }
 
-func (f *fakeExec) Send(_ context.Context, s *session.Session, reqID, content string, _ []backend.ImageAttachment, _ []backend.FileAttachment) error {
+func (f *fakeExec) Send(ctx context.Context, s *session.Session, reqID, content string, _ []backend.ImageAttachment, _ []backend.FileAttachment) error {
+	if f.onSendContext != nil {
+		f.onSendContext(ctx, s, reqID, content)
+	}
 	if f.onSend != nil {
 		f.onSend(s, reqID, content)
 	}

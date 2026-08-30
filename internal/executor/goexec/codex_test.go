@@ -747,6 +747,24 @@ func TestCodexTurnParamsForwardsSupportedEffort(t *testing.T) {
 	}
 }
 
+func TestCodexTurnSandboxPolicyOverridesReviewAndRestoresSessionDefault(t *testing.T) {
+	c := NewCodex(&capSink{}, "codex")
+	input := []map[string]any{{"type": "text", "text": "review"}}
+	snap := session.Snapshot{Cwd: t.TempDir(), Sandbox: "danger-full-access"}
+
+	review := c.codexTurnParamsForSession("thread-1", input, snap, "read-only")
+	reviewPolicy, ok := review["sandboxPolicy"].(map[string]any)
+	if !ok || reviewPolicy["type"] != "readOnly" || reviewPolicy["networkAccess"] != false {
+		t.Fatalf("review sandbox policy=%+v", review["sandboxPolicy"])
+	}
+
+	interactive := c.codexTurnParamsForSession("thread-1", input, snap, "")
+	interactivePolicy, ok := interactive["sandboxPolicy"].(map[string]any)
+	if !ok || interactivePolicy["type"] != "dangerFullAccess" {
+		t.Fatalf("interactive sandbox policy=%+v", interactive["sandboxPolicy"])
+	}
+}
+
 func TestCodexInputIncludesFilesAndImages(t *testing.T) {
 	c := NewCodex(&capSink{}, "codex")
 	reg := session.NewRegistry()

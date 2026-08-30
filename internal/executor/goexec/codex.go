@@ -1603,6 +1603,7 @@ func codexJSON(v any) string {
 // --- Executor interface ----------------------------------------------------
 
 func (c *Codex) Send(ctx context.Context, s *session.Session, reqID, content string, images []backend.ImageAttachment, files []backend.FileAttachment) error {
+	sandboxOverride, _ := backend.SandboxOverride(ctx)
 	if err := c.ensureServer(); err != nil {
 		c.sink.Emit(backend.NewError(s.ID, reqID, backend.ErrProcessDied, "codex app-server failed: "+err.Error()))
 		return err
@@ -1664,7 +1665,7 @@ func (c *Codex) Send(ctx context.Context, s *session.Session, reqID, content str
 		return err
 	}
 	input := c.codexInput(s, reqID, content, images, files, st)
-	go c.runTurn(s, st, threadID, input, done)
+	go c.runTurn(s, st, threadID, input, done, sandboxOverride)
 	return nil
 }
 
@@ -1712,13 +1713,13 @@ func (c *Codex) steerActiveTurn(s *session.Session, clientUserMessageID, content
 	return backend.SteerResult{TurnID: response.TurnID, RequestID: activeRequestID}, nil
 }
 
-func (c *Codex) runTurn(s *session.Session, st *codexState, threadID string, input []map[string]any, done chan struct{}) {
+func (c *Codex) runTurn(s *session.Session, st *codexState, threadID string, input []map[string]any, done chan struct{}, sandboxOverride string) {
 	defer c.cleanupTempImages(st)
 	st.mu.Lock()
 	requestID := st.reqID
 	st.mu.Unlock()
 	c.sink.Emit(backend.NewTurnProgress(s.ID, requestID, "waiting_model", "Waiting for Codex to accept the turn"))
-	if err := c.startTurnWithStaleRetry(s, st, threadID, input); err != nil {
+	if err := c.startTurnWithStaleRetry(s, st, threadID, input, sandboxOverride); err != nil {
 		st.finish("turn/start failed: " + err.Error())
 	}
 
@@ -2102,9 +2103,9 @@ func (c *Codex) shouldAutoCompact(st *codexState) bool {
 	return float64(st.contextUsed)/float64(st.contextMax) >= codexCompactThreshold
 }
 
-func (c *Codex) startTurnWithStaleRetry(s *session.Session, st *codexState, threadID string, input []map[string]any) error {
+func (c *Codex) startTurnWithStaleRetry(s *session.Session, st *codexState, threadID string, input []map[string]any, sandboxOverride string) error {
 	snap := s.Snapshot()
-	err := c.startTurn(threadID, input, snap)
+	err := c.startTurn(threadID, input, snap, sandboxOverride)
 	if err == nil {
 		c.finalizePendingRecovery(s, st, threadID)
 		return nil
@@ -2124,7 +2125,7 @@ func (c *Codex) startTurnWithStaleRetry(s *session.Session, st *codexState, thre
 	if err := c.moveActiveThreadClaim(threadID, newThreadID, s); err != nil {
 		return err
 	}
-	if err := c.startTurn(newThreadID, input, snap); err != nil {
+	if err := c.startTurn(newThreadID, input, snap, sandboxOverride); err != nil {
 		return err
 	}
 	c.finalizePendingRecovery(s, st, newThreadID)
@@ -2235,8 +2236,9 @@ func codexTurnParams(threadID string, input []map[string]any, effort string) map
 	return params
 }
 
-func (c *Codex) codexTurnParamsForSession(threadID string, input []map[string]any, snap session.Snapshot) map[string]any {
+func (c *Codex) codexTurnParamsForSession(threadID string, input []map[string]any, snap session.Snapshot, sandboxOverride string) map[string]any {
 	params := codexTurnParams(threadID, input, snap.Effort)
+	params["sandboxPolicy"] = codexTurnSandboxPolicy(snap, sandboxOverride)
 	if snap.ServiceTier != "" {
 		params["serviceTier"] = snap.ServiceTier
 	}
@@ -2249,8 +2251,8 @@ func (c *Codex) codexTurnParamsForSession(threadID string, input []map[string]an
 	return params
 }
 
-func (c *Codex) startTurn(threadID string, input []map[string]any, snap session.Snapshot) error {
-	_, err := c.rpcCall("turn/start", c.codexTurnParamsForSession(threadID, input, snap), 30*time.Second)
+func (c *Codex) startTurn(threadID string, input []map[string]any, snap session.Snapshot, sandboxOverride string) error {
+	_, err := c.rpcCall("turn/start", c.codexTurnParamsForSession(threadID, input, snap, sandboxOverride), 30*time.Second)
 	return err
 }
 
@@ -2829,6 +2831,25 @@ func codexSandboxForSession(snap session.Snapshot) string {
 		return base
 	}
 	return "danger-full-access"
+}
+
+func codexTurnSandboxPolicy(snap session.Snapshot, override string) map[string]any {
+	sandbox := strings.TrimSpace(override)
+	if sandbox == "" {
+		sandbox = codexSandboxForSession(snap)
+	}
+	switch sandbox {
+	case "read-only":
+		return map[string]any{"type": "readOnly", "networkAccess": false}
+	case "workspace-write":
+		roots := []string{}
+		if cwd := runtime.ExpandPath(snap.Cwd); filepath.IsAbs(cwd) {
+			roots = append(roots, cwd)
+		}
+		return map[string]any{"type": "workspaceWrite", "networkAccess": false, "writableRoots": roots}
+	default:
+		return map[string]any{"type": "dangerFullAccess"}
+	}
 }
 
 func extractThreadID(raw json.RawMessage, fallback string) string {
