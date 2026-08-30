@@ -143,6 +143,50 @@ func TestAutomaticWorkRunStaysDurableWhileSessionBusy(t *testing.T) {
 	s.EndTurn()
 }
 
+func TestRelayReviewRunRechecksReadOnlySandboxAtDispatch(t *testing.T) {
+	h, _ := newTestHub(t)
+	service := attachWorkService(t, h, t.TempDir())
+	c := newTestClient(h)
+	route(h, c, `{"type":"new_session","session_id":"s-review","name":"Review","backend":"codex","sandbox":"danger-full-access"}`)
+	_ = waitForType(t, c, "session_created")
+	ctx := context.Background()
+	project, err := service.CreateProject(ctx, workitems.CreateProjectInput{ID: "p-review", Name: "Review"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err := service.CreateItem(ctx, workitems.CreateItemInput{ID: "wi-review", ProjectID: project.ID, Title: "Player report"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err = service.MoveItem(ctx, workitems.MoveItemInput{ID: item.ID, ExpectedVersion: item.Version,
+		Lifecycle: workitems.LifecycleReady, Actor: workitems.Actor{Type: workitems.ActorSystem}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, item, err = service.LinkSession(ctx, workitems.LinkSessionInput{ID: "link-review", WorkItemID: item.ID,
+		SessionID: "s-review", ExpectedVersion: item.Version, Actor: workitems.Actor{Type: workitems.ActorSystem}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, _, err := service.StartRun(ctx, workitems.StartRunInput{ID: "run-review", WorkItemID: item.ID,
+		SessionID: "s-review", RequestID: "rjob_player_report", ExpectedVersion: item.Version,
+		Actor: workitems.Actor{Type: workitems.ActorSystem}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, _, ok, err := service.ClaimNextRun(ctx, run.AvailableAt)
+	if err != nil || !ok {
+		t.Fatalf("claim=%+v ok=%v err=%v", claimed, ok, err)
+	}
+	if h.dispatchQueuedRun(ctx, claimed) {
+		t.Fatal("review relay ran in a writable Session")
+	}
+	snapshot, _ := service.Snapshot(ctx)
+	if len(snapshot.Runs) != 1 || snapshot.Runs[0].Status != "deferred" || snapshot.Runs[0].QueueReason != "review_only_session_required" {
+		t.Fatalf("snapshot=%+v", snapshot)
+	}
+}
+
 func TestWorkRequestOwnershipRemainsDurableAfterTerminalProjection(t *testing.T) {
 	h, _ := newTestHub(t)
 	service := attachWorkService(t, h, t.TempDir())

@@ -85,6 +85,13 @@ func (h *Hub) dispatchQueuedRun(ctx context.Context, run workitems.Run) bool {
 		h.deferQueuedRun(ctx, run, time.Now().Add(30*time.Second), "desktop_controlled")
 		return false
 	}
+	// Relay review jobs must remain read-only at the moment of dispatch, not
+	// merely when the remote envelope was accepted. This closes the queue-time
+	// race where an operator changes Session sandbox while the job is waiting.
+	if strings.HasPrefix(run.RequestID, "rjob_") && s.Snapshot().Sandbox != "read-only" {
+		h.deferQueuedRun(ctx, run, time.Now().Add(30*time.Second), "review_only_session_required")
+		return false
+	}
 	if resetAt, limited := h.workQuotaLimited(ctx, s); limited {
 		h.deferQueuedRun(ctx, run, resetAt, "quota_limited")
 		return false
