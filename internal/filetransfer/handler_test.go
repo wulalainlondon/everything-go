@@ -12,7 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 )
@@ -91,8 +90,11 @@ func TestDropResumesAcrossServiceRestartAndFinalizesAtomically(t *testing.T) {
 
 	// Recreate the service as a Bridge restart would. The durable state returns
 	// the exact acknowledged cursor and accepts only the next offset.
-	restarted := *s
-	restarted.mu = sync.Mutex{}
+	restarted := Service{
+		dataDir: s.dataDir, downloadDir: s.downloadDir, stagingDir: s.stagingDir,
+		legacyDir: s.legacyDir, allowedRoots: append([]string(nil), s.allowedRoots...),
+		authorize: s.authorize, now: s.now,
+	}
 	response = httptest.NewRecorder()
 	restarted.DropHandler().ServeHTTP(response, authorizedRequest(http.MethodPost, "/api/drop/v1/uploads", metadata))
 	if response.Code != http.StatusOK || decodeState(t, response).ReceivedBytes != int64(len(first)) {
