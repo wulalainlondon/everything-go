@@ -1,0 +1,57 @@
+name: notarize-native-desktop
+
+on:
+  push:
+    branches: ['desktop-notarize/**']
+
+permissions:
+  contents: write
+
+jobs:
+  notarize:
+    runs-on: macos-latest
+    env:
+      RELEASE_TAG: desktop-native-v0.3.0
+      ASSET_NAME: BridgeDesktopNative-0.3.0-3-arm64.zip
+      GH_TOKEN: ${{ github.token }}
+      APPSTORE_CONNECT_API_KEY_ID: ${{ secrets.APPSTORE_CONNECT_API_KEY_ID }}
+      APPSTORE_CONNECT_API_ISSUER_ID: ${{ secrets.APPSTORE_CONNECT_API_ISSUER_ID }}
+      APPSTORE_CONNECT_API_KEY_P8_BASE64: ${{ secrets.APPSTORE_CONNECT_API_KEY_P8_BASE64 }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Developer ID signed draft asset
+        run: gh release download "$RELEASE_TAG" --pattern "$ASSET_NAME" --dir "$RUNNER_TEMP/input"
+
+      - name: Verify input identity and architecture
+        run: |
+          mkdir -p "$RUNNER_TEMP/input-check"
+          ditto -x -k "$RUNNER_TEMP/input/$ASSET_NAME" "$RUNNER_TEMP/input-check"
+          app="$RUNNER_TEMP/input-check/BridgeDesktopNative.app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          codesign -d --verbose=4 "$app" 2>&1 | grep -F 'Authority=Developer ID Application: YuDi Huang (UPWLTJL6S2)'
+          codesign -d --verbose=4 "$app" 2>&1 | grep -F 'TeamIdentifier=UPWLTJL6S2'
+          test "$(lipo -archs "$app/Contents/MacOS/BridgeDesktopNative")" = arm64
+
+      - name: Notarize and staple
+        run: |
+          test -n "$APPSTORE_CONNECT_API_KEY_ID"
+          test -n "$APPSTORE_CONNECT_API_ISSUER_ID"
+          test -n "$APPSTORE_CONNECT_API_KEY_P8_BASE64"
+          chmod +x scripts/notarize_macos_app_zip.sh
+          scripts/notarize_macos_app_zip.sh "$RUNNER_TEMP/input/$ASSET_NAME"
+
+      - name: Verify Apple ticket and Gatekeeper
+        run: |
+          mkdir -p "$RUNNER_TEMP/final-check"
+          ditto -x -k "$RUNNER_TEMP/input/$ASSET_NAME" "$RUNNER_TEMP/final-check"
+          app="$RUNNER_TEMP/final-check/BridgeDesktopNative.app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          xcrun stapler validate "$app"
+          spctl -a -vv -t exec "$app"
+
+      - name: Replace draft asset with notarized artifact
+        run: |
+          cd "$RUNNER_TEMP/input"
+          shasum -a 256 "$ASSET_NAME" > "$ASSET_NAME.sha256"
+          gh release upload "$RELEASE_TAG" "$ASSET_NAME" "$ASSET_NAME.sha256" --clobber
