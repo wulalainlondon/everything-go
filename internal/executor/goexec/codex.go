@@ -2334,7 +2334,12 @@ func (c *Codex) ensureThread(s *session.Session, st *codexState) error {
 	if snap.ResumeID != "" {
 		rolloutPath := c.findCodexSessionFile(snap.ResumeID)
 		rolloutBytes := fileSize(rolloutPath)
-		if c.rolloverEnabled && rolloutBytes > c.coldResumeMaxBytes {
+		// The shared daemon can rejoin a running or persisted thread without
+		// returning its history (excludeTurns below), so rollout byte size is no
+		// longer a reason to fork that canonical thread. Keep checkpoint rollover
+		// only for the legacy private stdio transport whose resume response still
+		// contains the complete history.
+		if c.appServerMode != "daemon" && c.rolloverEnabled && rolloutBytes > c.coldResumeMaxBytes {
 			var err error
 			recovery, err = c.prepareColdRecovery(snap, rolloutPath, rolloutBytes, "cold_resume_hard_limit")
 			if err != nil {

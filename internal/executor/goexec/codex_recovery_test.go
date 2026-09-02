@@ -155,6 +155,7 @@ func TestEnsureThreadLargeRolloutSkipsDirectResume(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := NewCodex(&capSink{}, "codex")
+	c.appServerMode = "stdio"
 	c.sessionsRoot = root
 	c.dataDir = t.TempDir()
 	c.rolloverEnabled = true
@@ -195,6 +196,51 @@ func TestEnsureThreadLargeRolloutSkipsDirectResume(t *testing.T) {
 	c.finalizePendingRecovery(s, st, newID)
 	if s.ResumeID() != newID || strings.Join(s.Snapshot().HistoricalResumeIDs, ",") != resumeID {
 		t.Fatalf("generation mapping not advanced after first turn: %+v", s.Snapshot())
+	}
+}
+
+func TestEnsureThreadDaemonLargeRolloutKeepsCanonicalThread(t *testing.T) {
+	root := t.TempDir()
+	resumeID := "019fb03e-0666-7ce3-8f99-8f19c79540e2"
+	rollout := filepath.Join(root, "rollout-2026-08-17T00-00-00-"+resumeID+".jsonl")
+	if err := os.WriteFile(rollout, []byte("large enough for the configured threshold\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := NewCodex(&capSink{}, "codex")
+	c.appServerMode = "daemon"
+	c.sessionsRoot = root
+	c.rolloverEnabled = true
+	c.coldResumeMaxBytes = 1
+	reg := session.NewRegistry()
+	s := reg.Create("logical", "large daemon session", t.TempDir(), "codex", "", "", resumeID)
+	writer := &rpcCaptureWriter{writes: make(chan []byte, 1)}
+	c.rpc.setWriter(writer)
+
+	method := make(chan string, 1)
+	go func() {
+		request := <-writer.writes
+		var frame struct {
+			ID     int            `json:"id"`
+			Method string         `json:"method"`
+			Params map[string]any `json:"params"`
+		}
+		_ = json.Unmarshal(request, &frame)
+		if frame.Params["excludeTurns"] != true {
+			method <- "thread/resume without excludeTurns"
+		} else {
+			method <- frame.Method
+		}
+		c.rpc.dispatchResponse(json.RawMessage(fmt.Sprintf(`{"id":%d,"result":{"thread":{"id":%q}}}`, frame.ID, resumeID)))
+	}()
+
+	if err := c.ensureThread(s, c.state(s.ID)); err != nil {
+		t.Fatal(err)
+	}
+	if got := <-method; got != "thread/resume" {
+		t.Fatalf("large daemon rollout used %q, want metadata-only thread/resume", got)
+	}
+	if s.ResumeID() != resumeID {
+		t.Fatalf("daemon changed canonical thread to %q", s.ResumeID())
 	}
 }
 
