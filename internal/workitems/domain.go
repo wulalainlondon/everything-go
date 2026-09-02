@@ -41,13 +41,14 @@ const (
 )
 
 var (
-	ErrNotFound          = errors.New("work item not found")
-	ErrConflict          = errors.New("work item version conflict")
-	ErrInvalidTransition = errors.New("invalid work item lifecycle transition")
-	ErrHumanRequired     = errors.New("human acceptance is required")
-	ErrDependencyCycle   = errors.New("work item dependency cycle")
-	ErrCrossProject      = errors.New("work item relation crosses projects")
-	ErrSessionLinked     = errors.New("session is already linked to an active work item")
+	ErrNotFound               = errors.New("work item not found")
+	ErrConflict               = errors.New("work item version conflict")
+	ErrInvalidTransition      = errors.New("invalid work item lifecycle transition")
+	ErrHumanRequired          = errors.New("human acceptance is required")
+	ErrReviewDecisionRequired = errors.New("a structured human review decision is required")
+	ErrDependencyCycle        = errors.New("work item dependency cycle")
+	ErrCrossProject           = errors.New("work item relation crosses projects")
+	ErrSessionLinked          = errors.New("session is already linked to an active work item")
 )
 
 type Actor struct {
@@ -170,6 +171,57 @@ type Workflow struct {
 	ArchivedAt  *int64             `json:"archived_at,omitempty"`
 }
 
+// BootstrapSource is a bounded, read-only evidence reference captured from a
+// server-authorized workspace. Excerpts are intentionally small and redacted.
+type BootstrapSource struct {
+	ID          string `json:"id"`
+	Kind        string `json:"kind"`
+	Label       string `json:"label"`
+	Path        string `json:"path,omitempty"`
+	Excerpt     string `json:"excerpt,omitempty"`
+	Fingerprint string `json:"fingerprint"`
+	ModifiedAt  int64  `json:"modified_at,omitempty"`
+}
+
+type BootstrapSuggestion struct {
+	ID                 string   `json:"id"`
+	WorkItemID         string   `json:"work_item_id"`
+	SessionID          string   `json:"session_id,omitempty"`
+	Title              string   `json:"title"`
+	Description        string   `json:"description,omitempty"`
+	Outcome            string   `json:"outcome,omitempty"`
+	NextStep           string   `json:"next_step,omitempty"`
+	AcceptanceCriteria string   `json:"acceptance_criteria,omitempty"`
+	EvidenceRefs       []string `json:"evidence_refs"`
+}
+
+// ProjectBootstrapDraft is server-authoritative review data. It never becomes
+// Project context or WorkItems until an explicit human approval mutation.
+type ProjectBootstrapDraft struct {
+	ID                  string                `json:"id"`
+	AuthorityInstanceID string                `json:"authority_instance_id"`
+	ProjectID           string                `json:"project_id,omitempty"`
+	ProjectVersion      uint64                `json:"project_version,omitempty"`
+	ProjectName         string                `json:"project_name"`
+	WorkspacePath       string                `json:"workspace_path"`
+	Status              string                `json:"status"`
+	Fingerprint         string                `json:"fingerprint"`
+	Objective           string                `json:"objective"`
+	CurrentState        string                `json:"current_state"`
+	NextStep            string                `json:"next_step"`
+	AcceptanceCriteria  string                `json:"acceptance_criteria"`
+	Constraints         []string              `json:"constraints"`
+	Decisions           []string              `json:"decisions"`
+	OpenQuestions       []string              `json:"open_questions"`
+	Suggestions         []BootstrapSuggestion `json:"suggestions"`
+	Sources             []BootstrapSource     `json:"sources"`
+	SessionIDs          []string              `json:"session_ids"`
+	Version             uint64                `json:"version"`
+	CreatedAt           int64                 `json:"created_at"`
+	UpdatedAt           int64                 `json:"updated_at"`
+	AppliedAt           *int64                `json:"applied_at,omitempty"`
+}
+
 // AttachmentRef stores only the durable relationship to the canonical
 // attachment journal. URL, MIME and availability are delivery projections
 // populated by core and are never written to the Work database.
@@ -196,6 +248,14 @@ type Activity struct {
 	CreatedAt  int64     `json:"created_at"`
 }
 
+type ReviewDecisionRecord struct {
+	Decision  string `json:"decision"`
+	Feedback  string `json:"feedback,omitempty"`
+	RunID     string `json:"run_id,omitempty"`
+	SessionID string `json:"session_id,omitempty"`
+	CreatedAt int64  `json:"created_at"`
+}
+
 type Change struct {
 	Revision  uint64          `json:"revision"`
 	Entity    string          `json:"entity"`
@@ -208,27 +268,30 @@ type Change struct {
 // ChangePayload is the native delta envelope. A single transaction can update
 // an item and one related entity without forcing clients to race a second sync.
 type ChangePayload struct {
-	Item       *WorkItem      `json:"item,omitempty"`
-	Link       *SessionLink   `json:"link,omitempty"`
-	Dependency *Dependency    `json:"dependency,omitempty"`
-	Comment    *Comment       `json:"comment,omitempty"`
-	Run        *Run           `json:"run,omitempty"`
-	Attachment *AttachmentRef `json:"attachment,omitempty"`
-	Activity   *Activity      `json:"activity,omitempty"`
-	Workflow   *Workflow      `json:"workflow,omitempty"`
+	Item           *WorkItem              `json:"item,omitempty"`
+	Link           *SessionLink           `json:"link,omitempty"`
+	Dependency     *Dependency            `json:"dependency,omitempty"`
+	Comment        *Comment               `json:"comment,omitempty"`
+	Run            *Run                   `json:"run,omitempty"`
+	Attachment     *AttachmentRef         `json:"attachment,omitempty"`
+	Activity       *Activity              `json:"activity,omitempty"`
+	Workflow       *Workflow              `json:"workflow,omitempty"`
+	Bootstrap      *ProjectBootstrapDraft `json:"bootstrap,omitempty"`
+	ReviewDecision *ReviewDecisionRecord  `json:"review_decision,omitempty"`
 }
 
 type Snapshot struct {
-	Revision     uint64          `json:"revision"`
-	Projects     []Project       `json:"projects"`
-	Items        []WorkItem      `json:"items"`
-	SessionLinks []SessionLink   `json:"session_links"`
-	Dependencies []Dependency    `json:"dependencies"`
-	Comments     []Comment       `json:"comments"`
-	Runs         []Run           `json:"runs"`
-	Attachments  []AttachmentRef `json:"attachments"`
-	Activities   []Activity      `json:"activities"`
-	Workflows    []Workflow      `json:"workflows"`
+	Revision     uint64                  `json:"revision"`
+	Projects     []Project               `json:"projects"`
+	Items        []WorkItem              `json:"items"`
+	SessionLinks []SessionLink           `json:"session_links"`
+	Dependencies []Dependency            `json:"dependencies"`
+	Comments     []Comment               `json:"comments"`
+	Runs         []Run                   `json:"runs"`
+	Attachments  []AttachmentRef         `json:"attachments"`
+	Activities   []Activity              `json:"activities"`
+	Workflows    []Workflow              `json:"workflows"`
+	Bootstraps   []ProjectBootstrapDraft `json:"bootstraps"`
 }
 
 type ItemView struct {
@@ -237,16 +300,17 @@ type ItemView struct {
 }
 
 type DeviceSnapshot struct {
-	Revision     uint64          `json:"revision"`
-	Projects     []Project       `json:"projects"`
-	Items        []ItemView      `json:"items"`
-	SessionLinks []SessionLink   `json:"session_links"`
-	Dependencies []Dependency    `json:"dependencies"`
-	Comments     []Comment       `json:"comments"`
-	Runs         []Run           `json:"runs"`
-	Attachments  []AttachmentRef `json:"attachments"`
-	Activities   []Activity      `json:"activities"`
-	Workflows    []Workflow      `json:"workflows"`
+	Revision     uint64                  `json:"revision"`
+	Projects     []Project               `json:"projects"`
+	Items        []ItemView              `json:"items"`
+	SessionLinks []SessionLink           `json:"session_links"`
+	Dependencies []Dependency            `json:"dependencies"`
+	Comments     []Comment               `json:"comments"`
+	Runs         []Run                   `json:"runs"`
+	Attachments  []AttachmentRef         `json:"attachments"`
+	Activities   []Activity              `json:"activities"`
+	Workflows    []Workflow              `json:"workflows"`
+	Bootstraps   []ProjectBootstrapDraft `json:"bootstraps"`
 }
 
 // ContextPack is the durable WorkItem projection supplied to an agent before a

@@ -49,20 +49,35 @@ func TestLifecycleRequiresHumanAcceptance(t *testing.T) {
 	s := openTestStore(t)
 	item := seedItem(t, s, "p1", "i1")
 	item = move(t, s, item, LifecycleReady, ActorUser)
+	_, item, err := s.LinkSession(context.Background(), LinkSessionInput{ID: "accept-link", WorkItemID: item.ID,
+		SessionID: "accept-session", ExpectedVersion: item.Version, Actor: Actor{Type: ActorUser}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	item = move(t, s, item, LifecycleActive, ActorAgent)
 	item = move(t, s, item, LifecycleReview, ActorAgent)
 
-	_, err := s.MoveItem(context.Background(), MoveItemInput{ID: item.ID, ExpectedVersion: item.Version,
+	_, err = s.MoveItem(context.Background(), MoveItemInput{ID: item.ID, ExpectedVersion: item.Version,
 		Lifecycle: LifecycleDone, Actor: Actor{Type: ActorAgent}})
 	if !errors.Is(err, ErrHumanRequired) {
 		t.Fatalf("agent done error=%v, want ErrHumanRequired", err)
 	}
 
-	item = move(t, s, item, LifecycleDone, ActorMobile)
+	accepted, err := s.DecideReview(context.Background(), ReviewDecisionInput{WorkItemID: item.ID,
+		ExpectedVersion: item.Version, Decision: "accept", Actor: Actor{Type: ActorMobile}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	item = accepted.Item
 	if item.AcceptedAt == nil || item.Lifecycle != LifecycleDone {
 		t.Fatalf("human acceptance not persisted: %+v", item)
 	}
-	item = move(t, s, item, LifecycleActive, ActorUser)
+	reopened, err := s.DecideReview(context.Background(), ReviewDecisionInput{WorkItemID: item.ID,
+		ExpectedVersion: item.Version, Decision: "reopen", Feedback: "new evidence", Actor: Actor{Type: ActorUser}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	item = reopened.Item
 	if item.AcceptedAt != nil {
 		t.Fatal("reopened item retained accepted_at")
 	}

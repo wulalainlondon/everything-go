@@ -78,7 +78,8 @@ func (s *Store) SnapshotForDevice(ctx context.Context, deviceID string) (DeviceS
 	}
 	result := DeviceSnapshot{Revision: base.Revision, Projects: base.Projects,
 		SessionLinks: base.SessionLinks, Dependencies: base.Dependencies, Comments: base.Comments,
-		Runs: base.Runs, Attachments: base.Attachments, Activities: base.Activities, Workflows: base.Workflows}
+		Runs: base.Runs, Attachments: base.Attachments, Activities: base.Activities, Workflows: base.Workflows,
+		Bootstraps: base.Bootstraps}
 	result.Items = make([]ItemView, 0, len(base.Items))
 	for _, item := range base.Items {
 		unread := 0

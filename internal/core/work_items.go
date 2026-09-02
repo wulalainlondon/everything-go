@@ -98,6 +98,35 @@ func (h *Hub) handleWorkCommand(c *Client, cmd clientproto.Command) {
 		}
 	}
 	switch cmd.Kind {
+	case "work_project_bootstrap_generate":
+		result, err := h.generateProjectBootstrap(ctx, cmd)
+		if err != nil {
+			h.sendWorkError(c, cmd.MutationID, err)
+			return
+		}
+		ack := protocol.WorkMutationAck{Type: "work_mutation_ack", MutationID: cmd.MutationID,
+			EntityVersion: result.Draft.Version, Revision: result.FirstRevision, Bootstrap: &result.Draft}
+		if !result.Changed {
+			ack.Revision = bootstrapAckRevision(ctx, h.work)
+			h.completeWorkMutationWithoutBroadcast(c, cmd.MutationID, ack)
+		} else {
+			h.completeWorkMutationRange(c, cmd.MutationID, ack, result.FirstRevision)
+		}
+
+	case "work_project_bootstrap_approve":
+		result, err := h.approveProjectBootstrap(ctx, cmd, actor)
+		if err != nil {
+			h.sendWorkError(c, cmd.MutationID, err)
+			return
+		}
+		ack := bootstrapMutationAck(cmd.MutationID, result)
+		if result.AlreadyApplied {
+			ack.Revision = bootstrapAckRevision(ctx, h.work)
+			h.completeWorkMutationWithoutBroadcast(c, cmd.MutationID, ack)
+		} else {
+			h.completeWorkMutationRange(c, cmd.MutationID, ack, result.FirstRevision)
+		}
+
 	case "work_project_create":
 		project, err := h.work.CreateProject(ctx, workitems.CreateProjectInput{
 			ID: cmd.ProjectID, Name: cmd.Name, WorkspacePath: cmd.WorkspacePath, Context: cmd.ProjectContext,
@@ -228,6 +257,23 @@ func (h *Hub) handleWorkCommand(c *Client, cmd clientproto.Command) {
 		}
 		h.completeWorkMutation(c, cmd.MutationID, protocol.WorkMutationAck{Type: "work_mutation_ack",
 			MutationID: cmd.MutationID, EntityVersion: item.Version, Revision: item.ActivityRevision, Item: &item})
+
+	case "work_item_review_decision":
+		result, err := h.work.DecideReview(ctx, workitems.ReviewDecisionInput{
+			WorkItemID: cmd.WorkItemID, ExpectedVersion: cmd.ExpectedVersion, Decision: cmd.Decision,
+			Feedback: cmd.Body, CommentID: cmd.CommentID, RunID: cmd.RunID, RequestID: cmd.RequestID, Actor: actor,
+		})
+		if err != nil {
+			h.sendWorkError(c, cmd.MutationID, err)
+			return
+		}
+		ack := protocol.WorkMutationAck{Type: "work_mutation_ack", MutationID: cmd.MutationID,
+			EntityVersion: result.Item.Version, Revision: result.Item.ActivityRevision, Item: &result.Item,
+			Comment: result.Comment, Run: result.Run}
+		h.completeWorkMutation(c, cmd.MutationID, ack)
+		if result.Run != nil {
+			h.WakeWorkScheduler()
+		}
 
 	case "work_item_archive", "work_item_restore":
 		item, err := h.work.ArchiveItem(ctx, workitems.ArchiveItemInput{ID: cmd.WorkItemID,
@@ -466,6 +512,8 @@ func (h *Hub) sendWorkError(c *Client, mutationID string, err error) {
 		code = "not_found"
 	case errors.Is(err, workitems.ErrHumanRequired):
 		code = "human_acceptance_required"
+	case errors.Is(err, workitems.ErrReviewDecisionRequired):
+		code = "review_decision_required"
 	case errors.Is(err, workitems.ErrDependencyCycle):
 		code = "dependency_cycle"
 	case errors.Is(err, workitems.ErrCrossProject):

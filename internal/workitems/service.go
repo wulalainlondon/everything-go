@@ -43,6 +43,10 @@ func (s *Service) MoveItem(ctx context.Context, in MoveItemInput) (WorkItem, err
 	return s.store.MoveItem(ctx, in)
 }
 
+func (s *Service) DecideReview(ctx context.Context, in ReviewDecisionInput) (ReviewDecisionResult, error) {
+	return s.store.DecideReview(ctx, in)
+}
+
 func (s *Service) LinkSession(ctx context.Context, in LinkSessionInput) (SessionLink, WorkItem, error) {
 	return s.store.LinkSession(ctx, in)
 }
@@ -81,6 +85,22 @@ func (s *Service) RemoveAttachment(ctx context.Context, in RemoveAttachmentInput
 
 func (s *Service) GetItem(ctx context.Context, id string) (WorkItem, error) {
 	return s.store.GetItem(ctx, id)
+}
+
+func (s *Service) GetProject(ctx context.Context, id string) (Project, error) {
+	return s.store.GetProject(ctx, id)
+}
+
+func (s *Service) SaveBootstrapDraft(ctx context.Context, in SaveBootstrapInput) (SaveBootstrapResult, error) {
+	return s.store.SaveBootstrapDraft(ctx, in)
+}
+
+func (s *Service) ApproveBootstrap(ctx context.Context, in ApproveBootstrapInput) (ApproveBootstrapResult, error) {
+	return s.store.ApproveBootstrap(ctx, in)
+}
+
+func (s *Service) GetBootstrap(ctx context.Context, id string) (ProjectBootstrapDraft, error) {
+	return s.store.GetBootstrap(ctx, id)
 }
 
 func (s *Service) BuildContextPack(ctx context.Context, itemID string, maxCharacters int) (ContextPack, error) {

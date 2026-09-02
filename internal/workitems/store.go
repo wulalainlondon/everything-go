@@ -17,7 +17,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 4
+const schemaVersion = 5
 
 const schema = `
 CREATE TABLE IF NOT EXISTS work_schema (
@@ -192,6 +192,34 @@ CREATE TABLE IF NOT EXISTS work_mutation_dedup (
   created_at INTEGER NOT NULL,
   PRIMARY KEY(device_id, mutation_id)
 );
+
+CREATE TABLE IF NOT EXISTS work_project_bootstraps (
+  id TEXT PRIMARY KEY,
+  authority_instance_id TEXT NOT NULL,
+  project_id TEXT NOT NULL DEFAULT '',
+  project_version INTEGER NOT NULL DEFAULT 0,
+  project_name TEXT NOT NULL,
+  workspace_path TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('review','applied','stale','failed')),
+  fingerprint TEXT NOT NULL,
+  objective TEXT NOT NULL DEFAULT '',
+  current_state TEXT NOT NULL DEFAULT '',
+  next_step TEXT NOT NULL DEFAULT '',
+  acceptance_criteria TEXT NOT NULL DEFAULT '',
+  constraints_json TEXT NOT NULL DEFAULT '[]',
+  decisions_json TEXT NOT NULL DEFAULT '[]',
+  open_questions_json TEXT NOT NULL DEFAULT '[]',
+  suggestions_json TEXT NOT NULL DEFAULT '[]',
+  sources_json TEXT NOT NULL DEFAULT '[]',
+  session_ids_json TEXT NOT NULL DEFAULT '[]',
+  version INTEGER NOT NULL DEFAULT 1,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  applied_at INTEGER,
+  UNIQUE(authority_instance_id, workspace_path)
+);
+CREATE INDEX IF NOT EXISTS work_bootstraps_updated
+  ON work_project_bootstraps(authority_instance_id, updated_at DESC, id);
 `
 
 type Store struct {
@@ -237,7 +265,7 @@ func (s *Store) backupLegacySchema(ctx context.Context) error {
 	if errors.Is(err, sql.ErrNoRows) || (err != nil && strings.Contains(err.Error(), "no such table")) {
 		return nil
 	}
-	if err != nil || (version != 1 && version != 2 && version != 3) {
+	if err != nil || (version != 1 && version != 2 && version != 3 && version != 4) {
 		return err
 	}
 	backupPath := s.dbPath + fmt.Sprintf(".pre-v%d.bak", version+1)
@@ -329,6 +357,10 @@ func (s *Store) migrate(ctx context.Context) error {
 					return err
 				}
 			}
+			if _, err := tx.ExecContext(ctx, "UPDATE work_schema SET version=?", schemaVersion); err != nil {
+				return err
+			}
+		case 4:
 			if _, err := tx.ExecContext(ctx, "UPDATE work_schema SET version=?", schemaVersion); err != nil {
 				return err
 			}
@@ -621,6 +653,15 @@ func (s *Store) MoveItem(ctx context.Context, in MoveItemInput) (WorkItem, error
 	if current.Version != in.ExpectedVersion {
 		return WorkItem{}, &ConflictError{Expected: in.ExpectedVersion, Current: current}
 	}
+	if current.Lifecycle == LifecycleReview && in.Lifecycle == LifecycleDone {
+		if in.Actor.Type != ActorUser && in.Actor.Type != ActorDesktop && in.Actor.Type != ActorMobile {
+			return WorkItem{}, ErrHumanRequired
+		}
+		return WorkItem{}, ErrReviewDecisionRequired
+	}
+	if current.Lifecycle == LifecycleDone && in.Lifecycle == LifecycleActive {
+		return WorkItem{}, ErrReviewDecisionRequired
+	}
 	if err := validateTransition(current.Lifecycle, in.Lifecycle, in.Actor); err != nil {
 		return WorkItem{}, err
 	}
@@ -673,7 +714,14 @@ func (s *Store) writeItemMutation(ctx context.Context, tx *sql.Tx, item WorkItem
 	if _, err := tx.ExecContext(ctx, "UPDATE work_items SET activity_revision=? WHERE id=?", revision, item.ID); err != nil {
 		return WorkItem{}, err
 	}
-	activity, err := insertActivity(ctx, tx, revision, item.ID, kind, actor, item, item.UpdatedAt)
+	activityPayload := any(item)
+	if payload.ReviewDecision != nil {
+		activityPayload = struct {
+			Item           WorkItem             `json:"item"`
+			ReviewDecision ReviewDecisionRecord `json:"review_decision"`
+		}{Item: item, ReviewDecision: *payload.ReviewDecision}
+	}
+	activity, err := insertActivity(ctx, tx, revision, item.ID, kind, actor, activityPayload, item.UpdatedAt)
 	if err != nil {
 		return WorkItem{}, err
 	}
@@ -1236,6 +1284,10 @@ func (s *Store) Snapshot(ctx context.Context) (Snapshot, error) {
 		return snap, err
 	}
 	snap.Workflows, err = s.listWorkflows(ctx)
+	if err != nil {
+		return snap, err
+	}
+	snap.Bootstraps, err = listBootstraps(ctx, s.db, s.instanceID)
 	return snap, err
 }
 

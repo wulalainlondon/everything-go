@@ -74,6 +74,12 @@ func (h *Hub) ServeWorkAPI(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.broadcastWorkRevision(item.ActivityRevision)
+		// An agent may request review before the enclosing Session emits Done.
+		// Notify at the authoritative attention transition itself; otherwise the
+		// later run completion sees an already-review item and cannot surface it.
+		if event.Action == "request_review" {
+			h.notifyWorkAttention(item, "review_ready")
+		}
 		w.WriteHeader(http.StatusAccepted)
 		_ = json.NewEncoder(w).Encode(item)
 	default:

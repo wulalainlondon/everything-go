@@ -86,6 +86,46 @@ func TestWorkStartRunUsesSessionActorAndProjectsSuccessToReview(t *testing.T) {
 	t.Fatalf("explicit successful run did not reach review: %+v", item)
 }
 
+func TestWorkReviewDecisionPersistsFeedbackAndDedupesQueuedRun(t *testing.T) {
+	h, _ := newTestHub(t)
+	service := attachWorkService(t, h, t.TempDir())
+	c := newTestClient(h)
+	c.deviceID = "note20"
+	c.clientSurface = "android"
+	route(h, c, `{"type":"new_session","session_id":"review-session","name":"Review","backend":"codex"}`)
+	_ = waitForType(t, c, "session_created")
+	ctx := context.Background()
+	project, err := service.CreateProject(ctx, workitems.CreateProjectInput{ID: "review-project", Name: "Player review"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err := service.CreateItem(ctx, workitems.CreateItemInput{ID: "review-item", ProjectID: project.ID, Title: "Player report"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, _ = service.MoveItem(ctx, workitems.MoveItemInput{ID: item.ID, ExpectedVersion: item.Version, Lifecycle: workitems.LifecycleReady, Actor: workitems.Actor{Type: workitems.ActorUser}})
+	_, item, _ = service.LinkSession(ctx, workitems.LinkSessionInput{ID: "review-link", WorkItemID: item.ID,
+		SessionID: "review-session", ExpectedVersion: item.Version, Actor: workitems.Actor{Type: workitems.ActorUser}})
+	item, _ = service.MoveItem(ctx, workitems.MoveItemInput{ID: item.ID, ExpectedVersion: item.Version, Lifecycle: workitems.LifecycleActive, Actor: workitems.Actor{Type: workitems.ActorAgent}})
+	item, _ = service.MoveItem(ctx, workitems.MoveItemInput{ID: item.ID, ExpectedVersion: item.Version, Lifecycle: workitems.LifecycleReview, Actor: workitems.Actor{Type: workitems.ActorAgent}})
+
+	frame := `{"type":"work_item_review_decision","work_item_id":"review-item","mutation_id":"review-mutation","expected_version":` + formatUint(item.Version) + `,"decision":"request_changes","body":"Include the missing screenshot.","comment_id":"review-comment","run_id":"review-run","request_id":"review-request"}`
+	route(h, c, frame)
+	ack := waitForType(t, c, "work_mutation_ack")
+	if ack["comment"].(map[string]any)["body"] != "Include the missing screenshot." || ack["run"].(map[string]any)["status"] != "queued" {
+		t.Fatalf("review decision ack=%+v", ack)
+	}
+	route(h, c, frame)
+	second := waitForType(t, c, "work_mutation_ack")
+	if second["mutation_id"] != "review-mutation" {
+		t.Fatalf("dedup ack=%+v", second)
+	}
+	snapshot, err := service.Snapshot(ctx)
+	if err != nil || len(snapshot.Runs) != 1 || len(snapshot.Comments) != 1 || snapshot.Items[0].Lifecycle != workitems.LifecycleActive {
+		t.Fatalf("review snapshot=%+v err=%v", snapshot, err)
+	}
+}
+
 func TestAutomaticWorkRunStaysDurableWhileSessionBusy(t *testing.T) {
 	h, exec := newTestHub(t)
 	sent := make(chan struct{}, 1)
@@ -276,7 +316,7 @@ func TestWorkHelloAdvertisesCapabilityAndReconcilesFromClientCursor(t *testing.T
 	route(h, c, `{"type":"hello","device_id":"phone"}`)
 	hello := waitForType(t, c, "hello_ack")
 	capabilities, ok := hello["capabilities"].([]any)
-	if !ok || len(capabilities) != 2 || capabilities[0] != "work_coordination_v1" || capabilities[1] != "work_items_v1" {
+	if !ok || len(capabilities) != 4 || capabilities[0] != "work_coordination_v1" || capabilities[1] != "work_items_v1" || capabilities[2] != "project_bootstrap_v1" || capabilities[3] != "work_review_feedback_v1" {
 		t.Fatalf("hello capabilities=%v", hello["capabilities"])
 	}
 	assertNoTypeWithin(t, c, "work_snapshot", 50*time.Millisecond)
@@ -405,6 +445,74 @@ func TestWorkSnapshotSurvivesBridgeRestart(t *testing.T) {
 	items := snapshot["items"].([]any)
 	if len(items) != 1 || items[0].(map[string]any)["id"] != "wi1" {
 		t.Fatalf("restart snapshot=%+v db=%s", snapshot, filepath.Join(dir, "everything_go_work_items.db"))
+	}
+}
+
+func TestProjectBootstrapGeneratesReviewDraftAndRequiresHumanApproval(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workspace, "README.md"), []byte("# Bridge\n\nManage local AI work reliably.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "package.json"), []byte(`{"name":"bridge","scripts":{"test":"vitest"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h, _ := newTestHub(t)
+	service := attachWorkService(t, h, t.TempDir())
+	c := newTestClient(h)
+	c.deviceID = "phone"
+	c.clientSurface = "android"
+	newSession, _ := json.Marshal(map[string]any{"type": "new_session", "session_id": "s-bootstrap", "name": "Verify project import", "cwd": workspace, "backend": "codex"})
+	route(h, c, string(newSession))
+	_ = waitForType(t, c, "session_created")
+	generate, _ := json.Marshal(map[string]any{
+		"type": "work_project_bootstrap_generate", "mutation_id": "mb-generate", "name": "Bridge",
+		"workspace_path": workspace, "session_ids": []string{"s-bootstrap"},
+	})
+	route(h, c, string(generate))
+	ack := waitForType(t, c, "work_mutation_ack")
+	draft := ack["bootstrap"].(map[string]any)
+	if draft["status"] != "review" || !strings.Contains(draft["objective"].(string), "Manage local AI work") {
+		t.Fatalf("bootstrap draft=%+v", draft)
+	}
+	suggestions := draft["suggestions"].([]any)
+	if len(suggestions) != 1 || suggestions[0].(map[string]any)["session_id"] != "s-bootstrap" {
+		t.Fatalf("suggestions=%+v", suggestions)
+	}
+	before, err := service.Snapshot(context.Background())
+	if err != nil || len(before.Projects) != 0 || len(before.Items) != 0 {
+		t.Fatalf("draft mutated formal work before approval: %+v err=%v", before, err)
+	}
+	approve, _ := json.Marshal(map[string]any{
+		"type": "work_project_bootstrap_approve", "mutation_id": "mb-approve",
+		"bootstrap_id": draft["id"], "expected_version": draft["version"], "name": "Bridge",
+		"objective": draft["objective"], "current_state": draft["current_state"],
+		"next_step": draft["next_step"], "acceptance_criteria": draft["acceptance_criteria"],
+		"selected_suggestion_ids": []string{suggestions[0].(map[string]any)["id"].(string)},
+	})
+	route(h, c, string(approve))
+	approved := waitForType(t, c, "work_mutation_ack")
+	if approved["bootstrap"].(map[string]any)["status"] != "applied" || len(approved["items"].([]any)) != 1 || len(approved["links"].([]any)) != 1 {
+		t.Fatalf("approval ACK=%+v", approved)
+	}
+	after, err := service.Snapshot(context.Background())
+	if err != nil || len(after.Projects) != 1 || len(after.Items) != 1 || after.Bootstraps[0].Status != "applied" {
+		t.Fatalf("approved snapshot=%+v err=%v", after, err)
+	}
+}
+
+func TestProjectBootstrapRejectsClientChosenUnmappedWorkspace(t *testing.T) {
+	h, _ := newTestHub(t)
+	attachWorkService(t, h, t.TempDir())
+	c := newTestClient(h)
+	c.deviceID = "phone"
+	generate, _ := json.Marshal(map[string]any{
+		"type": "work_project_bootstrap_generate", "mutation_id": "mb-denied", "name": "Unknown",
+		"workspace_path": t.TempDir(),
+	})
+	route(h, c, string(generate))
+	event := waitForType(t, c, "work_error")
+	if !strings.Contains(event["message"].(string), "authorized") {
+		t.Fatalf("unexpected error=%+v", event)
 	}
 }
 
