@@ -57,6 +57,7 @@ func TestColdRecoveryWritesBoundedRedactedCheckpointAndCommitsManifest(t *testin
 
 func TestEnsureThreadSingleflightSendsOneResumeRPC(t *testing.T) {
 	c := NewCodex(&capSink{}, "codex")
+	c.appServerMode = "daemon"
 	reg := session.NewRegistry()
 	s := reg.Create("logical", "session", t.TempDir(), "codex", "", "", "thread-old")
 	st := c.state(s.ID)
@@ -69,9 +70,16 @@ func TestEnsureThreadSingleflightSendsOneResumeRPC(t *testing.T) {
 		var frame struct {
 			ID     int    `json:"id"`
 			Method string `json:"method"`
+			Params struct {
+				ExcludeTurns bool `json:"excludeTurns"`
+			} `json:"params"`
 		}
 		_ = json.Unmarshal(request, &frame)
-		methods <- frame.Method
+		if !frame.Params.ExcludeTurns {
+			methods <- "missing excludeTurns"
+		} else {
+			methods <- frame.Method
+		}
 		c.rpc.dispatchResponse(json.RawMessage(fmt.Sprintf(`{"id":%d,"result":{"thread":{"id":"thread-old"}}}`, frame.ID)))
 	}()
 
@@ -90,6 +98,46 @@ func TestEnsureThreadSingleflightSendsOneResumeRPC(t *testing.T) {
 	case request := <-writer.writes:
 		t.Fatalf("singleflight emitted a second RPC: %s", request)
 	case <-time.After(30 * time.Millisecond):
+	}
+}
+
+func TestEnsureThreadStdioResumeKeepsLegacyParams(t *testing.T) {
+	c := NewCodex(&capSink{}, "codex")
+	c.appServerMode = "stdio"
+	reg := session.NewRegistry()
+	s := reg.Create("logical", "session", t.TempDir(), "codex", "", "", "thread-old")
+	writer := &rpcCaptureWriter{writes: make(chan []byte, 1)}
+	c.rpc.setWriter(writer)
+
+	checked := make(chan error, 1)
+	go func() {
+		request := <-writer.writes
+		var frame struct {
+			ID     int            `json:"id"`
+			Method string         `json:"method"`
+			Params map[string]any `json:"params"`
+		}
+		if err := json.Unmarshal(request, &frame); err != nil {
+			checked <- err
+			return
+		}
+		if frame.Method != "thread/resume" {
+			checked <- fmt.Errorf("method=%q", frame.Method)
+			return
+		}
+		if _, ok := frame.Params["excludeTurns"]; ok {
+			checked <- errors.New("stdio compatibility request included excludeTurns")
+			return
+		}
+		c.rpc.dispatchResponse(json.RawMessage(fmt.Sprintf(`{"id":%d,"result":{"thread":{"id":"thread-old"}}}`, frame.ID)))
+		checked <- nil
+	}()
+
+	if err := c.ensureThread(s, c.state(s.ID)); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-checked; err != nil {
+		t.Fatal(err)
 	}
 }
 

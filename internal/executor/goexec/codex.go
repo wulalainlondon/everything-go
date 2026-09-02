@@ -2342,10 +2342,19 @@ func (c *Codex) ensureThread(s *session.Session, st *codexState) error {
 			}
 			log.Printf("[codex] cold resume guarded session=%s thread=%s bytes=%d", s.ID, snap.ResumeID, rolloutBytes)
 		} else {
-			raw, err := c.rpcCall("thread/resume", map[string]any{
+			resumeParams := map[string]any{
 				"threadId": snap.ResumeID, "cwd": cwd,
 				"approvalPolicy": "never", "approvalsReviewer": "user", "sandbox": sandbox,
-			}, 15*time.Second)
+			}
+			if c.appServerMode == "daemon" {
+				// A shared daemon already owns the canonical rollout and only needs
+				// to subscribe this Bridge connection. Returning every historical
+				// turn can produce a hundreds-of-MiB JSON-RPC frame and time out even
+				// though the thread itself is healthy. excludeTurns preserves resume
+				// and notification subscription semantics while returning metadata.
+				resumeParams["excludeTurns"] = true
+			}
+			raw, err := c.rpcCall("thread/resume", resumeParams, 15*time.Second)
 			if err == nil {
 				threadID = extractThreadID(raw, snap.ResumeID)
 			} else if isActiveWriterError(err) {
