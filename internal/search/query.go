@@ -338,6 +338,9 @@ type HealthResponse struct {
 	ErrorsLast24h     int            `json:"errors_last_24h"`
 	Ready             bool           `json:"ready"`
 	IngestProgress    map[string]any `json:"ingest_progress"`
+	StaleFiles        int            `json:"stale_files"`
+	PendingBytes      int64          `json:"pending_bytes"`
+	ProjectionLagSecs float64        `json:"projection_lag_seconds"`
 }
 
 func (idx *Index) Health() HealthResponse {
@@ -361,6 +364,7 @@ func (idx *Index) Health() HealthResponse {
 	// ingested file or message) as well as the in-memory flag the bridge sets
 	// after the first child indexer run.
 	h.Ready = idx.isReady() || h.IndexedMessages > 0 || lastIngest != nil
+	h.StaleFiles, h.PendingBytes, h.ProjectionLagSecs = idx.projectionFreshness(time.Now())
 	p := idx.snapshotProgress()
 	status := p.status
 	if status == "" {
@@ -379,6 +383,7 @@ func (idx *Index) Health() HealthResponse {
 		h.IngestProgress["files_seen"] = p.lastMetrics.FilesSeen
 		h.IngestProgress["files_changed"] = p.lastMetrics.FilesChanged
 		h.IngestProgress["files_queued"] = p.lastMetrics.FilesQueued
+		h.IngestProgress["message_conflicts"] = p.lastMetrics.MessageConflicts
 		h.IngestProgress["bytes_read"] = p.lastMetrics.BytesRead
 		h.IngestProgress["duration_ms"] = p.lastMetrics.DurationMS
 		h.IngestProgress["maintenance_rows"] = p.lastMetrics.MaintenanceRows
@@ -404,6 +409,39 @@ func (idx *Index) Health() HealthResponse {
 		h.IngestProgress["cycle_done_at"] = p.cycleDone.Format(time.RFC3339)
 	}
 	return h
+}
+
+func (idx *Index) projectionFreshness(now time.Time) (staleFiles int, pendingBytes int64, maxLagSeconds float64) {
+	rows, err := idx.db.Query("SELECT source_path,last_mtime,last_offset FROM ingest_state")
+	if err != nil {
+		return 0, 0, 0
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var path string
+		var indexedMtime float64
+		var offset int64
+		if rows.Scan(&path, &indexedMtime, &offset) != nil {
+			continue
+		}
+		info, statErr := os.Stat(path)
+		if statErr != nil {
+			continue
+		}
+		currentMtime := float64(info.ModTime().UnixNano()) / 1e9
+		if info.Size() <= offset && currentMtime <= indexedMtime+0.000001 {
+			continue
+		}
+		staleFiles++
+		if info.Size() > offset {
+			pendingBytes += info.Size() - offset
+		}
+		lag := now.Sub(info.ModTime()).Seconds()
+		if lag > maxLagSeconds {
+			maxLagSeconds = lag
+		}
+	}
+	return staleFiles, pendingBytes, maxLagSeconds
 }
 
 // --- Session list -----------------------------------------------------------
@@ -563,8 +601,9 @@ type SessionUID struct {
 // of truth for "last active" — the session store's last_used can be stale or
 // flattened, so callers prefer this when it is > 0.
 type SessionPreview struct {
-	Recent []RecentMsg
-	LastTS int64 // unix seconds of the newest indexed message; 0 if unknown
+	Recent          []RecentMsg
+	LastTS          int64 // unix seconds of the newest indexed message; 0 if unknown
+	LastAssistantTS int64 // newest canonical assistant message, used for restart reconciliation
 }
 
 // parseISOUnix converts an ISO-8601 timestamp (e.g. "2026-06-07T09:18:58.954Z")
@@ -627,8 +666,12 @@ func (idx *Index) RecentMessagesByUID(uids []SessionUID, n int) map[string]*Sess
 	}
 	addRow := func(hubID, role, content, ts string) {
 		p := get(hubID)
-		if u := parseISOUnix(ts); u > p.LastTS {
+		u := parseISOUnix(ts)
+		if u > p.LastTS {
 			p.LastTS = u
+		}
+		if role == "assistant" && u > p.LastAssistantTS {
+			p.LastAssistantTS = u
 		}
 		text := strings.TrimSpace(content)
 		if text == "" {

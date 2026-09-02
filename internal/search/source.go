@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"everything-go/internal/sourcepolicy"
@@ -339,7 +340,7 @@ func (c codexSource) iterMessages(path string, startOffset int64) ([]searchableM
 	cwdResolved := false
 	var msgs []searchableMessage
 
-	final := lineReader(path, startOffset, func(raw []byte, lineNum int, _ int64) {
+	final := lineReader(path, startOffset, func(raw []byte, _ int, nextOffset int64) {
 		var rec codexRecord
 		if json.Unmarshal(raw, &rec) != nil {
 			return
@@ -374,7 +375,10 @@ func (c codexSource) iterMessages(path string, startOffset int64) ([]searchableM
 		}
 		msgUUID := rec.UUID
 		if msgUUID == "" {
-			msgUUID = stem + ":line:" + itoa(lineNum)
+			// Incremental reads restart their local line counter at 1. Using that
+			// counter made later batches collide with the first batch, so SQLite
+			// silently discarded every new UUID-less Codex message.
+			msgUUID = stem + ":offset:" + strconv.FormatInt(nextOffset, 10)
 		}
 		parent := rec.ParentUUID
 		if parent == "" {

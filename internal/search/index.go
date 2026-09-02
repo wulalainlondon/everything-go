@@ -47,20 +47,21 @@ type ingestProgress struct {
 // transcript bytes consumed by incremental readers; DBBytesDelta is the signed
 // change in the database + WAL footprint, not an estimate of physical SSD I/O.
 type IngestMetrics struct {
-	Mode            string `json:"mode,omitempty"`
-	FilesSeen       int    `json:"files_seen"`
-	FilesChanged    int    `json:"files_changed"`
-	FilesQueued     int    `json:"files_queued"`
-	MessagesAdded   int    `json:"messages_added"`
-	BytesRead       int64  `json:"bytes_read"`
-	DBBytesDelta    int64  `json:"db_bytes_delta"`
-	DurationMS      int64  `json:"duration_ms"`
-	MaintenanceRows int64  `json:"maintenance_rows,omitempty"`
-	WALBytesBefore  int64  `json:"wal_bytes_before,omitempty"`
-	WALBytesAfter   int64  `json:"wal_bytes_after,omitempty"`
-	CheckpointBusy  int    `json:"checkpoint_busy,omitempty"`
-	CheckpointLog   int    `json:"checkpoint_log_pages,omitempty"`
-	CheckpointDone  int    `json:"checkpointed_pages,omitempty"`
+	Mode             string `json:"mode,omitempty"`
+	FilesSeen        int    `json:"files_seen"`
+	FilesChanged     int    `json:"files_changed"`
+	FilesQueued      int    `json:"files_queued"`
+	MessagesAdded    int    `json:"messages_added"`
+	MessageConflicts int    `json:"message_conflicts"`
+	BytesRead        int64  `json:"bytes_read"`
+	DBBytesDelta     int64  `json:"db_bytes_delta"`
+	DurationMS       int64  `json:"duration_ms"`
+	MaintenanceRows  int64  `json:"maintenance_rows,omitempty"`
+	WALBytesBefore   int64  `json:"wal_bytes_before,omitempty"`
+	WALBytesAfter    int64  `json:"wal_bytes_after,omitempty"`
+	CheckpointBusy   int    `json:"checkpoint_busy,omitempty"`
+	CheckpointLog    int    `json:"checkpoint_log_pages,omitempty"`
+	CheckpointDone   int    `json:"checkpointed_pages,omitempty"`
 }
 
 // New opens (creating if needed) the search index at dbPath and registers the
@@ -119,9 +120,16 @@ func (idx *Index) RunPathsMetrics(paths []string) IngestMetrics {
 }
 
 const frameworkNoiseMaintenanceVersion = "1"
+const codexMessageIDVersion = "2-offset"
 
 func (idx *Index) runVersionedMaintenance() int64 {
 	var changed int64
+	if rebuilt, err := idx.refreshCodexMessageIDVersion(); err != nil {
+		log.Printf("[search] Codex message ID migration: %v", err)
+	} else if rebuilt > 0 {
+		changed += rebuilt
+		log.Printf("[search] reset %d stale Codex index row(s) for message ID v%s", rebuilt, codexMessageIDVersion)
+	}
 	policyChanged, err := idx.refreshSourcePolicyFingerprint()
 	if err != nil {
 		log.Printf("[search] source policy fingerprint: %v", err)
@@ -158,6 +166,58 @@ func (idx *Index) runVersionedMaintenance() int64 {
 		}
 	}
 	return changed
+}
+
+// refreshCodexMessageIDVersion performs a one-time rebuild when the synthetic
+// identity for UUID-less Codex messages changes. Keeping old line-based IDs
+// alongside offset-based IDs would duplicate historical messages, so Codex
+// rows and cursors are reset atomically and normal ingestion repopulates them.
+func (idx *Index) refreshCodexMessageIDVersion() (int64, error) {
+	const key = "codex_message_id_version"
+	var current string
+	err := idx.db.QueryRow("SELECT value FROM schema_meta WHERE key=?", key).Scan(&current)
+	if err != nil && err != sql.ErrNoRows {
+		return 0, err
+	}
+	if current == codexMessageIDVersion {
+		return 0, nil
+	}
+
+	tx, err := idx.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	var changed int64
+	result, err := tx.Exec(`DELETE FROM messages WHERE session_id IN (
+		SELECT session_id FROM sessions WHERE source='codex'
+	)`)
+	if err != nil {
+		return 0, err
+	}
+	if rows, rowsErr := result.RowsAffected(); rowsErr == nil {
+		changed += rows
+	}
+	result, err = tx.Exec("DELETE FROM sessions WHERE source='codex'")
+	if err != nil {
+		return 0, err
+	}
+	if rows, rowsErr := result.RowsAffected(); rowsErr == nil {
+		changed += rows
+	}
+	root := filepath.Clean(sourcepolicy.CodexSessionsDir()) + string(os.PathSeparator) + "%"
+	if _, err := tx.Exec("DELETE FROM ingest_state WHERE source_path LIKE ?", root); err != nil {
+		return 0, err
+	}
+	if _, err := tx.Exec(`INSERT INTO schema_meta(key,value) VALUES(?,?)
+		ON CONFLICT(key) DO UPDATE SET value=excluded.value`, key, codexMessageIDVersion); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return changed, nil
 }
 
 func databaseFootprint(path string) int64 {

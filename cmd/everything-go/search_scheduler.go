@@ -123,17 +123,17 @@ func searchFullReconcileInterval() time.Duration {
 	return defaultFullReconcile
 }
 
-func runSearchIndexerLoop(ctx context.Context, idx *search.Index, exePath, dataDir string, dirty *dirtyPathQueue, incremental bool) {
+func runSearchIndexerLoop(ctx context.Context, idx *search.Index, exePath, dataDir string, dirty *dirtyPathQueue, incremental bool, onIndexed func()) {
 	if !incremental {
 		log.Printf("[search] incremental path indexing disabled; using legacy full reconciliation")
-		runLegacySearchIndexerLoop(ctx, idx, exePath, dataDir, dirty, time.Minute, 15*time.Minute)
+		runLegacySearchIndexerLoop(ctx, idx, exePath, dataDir, dirty, time.Minute, 15*time.Minute, onIndexed)
 		return
 	}
 	log.Printf("[search] incremental path indexing enabled (full_reconcile=%s)", searchFullReconcileInterval())
-	runIncrementalSearchIndexerLoop(ctx, idx, exePath, dataDir, dirty, defaultIndexDebounce, searchFullReconcileInterval())
+	runIncrementalSearchIndexerLoop(ctx, idx, exePath, dataDir, dirty, defaultIndexDebounce, searchFullReconcileInterval(), onIndexed)
 }
 
-func runIncrementalSearchIndexerLoop(ctx context.Context, idx *search.Index, exePath, dataDir string, dirty *dirtyPathQueue, debounce, fullInterval time.Duration) {
+func runIncrementalSearchIndexerLoop(ctx context.Context, idx *search.Index, exePath, dataDir string, dirty *dirtyPathQueue, debounce, fullInterval time.Duration, onIndexed func()) {
 	if debounce <= 0 {
 		debounce = defaultIndexDebounce
 	}
@@ -186,6 +186,9 @@ func runIncrementalSearchIndexerLoop(ctx context.Context, idx *search.Index, exe
 		}
 		log.Printf("[search] indexed mode=%s files_seen=%d files_changed=%d messages=%d; next full reconciliation by %s",
 			metrics.Mode, metrics.FilesSeen, metrics.FilesChanged, metrics.MessagesAdded, lastFull.Add(fullInterval).Format(time.RFC3339))
+		if shouldRefreshSessionSummaries(metrics, metricsOK) && onIndexed != nil {
+			onIndexed()
+		}
 
 		for {
 			untilFull := time.Until(lastFull.Add(fullInterval))
@@ -222,6 +225,10 @@ func runIncrementalSearchIndexerLoop(ctx context.Context, idx *search.Index, exe
 			break
 		}
 	}
+}
+
+func shouldRefreshSessionSummaries(metrics search.IngestMetrics, metricsOK bool) bool {
+	return metricsOK && (metrics.MessagesAdded > 0 || metrics.MaintenanceRows > 0)
 }
 
 func mergeDirtyPaths(left, right []string) []string {

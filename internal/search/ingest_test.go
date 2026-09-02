@@ -1,8 +1,10 @@
 package search
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -209,5 +211,157 @@ func TestLineReaderUntilStopsPhysicalRead(t *testing.T) {
 	})
 	if calls != 2 || offset != int64(len("one\ntwo\n")) {
 		t.Fatalf("early stop calls=%d offset=%d", calls, offset)
+	}
+}
+
+func TestCodexIncrementalMessagesUseAbsoluteOffsetIdentity(t *testing.T) {
+	idx := newTestIndex(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rollout-2026-09-02T00-00-00-00000000-0000-0000-0000-000000000001.jsonl")
+	first := `{"timestamp":"2026-09-02T00:00:01Z","type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"first answer"}]}}` + "\n"
+	second := `{"timestamp":"2026-09-02T00:00:02Z","type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"second answer"}]}}` + "\n"
+	// Keep the head-signature window stable when the second record is appended.
+	if err := os.WriteFile(path, []byte(strings.Repeat(" ", 5000)+"\n"+first), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	src := codexSource{root: dir}
+	job := ingestJob{src: src, path: path, meta: sessionMeta{FirstTS: "2026-09-02T00:00:01Z"}}
+	if extracted, _, _, err := idx.ingestFile(job); err != nil || extracted != 1 {
+		t.Fatalf("first ingest extracted=%d err=%v", extracted, err)
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(second); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if extracted, _, _, err := idx.ingestFile(job); err != nil || extracted != 1 {
+		t.Fatalf("incremental ingest extracted=%d err=%v", extracted, err)
+	}
+
+	var count int
+	var latest string
+	if err := idx.db.QueryRow(`SELECT (SELECT COUNT(*) FROM messages WHERE session_id=?), content
+		FROM messages WHERE session_id=? ORDER BY ts DESC LIMIT 1`, src.sessionIDFor(path), src.sessionIDFor(path)).Scan(&count, &latest); err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 || latest != "second answer" {
+		t.Fatalf("indexed count=%d latest=%q, want 2 and second answer", count, latest)
+	}
+}
+
+func TestIngestCountsIdentityConflictsSeparately(t *testing.T) {
+	idx := newTestIndex(t)
+	dir := t.TempDir()
+	file := filepath.Join(dir, "rollout-2026-09-02T00-00-00-00000000-0000-0000-0000-000000000002.jsonl")
+	line := `{"timestamp":"2026-09-02T00:00:01Z","type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"same"}]}}` + "\n"
+	if err := os.WriteFile(file, []byte(line), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	job := ingestJob{src: codexSource{root: dir}, path: file, meta: sessionMeta{FirstTS: "2026-09-02T00:00:01Z"}}
+	if inserted, conflicts, _, err := idx.ingestFile(job); err != nil || inserted != 1 || conflicts != 0 {
+		t.Fatalf("first=(%d,%d,%v)", inserted, conflicts, err)
+	}
+	if _, err := idx.db.Exec(`UPDATE ingest_state SET last_offset=0 WHERE source_path=?`, file); err != nil {
+		t.Fatal(err)
+	}
+	if inserted, conflicts, _, err := idx.ingestFile(job); err != nil || inserted != 0 || conflicts != 1 {
+		t.Fatalf("second=(%d,%d,%v)", inserted, conflicts, err)
+	}
+}
+
+func TestCodexIncrementalAcrossThreeIndexerProcessesAndPartialLine(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "search.db")
+	sessionRoot := filepath.Join(dir, "sessions")
+	sessionDir := filepath.Join(sessionRoot, "2026", "09", "02")
+	if err := os.MkdirAll(sessionDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	rollout := filepath.Join(sessionDir, "rollout-2026-09-02T00-00-00-00000000-0000-0000-0000-000000000003.jsonl")
+	line := func(second int, text string, newline bool) string {
+		value := fmt.Sprintf(`{"timestamp":"2026-09-02T00:00:%02dZ","type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":%q}]}}`, second, text)
+		if newline {
+			value += "\n"
+		}
+		return value
+	}
+	if err := os.WriteFile(rollout, []byte(strings.Repeat(" ", 5000)+"\n"+line(1, "one", true)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run := func(wantAdded int) {
+		idx, err := New(dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		idx.sources = []source{codexSource{root: sessionRoot}}
+		metrics := idx.RunOnceMetrics()
+		if err := idx.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if metrics.MessagesAdded != wantAdded {
+			t.Fatalf("added=%d want=%d conflicts=%d", metrics.MessagesAdded, wantAdded, metrics.MessageConflicts)
+		}
+	}
+	run(1)
+	f, err := os.OpenFile(rollout, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(line(2, "two", true) + line(3, "three", false)); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	run(1) // incomplete third line is deliberately retained at the cursor
+	f, err = os.OpenFile(rollout, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	run(1)
+	idx, err := New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer idx.Close()
+	var count int
+	if err := idx.db.QueryRow(`SELECT COUNT(*) FROM messages`).Scan(&count); err != nil || count != 3 {
+		t.Fatalf("count=%d err=%v", count, err)
+	}
+}
+
+func TestCodexMessageIDMigrationRebuildsStaleRowsOnce(t *testing.T) {
+	idx := newTestIndex(t)
+	if _, err := idx.db.Exec(`INSERT INTO sessions(session_id,source,source_path,project_dir,cwd,display_name,first_ts,last_ts,msg_count,backend)
+		VALUES('codex:old','codex','/tmp/old.jsonl','','','','2026-01-01','2026-01-01',1,'codex')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := idx.db.Exec(`INSERT INTO messages(session_id,msg_uuid,role,ts,is_subagent,content)
+		VALUES('codex:old','old:line:1','assistant','2026-01-01',0,'stale')`); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := idx.refreshCodexMessageIDVersion()
+	if err != nil || changed != 2 {
+		t.Fatalf("migration changed=%d err=%v", changed, err)
+	}
+	var count int
+	if err := idx.db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE source='codex'`).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("Codex sessions after migration=%d err=%v", count, err)
+	}
+	changed, err = idx.refreshCodexMessageIDVersion()
+	if err != nil || changed != 0 {
+		t.Fatalf("second migration changed=%d err=%v", changed, err)
 	}
 }
