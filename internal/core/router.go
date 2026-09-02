@@ -38,6 +38,7 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 	case "hello":
 		c.deviceID = cmd.DeviceID
 		c.clientSurface = strings.ToLower(strings.TrimSpace(cmd.ClientSurface))
+		c.protocolVersion = cmd.ProtocolVersion
 		c.supportsReplayAck = cmd.ReplayAck
 		// Latest-device-wins: evict any older client from the same device so the
 		// half-disconnect storm can't pile up zombie clients (#1).
@@ -65,7 +66,7 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 				// work_coordination_v1 is the stable product capability. Keep the
 				// provisional work_items_v1 token during the released-client
 				// migration window; both names address the same wire schema.
-				helloInput.Capabilities = append(helloInput.Capabilities, "work_coordination_v1", "work_items_v1")
+				helloInput.Capabilities = append(helloInput.Capabilities, "work_coordination_v1", "work_items_v1", "project_bootstrap_v1", "work_review_feedback_v1")
 			}
 			if h.events != nil {
 				helloInput.Capabilities = append(helloInput.Capabilities, "event_inbox_v1")
@@ -199,10 +200,12 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		}
 
 	case "work_project_create", "work_item_create", "work_session_import", "work_item_update", "work_item_move",
+		"work_item_review_decision",
 		"work_item_archive", "work_item_restore", "work_item_link_session", "work_item_unlink_session",
 		"work_item_dependency_add", "work_item_dependency_remove", "work_item_comment_add",
 		"work_item_comment_edit", "work_item_attachment_add", "work_item_attachment_remove",
-		"work_item_start_run", "work_item_read", "work_workflow_create":
+		"work_item_start_run", "work_item_read", "work_workflow_create",
+		"work_project_bootstrap_generate", "work_project_bootstrap_approve":
 		h.handleWorkCommand(c, cmd)
 
 	case "handoff_to_desktop":
@@ -268,6 +271,10 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 			h.Emit(h.client.Error(cmd.SessionID, "no_session", "unknown session"))
 			return
 		}
+		if !h.reserveMessageRequest(cmd.SessionID, cmd.RequestID) {
+			c.enqueueEvent(protocol.NewMessageAck(cmd.SessionID, cmd.RequestID, "queued"))
+			return
+		}
 		// Enqueue on the session's turn worker: turns for one session run one at
 		// a time, in order, so two messages can't interleave a backend's stdin.
 		// The turn outlives this connection, so it gets its own context.
@@ -275,10 +282,14 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		images, files := cmd.Images, cmd.Files
 		content, files, err := h.resolveUploadedVideos(cmd.SessionID, content, files)
 		if err != nil {
+			h.releaseMessageRequest(cmd.SessionID, cmd.RequestID)
 			h.Emit(h.client.Error(cmd.SessionID, "invalid_attachment", err.Error()))
 			return
 		}
-		h.updateRuntime(cmd.SessionID, "queued", reqID, s.QueueLen()+1, "", "")
+		queuedBehindActive := s.State() != session.Idle || s.QueueLen() > 0
+		if !queuedBehindActive {
+			h.updateRuntime(cmd.SessionID, "queued", reqID, 0, "", "")
+		}
 		accepted := s.Submit(func() {
 			h.updateRuntime(cmd.SessionID, "running", reqID, s.QueueLen(), "", "")
 			if err := h.exec.Send(context.Background(), s, reqID, content, images, files); err != nil {
@@ -291,9 +302,13 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 			}
 		})
 		if !accepted {
+			h.releaseMessageRequest(cmd.SessionID, cmd.RequestID)
 			h.updateRuntime(cmd.SessionID, "failed", reqID, 0, "failed", "session is closed")
 			h.Emit(h.client.Error(cmd.SessionID, "session_closed", "session is closed"))
 			return
+		}
+		if queuedBehindActive {
+			h.updateRuntimeQueueLength(cmd.SessionID, s.QueueLen())
 		}
 		// This ACK means the Bridge accepted ownership of the request and placed it
 		// in the in-memory per-session actor queue. It is deliberately independent
@@ -394,10 +409,36 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		go h.sendResumable(c, 100)
 
 	case "rename_session":
-		if s, ok := h.registry.Get(cmd.SessionID); ok {
-			s.SetName(cmd.Name)
-			h.Emit(h.client.SessionRenamed(s.ID, cmd.Name))
-			go h.registry.Persist()
+		name := strings.TrimSpace(cmd.Name)
+		if len([]rune(name)) > 200 {
+			c.enqueueEvent(h.client.SessionRenameRejected(cmd.SessionID, h.cfg.InstanceID,
+				cmd.MutationID, "name_too_long", "", 0))
+			return
+		}
+		snap, changed, err := h.registry.RenameAndPersist(cmd.SessionID, name, c.deviceID,
+			cmd.MutationID, cmd.ExpectedRevision)
+		if err != nil {
+			reason := "persist_failed"
+			switch {
+			case errors.Is(err, session.ErrRenameConflict):
+				reason = "revision_conflict"
+			case errors.Is(err, session.ErrRenameEmpty):
+				reason = "name_empty"
+			case errors.Is(err, session.ErrSessionMissing):
+				reason = "session_not_found"
+			}
+			c.enqueueEvent(h.client.SessionRenameRejected(cmd.SessionID, h.cfg.InstanceID,
+				cmd.MutationID, reason, snap.Name, snap.MetadataRevision))
+			return
+		}
+		event := h.client.SessionRenamed(cmd.SessionID, snap.Name, h.cfg.InstanceID,
+			cmd.MutationID, snap.MetadataRevision, snap.NameUpdatedAt, snap.NameUpdatedBy)
+		if changed {
+			h.Emit(event)
+		} else {
+			// Idempotent retries receive the same authoritative confirmation
+			// without rebroadcasting a duplicate mutation to every device.
+			c.enqueueEvent(event)
 		}
 
 	case "set_session_meta":
@@ -579,7 +620,7 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 
 	case "fcm_token":
 		if h.fcm != nil {
-			h.fcm.SetToken(c.deviceID, cmd.Token)
+			h.fcm.SetToken(c.deviceID, cmd.Token, cmd.Platform)
 		}
 
 	case "permission_response":
@@ -820,6 +861,35 @@ func (h *Hub) sendHistory(c *Client, s *session.Session, cmd clientproto.Command
 	if msgs == nil {
 		msgs = []map[string]any{}
 	}
+	latestAssistantAt := int64(0)
+	for _, message := range msgs {
+		if role, _ := message["role"].(string); role != "assistant" {
+			continue
+		}
+		switch timestamp := message["timestamp"].(type) {
+		case int64:
+			if timestamp > latestAssistantAt {
+				latestAssistantAt = timestamp
+			}
+		case int:
+			if int64(timestamp) > latestAssistantAt {
+				latestAssistantAt = int64(timestamp)
+			}
+		case float64:
+			if int64(timestamp) > latestAssistantAt {
+				latestAssistantAt = int64(timestamp)
+			}
+		}
+	}
+	if latestAssistantAt > 0 {
+		observedPhase := s.State().String()
+		if observedPhase == "streaming" {
+			observedPhase = "running"
+		}
+		if view, changed := h.runtimes.ReconcileHistoryActivity(s.ID, latestAssistantAt, observedPhase); changed {
+			h.broadcastRuntime(view)
+		}
+	}
 	if res.Kind == "delta" {
 		c.enqueueEvent(h.client.HistoryDelta(s.ID, cmd.KnownLast, msgs, res.SourceCount))
 		return
@@ -877,6 +947,14 @@ func (h *Hub) sendResumable(c *Client, limit int) {
 func (h *Hub) sessionSummaries() []protocol.SessionSummary {
 	sessions := h.registry.List()
 	out := make([]protocol.SessionSummary, 0, len(sessions))
+	runtimeIDs := make([]string, 0, len(sessions))
+	for _, s := range sessions {
+		runtimeIDs = append(runtimeIDs, s.Snapshot().ID)
+	}
+	runtimePhase := make(map[string]string, len(runtimeIDs))
+	for _, view := range h.runtimes.Snapshot("", runtimeIDs) {
+		runtimePhase[view.SessionID] = view.Phase
+	}
 
 	// Batch-fetch recent messages + real last-activity for preview, keyed by hub
 	// session ID. Search DB uses "claude:{resumeID}" or "codex:rollout-{ts}-{uid}"
@@ -912,16 +990,28 @@ func (h *Hub) sessionSummaries() []protocol.SessionSummary {
 				lastActivity = float64(pv.LastTS)
 			}
 		}
+		previewText, previewRole := selectSessionPreview(recent, runtimePhase[snap.ID])
 		out = append(out, protocol.SessionSummary{
 			ID: snap.ID, Name: snap.Name, IsStreaming: snap.Streaming,
-			CreatedAt: snap.CreatedAt, LastActivity: lastActivity,
+			AuthorityInstanceID: h.cfg.InstanceID, MetadataRevision: snap.MetadataRevision,
+			NameUpdatedAt: snap.NameUpdatedAt, NameUpdatedBy: snap.NameUpdatedBy,
+			LastNameMutationID: snap.LastNameMutationID,
+			CreatedAt:          snap.CreatedAt, LastActivity: lastActivity,
 			Cwd: snap.Cwd, Model: snap.Model, Effort: snap.Effort, Backend: snap.Backend,
 			ServiceTier: snap.ServiceTier, CollaborationMode: snap.CollaborationMode, Personality: snap.Personality,
 			Sandbox: snap.Sandbox, Pinned: snap.Pinned, Hidden: snap.Hidden,
 			RecentMessages: recent,
+			PreviewText:    previewText, PreviewRole: previewRole, PreviewVersion: sessionPreviewPolicyVersion,
 		})
 	}
 	return out
+}
+
+// BroadcastSessionSummaries publishes a fresh snapshot after the out-of-process
+// search indexer commits new preview data. Native discovery may announce a file
+// before indexing finishes; this post-index broadcast closes that ordering gap.
+func (h *Hub) BroadcastSessionSummaries() {
+	h.Emit(h.client.SessionsList(h.sessionSummaries()))
 }
 
 func (h *Hub) sendBackendCatalog(c *Client) {
@@ -939,7 +1029,15 @@ func (h *Hub) sendBackendCatalog(c *Client) {
 // enqueueEvent marshals + enqueues a reply to this specific client.
 func (c *Client) enqueueEvent(event any) {
 	logOutbound(event)
-	data, err := marshalEvent(event)
+	c.enqueueEventUnlogged(event)
+}
+
+// enqueueEventUnlogged marshals an event for this client's negotiated wire
+// version without emitting another protocol log entry. Hub fan-out logs the
+// canonical event once, then uses this helper for each client-specific
+// SessionKey projection.
+func (c *Client) enqueueEventUnlogged(event any) {
+	data, err := marshalEvent(event, c.wireAuthority())
 	if err != nil {
 		log.Printf("enqueueEvent marshal: %v", err)
 		return

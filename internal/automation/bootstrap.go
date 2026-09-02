@@ -14,6 +14,14 @@ import (
 func BootstrapAccountsFromEnv(ctx context.Context, store *Store) (int, error) {
 	graphVersionReady := strings.TrimSpace(os.Getenv("META_GRAPH_API_VERSION")) != ""
 	webhookReady := strings.TrimSpace(os.Getenv("META_APP_SECRET")) != "" && strings.TrimSpace(os.Getenv("META_WEBHOOK_VERIFY_TOKEN")) != ""
+	sentryOrganization := strings.TrimSpace(os.Getenv("SENTRY_ORG"))
+	sentryProject := strings.TrimSpace(os.Getenv("SENTRY_PROJECT"))
+	sentryReady := sentryOrganization != "" && sentryProject != "" && strings.TrimSpace(os.Getenv("SENTRY_AUTH_TOKEN")) != ""
+	sentryWebhookReady := sentryReady && strings.TrimSpace(os.Getenv("SENTRY_WEBHOOK_SECRET")) != ""
+	sentryDisplayName := strings.TrimSpace(os.Getenv("SENTRY_DISPLAY_NAME"))
+	if sentryDisplayName == "" {
+		sentryDisplayName = sentryOrganization + " / " + sentryProject
+	}
 	candidates := []Account{
 		{ID: "facebook-judge", Provider: "meta.facebook", ExternalAccountID: strings.TrimSpace(os.Getenv("FB_JUDGE_PAGE_ID")),
 			DisplayName: "實習判官 Facebook", CredentialRef: "env:FB_JUDGE_PAGE_TOKEN", AppSecretRef: "env:META_APP_SECRET",
@@ -26,10 +34,13 @@ func BootstrapAccountsFromEnv(ctx context.Context, store *Store) (int, error) {
 		{ID: "threads-primary", Provider: "meta.threads", ExternalAccountID: strings.TrimSpace(os.Getenv("THREADS_USER_ID")),
 			DisplayName: "Wulala Threads", CredentialRef: "env:THREADS_TOKEN", Enabled: false,
 			PollEnabled: false, PollIntervalSeconds: 300},
+		{ID: "sentry-primary", Provider: "sentry", ExternalAccountID: sentryOrganization + "/" + sentryProject,
+			DisplayName: sentryDisplayName, CredentialRef: "env:SENTRY_AUTH_TOKEN", AppSecretRef: "env:SENTRY_WEBHOOK_SECRET",
+			Enabled: sentryReady, WebhookEnabled: sentryWebhookReady, PollEnabled: sentryReady, PollIntervalSeconds: 300},
 	}
 	created := 0
 	for _, account := range candidates {
-		if account.ExternalAccountID == "" {
+		if account.ExternalAccountID == "" || account.Provider == "sentry" && !sentryReady {
 			continue
 		}
 		if existing, err := store.GetAccount(ctx, account.ID); err == nil {
@@ -40,6 +51,14 @@ func BootstrapAccountsFromEnv(ctx context.Context, store *Store) (int, error) {
 				}
 				if existing.VerifyTokenRef == "" {
 					existing.VerifyTokenRef = account.VerifyTokenRef
+				}
+				if _, _, updateErr := store.UpsertAccount(ctx, existing, 0); updateErr != nil {
+					return created, updateErr
+				}
+			} else if existing.Provider == "sentry" && sentryWebhookReady && !existing.WebhookEnabled {
+				existing.WebhookEnabled = true
+				if existing.AppSecretRef == "" {
+					existing.AppSecretRef = account.AppSecretRef
 				}
 				if _, _, updateErr := store.UpsertAccount(ctx, existing, 0); updateErr != nil {
 					return created, updateErr

@@ -12,6 +12,8 @@ package fcm
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -23,6 +25,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"everything-go/internal/identity"
 
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
@@ -38,6 +42,7 @@ const (
 
 type deviceRegistration struct {
 	Token     string `json:"token"`
+	Platform  string `json:"platform,omitempty"`
 	UpdatedAt int64  `json:"updated_at"`
 }
 
@@ -51,6 +56,13 @@ type target struct {
 	token    string
 }
 
+type ReplyAction struct {
+	URL         string
+	FallbackURL string
+	Capability  string
+	ExpiresAt   int64
+}
+
 // Notifier holds the OAuth2 token source and a per-device token registry.
 type Notifier struct {
 	projectID    string
@@ -61,6 +73,13 @@ type Notifier struct {
 
 	mu      sync.RWMutex
 	devices map[string]deviceRegistration
+
+	statusMu          sync.Mutex
+	statusLastSent    map[string]time.Time
+	statusLastPhase   map[string]string
+	statusPending     map[string]v1message
+	statusTimers      map[string]*time.Timer
+	statusMinInterval time.Duration
 }
 
 // New loads the service account from serviceAccountPath and the persisted
@@ -91,11 +110,16 @@ func NewFromBytes(data []byte, registryPath string) (*Notifier, error) {
 		projectID: sa.ProjectID,
 		// Fan-out calls Token concurrently. ReuseTokenSource both caches the
 		// OAuth token and serializes refreshes around the underlying source.
-		tokenSource:  oauth2.ReuseTokenSource(nil, creds.TokenSource),
-		registryPath: registryPath,
-		endpoint:     "https://fcm.googleapis.com/v1/projects/" + sa.ProjectID + "/messages:send",
-		http:         &http.Client{Timeout: 15 * time.Second},
-		devices:      make(map[string]deviceRegistration),
+		tokenSource:       oauth2.ReuseTokenSource(nil, creds.TokenSource),
+		registryPath:      registryPath,
+		endpoint:          "https://fcm.googleapis.com/v1/projects/" + sa.ProjectID + "/messages:send",
+		http:              &http.Client{Timeout: 15 * time.Second},
+		devices:           make(map[string]deviceRegistration),
+		statusLastSent:    make(map[string]time.Time),
+		statusLastPhase:   make(map[string]string),
+		statusPending:     make(map[string]v1message),
+		statusTimers:      make(map[string]*time.Timer),
+		statusMinInterval: 8 * time.Second,
 	}
 	n.loadRegistry()
 	return n, nil
@@ -104,9 +128,16 @@ func NewFromBytes(data []byte, registryPath string) (*Notifier, error) {
 // SetToken registers/updates one stable device's token and persists the whole
 // registry. Reusing a token under a new device id moves it instead of creating
 // duplicate pushes (e.g. after an app reinstall changes the local device id).
-func (n *Notifier) SetToken(deviceID, token string) {
+func (n *Notifier) SetToken(deviceID, token string, platform ...string) {
 	deviceID = strings.TrimSpace(deviceID)
 	token = strings.TrimSpace(token)
+	devicePlatform := ""
+	if len(platform) > 0 {
+		devicePlatform = strings.ToLower(strings.TrimSpace(platform[0]))
+		if devicePlatform != "android" && devicePlatform != "ios" {
+			devicePlatform = ""
+		}
+	}
 	if token == "" || deviceID == "" {
 		return
 	}
@@ -117,11 +148,11 @@ func (n *Notifier) SetToken(deviceID, token string) {
 		}
 	}
 	current, exists := n.devices[deviceID]
-	if exists && current.Token == token {
+	if exists && current.Token == token && current.Platform == devicePlatform {
 		n.mu.Unlock()
 		return
 	}
-	n.devices[deviceID] = deviceRegistration{Token: token, UpdatedAt: time.Now().UnixMilli()}
+	n.devices[deviceID] = deviceRegistration{Token: token, Platform: devicePlatform, UpdatedAt: time.Now().UnixMilli()}
 	n.enforceCapLocked()
 	n.persistLocked()
 	n.mu.Unlock()
@@ -129,12 +160,37 @@ func (n *Notifier) SetToken(deviceID, token string) {
 }
 
 func (n *Notifier) targets() []target {
+	return n.targetsForPlatform("")
+}
+
+func (n *Notifier) targetsForPlatform(platform string) []target {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
 	out := make([]target, 0, len(n.devices))
 	seen := make(map[string]struct{}, len(n.devices))
 	for deviceID, registration := range n.devices {
 		if registration.Token == "" {
+			continue
+		}
+		if platform != "" && registration.Platform != platform {
+			continue
+		}
+		if _, duplicate := seen[registration.Token]; duplicate {
+			continue
+		}
+		seen[registration.Token] = struct{}{}
+		out = append(out, target{deviceID: deviceID, token: registration.Token})
+	}
+	return out
+}
+
+func (n *Notifier) targetsForUnspecifiedPlatform() []target {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	out := make([]target, 0, len(n.devices))
+	seen := make(map[string]struct{}, len(n.devices))
+	for deviceID, registration := range n.devices {
+		if registration.Token == "" || registration.Platform != "" {
 			continue
 		}
 		if _, duplicate := seen[registration.Token]; duplicate {
@@ -148,21 +204,45 @@ func (n *Notifier) targets() []target {
 
 // NotifyTaskDone sends the turn-complete push. No-op if no device token yet.
 func (n *Notifier) NotifyTaskDone(sessionName, lastText, sessionID string) {
+	n.NotifyTaskDoneWithReply("", sessionName, lastText, sessionID, "", ReplyAction{})
+}
+
+func (n *Notifier) NotifyTaskDoneWithReply(instanceID, sessionName, lastText, sessionID, requestID string, reply ReplyAction) {
 	summary := summarize(lastText)
-	msg := v1message{}
-	msg.Message.Notification.Title = "✓ " + sessionName
-	msg.Message.Notification.Body = summary
-	msg.Message.Data = map[string]string{"type": "task_done", "session_id": sessionID}
-	n.sendAll(msg, "task_done")
+	sessionKey, _ := identity.MakeSessionKey(instanceID, sessionID)
+	data := map[string]string{
+		"type": "task_done", "session_id": sessionID, "session_name": sessionName,
+		"title": "✓ " + sessionName, "body": summary, "authority_instance_id": instanceID,
+		"request_id": requestID, "session_key": sessionKey, "schema_version": fcmPayloadSchemaVersion,
+		"event_id": "task_done:" + sessionKey + ":" + requestID,
+	}
+	addReplyAction(data, reply)
+	android := v1message{}
+	android.Message.Data = data
+	android.Message.Android = &v1androidConfig{Priority: "high", TTL: "86400s", CollapseKey: "task-done-" + instanceID + "-" + sessionID}
+	n.sendTargets(android, "task_done", n.targetsForPlatform("android"))
+
+	legacy := v1message{}
+	legacy.Message.Notification = &v1notification{Title: "✓ " + sessionName, Body: summary}
+	legacy.Message.Data = data
+	ios := legacy
+	ios.Message.APNS = visibleAPNSConfig(
+		"BRIDGE_SESSION_REPLY",
+		"bridge-session-"+shortStableID(instanceID, sessionID),
+		"bridge-done-"+shortStableID(instanceID, sessionID),
+		legacy.Message.Notification,
+	)
+	n.sendTargets(ios, "task_done", n.targetsForPlatform("ios"))
+	n.sendTargets(legacy, "task_done", n.targetsForUnspecifiedPlatform())
 }
 
 // NotifyFilePush mirrors notify_fcm_file_push.
 func (n *Notifier) NotifyFilePush(fileID, filename string) {
 	msg := v1message{}
-	msg.Message.Notification.Title = "📎 新檔案"
-	msg.Message.Notification.Body = filename
+	msg.Message.Notification = &v1notification{Title: "📎 新檔案", Body: filename}
 	msg.Message.Data = map[string]string{
-		"type": "file_push", "file_id": fileID, "filename": filename, "deep_link": "bridge://inbox",
+		"type": "file_push", "schema_version": fcmPayloadSchemaVersion, "file_id": fileID, "filename": filename, "deep_link": "bridge://inbox",
+		"event_id": "file_push:" + fileID,
 	}
 	n.sendAll(msg, "file_push")
 }
@@ -172,7 +252,8 @@ func (n *Notifier) NotifyFilePush(fileID, filename string) {
 func (n *Notifier) NotifyTunnelURL(wsURL, instanceID string) {
 	msg := v1message{}
 	msg.Message.Data = map[string]string{
-		"type": "tunnel_url", "url": wsURL, "instance_id": instanceID,
+		"type": "tunnel_url", "schema_version": fcmPayloadSchemaVersion, "url": wsURL, "instance_id": instanceID,
+		"event_id": "tunnel_url:" + instanceID,
 	}
 	n.sendAll(msg, "tunnel_url")
 }
@@ -180,37 +261,181 @@ func (n *Notifier) NotifyTunnelURL(wsURL, instanceID string) {
 // NotifyFeedNew mirrors feed_ops.notify_fcm_feed_new.
 func (n *Notifier) NotifyFeedNew(feedID, title string) {
 	msg := v1message{}
-	msg.Message.Notification.Title = "新文章"
-	msg.Message.Notification.Body = title
+	msg.Message.Notification = &v1notification{Title: "新文章", Body: title}
 	msg.Message.Data = map[string]string{
-		"type": "feed_new", "feed_id": feedID, "title": title, "deep_link": "bridge://feed",
+		"type": "feed_new", "schema_version": fcmPayloadSchemaVersion, "feed_id": feedID, "title": title, "deep_link": "bridge://feed",
+		"event_id": "feed_new:" + feedID,
 	}
 	n.sendAll(msg, "feed_new")
 }
 
 func (n *Notifier) NotifyWorkAttention(instanceID, workItemID, title string, revision uint64, kind string) {
 	msg := v1message{}
-	msg.Message.Notification.Title = "工作需要你的注意"
-	msg.Message.Notification.Body = title
+	msg.Message.Notification = &v1notification{Title: "工作需要你的注意", Body: title}
 	msg.Message.Data = map[string]string{
-		"type": "work_attention", "authority_instance_id": instanceID,
+		"type": "work_attention", "schema_version": fcmPayloadSchemaVersion, "authority_instance_id": instanceID,
 		"work_item_id": workItemID, "activity_revision": fmt.Sprint(revision),
 		"kind": kind, "title": title, "deep_link": "bridge://inbox/work/" + workItemID,
+		"event_id": "work_attention:" + instanceID + ":" + workItemID + ":" + fmt.Sprint(revision) + ":" + kind,
 	}
 	n.sendAll(msg, "work_attention")
+}
+
+// NotifySessionStatus delivers a compact, revisioned lifecycle projection for
+// Android's single ongoing Bridge status card. It is deliberately data-only:
+// the native receiver owns rendering and can merge work from multiple Bridge
+// instances without producing one system notification per Session.
+//
+// Frequent tool/thinking transitions are coalesced per Session. Waiting and
+// terminal transitions bypass the interval so a request for human attention or
+// removal of a stale card is never delayed.
+func (n *Notifier) NotifySessionStatus(instanceID, sessionID, sessionName, phase, stage, stageMessage string,
+	revision uint64, updatedAt, activeStartedAt int64, activeRequestID string, queueLength int, reply ReplyAction) {
+	if instanceID == "" || sessionID == "" || revision == 0 {
+		return
+	}
+	sessionKey, _ := identity.MakeSessionKey(instanceID, sessionID)
+	msg := v1message{}
+	msg.Message.Data = map[string]string{
+		"type": "session_status", "authority_instance_id": instanceID,
+		"session_id": sessionID, "session_key": sessionKey, "session_name": sessionName,
+		"schema_version": fcmPayloadSchemaVersion,
+		"phase":          phase, "stage": stage, "stage_message": summarizeStatus(stageMessage),
+		"revision": fmt.Sprint(revision), "updated_at": fmt.Sprint(updatedAt),
+		"active_started_at": fmt.Sprint(activeStartedAt), "active_request_id": activeRequestID,
+		"queue_length": fmt.Sprint(queueLength),
+		"deep_link":    "bridge://chat?session_id=" + sessionID,
+		"event_id":     "session_status:" + sessionKey + ":" + fmt.Sprint(revision),
+	}
+	addReplyAction(msg.Message.Data, reply)
+	msg.Message.Android = &v1androidConfig{
+		Priority: "high", TTL: "300s", CollapseKey: "session-status-" + instanceID + "-" + sessionID,
+	}
+	n.enqueueSessionStatus(instanceID+"\x00"+sessionID, phase, msg, phase == "waiting" || !activeSessionPhase(phase))
+}
+
+func addReplyAction(data map[string]string, reply ReplyAction) {
+	if reply.URL == "" || reply.Capability == "" || reply.ExpiresAt <= 0 {
+		return
+	}
+	data["reply_url"] = reply.URL
+	if reply.FallbackURL != "" && reply.FallbackURL != reply.URL {
+		data["reply_fallback_url"] = reply.FallbackURL
+	}
+	data["reply_capability"] = reply.Capability
+	data["reply_expires_at"] = fmt.Sprint(reply.ExpiresAt)
+}
+
+func activeSessionPhase(phase string) bool {
+	switch phase {
+	case "queued", "running", "stopping", "waiting":
+		return true
+	default:
+		return false
+	}
+}
+
+func summarizeStatus(value string) string {
+	value = strings.TrimSpace(strings.Join(strings.Fields(value), " "))
+	runes := []rune(value)
+	if len(runes) > 80 {
+		value = string(runes[:80]) + "…"
+	}
+	return value
+}
+
+func (n *Notifier) enqueueSessionStatus(key, phase string, msg v1message, immediate bool) {
+	n.statusMu.Lock()
+	n.ensureStatusStateLocked()
+	now := time.Now()
+	interval := n.statusMinInterval
+	if interval <= 0 {
+		interval = 8 * time.Second
+	}
+	last := n.statusLastSent[key]
+	phaseChanged := n.statusLastPhase[key] != "" && n.statusLastPhase[key] != phase
+	if immediate || phaseChanged || last.IsZero() || now.Sub(last) >= interval {
+		if timer := n.statusTimers[key]; timer != nil {
+			timer.Stop()
+			delete(n.statusTimers, key)
+		}
+		delete(n.statusPending, key)
+		n.statusLastSent[key] = now
+		n.statusLastPhase[key] = phase
+		n.statusMu.Unlock()
+		n.sendSessionStatus(msg)
+		return
+	}
+	n.statusPending[key] = msg
+	if n.statusTimers[key] == nil {
+		delay := interval - now.Sub(last)
+		n.statusTimers[key] = time.AfterFunc(delay, func() { n.flushSessionStatus(key) })
+	}
+	n.statusMu.Unlock()
+}
+
+func (n *Notifier) ensureStatusStateLocked() {
+	if n.statusLastSent == nil {
+		n.statusLastSent = make(map[string]time.Time)
+	}
+	if n.statusLastPhase == nil {
+		n.statusLastPhase = make(map[string]string)
+	}
+	if n.statusPending == nil {
+		n.statusPending = make(map[string]v1message)
+	}
+	if n.statusTimers == nil {
+		n.statusTimers = make(map[string]*time.Timer)
+	}
+}
+
+func (n *Notifier) flushSessionStatus(key string) {
+	n.statusMu.Lock()
+	n.ensureStatusStateLocked()
+	msg, ok := n.statusPending[key]
+	delete(n.statusPending, key)
+	delete(n.statusTimers, key)
+	if ok {
+		n.statusLastSent[key] = time.Now()
+		n.statusLastPhase[key] = msg.Message.Data["phase"]
+	}
+	n.statusMu.Unlock()
+	if ok {
+		n.sendSessionStatus(msg)
+	}
+}
+
+func (n *Notifier) sendSessionStatus(msg v1message) {
+	n.sendTargets(msg, "session_status", n.targetsForPlatform("android"))
+	if !shouldSurfaceIOSSessionStatus(msg.Message.Data["phase"], msg.Message.Data["stage"]) {
+		return
+	}
+	title := msg.Message.Data["session_name"]
+	body := iosSessionStatusBody(msg.Message.Data["phase"], msg.Message.Data["stage"], msg.Message.Data["stage_message"])
+	alert := &v1notification{Title: title, Body: body}
+	ios := msg
+	ios.Message.Android = nil
+	ios.Message.Notification = alert
+	ios.Message.APNS = visibleAPNSConfig(
+		"BRIDGE_SESSION_REPLY",
+		"bridge-session-"+shortStableID(msg.Message.Data["authority_instance_id"], msg.Message.Data["session_id"]),
+		"bridge-status-"+shortStableID(msg.Message.Data["authority_instance_id"], msg.Message.Data["session_id"]),
+		alert,
+	)
+	n.sendTargets(ios, "session_status", n.targetsForPlatform("ios"))
 }
 
 // NotifyExternalEvent surfaces a durable Event Inbox record. FCM is only a
 // wake-up hint; the app always reconciles canonical content from the Bridge.
 func (n *Notifier) NotifyExternalEvent(instanceID, eventID, source, kind, severity, title, body string) {
 	msg := v1message{}
-	msg.Message.Notification.Title = title
-	msg.Message.Notification.Body = summarize(body)
-	if msg.Message.Notification.Body == "" {
-		msg.Message.Notification.Body = source
+	notificationBody := summarize(body)
+	if notificationBody == "" {
+		notificationBody = source
 	}
+	msg.Message.Notification = &v1notification{Title: title, Body: notificationBody}
 	msg.Message.Data = map[string]string{
-		"type": "external_event", "event_id": eventID, "source": source,
+		"type": "external_event", "schema_version": fcmPayloadSchemaVersion, "event_id": eventID, "source": source,
 		"kind": kind, "severity": severity, "title": title,
 		"authority_instance_id": instanceID,
 		"deep_link":             "bridge://inbox/events/" + eventID,
@@ -220,19 +445,100 @@ func (n *Notifier) NotifyExternalEvent(instanceID, eventID, source, kind, severi
 
 type v1message struct {
 	Message struct {
-		Token        string `json:"token"`
-		Notification struct {
-			Title string `json:"title"`
-			Body  string `json:"body"`
-		} `json:"notification"`
-		Data map[string]string `json:"data"`
+		Token        string            `json:"token"`
+		Notification *v1notification   `json:"notification,omitempty"`
+		Data         map[string]string `json:"data"`
+		Android      *v1androidConfig  `json:"android,omitempty"`
+		APNS         *v1apnsConfig     `json:"apns,omitempty"`
 	} `json:"message"`
+}
+
+type v1notification struct {
+	Title string `json:"title"`
+	Body  string `json:"body"`
+}
+
+type v1androidConfig struct {
+	CollapseKey string `json:"collapse_key,omitempty"`
+	Priority    string `json:"priority,omitempty"`
+	TTL         string `json:"ttl,omitempty"`
+}
+
+type v1apnsConfig struct {
+	Headers map[string]string `json:"headers,omitempty"`
+	Payload v1apnsPayload     `json:"payload"`
+}
+
+type v1apnsPayload struct {
+	APS v1aps `json:"aps"`
+}
+
+type v1aps struct {
+	Alert             *v1notification `json:"alert,omitempty"`
+	Category          string          `json:"category,omitempty"`
+	ThreadID          string          `json:"thread-id,omitempty"`
+	ContentAvailable  int             `json:"content-available,omitempty"`
+	InterruptionLevel string          `json:"interruption-level,omitempty"`
+}
+
+func visibleAPNSConfig(category, threadID, collapseID string, alert *v1notification) *v1apnsConfig {
+	return &v1apnsConfig{
+		Headers: map[string]string{
+			"apns-priority":    "10",
+			"apns-expiration":  fmt.Sprint(time.Now().Add(24 * time.Hour).Unix()),
+			"apns-collapse-id": collapseID,
+		},
+		Payload: v1apnsPayload{APS: v1aps{
+			Alert: alert, Category: category, ThreadID: threadID,
+			ContentAvailable: 1, InterruptionLevel: "active",
+		}},
+	}
+}
+
+func shortStableID(parts ...string) string {
+	joined := strings.Join(parts, "\x00")
+	sum := sha256.Sum256([]byte(joined))
+	return hex.EncodeToString(sum[:8])
+}
+
+func shouldSurfaceIOSSessionStatus(phase, stage string) bool {
+	switch phase {
+	case "waiting", "stopping":
+		return true
+	case "running":
+		// One visible status per request. Fine-grained thinking/tool progress is
+		// still delivered over WebSocket and rendered inside the app; repeatedly
+		// alerting for every stage would turn iOS Notification Center into a log.
+		return stage == "" || stage == "running" || stage == "preparing"
+	default:
+		return false
+	}
+}
+
+func iosSessionStatusBody(phase, stage, message string) string {
+	detail := summarizeStatus(message)
+	var label string
+	switch phase {
+	case "waiting":
+		label = "需要你的回覆"
+	case "stopping":
+		label = "正在停止"
+	default:
+		label = "正在處理"
+	}
+	if detail != "" {
+		return label + " · " + detail
+	}
+	return label
 }
 
 // sendAll fans a notification out concurrently so a slow or invalid device
 // cannot delay the remaining devices.
 func (n *Notifier) sendAll(msg v1message, kind string) {
-	targets := n.targets()
+	n.sendTargets(msg, kind, n.targets())
+}
+
+func (n *Notifier) sendTargets(msg v1message, kind string, targets []target) {
 	if len(targets) == 0 {
 		return
 	}

@@ -20,7 +20,7 @@ const automationSchedulerInterval = 5 * time.Second
 
 func (h *Hub) SetAutomation(store *automation.Store) {
 	h.automation = store
-	h.automationManager = automation.NewManager(store, automation.EnvSecretResolver{}, automation.MetaFacebookConnector{}, automation.MetaThreadsConnector{})
+	h.automationManager = automation.NewManager(store, automation.EnvSecretResolver{}, automation.MetaFacebookConnector{}, automation.MetaThreadsConnector{}, automation.SentryConnector{})
 }
 
 func (h *Hub) StartAutomationScheduler(ctx context.Context) {

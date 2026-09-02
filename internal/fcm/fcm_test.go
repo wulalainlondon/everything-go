@@ -8,29 +8,36 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"golang.org/x/oauth2"
 )
 
 func testNotifier(path, endpoint string, client *http.Client) *Notifier {
 	return &Notifier{
-		projectID:    "test",
-		tokenSource:  oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "oauth"}),
-		registryPath: path,
-		endpoint:     endpoint,
-		http:         client,
-		devices:      make(map[string]deviceRegistration),
+		projectID:         "test",
+		tokenSource:       oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "oauth"}),
+		registryPath:      path,
+		endpoint:          endpoint,
+		http:              client,
+		devices:           make(map[string]deviceRegistration),
+		statusLastSent:    make(map[string]time.Time),
+		statusLastPhase:   make(map[string]string),
+		statusPending:     make(map[string]v1message),
+		statusTimers:      make(map[string]*time.Timer),
+		statusMinInterval: 20 * time.Millisecond,
 	}
 }
 
 func TestPerDeviceRegistryPersistsWithoutOverwrite(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "fcm_tokens.json")
 	n := testNotifier(path, "", http.DefaultClient)
-	n.SetToken("note20", "token-note20")
-	n.SetToken("ipad", "token-ipad")
+	n.SetToken("note20", "token-note20", "android")
+	n.SetToken("ipad", "token-ipad", "ios")
 
 	reloaded := testNotifier(path, "", http.DefaultClient)
 	reloaded.loadRegistry()
@@ -39,6 +46,9 @@ func TestPerDeviceRegistryPersistsWithoutOverwrite(t *testing.T) {
 	if len(targets) != 2 || targets[0].deviceID != "ipad" || targets[0].token != "token-ipad" ||
 		targets[1].deviceID != "note20" || targets[1].token != "token-note20" {
 		t.Fatalf("registry did not preserve both devices: %+v", targets)
+	}
+	if reloaded.devices["ipad"].Platform != "ios" || reloaded.devices["note20"].Platform != "android" {
+		t.Fatalf("registry did not preserve device platforms: %+v", reloaded.devices)
 	}
 }
 
@@ -113,7 +123,7 @@ func TestWorkAttentionCarriesStableDedupFacts(t *testing.T) {
 	}))
 	defer server.Close()
 	n := testNotifier(filepath.Join(t.TempDir(), "fcm_tokens.json"), server.URL, server.Client())
-	n.SetToken("note20", "token")
+	n.SetToken("note20", "token", "android")
 	n.NotifyWorkAttention("morrie", "wi1", "Review release", 42, "review_ready")
 	data := got.Message.Data
 	if data["type"] != "work_attention" || data["authority_instance_id"] != "morrie" ||
@@ -130,13 +140,238 @@ func TestExternalEventCarriesCanonicalIdentity(t *testing.T) {
 	}))
 	defer server.Close()
 	n := testNotifier(filepath.Join(t.TempDir(), "fcm_tokens.json"), server.URL, server.Client())
-	n.SetToken("note20", "token")
+	n.SetToken("note20", "token", "android")
 	n.NotifyExternalEvent("wulala", "evt_1", "github", "ci_failed", "error", "CI failed", "race test")
 	data := got.Message.Data
 	if data["type"] != "external_event" || data["authority_instance_id"] != "wulala" ||
 		data["event_id"] != "evt_1" || data["source"] != "github" || data["kind"] != "ci_failed" {
 		t.Fatalf("external event payload=%+v", data)
 	}
+}
+
+func TestSessionStatusIsDataOnlyRevisionedAndAndroidCollapsible(t *testing.T) {
+	var got v1message
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	n := testNotifier(filepath.Join(t.TempDir(), "fcm_tokens.json"), server.URL, server.Client())
+	n.SetToken("note20", "token", "android")
+	n.NotifySessionStatus("wulala", "s1", "Release QA", "running", "running_tool", "go test ./...", 7, 100, 90, "request-7", 0,
+		ReplyAction{URL: "http://100.64.0.1/reply", FallbackURL: "http://192.168.1.2/reply", Capability: "signed", ExpiresAt: 999})
+	data := got.Message.Data
+	if data["type"] != "session_status" || data["authority_instance_id"] != "wulala" ||
+		data["session_id"] != "s1" || data["revision"] != "7" || data["phase"] != "running" ||
+		data["stage"] != "running_tool" || data["active_request_id"] != "request-7" || got.Message.Notification != nil {
+		t.Fatalf("session status payload=%+v notification=%+v", data, got.Message.Notification)
+	}
+	if data["session_key"] != "sk1:wulala:s1" || data["schema_version"] != "3" {
+		t.Fatalf("session identity payload=%+v", data)
+	}
+	if got.Message.Android == nil || got.Message.Android.Priority != "high" ||
+		got.Message.Android.CollapseKey != "session-status-wulala-s1" {
+		t.Fatalf("android delivery config=%+v", got.Message.Android)
+	}
+	if data["reply_url"] != "http://100.64.0.1/reply" || data["reply_fallback_url"] != "http://192.168.1.2/reply" ||
+		data["reply_capability"] != "signed" || data["reply_expires_at"] != "999" {
+		t.Fatalf("reply action payload=%+v", data)
+	}
+}
+
+func TestTaskDoneUsesNativeAndroidPayloadAndLegacyNotificationElsewhere(t *testing.T) {
+	var mu sync.Mutex
+	got := make(map[string]v1message)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var msg v1message
+		_ = json.NewDecoder(r.Body).Decode(&msg)
+		mu.Lock()
+		got[msg.Message.Token] = msg
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	n := testNotifier(filepath.Join(t.TempDir(), "fcm_tokens.json"), server.URL, server.Client())
+	n.SetToken("note20", "android-token", "android")
+	n.SetToken("ipad", "ios-token", "ios")
+	n.SetToken("legacy", "legacy-token")
+	n.NotifyTaskDoneWithReply("wulala", "Release QA", "Done.", "s1", "request-7",
+		ReplyAction{URL: "http://100.64.0.1/reply", Capability: "signed", ExpiresAt: 999})
+	mu.Lock()
+	android, androidOK := got["android-token"]
+	ios, iosOK := got["ios-token"]
+	legacy, legacyOK := got["legacy-token"]
+	mu.Unlock()
+	if !androidOK || !iosOK || !legacyOK {
+		t.Fatalf("platform fanout=%v", got)
+	}
+	if android.Message.Notification != nil || android.Message.Data["reply_capability"] != "signed" ||
+		android.Message.Data["request_id"] != "request-7" {
+		t.Fatalf("Android task_done must be native data-only: %+v", android.Message)
+	}
+	if ios.Message.Notification == nil || legacy.Message.Notification == nil {
+		t.Fatalf("non-Android clients lost visible notification ios=%+v legacy=%+v", ios.Message, legacy.Message)
+	}
+	if ios.Message.APNS == nil || ios.Message.APNS.Payload.APS.Category != "BRIDGE_SESSION_REPLY" ||
+		ios.Message.APNS.Payload.APS.ThreadID == "" || ios.Message.APNS.Headers["apns-collapse-id"] == "" {
+		t.Fatalf("iOS completion is not actionable/collapsible: %+v", ios.Message.APNS)
+	}
+	if legacy.Message.APNS != nil {
+		t.Fatalf("unknown legacy platform must not receive iOS-only APNS config: %+v", legacy.Message.APNS)
+	}
+}
+
+func TestSessionStatusCoalescesProgressButTerminalFlushes(t *testing.T) {
+	var mu sync.Mutex
+	var revisions []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var got v1message
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		mu.Lock()
+		revisions = append(revisions, got.Message.Data["revision"])
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	n := testNotifier(filepath.Join(t.TempDir(), "fcm_tokens.json"), server.URL, server.Client())
+	n.statusMinInterval = time.Hour
+	n.SetToken("note20", "token", "android")
+	n.NotifySessionStatus("wulala", "s1", "QA", "running", "thinking", "", 1, 1, 1, "request-1", 0, ReplyAction{})
+	n.NotifySessionStatus("wulala", "s1", "QA", "running", "running_tool", "test", 2, 2, 1, "request-1", 0, ReplyAction{})
+	n.NotifySessionStatus("wulala", "s1", "QA", "completed", "completed", "", 3, 3, 1, "request-1", 0, ReplyAction{})
+	mu.Lock()
+	got := append([]string(nil), revisions...)
+	mu.Unlock()
+	if strings.Join(got, ",") != "1,3" {
+		t.Fatalf("expected first progress and immediate terminal only, got %v", got)
+	}
+}
+
+func TestSessionStatusPhaseChangesBypassProgressThrottle(t *testing.T) {
+	var mu sync.Mutex
+	var phases []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var got v1message
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		mu.Lock()
+		phases = append(phases, got.Message.Data["phase"])
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	n := testNotifier(filepath.Join(t.TempDir(), "fcm_tokens.json"), server.URL, server.Client())
+	n.statusMinInterval = time.Hour
+	n.SetToken("note20", "token", "android")
+	n.NotifySessionStatus("wulala", "s1", "QA", "queued", "queued", "", 1, 1, 1, "request-1", 1, ReplyAction{})
+	n.NotifySessionStatus("wulala", "s1", "QA", "running", "thinking", "", 2, 2, 1, "request-1", 0, ReplyAction{})
+	mu.Lock()
+	got := append([]string(nil), phases...)
+	mu.Unlock()
+	if strings.Join(got, ",") != "queued,running" {
+		t.Fatalf("phase transition was delayed: %v", got)
+	}
+}
+
+func TestSessionProgressTargetsAndroidOnlyButLifecycleStartAlsoTargetsIOS(t *testing.T) {
+	var mu sync.Mutex
+	var messages []v1message
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var got v1message
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		mu.Lock()
+		messages = append(messages, got)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	n := testNotifier(filepath.Join(t.TempDir(), "fcm_tokens.json"), server.URL, server.Client())
+	n.SetToken("note20", "android-token", "android")
+	n.SetToken("ipad", "ios-token", "ios")
+	n.SetToken("legacy", "unknown-token")
+	n.NotifySessionStatus("wulala", "s1", "QA", "running", "thinking", "", 1, 1, 1, "request-1", 0, ReplyAction{})
+	mu.Lock()
+	progress := append([]v1message(nil), messages...)
+	mu.Unlock()
+	if len(progress) != 1 || progress[0].Message.Token != "android-token" {
+		t.Fatalf("fine-grained progress reached wrong platforms: %+v", progress)
+	}
+
+	n.statusMinInterval = 0
+	n.NotifySessionStatus("wulala", "s2", "QA Start", "running", "preparing", "", 1, 2, 2, "request-2", 0,
+		ReplyAction{URL: "http://100.64.0.1/reply", Capability: "signed", ExpiresAt: 999})
+	mu.Lock()
+	started := append([]v1message(nil), messages[len(progress):]...)
+	mu.Unlock()
+	if len(started) != 2 {
+		t.Fatalf("lifecycle start fanout=%+v", started)
+	}
+	byToken := make(map[string]v1message, len(started))
+	for _, message := range started {
+		byToken[message.Message.Token] = message
+	}
+	android, androidOK := byToken["android-token"]
+	ios, iosOK := byToken["ios-token"]
+	if !androidOK || !iosOK || byToken["unknown-token"].Message.Token != "" {
+		t.Fatalf("lifecycle start targets=%+v", byToken)
+	}
+	if android.Message.Notification != nil || android.Message.APNS != nil {
+		t.Fatalf("Android status stopped being native data-only: %+v", android.Message)
+	}
+	if ios.Message.Notification == nil || ios.Message.APNS == nil ||
+		ios.Message.APNS.Payload.APS.Category != "BRIDGE_SESSION_REPLY" ||
+		ios.Message.APNS.Payload.APS.ThreadID == "" ||
+		ios.Message.APNS.Headers["apns-collapse-id"] == "" {
+		t.Fatalf("iOS status is not visible/actionable/collapsible: %+v", ios.Message)
+	}
+}
+
+// TestLiveSessionStatus is an explicit, opt-in device smoke test. It is skipped
+// in normal CI because it requires real Firebase credentials and a registered
+// test phone. The terminal revision always runs so an interrupted test does not
+// intentionally leave a permanent QA card behind.
+func TestLiveSessionStatus(t *testing.T) {
+	if os.Getenv("EVERYTHING_GO_FCM_LIVE_TEST") != "1" {
+		t.Skip("set EVERYTHING_GO_FCM_LIVE_TEST=1 for the real-device FCM smoke test")
+	}
+	serviceAccount := os.Getenv("EVERYTHING_GO_FCM_SERVICE_ACCOUNT")
+	registry := os.Getenv("EVERYTHING_GO_FCM_TOKEN_REGISTRY")
+	if serviceAccount == "" || registry == "" {
+		t.Fatal("live test requires EVERYTHING_GO_FCM_SERVICE_ACCOUNT and EVERYTHING_GO_FCM_TOKEN_REGISTRY")
+	}
+	n, err := New(serviceAccount, registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n.statusMinInterval = 10 * time.Millisecond
+	authority := envOr("EVERYTHING_GO_FCM_TEST_AUTHORITY", "qa-live-status")
+	sessionID := envOr("EVERYTHING_GO_FCM_TEST_SESSION", "qa-lock-screen")
+	sessionName := envOr("EVERYTHING_GO_FCM_TEST_SESSION_NAME", "鎖定畫面狀態卡驗證")
+	startRevision := uint64(1)
+	if raw := os.Getenv("EVERYTHING_GO_FCM_TEST_REVISION"); raw != "" {
+		if parsed, parseErr := strconv.ParseUint(raw, 10, 64); parseErr == nil && parsed > 0 {
+			startRevision = parsed
+		}
+	}
+	n.NotifySessionStatus(authority, sessionID, sessionName,
+		"running", "running_tool", "執行 Release 實機測試", startRevision, time.Now().UnixMilli(), time.Now().UnixMilli(), "release-test", 0, ReplyAction{})
+	t.Cleanup(func() {
+		n.NotifySessionStatus(authority, sessionID, sessionName,
+			"completed", "completed", "", startRevision+1, time.Now().UnixMilli(), 0, "release-test", 0, ReplyAction{})
+	})
+	duration := 15 * time.Second
+	if raw := os.Getenv("EVERYTHING_GO_FCM_TEST_DURATION"); raw != "" {
+		if parsed, parseErr := time.ParseDuration(raw); parseErr == nil && parsed > 0 {
+			duration = parsed
+		}
+	}
+	time.Sleep(duration)
+}
+
+func envOr(key, fallback string) string {
+	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+		return value
+	}
+	return fallback
 }
 
 func TestSummarizeStripsMarkdown(t *testing.T) {
