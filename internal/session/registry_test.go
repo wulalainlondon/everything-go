@@ -2,6 +2,7 @@ package session
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -86,6 +87,62 @@ func TestPersistRestartRoundTrip(t *testing.T) {
 	}
 	if got.State() != Idle {
 		t.Fatalf("restored session should be Idle, got %s", got.State())
+	}
+}
+
+func TestRenameAndPersistIsDurableRevisionedAndIdempotent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sessions.json")
+	r := NewRegistry()
+	r.AttachStore(NewStore(path))
+	r.Create("s1", "Old", "/work", "codex", "", "", "thread-1")
+	expected := uint64(0)
+
+	committed, changed, err := r.RenameAndPersist("s1", "New", "device-a", "mutation-1", &expected)
+	if err != nil || !changed {
+		t.Fatalf("rename commit failed changed=%v err=%v", changed, err)
+	}
+	if committed.MetadataRevision != 1 || committed.NameUpdatedBy != "device-a" || committed.NameUpdatedAt == 0 {
+		t.Fatalf("rename metadata missing: %+v", committed)
+	}
+
+	restarted := NewRegistry()
+	restarted.AttachStore(NewStore(path))
+	loaded, ok := restarted.Get("s1")
+	if !ok {
+		t.Fatal("renamed session missing after restart")
+	}
+	got := loaded.Snapshot()
+	if got.Name != "New" || got.MetadataRevision != 1 || got.LastNameMutationID != "mutation-1" {
+		t.Fatalf("durable rename mismatch: %+v", got)
+	}
+
+	retry, changed, err := restarted.RenameAndPersist("s1", "New", "device-a", "mutation-1", &expected)
+	if err != nil || changed || retry.MetadataRevision != 1 {
+		t.Fatalf("idempotent retry changed state: changed=%v err=%v snapshot=%+v", changed, err, retry)
+	}
+
+	stale := uint64(0)
+	current, changed, err := restarted.RenameAndPersist("s1", "Stale", "device-b", "mutation-2", &stale)
+	if !errors.Is(err, ErrRenameConflict) || changed || current.Name != "New" || current.MetadataRevision != 1 {
+		t.Fatalf("stale rename was not rejected: changed=%v err=%v snapshot=%+v", changed, err, current)
+	}
+}
+
+func TestRenameAndPersistRollsBackWhenDiskCommitFails(t *testing.T) {
+	dir := t.TempDir()
+	blockingFile := filepath.Join(dir, "not-a-directory")
+	if err := os.WriteFile(blockingFile, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := NewRegistry()
+	r.AttachStore(NewStore(filepath.Join(blockingFile, "sessions.json")))
+	r.Create("s1", "Old", "/work", "codex", "", "", "")
+
+	if _, changed, err := r.RenameAndPersist("s1", "New", "device-a", "mutation-1", nil); err == nil || changed {
+		t.Fatalf("rename unexpectedly survived failed persistence: changed=%v err=%v", changed, err)
+	}
+	if got, _ := r.Get("s1"); got.Name() != "Old" {
+		t.Fatalf("memory was not rolled back, name=%q", got.Name())
 	}
 }
 

@@ -111,9 +111,10 @@ type Client struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	clientID      string
-	deviceID      string
-	clientSurface string
+	clientID        string
+	deviceID        string
+	clientSurface   string
+	protocolVersion int
 	// enrollmentOnly is true when the handshake was admitted solely through a
 	// short-lived LAN pairing window. Such a client may only complete claim_bridge
 	// (or ping) until its credential is persisted.
@@ -135,6 +136,13 @@ type Client struct {
 	// megabytes of binary frames and look like a dead client on slower mobile
 	// links even though upload bytes are still arriving.
 	uploadActive atomic.Bool
+}
+
+func (c *Client) wireAuthority() string {
+	if c.protocolVersion >= 3 {
+		return c.hub.cfg.InstanceID
+	}
+	return ""
 }
 
 func (c *Client) enqueue(data []byte) {
@@ -354,7 +362,7 @@ func (c *Client) handshake(ctx context.Context) (clientproto.Command, bool) {
 // conn at this point.
 func (c *Client) writeNow(ctx context.Context, event any) {
 	logOutbound(event)
-	data, err := marshalEvent(event)
+	data, err := marshalEvent(event, c.wireAuthority())
 	if err != nil {
 		return
 	}

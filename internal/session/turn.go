@@ -2,6 +2,7 @@ package session
 
 import (
 	"log"
+	"sync"
 	"time"
 )
 
@@ -157,16 +158,31 @@ func (s *Session) beginTurn() <-chan struct{} {
 // the connection core when the executor emits a terminal event (done/stopped/
 // error) and by stop/clear/kill paths that forcibly cancel a turn. Idempotent.
 func (s *Session) EndTurn() {
+	s.PrepareEndTurn()()
+}
+
+// PrepareEndTurn marks the active turn idle immediately but holds the actor
+// release signal until the returned closure is called. The Hub uses this tiny
+// two-phase boundary to publish done -> terminal runtime in order before the
+// next queued turn can begin. Close/duplicate terminal races cannot double
+// close turnDone because ownership is detached under the Session lock.
+func (s *Session) PrepareEndTurn() func() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.state == Streaming || s.state == Stopping {
 		s.state = Idle
 	}
-	if s.turnDone != nil {
-		close(s.turnDone)
-		s.turnDone = nil
-	}
+	done := s.turnDone
+	s.turnDone = nil
 	s.lastActivity = nowSeconds()
+	s.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			if done != nil {
+				close(done)
+			}
+		})
+	}
 }
 
 // MarkStopping records that a stop was requested for the in-flight turn. Purely

@@ -32,6 +32,7 @@ import (
 	"everything-go/internal/inbox"
 	"everything-go/internal/media"
 	"everything-go/internal/nativewatch"
+	"everything-go/internal/notificationreply"
 	"everything-go/internal/protocol"
 	"everything-go/internal/relay"
 	"everything-go/internal/runtime"
@@ -59,30 +60,35 @@ type Config struct {
 // the executor.Sink (Emit broadcasts an event to connected clients, or buffers
 // it when none are connected so a reconnecting client can recover it).
 type Hub struct {
-	registry          *session.Registry
-	exec              executor.Executor
-	shells            *runtime.ShellManager
-	pairing           *governance.Pairing
-	perms             *governance.PermissionManager
-	offline           *governance.OfflineBuffer
-	goals             *governance.GoalStateStore
-	search            *search.Index
-	fcm               *fcm.Notifier
-	feed              *feed.Store
-	inbox             *inbox.Store
-	mediaScan         *media.Scanner
-	attachments       *attachmentjournal.Store
-	controls          *governance.SessionControlStore
-	runtimes          *runtimejournal.Store
-	work              *workitems.Service
-	events            *eventinbox.Store
-	automation        *automation.Store
-	automationManager *automation.Manager
-	relay             *relay.Store
-	relayPeers        relay.Peers
-	cfg               Config
-	client            clientproto.AppV1
-	gen               string // per-boot generation id
+	registry            *session.Registry
+	exec                executor.Executor
+	shells              *runtime.ShellManager
+	pairing             *governance.Pairing
+	perms               *governance.PermissionManager
+	offline             *governance.OfflineBuffer
+	goals               *governance.GoalStateStore
+	search              *search.Index
+	fcm                 *fcm.Notifier
+	workAttentionPush   func(instanceID, workItemID, title string, revision uint64, kind string)
+	runtimeStatusPush   func(instanceID, sessionID, sessionName, phase, stage, stageMessage string, revision uint64, updatedAt, activeStartedAt int64, activeRequestID string, queueLength int, reply fcm.ReplyAction)
+	feed                *feed.Store
+	inbox               *inbox.Store
+	mediaScan           *media.Scanner
+	attachments         *attachmentjournal.Store
+	controls            *governance.SessionControlStore
+	runtimes            *runtimejournal.Store
+	recoveredRuntimes   []runtimejournal.View
+	replyCaps           *notificationreply.Capabilities
+	notificationReplies *notificationreply.Store
+	work                *workitems.Service
+	events              *eventinbox.Store
+	automation          *automation.Store
+	automationManager   *automation.Manager
+	relay               *relay.Store
+	relayPeers          relay.Peers
+	cfg                 Config
+	client              clientproto.AppV1
+	gen                 string // per-boot generation id
 
 	iceServers []webrtc.ICEServer // STUN/TURN for WebRTC answers (default: Google STUN)
 
@@ -101,6 +107,9 @@ type Hub struct {
 
 	steerMu      sync.Mutex
 	steerResults map[string]protocol.SteerResult // session_id/request_id -> terminal acknowledgement
+
+	messageMu       sync.Mutex
+	messageReceipts map[string]int64 // session_id/request_id -> accepted unix milliseconds
 
 	storm *stormGuards // dedupe/throttle/semaphore for heavy handlers
 
@@ -144,32 +153,39 @@ type Hub struct {
 func NewHub(reg *session.Registry, cfg Config, pairing *governance.Pairing, port int) *Hub {
 	cfg.Port = port
 	h := &Hub{
-		registry:          reg,
-		pairing:           pairing,
-		offline:           governance.NewOfflineBuffer(),
-		goals:             governance.NewGoalStateStore(goalSnapshotPath(cfg.DataDir)),
-		cfg:               cfg,
-		client:            clientproto.NewAppV1(),
-		gen:               randomID(),
-		clients:           make(map[*Client]struct{}),
-		latestByDevice:    make(map[string]*Client),
-		turnText:          make(map[string]*strings.Builder),
-		steerResults:      make(map[string]protocol.SteerResult),
-		iceServers:        stunServers,
-		storm:             newStormGuards(),
-		mediaScan:         media.NewScanner(port),
-		attachments:       attachmentjournal.New(cfg.DataDir),
-		controls:          governance.NewSessionControlStore(cfg.DataDir),
-		runtimes:          runtimejournal.New(cfg.DataDir),
-		attachmentReplays: make(map[string]*attachmentReplayLease),
-		workWake:          make(chan struct{}, 1),
-		automationWake:    make(chan struct{}, 1),
-		relayWake:         make(chan struct{}, 1),
-		relayNonces:       make(map[string]int64),
+		registry:            reg,
+		pairing:             pairing,
+		offline:             governance.NewOfflineBuffer(),
+		goals:               governance.NewGoalStateStore(goalSnapshotPath(cfg.DataDir)),
+		cfg:                 cfg,
+		client:              clientproto.NewAppV1(),
+		gen:                 randomID(),
+		clients:             make(map[*Client]struct{}),
+		latestByDevice:      make(map[string]*Client),
+		turnText:            make(map[string]*strings.Builder),
+		steerResults:        make(map[string]protocol.SteerResult),
+		messageReceipts:     make(map[string]int64),
+		iceServers:          stunServers,
+		storm:               newStormGuards(),
+		mediaScan:           media.NewScanner(port),
+		attachments:         attachmentjournal.New(cfg.DataDir),
+		controls:            governance.NewSessionControlStore(cfg.DataDir),
+		runtimes:            runtimejournal.New(cfg.DataDir),
+		notificationReplies: notificationreply.NewStore(cfg.DataDir),
+		attachmentReplays:   make(map[string]*attachmentReplayLease),
+		workWake:            make(chan struct{}, 1),
+		automationWake:      make(chan struct{}, 1),
+		relayWake:           make(chan struct{}, 1),
+		relayNonces:         make(map[string]int64),
+	}
+	if capabilities, err := notificationreply.NewCapabilities(cfg.DataDir, cfg.InstanceID); err != nil {
+		log.Printf("[notification-reply] capability initialization failed: %v", err)
+	} else {
+		h.replyCaps = capabilities
 	}
 	// No Session worker can be active while a new Hub is being constructed.
 	// Recover stale persisted phases exactly once here, never during reconnect.
-	h.runtimes.RecoverAllStale()
+	h.recoveredRuntimes = h.runtimes.RecoverAllStale()
 	if cfg.TailscaleIP != "" {
 		h.mediaScan.SetTailscaleIP(cfg.TailscaleIP)
 	}
@@ -187,7 +203,10 @@ func NewHub(reg *session.Registry, cfg Config, pairing *governance.Pairing, port
 
 // SetExecutor wires the backend after construction (the executor needs the Hub
 // as its Sink, so the Hub is built first).
-func (h *Hub) SetExecutor(e executor.Executor) { h.exec = e }
+func (h *Hub) SetExecutor(e executor.Executor) {
+	h.exec = e
+	h.resumeNotificationReplies()
+}
 
 func (h *Hub) SetRelay(store *relay.Store, peers relay.Peers) {
 	h.relay, h.relayPeers = store, peers
@@ -221,10 +240,30 @@ func (h *Hub) HTTPAuthorized(r *http.Request) bool {
 }
 
 // SetSearch wires the search index (nil disables the search command family).
-func (h *Hub) SetSearch(s *search.Index) { h.search = s }
+func (h *Hub) SetSearch(s *search.Index) {
+	h.search = s
+	if s != nil {
+		go h.reconcileRestartMarkersFromSearch()
+	}
+}
 
 // SetFCM wires the push notifier (nil disables push).
-func (h *Hub) SetFCM(n *fcm.Notifier) { h.fcm = n }
+func (h *Hub) SetFCM(n *fcm.Notifier) {
+	h.fcm = n
+	h.workAttentionPush = nil
+	h.runtimeStatusPush = nil
+	if n != nil {
+		h.workAttentionPush = n.NotifyWorkAttention
+		h.runtimeStatusPush = n.NotifySessionStatus
+		// Construction recovers stale active turns before FCM is wired. Publish
+		// those terminal revisions now so a lock-screen card from the previous
+		// Bridge process cannot remain stuck as "running".
+		for _, view := range h.recoveredRuntimes {
+			h.notifyRuntimeStatus(view)
+		}
+		h.recoveredRuntimes = nil
+	}
+}
 
 // SetTunnelURL updates the tunnel base URL used when building media/document
 // URLs in scan results. Call this whenever the tunnel address changes.
@@ -392,13 +431,20 @@ func (h *Hub) Emit(event any) {
 		}
 	}
 
-	// The Hub is the single point every executor event flows through, so it is
-	// where session lifecycle state is driven: a terminal event ends the turn
-	// (releasing the per-session queue). State is never mutated by the backends.
-	h.driveTurnState(event)
 	// Accumulate assistant text per turn so a push notification can carry a
 	// summary when the turn completes (mirrors the Python notify_fcm payload).
 	h.accumulateTurn(event)
+	// Record terminal state before exposing the terminal event, but hold the
+	// actor release until done -> runtime has been published in order. Marking
+	// the Session idle now also lets a client safely reclaim control as soon as
+	// it observes an active-writer error.
+	terminalView, terminalChanged, terminalEvent := h.recordTerminalRuntime(event)
+	releaseTurn := func() {}
+	if terminalEvent {
+		if s, ok := h.registry.Get(terminalView.SessionID); ok {
+			releaseTurn = s.PrepareEndTurn()
+		}
+	}
 
 	h.mu.RLock()
 	n := len(h.clients)
@@ -407,16 +453,15 @@ func (h *Hub) Emit(event any) {
 	if n == 0 {
 		h.offline.Append(event)
 	} else {
-		data, err := json.Marshal(event)
-		if err != nil {
-			log.Printf("emit marshal error: %v", err)
-			return
-		}
 		h.mu.RLock()
+		clients := make([]*Client, 0, len(h.clients))
 		for c := range h.clients {
-			c.enqueue(data)
+			clients = append(clients, c)
 		}
 		h.mu.RUnlock()
+		for _, c := range clients {
+			c.enqueueEventUnlogged(event)
+		}
 	}
 
 	// Persist on the events that change durable session state: a new resume id
@@ -436,7 +481,14 @@ func (h *Hub) Emit(event any) {
 	// Persist and publish the compact authoritative lifecycle only after the
 	// original event. This preserves text -> attachment -> done ordering for
 	// existing clients while still making reconnect state durable.
-	h.driveRuntimeState(event)
+	if !terminalEvent {
+		h.driveRuntimeState(event)
+	} else {
+		if terminalChanged {
+			h.publishRuntime(terminalView)
+		}
+		releaseTurn()
+	}
 }
 
 // broadcastOnline delivers canonical state changes to clients that are
@@ -444,15 +496,15 @@ func (h *Hub) Emit(event any) {
 // Callers must have their own durable reconnect source (for example the Event
 // Inbox store); otherwise an offline device would miss the event.
 func (h *Hub) broadcastOnline(event any) error {
-	data, err := json.Marshal(event)
-	if err != nil {
-		return err
-	}
 	logOutbound(event)
 	h.mu.RLock()
-	defer h.mu.RUnlock()
+	clients := make([]*Client, 0, len(h.clients))
 	for c := range h.clients {
-		c.enqueue(data)
+		clients = append(clients, c)
+	}
+	h.mu.RUnlock()
+	for _, c := range clients {
+		c.enqueueEventUnlogged(event)
 	}
 	return nil
 }
@@ -532,7 +584,9 @@ func (h *Hub) accumulateTurn(event any) {
 				name = n
 			}
 		}
-		go h.fcm.NotifyTaskDone(name, text, e.SessionID)
+		replyURL, fallbackURL, capability, expiresAt := h.notificationReplyAction(e.SessionID)
+		go h.fcm.NotifyTaskDoneWithReply(h.cfg.InstanceID, name, text, e.SessionID, e.RequestID,
+			fcm.ReplyAction{URL: replyURL, FallbackURL: fallbackURL, Capability: capability, ExpiresAt: expiresAt})
 	case protocol.Stopped:
 		h.turnMu.Lock()
 		delete(h.turnText, e.SessionID)
@@ -613,8 +667,12 @@ func goalSnapshotPath(dataDir string) string {
 	return filepath.Join(dataDir, "goal_snapshots.json")
 }
 
-func marshalEvent(event any) ([]byte, error) {
-	return json.Marshal(event)
+func marshalEvent(event any, authorityInstanceID string) ([]byte, error) {
+	data, err := json.Marshal(event)
+	if err != nil || strings.TrimSpace(authorityInstanceID) == "" {
+		return data, err
+	}
+	return scopeSessionIDsJSON(data, authorityInstanceID)
 }
 
 func randomID() string {

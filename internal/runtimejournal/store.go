@@ -33,6 +33,7 @@ type Record struct {
 	Stage           string            `json:"stage,omitempty"`
 	StageMessage    string            `json:"stage_message,omitempty"`
 	StageStartedAt  int64             `json:"stage_started_at,omitempty"`
+	ActiveStartedAt int64             `json:"active_started_at,omitempty"`
 	ActiveRequestID string            `json:"active_request_id,omitempty"`
 	QueueLength     int               `json:"queue_length"`
 	LastTerminal    string            `json:"last_terminal_status,omitempty"`
@@ -52,6 +53,7 @@ type View struct {
 	Stage            string `json:"stage,omitempty"`
 	StageMessage     string `json:"stage_message,omitempty"`
 	StageStartedAt   int64  `json:"stage_started_at,omitempty"`
+	ActiveStartedAt  int64  `json:"active_started_at,omitempty"`
 	ActiveRequestID  string `json:"active_request_id,omitempty"`
 	QueueLength      int    `json:"queue_length"`
 	LastTerminal     string `json:"last_terminal_status,omitempty"`
@@ -109,18 +111,25 @@ func (s *Store) Update(sessionID, phase, requestID string, queueLength int, term
 	if phase == "" {
 		phase = r.Phase
 	}
+	previousRequestID := r.ActiveRequestID
+	newTurn := terminal == "" && requestID != "" && requestID != previousRequestID &&
+		(phase == "queued" || phase == "running")
 	if r.Phase == phase && r.ActiveRequestID == requestID && r.QueueLength == queueLength &&
 		r.LastTerminal == terminal && r.LastError == lastError {
 		return viewLocked(r, ""), false
 	}
+	now := s.now().UnixMilli()
 	r.Revision++
 	r.Phase = phase
 	r.Stage = defaultStageForPhase(phase)
 	r.StageMessage = ""
-	r.StageStartedAt = s.now().UnixMilli()
+	r.StageStartedAt = now
+	if newTurn || (r.ActiveStartedAt == 0 && (phase == "queued" || phase == "running" || phase == "waiting" || phase == "stopping")) {
+		r.ActiveStartedAt = now
+	}
 	r.ActiveRequestID = requestID
 	r.QueueLength = queueLength
-	r.UpdatedAt = s.now().UnixMilli()
+	r.UpdatedAt = now
 	if terminal != "" {
 		r.LastTerminal = terminal
 		r.LastError = lastError
@@ -129,10 +138,41 @@ func (s *Store) Update(sessionID, phase, requestID string, queueLength int, term
 		if len(r.Terminals) > 128 {
 			r.Terminals = append([]Terminal(nil), r.Terminals[len(r.Terminals)-128:]...)
 		}
+	} else if newTurn {
+		// LastTerminal describes the previous request. Once a distinct request is
+		// accepted it must no longer drive the current row's status. Keep the
+		// terminal ledger intact for per-device unread/reconciliation cursors.
+		r.LastTerminal = ""
+		r.LastError = ""
+		r.CompletedAt = 0
 	} else if phase == "running" || phase == "queued" || phase == "waiting" || phase == "stopping" {
 		r.LastError = ""
 	}
 	s.enforceCapLocked()
+	s.saveLocked()
+	return viewLocked(r, ""), true
+}
+
+// UpdateQueueLength changes only the number of turns waiting behind the active
+// request. Accepting a follow-up must not replace ActiveRequestID or regress
+// the active phase to queued; clients use those fields to render the turn that
+// is actually producing output.
+func (s *Store) UpdateQueueLength(sessionID string, queueLength int) (View, bool) {
+	if sessionID == "" {
+		return View{}, false
+	}
+	if queueLength < 0 {
+		queueLength = 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r := s.ensureLocked(sessionID)
+	if r.QueueLength == queueLength {
+		return viewLocked(r, ""), false
+	}
+	r.Revision++
+	r.QueueLength = queueLength
+	r.UpdatedAt = s.now().UnixMilli()
 	s.saveLocked()
 	return viewLocked(r, ""), true
 }
@@ -164,13 +204,18 @@ func (s *Store) Progress(sessionID, requestID, stage, message string) (View, boo
 	if r.Stage == stage && r.StageMessage == message && (requestID == "" || r.ActiveRequestID == requestID) {
 		return viewLocked(r, ""), false
 	}
+	now := s.now().UnixMilli()
+	requestChanged := requestID != "" && requestID != r.ActiveRequestID
 	r.Revision++
 	if requestID != "" {
 		r.ActiveRequestID = requestID
 	}
+	if requestChanged || r.ActiveStartedAt == 0 {
+		r.ActiveStartedAt = now
+	}
 	r.Stage = stage
 	r.StageMessage = message
-	r.StageStartedAt = s.now().UnixMilli()
+	r.StageStartedAt = now
 	r.UpdatedAt = r.StageStartedAt
 	s.scheduleSaveLocked()
 	return viewLocked(r, ""), true
@@ -245,6 +290,7 @@ func (s *Store) Recover(sessionID string, actuallyActive bool) (View, bool) {
 	r.CompletedAt = r.UpdatedAt
 	r.Terminals = append(r.Terminals, Terminal{Revision: r.Revision, RequestID: r.ActiveRequestID, Status: "interrupted", At: r.CompletedAt})
 	r.ActiveRequestID = ""
+	r.ActiveStartedAt = 0
 	s.saveLocked()
 	return viewLocked(r, ""), true
 }
@@ -275,12 +321,48 @@ func (s *Store) RecoverAllStale() []View {
 		r.CompletedAt = r.UpdatedAt
 		r.Terminals = append(r.Terminals, Terminal{Revision: r.Revision, RequestID: r.ActiveRequestID, Status: "interrupted", At: r.CompletedAt})
 		r.ActiveRequestID = ""
+		r.ActiveStartedAt = 0
 		recovered = append(recovered, viewLocked(r, ""))
 	}
 	if len(recovered) > 0 {
 		s.saveLocked()
 	}
 	return recovered
+}
+
+// ReconcileHistoryActivity clears only a restart-generated interruption when
+// canonical assistant history proves the logical Session advanced afterwards.
+// User-requested stops have no restart marker and remain visible.
+func (s *Store) ReconcileHistoryActivity(sessionID string, latestAssistantAt int64, observedPhase string) (View, bool) {
+	if sessionID == "" || latestAssistantAt <= 0 {
+		return View{}, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r := s.ensureLocked(sessionID)
+	if r.Phase != "interrupted" || r.LastTerminal != "interrupted" ||
+		r.LastError != "Bridge restarted before the terminal event was observed" ||
+		r.CompletedAt == 0 || latestAssistantAt <= r.CompletedAt {
+		return viewLocked(r, ""), false
+	}
+	phase := observedPhase
+	if phase != "queued" && phase != "running" && phase != "stopping" && phase != "waiting" {
+		phase = "idle"
+	}
+	r.Revision++
+	r.Phase = phase
+	r.Stage = defaultStageForPhase(phase)
+	r.StageMessage = ""
+	r.StageStartedAt = s.now().UnixMilli()
+	r.ActiveRequestID = ""
+	r.ActiveStartedAt = 0
+	r.QueueLength = 0
+	r.LastTerminal = ""
+	r.LastError = ""
+	r.CompletedAt = 0
+	r.UpdatedAt = r.StageStartedAt
+	s.saveLocked()
+	return viewLocked(r, ""), true
 }
 
 func (s *Store) Snapshot(deviceID string, sessionIDs []string) []View {
@@ -353,6 +435,12 @@ func (s *Store) ensureLocked(sessionID string) *Record {
 		r.Stage = defaultStageForPhase(r.Phase)
 		r.StageStartedAt = r.UpdatedAt
 	}
+	if r.ActiveStartedAt == 0 && (r.Phase == "queued" || r.Phase == "running" || r.Phase == "waiting" || r.Phase == "stopping") {
+		r.ActiveStartedAt = r.StageStartedAt
+		if r.ActiveStartedAt == 0 {
+			r.ActiveStartedAt = r.UpdatedAt
+		}
+	}
 	return r
 }
 
@@ -391,11 +479,18 @@ func viewLocked(r *Record, deviceID string) View {
 			unread++
 		}
 	}
+	lastTerminal, lastError, completedAt := r.LastTerminal, r.LastError, r.CompletedAt
+	active := r.Phase == "queued" || r.Phase == "running" || r.Phase == "waiting" || r.Phase == "stopping"
+	if active && r.ActiveRequestID != "" && len(r.Terminals) > 0 && r.Terminals[len(r.Terminals)-1].RequestID != r.ActiveRequestID {
+		// Backward-compatible self-heal for journals written before new requests
+		// cleared the previous terminal presentation. The ledger remains intact.
+		lastTerminal, lastError, completedAt = "", "", 0
+	}
 	return View{SessionID: r.SessionID, Revision: r.Revision, Phase: r.Phase,
-		Stage: r.Stage, StageMessage: r.StageMessage, StageStartedAt: r.StageStartedAt,
+		Stage: r.Stage, StageMessage: r.StageMessage, StageStartedAt: r.StageStartedAt, ActiveStartedAt: r.ActiveStartedAt,
 		ActiveRequestID: r.ActiveRequestID, QueueLength: r.QueueLength,
-		LastTerminal: r.LastTerminal, LastError: r.LastError, UpdatedAt: r.UpdatedAt,
-		CompletedAt: r.CompletedAt, Unread: unread,
+		LastTerminal: lastTerminal, LastError: lastError, UpdatedAt: r.UpdatedAt,
+		CompletedAt: completedAt, Unread: unread,
 		DeliveryPending:  deviceID != "" && r.AckedByDevice[deviceID] < r.Revision,
 		HistoryReconcile: deviceID != "" && historyReconcile}
 }

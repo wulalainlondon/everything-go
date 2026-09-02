@@ -12,6 +12,7 @@
 package session
 
 import (
+	"errors"
 	"log"
 	"sort"
 	"strings"
@@ -33,6 +34,10 @@ type Session struct {
 	CreatedAt float64 // unix seconds (matches Python time.time())
 
 	name                string
+	metadataRevision    uint64
+	nameUpdatedAt       int64
+	nameUpdatedBy       string
+	lastNameMutationID  string
 	cwd                 string
 	backend             string
 	model               string
@@ -67,6 +72,10 @@ type Session struct {
 type Snapshot struct {
 	ID                  string
 	Name                string
+	MetadataRevision    uint64
+	NameUpdatedAt       int64
+	NameUpdatedBy       string
+	LastNameMutationID  string
 	Cwd                 string
 	Backend             string
 	Model               string
@@ -99,6 +108,8 @@ func (s *Session) Snapshot() Snapshot {
 func (s *Session) snapshotLocked() Snapshot {
 	return Snapshot{
 		ID: s.ID, Name: s.name, Cwd: s.cwd, Backend: s.backend,
+		MetadataRevision: s.metadataRevision, NameUpdatedAt: s.nameUpdatedAt,
+		NameUpdatedBy: s.nameUpdatedBy, LastNameMutationID: s.lastNameMutationID,
 		Model: s.model, Sandbox: s.sandbox, Effort: s.effort, ResumeID: s.resumeID,
 		HistoricalResumeIDs: append([]string(nil), s.historicalResumeIDs...),
 		ServiceTier:         s.serviceTier, CollaborationMode: s.collaborationMode, Personality: s.personality,
@@ -269,9 +280,10 @@ func (s *Session) SetLastActivity(ts float64) {
 
 // Registry is the in-memory session store, owned by the Go connection core.
 type Registry struct {
-	mu       sync.RWMutex
-	sessions map[string]*Session
-	store    *Store
+	mu         sync.RWMutex
+	mutationMu sync.Mutex
+	sessions   map[string]*Session
+	store      *Store
 }
 
 func NewRegistry() *Registry {
@@ -297,6 +309,8 @@ func (r *Registry) AttachStore(store *Store) {
 		r.sessions[id] = &Session{
 			ID: id, CreatedAt: created,
 			name: e.Name, cwd: e.Cwd, backend: e.Backend,
+			metadataRevision: e.MetadataRevision, nameUpdatedAt: e.NameUpdatedAt,
+			nameUpdatedBy: e.NameUpdatedBy, lastNameMutationID: e.LastNameMutationID,
 			model: e.Model, sandbox: e.Sandbox, resumeID: resume,
 			historicalResumeIDs: append([]string(nil), e.HistoricalResumeIDs...),
 			effort:              e.Effort,
@@ -387,12 +401,71 @@ func firstNonEmptyRegistry(values ...string) string {
 // Persist writes the current sessions to the attached store (no-op if none).
 // Safe to call from a goroutine; writes are serialized inside the Store.
 func (r *Registry) Persist() {
+	r.mutationMu.Lock()
+	defer r.mutationMu.Unlock()
 	if r.store == nil {
 		return
 	}
 	if err := r.store.Save(r.List()); err != nil {
 		log.Printf("session persist failed: %v", err)
 	}
+}
+
+var (
+	ErrRenameConflict = errors.New("session metadata revision conflict")
+	ErrRenameEmpty    = errors.New("session name is empty")
+	ErrSessionMissing = errors.New("session not found")
+)
+
+// RenameAndPersist is the authoritative Session-name commit. The mutation is
+// serialized with every Registry persist, written atomically to disk, and only
+// then returned to the caller for broadcast. A failed disk write rolls memory
+// back, so session_renamed always means the new name survived a restart.
+func (r *Registry) RenameAndPersist(id, name, updatedBy, mutationID string, expectedRevision *uint64) (Snapshot, bool, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return Snapshot{}, false, ErrRenameEmpty
+	}
+	r.mutationMu.Lock()
+	defer r.mutationMu.Unlock()
+
+	s, ok := r.Get(id)
+	if !ok {
+		return Snapshot{}, false, ErrSessionMissing
+	}
+	before := s.Snapshot()
+	if mutationID != "" && before.LastNameMutationID == mutationID {
+		return before, false, nil
+	}
+	if expectedRevision != nil && *expectedRevision != before.MetadataRevision {
+		return before, false, ErrRenameConflict
+	}
+	if before.Name == name {
+		return before, false, nil
+	}
+
+	now := time.Now().UnixMilli()
+	s.mu.Lock()
+	s.name = name
+	s.metadataRevision++
+	s.nameUpdatedAt = now
+	s.nameUpdatedBy = strings.TrimSpace(updatedBy)
+	s.lastNameMutationID = mutationID
+	s.mu.Unlock()
+	after := s.Snapshot()
+	if r.store != nil {
+		if err := r.store.Save(r.List()); err != nil {
+			s.mu.Lock()
+			s.name = before.Name
+			s.metadataRevision = before.MetadataRevision
+			s.nameUpdatedAt = before.NameUpdatedAt
+			s.nameUpdatedBy = before.NameUpdatedBy
+			s.lastNameMutationID = before.LastNameMutationID
+			s.mu.Unlock()
+			return before, false, err
+		}
+	}
+	return after, true, nil
 }
 
 // PruneCodexSessions removes persisted and in-memory Codex rows excluded by
@@ -502,7 +575,10 @@ func (r *Registry) UpsertExternal(id, name, cwd, backend, resumeID string, lastU
 		}
 		before := s.Snapshot()
 		s.mu.Lock()
-		if s.name == "" || (s.ID == id && strings.HasPrefix(s.ID, "jl_")) {
+		// Once a user-authored metadata revision exists, the Bridge registry is
+		// the name authority. Native JSONL discovery may keep refreshing runtime
+		// location/activity, but must never restore its derived transcript title.
+		if s.metadataRevision == 0 && (s.name == "" || (s.ID == id && strings.HasPrefix(s.ID, "jl_"))) {
 			s.name = name
 		}
 		if s.cwd == "" || (s.ID == id && strings.HasPrefix(s.ID, "jl_")) {
@@ -534,7 +610,9 @@ func (r *Registry) UpsertExternal(id, name, cwd, backend, resumeID string, lastU
 		// observation roll the active mapping backwards; retain it as history.
 		if s.resumeID == "" {
 			s.resumeID = resumeID
-			s.name = name
+			if s.metadataRevision == 0 {
+				s.name = name
+			}
 			s.cwd = cwd
 			s.backend = backend
 		} else if s.resumeID != resumeID {
@@ -547,7 +625,9 @@ func (r *Registry) UpsertExternal(id, name, cwd, backend, resumeID string, lastU
 			s.mu.Unlock()
 			return s, historyChanged
 		} else {
-			s.name = name
+			if s.metadataRevision == 0 {
+				s.name = name
+			}
 			s.cwd = cwd
 			s.backend = backend
 		}

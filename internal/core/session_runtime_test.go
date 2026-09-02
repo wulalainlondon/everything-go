@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"everything-go/internal/fcm"
 	"everything-go/internal/protocol"
 )
 
@@ -62,5 +63,32 @@ func TestRuntimeSnapshotSurvivesOtherOnlineClient(t *testing.T) {
 	phone := h.runtimeSnapshot("phone")
 	if len(phone.Items) != 1 || phone.Items[0].Phase != "completed" || phone.Items[0].Unread != 1 {
 		t.Fatalf("offline phone did not recover terminal snapshot: %+v", phone.Items)
+	}
+}
+
+func TestRuntimeStatusPushUsesAuthoritativeRevisionAndSessionName(t *testing.T) {
+	h, _ := newTestHub(t)
+	h.cfg.InstanceID = "wulala"
+	h.registry.Create("s1", "Release QA", t.TempDir(), "codex", "", "", "")
+	type pushed struct {
+		instanceID, sessionID, name, phase, stage, message, activeRequestID string
+		revision                                                            uint64
+		updatedAt, activeStartedAt                                          int64
+		queueLength                                                         int
+	}
+	ch := make(chan pushed, 1)
+	h.runtimeStatusPush = func(instanceID, sessionID, name, phase, stage, message string,
+		revision uint64, updatedAt, activeStartedAt int64, activeRequestID string, queueLength int, _ fcm.ReplyAction) {
+		ch <- pushed{instanceID, sessionID, name, phase, stage, message, activeRequestID, revision, updatedAt, activeStartedAt, queueLength}
+	}
+	h.updateRuntime("s1", "running", "r1", 0, "", "")
+	select {
+	case got := <-ch:
+		if got.instanceID != "wulala" || got.sessionID != "s1" || got.name != "Release QA" ||
+			got.phase != "running" || got.activeRequestID != "r1" || got.revision == 0 || got.updatedAt == 0 || got.activeStartedAt == 0 {
+			t.Fatalf("runtime status projection=%+v", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("runtime status push was not projected")
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 
 	"everything-go/internal/eventinbox"
+	"everything-go/internal/identity"
 	"everything-go/internal/workitems"
 )
 
@@ -23,14 +24,15 @@ type Inbound struct {
 	RequestID string `json:"request_id"`
 
 	// hello / pairing
-	DeviceID      string `json:"device_id"`
-	DeviceName    string `json:"device_name"`
-	ClientSurface string `json:"client_surface"`
-	AuthToken     string `json:"auth_token"`
-	ReplayAck     bool   `json:"replay_ack"`
-	BatchID       string `json:"batch_id"`
-	Revision      uint64 `json:"revision"`
-	Read          bool   `json:"read"`
+	DeviceID        string `json:"device_id"`
+	DeviceName      string `json:"device_name"`
+	ClientSurface   string `json:"client_surface"`
+	AuthToken       string `json:"auth_token"`
+	ReplayAck       bool   `json:"replay_ack"`
+	ProtocolVersion int    `json:"protocol_version"`
+	BatchID         string `json:"batch_id"`
+	Revision        uint64 `json:"revision"`
+	Read            bool   `json:"read"`
 
 	// new_session
 	Name           string `json:"name"`
@@ -84,6 +86,7 @@ type Inbound struct {
 	ClientHash       string   `json:"client_hash"`
 	ExpectedModified *int64   `json:"expected_modified"`
 	Token            string   `json:"token"`
+	Platform         string   `json:"platform"`
 
 	// search
 	Query            string         `json:"query"`
@@ -138,43 +141,48 @@ type Inbound struct {
 
 	// Native WorkItem commands. Revision is reused as the sync/read cursor;
 	// command-specific fields stay flat for backward-compatible decoding.
-	ProjectID           string                       `json:"project_id"`
-	WorkItemID          string                       `json:"work_item_id"`
-	MutationID          string                       `json:"mutation_id"`
-	ExpectedVersion     uint64                       `json:"expected_version"`
-	Lifecycle           string                       `json:"lifecycle"`
-	Priority            string                       `json:"priority"`
-	SortKey             int64                        `json:"sort_key"`
-	Description         string                       `json:"description"`
-	Outcome             string                       `json:"outcome"`
-	NextStep            string                       `json:"next_step"`
-	AcceptanceCriteria  string                       `json:"acceptance_criteria"`
-	WorkspacePath       string                       `json:"workspace_path"`
-	ThreadID            string                       `json:"thread_id"`
-	Role                string                       `json:"role"`
-	DependsOnID         string                       `json:"depends_on_id"`
-	WorkLinkID          string                       `json:"work_link_id"`
-	CommentID           string                       `json:"comment_id"`
-	WorkAttachmentID    string                       `json:"work_attachment_id"`
-	AttachmentID        string                       `json:"attachment_id"`
-	RunID               string                       `json:"run_id"`
-	RunKind             string                       `json:"run_kind"`
-	Body                string                       `json:"body"`
-	BlockedReasonCode   string                       `json:"blocked_reason_code"`
-	BlockedNote         string                       `json:"blocked_note"`
-	Assignee            string                       `json:"assignee"`
-	DueAt               *int64                       `json:"due_at"`
-	Labels              []string                     `json:"labels"`
-	AutomationMode      string                       `json:"automation_mode"`
-	WorkflowID          string                       `json:"workflow_id"`
-	WorkflowNodeID      string                       `json:"workflow_node_id"`
-	WorkflowName        string                       `json:"workflow_name"`
-	WorkflowDescription string                       `json:"workflow_description"`
-	WorkflowDefinition  workitems.WorkflowDefinition `json:"workflow_definition"`
-	ProjectContext      string                       `json:"project_context"`
-	DeliveredRevision   uint64                       `json:"delivered_revision"`
-	AckedRevision       uint64                       `json:"acked_revision"`
-	Fields              []string                     `json:"fields"`
+	ProjectID             string                       `json:"project_id"`
+	WorkItemID            string                       `json:"work_item_id"`
+	MutationID            string                       `json:"mutation_id"`
+	ExpectedVersion       uint64                       `json:"expected_version"`
+	ExpectedRevision      *uint64                      `json:"expected_revision"`
+	Lifecycle             string                       `json:"lifecycle"`
+	Priority              string                       `json:"priority"`
+	SortKey               int64                        `json:"sort_key"`
+	Description           string                       `json:"description"`
+	Outcome               string                       `json:"outcome"`
+	NextStep              string                       `json:"next_step"`
+	AcceptanceCriteria    string                       `json:"acceptance_criteria"`
+	WorkspacePath         string                       `json:"workspace_path"`
+	ThreadID              string                       `json:"thread_id"`
+	Role                  string                       `json:"role"`
+	DependsOnID           string                       `json:"depends_on_id"`
+	WorkLinkID            string                       `json:"work_link_id"`
+	CommentID             string                       `json:"comment_id"`
+	WorkAttachmentID      string                       `json:"work_attachment_id"`
+	AttachmentID          string                       `json:"attachment_id"`
+	RunID                 string                       `json:"run_id"`
+	RunKind               string                       `json:"run_kind"`
+	Body                  string                       `json:"body"`
+	BlockedReasonCode     string                       `json:"blocked_reason_code"`
+	BlockedNote           string                       `json:"blocked_note"`
+	Assignee              string                       `json:"assignee"`
+	DueAt                 *int64                       `json:"due_at"`
+	Labels                []string                     `json:"labels"`
+	AutomationMode        string                       `json:"automation_mode"`
+	WorkflowID            string                       `json:"workflow_id"`
+	WorkflowNodeID        string                       `json:"workflow_node_id"`
+	WorkflowName          string                       `json:"workflow_name"`
+	WorkflowDescription   string                       `json:"workflow_description"`
+	WorkflowDefinition    workitems.WorkflowDefinition `json:"workflow_definition"`
+	ProjectContext        string                       `json:"project_context"`
+	DeliveredRevision     uint64                       `json:"delivered_revision"`
+	AckedRevision         uint64                       `json:"acked_revision"`
+	Fields                []string                     `json:"fields"`
+	BootstrapID           string                       `json:"bootstrap_id"`
+	CurrentState          string                       `json:"current_state"`
+	SessionIDs            []string                     `json:"session_ids"`
+	SelectedSuggestionIDs []string                     `json:"selected_suggestion_ids"`
 }
 
 // InboundImage is one attached image on a message (app strips the data-URL
@@ -207,6 +215,12 @@ type SearchFilters struct {
 func ParseInbound(raw []byte) (Inbound, error) {
 	var in Inbound
 	err := json.Unmarshal(raw, &in)
+	if err == nil {
+		in.SessionID = identity.WireSessionID(in.SessionID)
+		for index, sessionID := range in.SessionIDs {
+			in.SessionIDs[index] = identity.WireSessionID(sessionID)
+		}
+	}
 	return in, err
 }
 
@@ -268,6 +282,9 @@ func NewWorkSnapshot(snapshot workitems.DeviceSnapshot, authoritativeReset ...bo
 	if snapshot.Workflows == nil {
 		snapshot.Workflows = []workitems.Workflow{}
 	}
+	if snapshot.Bootstraps == nil {
+		snapshot.Bootstraps = []workitems.ProjectBootstrapDraft{}
+	}
 	reset := len(authoritativeReset) > 0 && authoritativeReset[0]
 	return WorkSnapshot{Type: "work_snapshot", AuthoritativeReset: reset, DeviceSnapshot: snapshot}
 }
@@ -293,17 +310,20 @@ func NewWorkDeltaBatch(from, latest uint64, changes []workitems.Change) WorkDelt
 }
 
 type WorkMutationAck struct {
-	Type          string                   `json:"type"`
-	MutationID    string                   `json:"mutation_id"`
-	EntityVersion uint64                   `json:"entity_version"`
-	Revision      uint64                   `json:"revision"`
-	Project       *workitems.Project       `json:"project,omitempty"`
-	Item          *workitems.WorkItem      `json:"item,omitempty"`
-	Link          *workitems.SessionLink   `json:"link,omitempty"`
-	Comment       *workitems.Comment       `json:"comment,omitempty"`
-	Run           *workitems.Run           `json:"run,omitempty"`
-	Attachment    *workitems.AttachmentRef `json:"attachment,omitempty"`
-	Workflow      *workitems.Workflow      `json:"workflow,omitempty"`
+	Type          string                           `json:"type"`
+	MutationID    string                           `json:"mutation_id"`
+	EntityVersion uint64                           `json:"entity_version"`
+	Revision      uint64                           `json:"revision"`
+	Project       *workitems.Project               `json:"project,omitempty"`
+	Item          *workitems.WorkItem              `json:"item,omitempty"`
+	Link          *workitems.SessionLink           `json:"link,omitempty"`
+	Comment       *workitems.Comment               `json:"comment,omitempty"`
+	Run           *workitems.Run                   `json:"run,omitempty"`
+	Attachment    *workitems.AttachmentRef         `json:"attachment,omitempty"`
+	Workflow      *workitems.Workflow              `json:"workflow,omitempty"`
+	Bootstrap     *workitems.ProjectBootstrapDraft `json:"bootstrap,omitempty"`
+	Items         []workitems.WorkItem             `json:"items,omitempty"`
+	Links         []workitems.SessionLink          `json:"links,omitempty"`
 }
 
 type WorkConflict struct {
@@ -352,6 +372,7 @@ type SessionRuntime struct {
 	Stage              string `json:"stage,omitempty"`
 	StageMessage       string `json:"stage_message,omitempty"`
 	StageStartedAt     int64  `json:"stage_started_at,omitempty"`
+	ActiveStartedAt    int64  `json:"active_started_at,omitempty"`
 	ActiveRequestID    string `json:"active_request_id,omitempty"`
 	QueueLength        int    `json:"queue_length"`
 	LastTerminalStatus string `json:"last_terminal_status,omitempty"`
@@ -519,22 +540,30 @@ type RecentMessage struct {
 
 // SessionSummary mirrors SessionSummarySchema.
 type SessionSummary struct {
-	ID                string          `json:"id"`
-	Name              string          `json:"name"`
-	IsStreaming       bool            `json:"is_streaming"`
-	CreatedAt         float64         `json:"created_at"`
-	LastActivity      float64         `json:"last_activity,omitempty"`
-	Cwd               string          `json:"cwd,omitempty"`
-	Model             string          `json:"model,omitempty"`
-	Effort            string          `json:"effort,omitempty"`
-	ServiceTier       string          `json:"service_tier,omitempty"`
-	CollaborationMode string          `json:"collaboration_mode,omitempty"`
-	Personality       string          `json:"personality,omitempty"`
-	Backend           string          `json:"backend,omitempty"`
-	Sandbox           string          `json:"sandbox,omitempty"`
-	Pinned            bool            `json:"pinned"`
-	Hidden            bool            `json:"hidden"`
-	RecentMessages    []RecentMessage `json:"recent_messages,omitempty"`
+	ID                  string          `json:"id"`
+	Name                string          `json:"name"`
+	AuthorityInstanceID string          `json:"authority_instance_id,omitempty"`
+	MetadataRevision    uint64          `json:"metadata_revision"`
+	NameUpdatedAt       int64           `json:"name_updated_at,omitempty"`
+	NameUpdatedBy       string          `json:"name_updated_by,omitempty"`
+	LastNameMutationID  string          `json:"last_name_mutation_id,omitempty"`
+	IsStreaming         bool            `json:"is_streaming"`
+	CreatedAt           float64         `json:"created_at"`
+	LastActivity        float64         `json:"last_activity,omitempty"`
+	Cwd                 string          `json:"cwd,omitempty"`
+	Model               string          `json:"model,omitempty"`
+	Effort              string          `json:"effort,omitempty"`
+	ServiceTier         string          `json:"service_tier,omitempty"`
+	CollaborationMode   string          `json:"collaboration_mode,omitempty"`
+	Personality         string          `json:"personality,omitempty"`
+	Backend             string          `json:"backend,omitempty"`
+	Sandbox             string          `json:"sandbox,omitempty"`
+	Pinned              bool            `json:"pinned"`
+	Hidden              bool            `json:"hidden"`
+	RecentMessages      []RecentMessage `json:"recent_messages,omitempty"`
+	PreviewText         string          `json:"preview_text,omitempty"`
+	PreviewRole         string          `json:"preview_role,omitempty"`
+	PreviewVersion      int             `json:"preview_version,omitempty"`
 }
 
 // CodexLiveDiff carries the latest aggregated turn diff. Replacing rather than
@@ -931,13 +960,36 @@ func NewResumableSessions(sessions any) ResumableSessions {
 // --- Session mgmt tail ------------------------------------------------------
 
 type SessionRenamed struct {
-	Type      string `json:"type"`
-	SessionID string `json:"session_id"`
-	Name      string `json:"name"`
+	Type                string `json:"type"`
+	SessionID           string `json:"session_id"`
+	Name                string `json:"name"`
+	AuthorityInstanceID string `json:"authority_instance_id,omitempty"`
+	MutationID          string `json:"mutation_id,omitempty"`
+	Revision            uint64 `json:"revision"`
+	UpdatedAt           int64  `json:"updated_at,omitempty"`
+	UpdatedBy           string `json:"updated_by,omitempty"`
 }
 
-func NewSessionRenamed(sessionID, name string) SessionRenamed {
-	return SessionRenamed{Type: "session_renamed", SessionID: sessionID, Name: name}
+func NewSessionRenamed(sessionID, name, authorityInstanceID, mutationID string, revision uint64, updatedAt int64, updatedBy string) SessionRenamed {
+	return SessionRenamed{Type: "session_renamed", SessionID: sessionID, Name: name,
+		AuthorityInstanceID: authorityInstanceID, MutationID: mutationID, Revision: revision,
+		UpdatedAt: updatedAt, UpdatedBy: updatedBy}
+}
+
+type SessionRenameRejected struct {
+	Type                string `json:"type"`
+	SessionID           string `json:"session_id"`
+	AuthorityInstanceID string `json:"authority_instance_id,omitempty"`
+	MutationID          string `json:"mutation_id,omitempty"`
+	Reason              string `json:"reason"`
+	CurrentName         string `json:"current_name,omitempty"`
+	CurrentRevision     uint64 `json:"current_revision"`
+}
+
+func NewSessionRenameRejected(sessionID, authorityInstanceID, mutationID, reason, currentName string, currentRevision uint64) SessionRenameRejected {
+	return SessionRenameRejected{Type: "session_rename_rejected", SessionID: sessionID,
+		AuthorityInstanceID: authorityInstanceID, MutationID: mutationID, Reason: reason,
+		CurrentName: currentName, CurrentRevision: currentRevision}
 }
 
 // SessionForked announces a new session created by forking another's transcript.

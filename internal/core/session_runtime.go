@@ -3,16 +3,74 @@ package core
 import (
 	"context"
 	"log"
+	"sort"
+	"time"
 
+	"everything-go/internal/fcm"
 	"everything-go/internal/protocol"
 	"everything-go/internal/runtimejournal"
+	"everything-go/internal/workitems"
 )
+
+const (
+	messageReceiptTTL = 24 * time.Hour
+	messageReceiptMax = 4096
+)
+
+func messageReceiptKey(sessionID, requestID string) string { return sessionID + "\x00" + requestID }
+
+func (h *Hub) reserveMessageRequest(sessionID, requestID string) bool {
+	if sessionID == "" || requestID == "" {
+		return true
+	}
+	now := time.Now()
+	cutoff := now.Add(-messageReceiptTTL).UnixMilli()
+	key := messageReceiptKey(sessionID, requestID)
+	h.messageMu.Lock()
+	defer h.messageMu.Unlock()
+	if _, exists := h.messageReceipts[key]; exists {
+		return false
+	}
+	h.messageReceipts[key] = now.UnixMilli()
+	if len(h.messageReceipts) <= messageReceiptMax {
+		return true
+	}
+	type receipt struct {
+		key string
+		at  int64
+	}
+	all := make([]receipt, 0, len(h.messageReceipts))
+	for candidate, at := range h.messageReceipts {
+		if at < cutoff {
+			delete(h.messageReceipts, candidate)
+			continue
+		}
+		all = append(all, receipt{candidate, at})
+	}
+	if len(h.messageReceipts) > messageReceiptMax {
+		sort.Slice(all, func(i, j int) bool { return all[i].at < all[j].at })
+		for _, candidate := range all[:len(h.messageReceipts)-messageReceiptMax] {
+			delete(h.messageReceipts, candidate.key)
+		}
+	}
+	return true
+}
+
+func (h *Hub) releaseMessageRequest(sessionID, requestID string) {
+	if sessionID == "" || requestID == "" {
+		return
+	}
+	h.messageMu.Lock()
+	delete(h.messageReceipts, messageReceiptKey(sessionID, requestID))
+	h.messageMu.Unlock()
+}
 
 func runtimeEvent(view runtimejournal.View) protocol.SessionRuntime {
 	return protocol.SessionRuntime{
 		Type: "session_runtime", SessionID: view.SessionID, Revision: view.Revision,
 		Phase: view.Phase, Stage: view.Stage, StageMessage: view.StageMessage,
-		StageStartedAt: view.StageStartedAt, ActiveRequestID: view.ActiveRequestID, QueueLength: view.QueueLength,
+		StageStartedAt: view.StageStartedAt, ActiveStartedAt: view.ActiveStartedAt,
+		ActiveRequestID: view.ActiveRequestID, QueueLength: view.QueueLength,
 		LastTerminalStatus: view.LastTerminal, LastError: view.LastError,
 		UpdatedAt: view.UpdatedAt, CompletedAt: view.CompletedAt, Unread: view.Unread,
 		DeliveryPending: view.DeliveryPending, HistoryReconcile: view.HistoryReconcile,
@@ -23,6 +81,7 @@ func (h *Hub) updateRuntimeProgress(sessionID, requestID, stage, message string)
 	view, changed := h.runtimes.Progress(sessionID, requestID, stage, message)
 	if changed {
 		h.broadcastRuntime(view)
+		h.notifyRuntimeStatus(view)
 	}
 }
 
@@ -51,8 +110,64 @@ func (h *Hub) updateRuntime(sessionID, phase, requestID string, queueLength int,
 	if !changed {
 		return
 	}
+	h.publishRuntime(view)
+}
+
+func (h *Hub) publishRuntime(view runtimejournal.View) {
 	h.broadcastRuntime(view)
-	h.projectWorkRun(sessionID, requestID, phase, message)
+	h.notifyRuntimeStatus(view)
+	h.projectWorkRun(view.SessionID, view.ActiveRequestID, view.Phase, view.LastError)
+}
+
+func (h *Hub) updateRuntimeQueueLength(sessionID string, queueLength int) {
+	view, changed := h.runtimes.UpdateQueueLength(sessionID, queueLength)
+	if !changed {
+		return
+	}
+	h.broadcastRuntime(view)
+	h.notifyRuntimeStatus(view)
+}
+
+func (h *Hub) sessionQueueLength(sessionID string) int {
+	if current, ok := h.registry.Get(sessionID); ok {
+		return current.QueueLen()
+	}
+	return 0
+}
+
+func (h *Hub) recordTerminalRuntime(event any) (runtimejournal.View, bool, bool) {
+	var sessionID, requestID, phase, terminal, message string
+	switch e := event.(type) {
+	case protocol.Done:
+		sessionID, requestID, phase, terminal = e.SessionID, e.RequestID, "completed", "completed"
+	case protocol.Stopped:
+		sessionID, requestID, phase, terminal = e.SessionID, e.RequestID, "interrupted", "interrupted"
+	case protocol.Error:
+		if e.SessionID == "" {
+			return runtimejournal.View{}, false, false
+		}
+		sessionID, requestID, phase, terminal, message = e.SessionID, e.RequestID, "failed", "failed", e.Message
+	default:
+		return runtimejournal.View{}, false, false
+	}
+	view, changed := h.runtimes.Update(sessionID, phase, requestID, h.sessionQueueLength(sessionID), terminal, message)
+	return view, changed, true
+}
+
+func (h *Hub) notifyRuntimeStatus(view runtimejournal.View) {
+	if h.runtimeStatusPush == nil || view.SessionID == "" || view.Revision == 0 {
+		return
+	}
+	name := view.SessionID
+	if s, ok := h.registry.Get(view.SessionID); ok {
+		if candidate := s.Name(); candidate != "" {
+			name = candidate
+		}
+	}
+	replyURL, fallbackURL, capability, expiresAt := h.notificationReplyAction(view.SessionID)
+	go h.runtimeStatusPush(h.cfg.InstanceID, view.SessionID, name, view.Phase, view.Stage,
+		view.StageMessage, view.Revision, view.UpdatedAt, view.ActiveStartedAt, view.ActiveRequestID, view.QueueLength,
+		fcm.ReplyAction{URL: replyURL, FallbackURL: fallbackURL, Capability: capability, ExpiresAt: expiresAt})
 }
 
 func (h *Hub) projectWorkRun(sessionID, requestID, phase, reason string) {
@@ -86,10 +201,16 @@ func (h *Hub) projectWorkRun(sessionID, requestID, phase, reason string) {
 	}
 	h.projectAutomationRun(requestID, status, reason)
 	h.broadcastWorkRevision(update.Item.ActivityRevision)
-	if update.Attention != "" && h.fcm != nil {
-		go h.fcm.NotifyWorkAttention(h.cfg.InstanceID, update.Item.ID, update.Item.Title,
-			update.Item.ActivityRevision, update.Attention)
+	if update.Attention != "" {
+		h.notifyWorkAttention(update.Item, update.Attention)
 	}
+}
+
+func (h *Hub) notifyWorkAttention(item workitems.WorkItem, kind string) {
+	if h.workAttentionPush == nil || item.ID == "" || kind == "" {
+		return
+	}
+	go h.workAttentionPush(h.cfg.InstanceID, item.ID, item.Title, item.ActivityRevision, kind)
 }
 
 func (h *Hub) broadcastRuntime(view runtimejournal.View) {
@@ -121,14 +242,10 @@ func (h *Hub) driveRuntimeState(event any) {
 		h.updateRuntimeProgress(e.SessionID, e.RequestID, "thinking", "")
 	case protocol.TodoUpdate:
 		h.updateRuntimeProgress(e.SessionID, e.RequestID, "running_tool", "Updating task plan")
-	case protocol.Done:
-		h.updateRuntime(e.SessionID, "completed", e.RequestID, 0, "completed", "")
-	case protocol.Stopped:
-		h.updateRuntime(e.SessionID, "interrupted", e.RequestID, 0, "interrupted", "")
-	case protocol.Error:
-		if e.SessionID != "" {
-			h.updateRuntime(e.SessionID, "failed", e.RequestID, 0, "failed", e.Message)
-		}
+	case protocol.Done, protocol.Stopped, protocol.Error:
+		// Terminal events are recorded and published by Hub.Emit's two-phase
+		// ordering boundary before the next queued turn is released.
+		return
 	case protocol.UserInputRequestEvent:
 		h.updateRuntime(e.SessionID, "waiting", e.RequestID, 0, "", "")
 	case protocol.InteractionResolved:

@@ -23,14 +23,15 @@ type Command struct {
 	SessionID string
 	RequestID string
 
-	DeviceID      string
-	DeviceName    string
-	ClientSurface string
-	AuthToken     string
-	ReplayAck     bool
-	BatchID       string
-	Revision      uint64
-	Read          bool
+	DeviceID        string
+	DeviceName      string
+	ClientSurface   string
+	AuthToken       string
+	ReplayAck       bool
+	ProtocolVersion int
+	BatchID         string
+	Revision        uint64
+	Read            bool
 
 	Name            string
 	Cwd             string
@@ -72,6 +73,7 @@ type Command struct {
 	ClientHash       string
 	ExpectedModified *int64
 	Token            string
+	Platform         string
 
 	Query            string
 	Offset           int
@@ -105,43 +107,48 @@ type Command struct {
 	ClientDedupKey string
 	ContentType    string
 
-	ProjectID           string
-	WorkItemID          string
-	MutationID          string
-	ExpectedVersion     uint64
-	Lifecycle           string
-	Priority            string
-	SortKey             int64
-	Description         string
-	Outcome             string
-	NextStep            string
-	AcceptanceCriteria  string
-	WorkspacePath       string
-	ThreadID            string
-	Role                string
-	DependsOnID         string
-	WorkLinkID          string
-	CommentID           string
-	WorkAttachmentID    string
-	AttachmentID        string
-	RunID               string
-	RunKind             string
-	Body                string
-	BlockedReasonCode   string
-	BlockedNote         string
-	Assignee            string
-	DueAt               *int64
-	Labels              []string
-	AutomationMode      string
-	WorkflowID          string
-	WorkflowNodeID      string
-	WorkflowName        string
-	WorkflowDescription string
-	WorkflowDefinition  workitems.WorkflowDefinition
-	ProjectContext      string
-	DeliveredRevision   uint64
-	AckedRevision       uint64
-	Fields              []string
+	ProjectID             string
+	WorkItemID            string
+	MutationID            string
+	ExpectedVersion       uint64
+	ExpectedRevision      *uint64
+	Lifecycle             string
+	Priority              string
+	SortKey               int64
+	Description           string
+	Outcome               string
+	NextStep              string
+	AcceptanceCriteria    string
+	WorkspacePath         string
+	ThreadID              string
+	Role                  string
+	DependsOnID           string
+	WorkLinkID            string
+	CommentID             string
+	WorkAttachmentID      string
+	AttachmentID          string
+	RunID                 string
+	RunKind               string
+	Body                  string
+	BlockedReasonCode     string
+	BlockedNote           string
+	Assignee              string
+	DueAt                 *int64
+	Labels                []string
+	AutomationMode        string
+	WorkflowID            string
+	WorkflowNodeID        string
+	WorkflowName          string
+	WorkflowDescription   string
+	WorkflowDefinition    workitems.WorkflowDefinition
+	ProjectContext        string
+	DeliveredRevision     uint64
+	AckedRevision         uint64
+	Fields                []string
+	BootstrapID           string
+	CurrentState          string
+	SessionIDs            []string
+	SelectedSuggestionIDs []string
 
 	Images []backend.ImageAttachment
 	Files  []backend.FileAttachment
@@ -153,14 +160,15 @@ func (AppV1) ParseCommand(in protocol.Inbound) Command {
 		SessionID: in.SessionID,
 		RequestID: in.RequestID,
 
-		DeviceID:      in.DeviceID,
-		DeviceName:    in.DeviceName,
-		ClientSurface: in.ClientSurface,
-		AuthToken:     in.AuthToken,
-		ReplayAck:     in.ReplayAck,
-		BatchID:       in.BatchID,
-		Revision:      in.Revision,
-		Read:          in.Read,
+		DeviceID:        in.DeviceID,
+		DeviceName:      in.DeviceName,
+		ClientSurface:   in.ClientSurface,
+		AuthToken:       in.AuthToken,
+		ReplayAck:       in.ReplayAck,
+		ProtocolVersion: in.ProtocolVersion,
+		BatchID:         in.BatchID,
+		Revision:        in.Revision,
+		Read:            in.Read,
 
 		Name:            in.Name,
 		Cwd:             in.Cwd,
@@ -207,6 +215,7 @@ func (AppV1) ParseCommand(in protocol.Inbound) Command {
 		ClientHash:       in.ClientHash,
 		ExpectedModified: in.ExpectedModified,
 		Token:            in.Token,
+		Platform:         in.Platform,
 
 		Query:            in.Query,
 		Offset:           in.Offset,
@@ -240,43 +249,48 @@ func (AppV1) ParseCommand(in protocol.Inbound) Command {
 		ClientDedupKey: in.ClientDedupKey,
 		ContentType:    in.ContentType,
 
-		ProjectID:           in.ProjectID,
-		WorkItemID:          in.WorkItemID,
-		MutationID:          in.MutationID,
-		ExpectedVersion:     in.ExpectedVersion,
-		Lifecycle:           in.Lifecycle,
-		Priority:            in.Priority,
-		SortKey:             in.SortKey,
-		Description:         in.Description,
-		Outcome:             in.Outcome,
-		NextStep:            in.NextStep,
-		AcceptanceCriteria:  in.AcceptanceCriteria,
-		WorkspacePath:       in.WorkspacePath,
-		ThreadID:            in.ThreadID,
-		Role:                in.Role,
-		DependsOnID:         in.DependsOnID,
-		WorkLinkID:          in.WorkLinkID,
-		CommentID:           in.CommentID,
-		WorkAttachmentID:    in.WorkAttachmentID,
-		AttachmentID:        in.AttachmentID,
-		RunID:               in.RunID,
-		RunKind:             in.RunKind,
-		Body:                in.Body,
-		BlockedReasonCode:   in.BlockedReasonCode,
-		BlockedNote:         in.BlockedNote,
-		Assignee:            in.Assignee,
-		DueAt:               in.DueAt,
-		Labels:              in.Labels,
-		AutomationMode:      in.AutomationMode,
-		WorkflowID:          in.WorkflowID,
-		WorkflowNodeID:      in.WorkflowNodeID,
-		WorkflowName:        in.WorkflowName,
-		WorkflowDescription: in.WorkflowDescription,
-		WorkflowDefinition:  in.WorkflowDefinition,
-		ProjectContext:      in.ProjectContext,
-		DeliveredRevision:   in.DeliveredRevision,
-		AckedRevision:       in.AckedRevision,
-		Fields:              append([]string(nil), in.Fields...),
+		ProjectID:             in.ProjectID,
+		WorkItemID:            in.WorkItemID,
+		MutationID:            in.MutationID,
+		ExpectedVersion:       in.ExpectedVersion,
+		ExpectedRevision:      in.ExpectedRevision,
+		Lifecycle:             in.Lifecycle,
+		Priority:              in.Priority,
+		SortKey:               in.SortKey,
+		Description:           in.Description,
+		Outcome:               in.Outcome,
+		NextStep:              in.NextStep,
+		AcceptanceCriteria:    in.AcceptanceCriteria,
+		WorkspacePath:         in.WorkspacePath,
+		ThreadID:              in.ThreadID,
+		Role:                  in.Role,
+		DependsOnID:           in.DependsOnID,
+		WorkLinkID:            in.WorkLinkID,
+		CommentID:             in.CommentID,
+		WorkAttachmentID:      in.WorkAttachmentID,
+		AttachmentID:          in.AttachmentID,
+		RunID:                 in.RunID,
+		RunKind:               in.RunKind,
+		Body:                  in.Body,
+		BlockedReasonCode:     in.BlockedReasonCode,
+		BlockedNote:           in.BlockedNote,
+		Assignee:              in.Assignee,
+		DueAt:                 in.DueAt,
+		Labels:                in.Labels,
+		AutomationMode:        in.AutomationMode,
+		WorkflowID:            in.WorkflowID,
+		WorkflowNodeID:        in.WorkflowNodeID,
+		WorkflowName:          in.WorkflowName,
+		WorkflowDescription:   in.WorkflowDescription,
+		WorkflowDefinition:    in.WorkflowDefinition,
+		ProjectContext:        in.ProjectContext,
+		DeliveredRevision:     in.DeliveredRevision,
+		AckedRevision:         in.AckedRevision,
+		Fields:                append([]string(nil), in.Fields...),
+		BootstrapID:           in.BootstrapID,
+		CurrentState:          in.CurrentState,
+		SessionIDs:            append([]string(nil), in.SessionIDs...),
+		SelectedSuggestionIDs: append([]string(nil), in.SelectedSuggestionIDs...),
 
 		Images: inboundImagesToBackend(in.Images),
 		Files:  inboundFilesToBackend(in.Files),
@@ -335,7 +349,7 @@ type HelloInput struct {
 func (AppV1) HelloAck(in HelloInput) protocol.HelloAck {
 	return protocol.HelloAck{
 		Type:            "hello_ack",
-		ProtocolVersion: 2,
+		ProtocolVersion: protocol.ProtocolVersion,
 		ClientID:        in.ClientID,
 		DeviceID:        in.DeviceID,
 		DeviceName:      in.DeviceName,
@@ -449,8 +463,12 @@ func (AppV1) SessionClosed(sessionID string) protocol.SessionClosed {
 	return protocol.NewSessionClosed(sessionID)
 }
 
-func (AppV1) SessionRenamed(sessionID, name string) protocol.SessionRenamed {
-	return protocol.NewSessionRenamed(sessionID, name)
+func (AppV1) SessionRenamed(sessionID, name, authorityInstanceID, mutationID string, revision uint64, updatedAt int64, updatedBy string) protocol.SessionRenamed {
+	return protocol.NewSessionRenamed(sessionID, name, authorityInstanceID, mutationID, revision, updatedAt, updatedBy)
+}
+
+func (AppV1) SessionRenameRejected(sessionID, authorityInstanceID, mutationID, reason, currentName string, currentRevision uint64) protocol.SessionRenameRejected {
+	return protocol.NewSessionRenameRejected(sessionID, authorityInstanceID, mutationID, reason, currentName, currentRevision)
 }
 
 func (AppV1) SessionMetaUpdated(sessionID string, pinned, hidden *bool) protocol.SessionMetaUpdated {

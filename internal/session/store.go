@@ -14,6 +14,10 @@ import (
 // object so Python-only metadata survives Go updates.
 type savedEntry struct {
 	Name                string   `json:"name"`
+	MetadataRevision    uint64   `json:"metadata_revision,omitempty"`
+	NameUpdatedAt       int64    `json:"name_updated_at,omitempty"`
+	NameUpdatedBy       string   `json:"name_updated_by,omitempty"`
+	LastNameMutationID  string   `json:"last_name_mutation_id,omitempty"`
 	ResumeID            string   `json:"resume_id"`
 	ClaudeUUID          string   `json:"claude_uuid"`
 	LastUsed            int64    `json:"last_used"`
@@ -95,6 +99,8 @@ func (st *Store) Save(sessions []*Session) error {
 		}
 		entry := savedEntry{
 			Name: snap.Name, ResumeID: snap.ResumeID, ClaudeUUID: snap.ResumeID,
+			MetadataRevision: snap.MetadataRevision, NameUpdatedAt: snap.NameUpdatedAt,
+			NameUpdatedBy: snap.NameUpdatedBy, LastNameMutationID: snap.LastNameMutationID,
 			LastUsed: lastUsed, Cwd: snap.Cwd, Backend: snap.Backend, Model: snap.Model,
 			Sandbox: snap.Sandbox, CreatedAt: snap.CreatedAt,
 			Effort:      snap.Effort,
@@ -187,6 +193,10 @@ func putKnownFields(obj map[string]json.RawMessage, entry savedEntry) {
 		obj[key] = data
 	}
 	put("name", entry.Name)
+	put("metadata_revision", entry.MetadataRevision)
+	put("name_updated_at", entry.NameUpdatedAt)
+	put("name_updated_by", entry.NameUpdatedBy)
+	put("last_name_mutation_id", entry.LastNameMutationID)
 	put("resume_id", entry.ResumeID)
 	put("claude_uuid", entry.ClaudeUUID)
 	put("last_used", entry.LastUsed)
@@ -273,6 +283,10 @@ func entryFromRaw(obj map[string]json.RawMessage) savedEntry {
 	}
 	return savedEntry{
 		Name:                rawString(obj, "name"),
+		MetadataRevision:    uint64(rawInt64(obj, "metadata_revision")),
+		NameUpdatedAt:       rawInt64(obj, "name_updated_at"),
+		NameUpdatedBy:       rawString(obj, "name_updated_by"),
+		LastNameMutationID:  rawString(obj, "last_name_mutation_id"),
 		ResumeID:            resumeID,
 		ClaudeUUID:          claudeUUID,
 		LastUsed:            lastUsed,
