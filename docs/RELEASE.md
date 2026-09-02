@@ -40,6 +40,13 @@ The CI pipeline runs automatically (~3–5 min) and:
 4. Staples the notarization ticket back into the `.app.zip`
 5. Publishes all assets to GitHub Releases with a `SHA256SUMS` file
 
+Every macOS bundle also contains
+`Contents/Resources/release-provenance.json`. Before promotion, verify its
+`canonical_repository` is `go`, record the commit, dirty flag and
+`source_sha256`, and keep it with the release SHA256 evidence. CI releases must
+be clean (`dirty=false`); a local canary may record `dirty=true` but still must
+pass the exact Developer ID signing gate.
+
 > **Tag format is required.** The tag must match `v*` (e.g. `v0.1.2`).
 > A plain commit push does not trigger the release workflow.
 

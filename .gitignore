@@ -8,6 +8,8 @@
 # FCM service account key — injected at CI build time via FCM_SERVICE_ACCOUNT_JSON secret.
 # Never commit; the binary embeds it at build time via //go:embed.
 cmd/everything-go/keys/*.json
+internal/core/notification_reply_secret
+/release-artifacts/
 *.log
 .DS_Store
 

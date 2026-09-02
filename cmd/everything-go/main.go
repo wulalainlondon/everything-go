@@ -209,7 +209,7 @@ func main() {
 		} else {
 			hub.SetSearch(idx)
 			if exePath, err := os.Executable(); err == nil {
-				go runSearchIndexerLoop(ctx, idx, exePath, *dataDir, searchDirty, incrementalSearchEnabled() && nativeWatcherActive)
+				go runSearchIndexerLoop(ctx, idx, exePath, *dataDir, searchDirty, incrementalSearchEnabled() && nativeWatcherActive, hub.BroadcastSessionSummaries)
 			} else {
 				log.Printf("[search] cannot locate binary for indexer child (%v); serving existing index only", err)
 			}
@@ -301,10 +301,12 @@ func main() {
 	mux.HandleFunc("/api/events/v1/events", hub.ServeEventAPI)
 	mux.HandleFunc("/api/automation/v1/", hub.ServeAutomationAPI)
 	mux.HandleFunc("/api/relay/v1/", hub.ServeRelayAPI)
+	mux.HandleFunc("/api/notification/v1/replies", hub.ServeNotificationReplyAPI)
 	mux.HandleFunc("/hooks/github", hub.ServeGitHubWebhook)
 	mux.HandleFunc("/hooks/apple-app-store", hub.ServeAppStoreWebhook)
 	mux.HandleFunc("/hooks/apple-app-store/", hub.ServeAppStoreWebhook)
 	mux.HandleFunc("/hooks/meta/", hub.ServeMetaWebhook)
+	mux.HandleFunc("/hooks/sentry/", hub.ServeSentryWebhook)
 	mux.HandleFunc("/", hub.ServeWS)
 
 	addr := fmt.Sprintf(":%d", *port)
@@ -367,7 +369,7 @@ const indexResultPrefix = "EVERYTHING_GO_INDEX_RESULT="
 // adaptive interval. Native watcher notifications wake it immediately; quiet
 // systems back off to maxInterval. Spawn-and-wait serializes runs and each
 // child's exit returns its transcript parsing heap to the OS.
-func runLegacySearchIndexerLoop(ctx context.Context, idx *search.Index, exePath, dataDir string, dirty *dirtyPathQueue, minInterval, maxInterval time.Duration) {
+func runLegacySearchIndexerLoop(ctx context.Context, idx *search.Index, exePath, dataDir string, dirty *dirtyPathQueue, minInterval, maxInterval time.Duration, onIndexed func()) {
 	idleCycles := 0
 	for {
 		idx.SetIndexing(true)
@@ -388,6 +390,9 @@ func runLegacySearchIndexerLoop(ctx context.Context, idx *search.Index, exePath,
 			idx.MarkReady()
 			if metricsOK {
 				idx.RecordIngestMetrics(metrics)
+				if shouldRefreshSessionSummaries(metrics, true) && onIndexed != nil {
+					onIndexed()
+				}
 			}
 			if !metricsOK || metrics.FilesChanged > 0 || metrics.MessagesAdded > 0 {
 				idleCycles = 0

@@ -34,6 +34,7 @@ mkdir -p "$MACOS_DIR" "$RES_DIR"
 
 cp "$BIN_SRC" "$MACOS_DIR/everything-go"
 chmod +x "$MACOS_DIR/everything-go"
+"$(dirname "$0")/write_release_provenance.sh" "$RES_DIR/release-provenance.json"
 
 cat > "$APP_DIR/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>

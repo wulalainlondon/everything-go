@@ -3,6 +3,8 @@ package main
 import (
 	"testing"
 	"time"
+
+	"everything-go/internal/search"
 )
 
 func TestIndexBackoff(t *testing.T) {
@@ -16,6 +18,21 @@ func TestIndexBackoff(t *testing.T) {
 	}
 	if got := indexBackoff(min, max, -1); got != min {
 		t.Fatalf("negative idle delay=%s want=%s", got, min)
+	}
+}
+
+func TestShouldRefreshSessionSummaries(t *testing.T) {
+	if shouldRefreshSessionSummaries(search.IngestMetrics{MessagesAdded: 1}, false) {
+		t.Fatal("invalid metrics must not broadcast")
+	}
+	if !shouldRefreshSessionSummaries(search.IngestMetrics{MessagesAdded: 1}, true) {
+		t.Fatal("new preview messages must broadcast")
+	}
+	if !shouldRefreshSessionSummaries(search.IngestMetrics{MaintenanceRows: 2}, true) {
+		t.Fatal("index rebuild maintenance must broadcast")
+	}
+	if shouldRefreshSessionSummaries(search.IngestMetrics{FilesChanged: 1}, true) {
+		t.Fatal("metadata-only indexing must stay quiet")
 	}
 }
 

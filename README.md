@@ -1,19 +1,18 @@
 # everything-go
 
-A Go re-implementation of the `bridge`, built to speak the **identical external
-WebSocket protocol** as the Python bridge (`app/src/schemas/bridge.ts` is the
-shared source of truth). The same React/Capacitor app connects to either with no
-changes — just point it at a different `IP:port` in settings.
+Averything's production Bridge. This repository is the sole writable backend
+source; the workspace sibling `bridge/` is a generated public mirror.
 
-## Why
+Protocol semantics come from `../contracts/v3/protocol.schema.json`; generated
+Go/TypeScript/Swift/Android constants and executable vectors prevent clients
+from silently defining different identity or lifecycle rules.
 
-Three-way stability / footprint comparison against the existing Python bridge:
+## Topology
 
-| Config | What | How |
-|--------|------|-----|
-| **1 — pure Python** | current prod | run the Python bridge (port 8766) |
-| **2 — pure Go** | this binary, `--executor=go` | spawns the Claude CLI + parses NDJSON in Go |
-| **3 — Go + Python (P3 hybrid)** | this binary, `--executor=python` | Go owns connection/routing/session; a Python worker runs the AI turn over a socket |
+One managed Go Bridge owns Session metadata, runtime, attachments, delivery
+cursors, Work Items and external events. It connects to the managed shared
+Codex app-server over a Unix socket and exposes protocol v3 to clients. LAN,
+Tailscale and Tunnel URLs are replaceable transports, never data identity.
 
 The connection core (WS termination, envelope routing, session registry) is
 written **once** against the `executor.Executor` interface. Swapping `--executor`
@@ -35,15 +34,15 @@ internal/netsvc          network presence: LAN UDP discovery beacon + mDNS + clo
 The router only inspects `{type, session_id}` to route; payloads are forwarded
 to the executor opaquely. The 803-line Zod schema lives only in the app.
 
-## Run
+## Local development build (never deploy this output)
 
 ```bash
 go build -o everything-go ./cmd/everything-go
 ./everything-go --port 8767 --executor go
 ```
 
-Then in the app's connection settings, set the bridge IP to this machine and the
-port to `8767`. Use the Python bridge on `8766` to compare.
+Production deployment is only through the Developer-ID-signed Release flow in
+`docs/RELEASE.md`. A local build does not authorize restarting Wulala or Morrie.
 
 Discovery services are intentionally opt-in. Keep them off for fixed-endpoint
 P2 validation; enable them only when testing the network-presence layer:
@@ -59,14 +58,17 @@ P2 validation; enable them only when testing the network-presence layer:
 WebSocket while preserving the same app-facing bridge protocol:
 
 ```bash
-go run ./examples/remote_ws_echo
+go build -o /tmp/everything-go-remote-echo ./examples/remote_ws_echo
 ./everything-go --port 8767 --executor go --remote-ws-url ws://127.0.0.1:9001/backend
 ```
 
 Create or switch a session to backend `remote-ws`. The backend-facing protocol
 is documented in [`docs/REMOTE_WS_PROTOCOL.md`](docs/REMOTE_WS_PROTOCOL.md).
 
-## Parity matrix (vs Python bridge)
+## Historical migration verification matrix
+
+The table below is retained as migration evidence only. Python is retired and
+is not a supported runtime or fallback.
 
 This project is in a **core-hardening phase**. Phase 1 (core hardening) is done:
 the session core is method-encapsulated with an explicit state machine and a
