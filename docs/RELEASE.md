@@ -55,7 +55,12 @@ pass the exact Developer ID signing gate.
 | Target | CPU / release asset | Port | Runtime |
 |---|---|---:|---|
 | Wulala | Apple Silicon `arm64` / `darwin-arm64` | 8766 | `~/.everything-go-runtime` |
-| Morrie | **Intel `x86_64` (`GOARCH=amd64`)** / `darwin-amd64` | 9453 | `/Users/morrie/.everything-go-runtime-9453` |
+| Morrie | **Intel `x86_64` (`GOARCH=amd64`)** / `darwin-amd64` | 8766 | `/Users/morrie/.everything-go-runtime-9453` (legacy data-dir name retained) |
+
+Morrie's active launchd label is `com.morrie.everything-go`. The former Python
+Bridge on 8766, its separately managed cloudflared process, and the Go 9453
+LaunchAgent are disabled. Everything Go now owns 8766 and its tunnel directly;
+the old 9453 wrapper/plist are retained only as an explicit rollback artifact.
 
 Morrie is an Intel Mac. Never deploy the Wulala `darwin-arm64` bundle to it:
 Developer ID verification can still succeed for the wrong architecture, but
