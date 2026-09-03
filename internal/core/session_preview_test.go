@@ -131,9 +131,14 @@ func TestHistoryReconciliationRepairsPersistedToolProjection(t *testing.T) {
 	c := newTestClient(h)
 	h.sendHistory(c, s, clientproto.Command{SessionID: s.ID, Mode: "snapshot"})
 	waitForType(t, c, "history_snapshot")
+	list := waitForType(t, c, "sessions_list")
 
 	snap := s.Snapshot()
 	if snap.PreviewText != "human-facing update" || snap.PreviewUpdatedAt != 2_000 || snap.PreviewRevision != 2 {
 		t.Fatalf("history did not self-heal tool projection: %+v", snap)
+	}
+	sessions, _ := list["sessions"].([]any)
+	if len(sessions) != 1 || sessions[0].(map[string]any)["preview_text"] != "human-facing update" {
+		t.Fatalf("repaired projection was not broadcast immediately: %+v", list)
 	}
 }

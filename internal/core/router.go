@@ -872,6 +872,7 @@ func (h *Hub) sendHistory(c *Client, s *session.Session, cmd clientproto.Command
 	latestAssistantAt := int64(0)
 	latestAssistantText := ""
 	toolOnlyPreviews := make(map[string]struct{})
+	previewProjectionChanged := false
 	for _, message := range msgs {
 		if role, _ := message["role"].(string); role != "assistant" {
 			continue
@@ -906,9 +907,9 @@ func (h *Hub) sendHistory(c *Client, s *session.Session, cmd clientproto.Command
 			_, invalidToolProjection := toolOnlyPreviews[current.PreviewText]
 			var err error
 			if invalidToolProjection && current.PreviewRole == "assistant" {
-				_, _, err = h.registry.RepairPreviewAndPersist(s.ID, current.PreviewText, preview, "assistant", latestAssistantAt)
+				_, previewProjectionChanged, err = h.registry.RepairPreviewAndPersist(s.ID, current.PreviewText, preview, "assistant", latestAssistantAt)
 			} else {
-				_, _, err = h.registry.CommitPreviewAndPersist(s.ID, preview, "assistant", latestAssistantAt)
+				_, previewProjectionChanged, err = h.registry.CommitPreviewAndPersist(s.ID, preview, "assistant", latestAssistantAt)
 			}
 			if err != nil {
 				log.Printf("[session-preview] history reconciliation failed session=%s: %v", s.ID, err)
@@ -924,9 +925,15 @@ func (h *Hub) sendHistory(c *Client, s *session.Session, cmd clientproto.Command
 	}
 	if res.Kind == "delta" {
 		c.enqueueEvent(h.client.HistoryDelta(s.ID, cmd.KnownLast, msgs, res.SourceCount))
+		if previewProjectionChanged {
+			h.BroadcastSessionSummaries()
+		}
 		return
 	}
 	c.enqueueEvent(h.client.HistorySnapshot(s.ID, msgs, res.SourceCount, res.HasMoreBefore, res.KnownIDFound, res.SnapshotReason))
+	if previewProjectionChanged {
+		h.BroadcastSessionSummaries()
+	}
 }
 
 // loadLogicalSessionHistory merges the bounded tails of archived physical
