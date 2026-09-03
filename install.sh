@@ -255,7 +255,13 @@ fi
 
 # ── 5. generate the launch wrapper ─────────────────────────────────
 # Service-managers start with a bare PATH; bake in the CLI + cloudflared dirs.
-SERVICE_PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin${CLI_PATHS}${CF_PATH:+:$CF_PATH}"
+SERVICE_PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin"
+if [ -n "$CLI_PATHS" ]; then
+  # Prefer the exact CLI locations discovered above.  A stale global Codex
+  # installation must not shadow the managed/current CLI for launchd.
+  SERVICE_PATH="${CLI_PATHS#:}:$SERVICE_PATH"
+fi
+[ -n "$CF_PATH" ] && SERVICE_PATH="$SERVICE_PATH:$CF_PATH"
 cat > "$LAUNCH" <<EOF
 #!/usr/bin/env bash
 set -uo pipefail
