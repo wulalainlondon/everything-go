@@ -410,6 +410,19 @@ func TestLiveMultiSessionNotification(t *testing.T) {
 	time.Sleep(30 * time.Second)
 }
 
+func TestLiveTaskDoneNotification(t *testing.T) {
+	if os.Getenv("EVERYTHING_GO_FCM_LIVE_TEST") != "1" {
+		t.Skip("set EVERYTHING_GO_FCM_LIVE_TEST=1 for the real-device FCM smoke test")
+	}
+	n := liveTestNotifier(t)
+	n.NotifyTaskDoneWithAuthority(
+		"eg_wulala_qa", "Wulala", "完成通知實測",
+		"已完成 P0–P2 通知狀態打磨，可查看結果。", "qa-task-done", "qa-task-done-request",
+		ReplyAction{},
+	)
+	time.Sleep(10 * time.Second)
+}
+
 func liveTestNotifier(t *testing.T) *Notifier {
 	t.Helper()
 	serviceAccount := os.Getenv("EVERYTHING_GO_FCM_SERVICE_ACCOUNT")
