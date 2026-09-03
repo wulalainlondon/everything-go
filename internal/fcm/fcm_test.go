@@ -415,6 +415,13 @@ func TestLiveTaskDoneNotification(t *testing.T) {
 		t.Skip("set EVERYTHING_GO_FCM_LIVE_TEST=1 for the real-device FCM smoke test")
 	}
 	n := liveTestNotifier(t)
+	revision := uint64(time.Now().Unix() % 1_000_000)
+	n.NotifySessionStatusWithAuthority(
+		"eg_wulala_qa", "Wulala", "qa-task-done", "完成通知實測",
+		"running", "thinking", "", revision, time.Now().UnixMilli(), time.Now().UnixMilli(),
+		"qa-task-done-request", 0, ReplyAction{},
+	)
+	time.Sleep(time.Second)
 	n.NotifyTaskDoneWithAuthority(
 		"eg_wulala_qa", "Wulala", "完成通知實測",
 		"已完成 P0–P2 通知狀態打磨，可查看結果。", "qa-task-done", "qa-task-done-request",
