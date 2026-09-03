@@ -344,6 +344,7 @@ func TestLiveSessionStatus(t *testing.T) {
 	}
 	n.statusMinInterval = 10 * time.Millisecond
 	authority := envOr("EVERYTHING_GO_FCM_TEST_AUTHORITY", "qa-live-status")
+	authorityName := envOr("EVERYTHING_GO_FCM_TEST_AUTHORITY_NAME", "Wulala")
 	sessionID := envOr("EVERYTHING_GO_FCM_TEST_SESSION", "qa-lock-screen")
 	sessionName := envOr("EVERYTHING_GO_FCM_TEST_SESSION_NAME", "鎖定畫面狀態卡驗證")
 	startRevision := uint64(1)
@@ -352,10 +353,10 @@ func TestLiveSessionStatus(t *testing.T) {
 			startRevision = parsed
 		}
 	}
-	n.NotifySessionStatus(authority, sessionID, sessionName,
+	n.NotifySessionStatusWithAuthority(authority, authorityName, sessionID, sessionName,
 		"running", "running_tool", "執行 Release 實機測試", startRevision, time.Now().UnixMilli(), time.Now().UnixMilli(), "release-test", 0, ReplyAction{})
 	t.Cleanup(func() {
-		n.NotifySessionStatus(authority, sessionID, sessionName,
+		n.NotifySessionStatusWithAuthority(authority, authorityName, sessionID, sessionName,
 			"completed", "completed", "", startRevision+1, time.Now().UnixMilli(), 0, "release-test", 0, ReplyAction{})
 	})
 	duration := 15 * time.Second
@@ -365,6 +366,63 @@ func TestLiveSessionStatus(t *testing.T) {
 		}
 	}
 	time.Sleep(duration)
+}
+
+func TestLiveWaitingNotification(t *testing.T) {
+	if os.Getenv("EVERYTHING_GO_FCM_LIVE_TEST") != "1" {
+		t.Skip("set EVERYTHING_GO_FCM_LIVE_TEST=1 for the real-device FCM smoke test")
+	}
+	n := liveTestNotifier(t)
+	authority := envOr("EVERYTHING_GO_FCM_TEST_AUTHORITY", "qa-live-waiting")
+	sessionID := envOr("EVERYTHING_GO_FCM_TEST_SESSION", "qa-waiting")
+	revision := uint64(time.Now().Unix() % 1_000_000)
+	n.NotifySessionStatusWithAuthority(authority, "Wulala", sessionID, "等待回覆實測",
+		"waiting", "waiting_user", "需要確認部署方式", revision, time.Now().UnixMilli(), time.Now().Add(-2*time.Minute).UnixMilli(), "waiting-request", 0,
+		ReplyAction{URL: "http://127.0.0.1:9/reply", Capability: "qa-capability", ExpiresAt: time.Now().Add(time.Hour).UnixMilli()})
+	t.Cleanup(func() {
+		n.NotifySessionStatusWithAuthority(authority, "Wulala", sessionID, "等待回覆實測",
+			"completed", "completed", "", revision+1, time.Now().UnixMilli(), 0, "waiting-request", 0, ReplyAction{})
+	})
+	time.Sleep(30 * time.Second)
+}
+
+func TestLiveMultiSessionNotification(t *testing.T) {
+	if os.Getenv("EVERYTHING_GO_FCM_LIVE_TEST") != "1" {
+		t.Skip("set EVERYTHING_GO_FCM_LIVE_TEST=1 for the real-device FCM smoke test")
+	}
+	n := liveTestNotifier(t)
+	revision := uint64(time.Now().Unix() % 1_000_000)
+	type item struct{ authority, authorityName, sessionID, sessionName string }
+	items := []item{
+		{"eg_wulala_qa", "Wulala", "qa-multi-wulala", "通知工作 A"},
+		{"eg_morrie_qa", "Morrie", "qa-multi-morrie", "通知工作 B"},
+	}
+	for index, candidate := range items {
+		n.NotifySessionStatusWithAuthority(candidate.authority, candidate.authorityName, candidate.sessionID, candidate.sessionName,
+			"running", "thinking", "", revision+uint64(index), time.Now().UnixMilli(), time.Now().Add(-time.Minute).UnixMilli(), "multi-request", 0, ReplyAction{})
+	}
+	t.Cleanup(func() {
+		for index, candidate := range items {
+			n.NotifySessionStatusWithAuthority(candidate.authority, candidate.authorityName, candidate.sessionID, candidate.sessionName,
+				"completed", "completed", "", revision+uint64(index)+10, time.Now().UnixMilli(), 0, "multi-request", 0, ReplyAction{})
+		}
+	})
+	time.Sleep(30 * time.Second)
+}
+
+func liveTestNotifier(t *testing.T) *Notifier {
+	t.Helper()
+	serviceAccount := os.Getenv("EVERYTHING_GO_FCM_SERVICE_ACCOUNT")
+	registry := os.Getenv("EVERYTHING_GO_FCM_TOKEN_REGISTRY")
+	if serviceAccount == "" || registry == "" {
+		t.Fatal("live test requires EVERYTHING_GO_FCM_SERVICE_ACCOUNT and EVERYTHING_GO_FCM_TOKEN_REGISTRY")
+	}
+	n, err := New(serviceAccount, registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n.statusMinInterval = 10 * time.Millisecond
+	return n
 }
 
 func envOr(key, fallback string) string {
