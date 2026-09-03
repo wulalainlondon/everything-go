@@ -184,6 +184,25 @@ func (m *Mux) AllUsageProviders() []UsageProvider {
 	return out
 }
 
+// RuntimeDiagnostics aggregates distinct backend diagnostics without coupling
+// the core status endpoint to Codex or any other concrete runtime.
+func (m *Mux) RuntimeDiagnostics() map[string]any {
+	seen := map[Executor]bool{}
+	out := map[string]any{}
+	for _, e := range m.byBackend {
+		if seen[e] {
+			continue
+		}
+		seen[e] = true
+		if provider, ok := e.(RuntimeDiagnosticsProvider); ok {
+			for key, value := range provider.RuntimeDiagnostics() {
+				out[key] = value
+			}
+		}
+	}
+	return out
+}
+
 // RespondUserInput tries each interaction-capable backend until one owns the id.
 // The answer carries no session, so the backend matches by request_id/tool_use_id.
 func (m *Mux) RespondUserInput(id string, answers map[string]any, cancelled bool) bool {

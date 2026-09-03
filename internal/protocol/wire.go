@@ -1065,10 +1065,16 @@ func NewAgentTree(sessionID, resumeID string, total int, tree []*AgentNode) Agen
 }
 
 type SessionMetaUpdated struct {
-	Type      string `json:"type"`
-	SessionID string `json:"session_id"`
-	Pinned    *bool  `json:"pinned,omitempty"`
-	Hidden    *bool  `json:"hidden,omitempty"`
+	Type      string  `json:"type"`
+	SessionID string  `json:"session_id"`
+	Pinned    *bool   `json:"pinned,omitempty"`
+	Hidden    *bool   `json:"hidden,omitempty"`
+	Model     *string `json:"model,omitempty"`
+	Effort    *string `json:"effort,omitempty"`
+}
+
+func NewSessionRuntimeMetadata(sessionID string, model, effort *string) SessionMetaUpdated {
+	return SessionMetaUpdated{Type: "session_meta_updated", SessionID: sessionID, Model: model, Effort: effort}
 }
 
 // --- Runtime ops: shell -----------------------------------------------------
@@ -1549,6 +1555,7 @@ type UserInputQuestion struct {
 	Options     []UserInputOption `json:"options"`
 	MultiSelect bool              `json:"multi_select"`
 	FreeForm    bool              `json:"free_form"`
+	Secret      bool              `json:"secret,omitempty"`
 }
 
 // UserInputRequestPayload is the interaction body shared by the
@@ -1563,6 +1570,8 @@ type UserInputRequestPayload struct {
 	RequestingAgent string              `json:"requesting_agent,omitempty"`
 	Questions       []UserInputQuestion `json:"questions"`
 	CreatedAt       int64               `json:"created_at"`
+	ExpiresAt       int64               `json:"expires_at,omitempty"`
+	IsBlocking      *bool               `json:"is_blocking,omitempty"`
 	Status          string              `json:"status"`
 }
 

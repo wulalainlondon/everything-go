@@ -500,6 +500,11 @@ func (h *Hub) Emit(event any) {
 		// turn or the service can restart; otherwise a crash can revive the old
 		// generation and fork history again.
 		h.registry.Persist()
+	case protocol.SessionMetaUpdated:
+		// Runtime-derived model/effort metadata is part of the canonical Session
+		// identity and must survive a Bridge restart just like an explicit config
+		// change. Pin/hidden updates are harmless to persist here as well.
+		h.registry.Persist()
 	case protocol.Done:
 		go h.registry.Persist()
 	}

@@ -48,3 +48,10 @@ type InteractionResponder interface {
 	RespondUserInput(id string, answers map[string]any, cancelled bool) bool
 	PendingInteractions(sessionID string) []backend.UserInputPayload
 }
+
+// RuntimeDiagnosticsProvider exposes cached, non-blocking health details for
+// backend runtimes. Implementations must not spawn processes or perform network
+// I/O from this method; status_result is expected to remain cheap.
+type RuntimeDiagnosticsProvider interface {
+	RuntimeDiagnostics() map[string]any
+}

@@ -65,6 +65,28 @@ func newTestHub(t *testing.T) (*Hub, *fakeExec) {
 	return h, fe
 }
 
+type diagnosticExec struct{ *fakeExec }
+
+func (d *diagnosticExec) RuntimeDiagnostics() map[string]any {
+	return map[string]any{"codex": map[string]any{
+		"status": "restart_required", "managed_version": "0.153.0", "running_version": "0.149.0",
+	}}
+}
+
+func TestStatusResultIncludesBackendRuntimeDiagnostics(t *testing.T) {
+	h, fe := newTestHub(t)
+	h.SetExecutor(&diagnosticExec{fakeExec: fe})
+	status := h.statusResult("s1")
+	runtimes, ok := status.Status["backend_runtimes"].(map[string]any)
+	if !ok {
+		t.Fatalf("backend runtime diagnostics missing: %+v", status.Status)
+	}
+	codex, ok := runtimes["codex"].(map[string]any)
+	if !ok || codex["status"] != "restart_required" || codex["managed_version"] != "0.153.0" {
+		t.Fatalf("unexpected Codex diagnostics: %+v", runtimes)
+	}
+}
+
 // newTestClient registers a client whose send channel we drain directly. The
 // buffer is large enough that enqueue never overflows (so the nil conn is never
 // touched).

@@ -137,6 +137,10 @@ func NewSessionInitInfo(sessionID, model, permissionMode string, tools, slashCom
 	return protocol.NewSessionInitInfo(sessionID, model, permissionMode, tools, slashCommands, mcpServers)
 }
 
+func NewSessionRuntimeMetadata(sessionID string, model, effort *string) protocol.SessionMetaUpdated {
+	return protocol.NewSessionRuntimeMetadata(sessionID, model, effort)
+}
+
 func NewSessionWarning(sessionID, message string) SessionWarning {
 	return protocol.NewSessionWarning(sessionID, message)
 }

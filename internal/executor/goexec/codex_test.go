@@ -464,6 +464,83 @@ func TestCodexInvalidateLiveThreadsClearsAllSessionRoutes(t *testing.T) {
 	}
 }
 
+func TestCodexDisconnectFailsActiveTurnAndExpiresInteractions(t *testing.T) {
+	sink := &capSink{}
+	c := NewCodex(sink, "codex")
+	reg := session.NewRegistry()
+	s := reg.Create("s1", "one", "/tmp", backend.Codex, "", "", "")
+	st := c.state(s.ID)
+	st.threadID = "thread-1"
+	st.currentTurnID = "turn-1"
+	st.reqID = "request-1"
+	st.turnActive = true
+	st.turnDone = make(chan struct{})
+	blocking := true
+	c.interactions["ui-1"] = codexInteraction{payload: backend.UserInputPayload{
+		RequestID: "ui-1", SessionID: s.ID, IsBlocking: &blocking,
+	}}
+
+	c.failLiveOperations("connection lost")
+	c.expireDisconnectedInteractions()
+
+	select {
+	case <-st.turnDone:
+	default:
+		t.Fatal("active turn was not released after daemon disconnect")
+	}
+	st.mu.Lock()
+	turnErr, active := st.turnErr, st.turnActive
+	st.mu.Unlock()
+	if active || !strings.Contains(turnErr, "not retried automatically") {
+		t.Fatalf("disconnect state active=%v err=%q", active, turnErr)
+	}
+	if pending := c.PendingInteractions(s.ID); len(pending) != 0 {
+		t.Fatalf("stale interactions survived disconnect: %+v", pending)
+	}
+	if sink.count(func(event any) bool {
+		resolved, ok := event.(backend.InteractionResolved)
+		return ok && resolved.RequestID == "ui-1" && resolved.Status == "expired"
+	}) != 1 {
+		t.Fatalf("interaction expiration event missing: %+v", sink.events)
+	}
+}
+
+func TestDecodeCodexDaemonVersionReportsRestartRequired(t *testing.T) {
+	got, err := decodeCodexDaemonVersion([]byte(`{
+		"status":"running","backend":"pid","cliVersion":"0.153.0",
+		"managedCodexVersion":"0.153.0","appServerVersion":"0.149.0",
+		"managedCodexPath":"/codex","socketPath":"/codex.sock"
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["status"] != "restart_required" || got["managed_version"] != "0.153.0" || got["running_version"] != "0.149.0" {
+		t.Fatalf("unexpected daemon diagnostics: %+v", got)
+	}
+}
+
+func TestCodexAppliesThreadRuntimeMetadata(t *testing.T) {
+	sink := &capSink{}
+	c := NewCodex(sink, "codex")
+	reg := session.NewRegistry()
+	s := reg.Create("s1", "one", "/tmp", backend.Codex, "old-model", "", "")
+	s.SetEffort("low")
+	c.applyThreadRuntimeMetadata(s, json.RawMessage(`{
+		"thread":{"id":"thread-1","model":"gpt-5.6-sol","reasoningEffort":"high"}
+	}`))
+
+	snap := s.Snapshot()
+	if snap.Model != "gpt-5.6-sol" || snap.Effort != "high" {
+		t.Fatalf("runtime metadata not applied: %+v", snap)
+	}
+	if sink.count(func(event any) bool {
+		updated, ok := event.(protocol.SessionMetaUpdated)
+		return ok && updated.Model != nil && *updated.Model == "gpt-5.6-sol" && updated.Effort != nil && *updated.Effort == "high"
+	}) != 1 {
+		t.Fatalf("session metadata event missing: %+v", sink.events)
+	}
+}
+
 func TestCodexDetectsStaleThreadErrors(t *testing.T) {
 	cases := []string{
 		"Unknown session: abc",
@@ -889,6 +966,90 @@ func TestCodexExtractedAskUserQuestionEmitsFallbackInteraction(t *testing.T) {
 	}
 	if !sawRequest || !sawResolved {
 		t.Fatalf("missing interaction events request=%v resolved=%v events=%+v", sawRequest, sawResolved, sink.events)
+	}
+}
+
+func TestCodexAsyncUserInputCarriesLifecycleAndServerResolution(t *testing.T) {
+	sink := &capSink{}
+	c := NewCodex(sink, "codex")
+	reg := session.NewRegistry()
+	s := reg.Create("s1", "codex", "/tmp", backend.Codex, "", "", "")
+	st := c.state(s.ID)
+	st.threadID = "thread-1"
+	st.reqID = "turn-request"
+	c.threadToSession["thread-1"] = s
+	w := &captureWriter{}
+	c.rpc.setWriter(w)
+	before := time.Now().UnixMilli()
+
+	c.handleServerRequest("rpc-async", "item/tool/requestUserInput", json.RawMessage(`{
+		"threadId":"thread-1","turnId":"turn-1","itemId":"ask-async",
+		"isBlocking":false,"autoResolutionMs":60000,
+		"questions":[{"id":"token","header":"Credential","question":"Enter token","isSecret":true}]
+	}`))
+
+	pending := c.PendingInteractions(s.ID)
+	if len(pending) != 1 {
+		t.Fatalf("async interaction missing: %+v", pending)
+	}
+	got := pending[0]
+	if got.Kind != "request_user_input_async" || got.IsBlocking == nil || *got.IsBlocking ||
+		got.ExpiresAt < before+59000 || len(got.Questions) != 1 || !got.Questions[0].Secret || got.Questions[0].Type != "secret" {
+		t.Fatalf("bad async interaction: %+v", got)
+	}
+	if c.hasPendingInteraction(s.ID) {
+		t.Fatal("non-blocking async question must not extend the turn deadline")
+	}
+
+	c.dispatch(json.RawMessage(`{
+		"method":"serverRequest/resolved",
+		"params":{"threadId":"thread-1","requestId":"rpc-async"}
+	}`))
+	if pending := c.PendingInteractions(s.ID); len(pending) != 0 {
+		t.Fatalf("server-resolved interaction retained: %+v", pending)
+	}
+	if sink.count(func(event any) bool {
+		resolved, ok := event.(backend.InteractionResolved)
+		return ok && resolved.RequestID == got.RequestID && resolved.Status == "expired"
+	}) != 1 {
+		t.Fatalf("server resolution event missing: %+v", sink.events)
+	}
+}
+
+func TestCodexV2UserInputResponseUsesStructuredAnswerArrays(t *testing.T) {
+	c := NewCodex(&capSink{}, "codex")
+	reg := session.NewRegistry()
+	s := reg.Create("s1", "codex", "/tmp", backend.Codex, "", "", "")
+	st := c.state(s.ID)
+	st.threadID = "thread-1"
+	c.threadToSession["thread-1"] = s
+	w := &captureWriter{}
+	c.rpc.setWriter(w)
+
+	c.handleServerRequest(91, "item/tool/requestUserInput", json.RawMessage(`{
+		"threadId":"thread-1","turnId":"turn-1","itemId":"ask-v2","isBlocking":true,
+		"questions":[
+			{"id":"choice","header":"Choice","question":"Pick","options":[{"label":"A","description":"first"}]},
+			{"id":"notes","header":"Notes","question":"Explain","options":null}
+		]
+	}`))
+	if !c.RespondUserInput("ask-v2", map[string]any{"choice": "A", "notes": "because"}, false) {
+		t.Fatal("v2 request was not resolved")
+	}
+	var reply struct {
+		ID     int `json:"id"`
+		Result struct {
+			Answers map[string]struct {
+				Answers []string `json:"answers"`
+			} `json:"answers"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(w.Bytes()), &reply); err != nil {
+		t.Fatalf("bad v2 reply: %v raw=%s", err, w.String())
+	}
+	if reply.ID != 91 || len(reply.Result.Answers["choice"].Answers) != 1 ||
+		reply.Result.Answers["choice"].Answers[0] != "A" || reply.Result.Answers["notes"].Answers[0] != "because" {
+		t.Fatalf("unexpected v2 response: %+v", reply)
 	}
 }
 
