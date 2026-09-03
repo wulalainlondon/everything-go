@@ -158,7 +158,7 @@ func TestSessionStatusIsDataOnlyRevisionedAndAndroidCollapsible(t *testing.T) {
 	defer server.Close()
 	n := testNotifier(filepath.Join(t.TempDir(), "fcm_tokens.json"), server.URL, server.Client())
 	n.SetToken("note20", "token", "android")
-	n.NotifySessionStatus("wulala", "s1", "Release QA", "running", "running_tool", "go test ./...", 7, 100, 90, "request-7", 0,
+	n.NotifySessionStatusWithAuthority("wulala", "Wulala", "s1", "Release QA", "running", "running_tool", "go test ./...", 7, 100, 90, "request-7", 0,
 		ReplyAction{URL: "http://100.64.0.1/reply", FallbackURL: "http://192.168.1.2/reply", Capability: "signed", ExpiresAt: 999})
 	data := got.Message.Data
 	if data["type"] != "session_status" || data["authority_instance_id"] != "wulala" ||
@@ -166,7 +166,7 @@ func TestSessionStatusIsDataOnlyRevisionedAndAndroidCollapsible(t *testing.T) {
 		data["stage"] != "running_tool" || data["active_request_id"] != "request-7" || got.Message.Notification != nil {
 		t.Fatalf("session status payload=%+v notification=%+v", data, got.Message.Notification)
 	}
-	if data["session_key"] != "sk1:wulala:s1" || data["schema_version"] != "3" {
+	if data["session_key"] != "sk1:wulala:s1" || data["schema_version"] != "3" || data["authority_name"] != "Wulala" {
 		t.Fatalf("session identity payload=%+v", data)
 	}
 	if got.Message.Android == nil || got.Message.Android.Priority != "high" ||
@@ -195,7 +195,7 @@ func TestTaskDoneUsesNativeAndroidPayloadAndLegacyNotificationElsewhere(t *testi
 	n.SetToken("note20", "android-token", "android")
 	n.SetToken("ipad", "ios-token", "ios")
 	n.SetToken("legacy", "legacy-token")
-	n.NotifyTaskDoneWithReply("wulala", "Release QA", "Done.", "s1", "request-7",
+	n.NotifyTaskDoneWithAuthority("wulala", "Wulala", "Release QA", "Done.", "s1", "request-7",
 		ReplyAction{URL: "http://100.64.0.1/reply", Capability: "signed", ExpiresAt: 999})
 	mu.Lock()
 	android, androidOK := got["android-token"]
@@ -205,7 +205,7 @@ func TestTaskDoneUsesNativeAndroidPayloadAndLegacyNotificationElsewhere(t *testi
 	if !androidOK || !iosOK || !legacyOK {
 		t.Fatalf("platform fanout=%v", got)
 	}
-	if android.Message.Notification != nil || android.Message.Data["reply_capability"] != "signed" ||
+	if android.Message.Notification != nil || android.Message.Data["reply_capability"] != "signed" || android.Message.Data["authority_name"] != "Wulala" ||
 		android.Message.Data["request_id"] != "request-7" {
 		t.Fatalf("Android task_done must be native data-only: %+v", android.Message)
 	}

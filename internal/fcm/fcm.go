@@ -119,7 +119,7 @@ func NewFromBytes(data []byte, registryPath string) (*Notifier, error) {
 		statusLastPhase:   make(map[string]string),
 		statusPending:     make(map[string]v1message),
 		statusTimers:      make(map[string]*time.Timer),
-		statusMinInterval: 8 * time.Second,
+		statusMinInterval: 15 * time.Second,
 	}
 	n.loadRegistry()
 	return n, nil
@@ -208,6 +208,10 @@ func (n *Notifier) NotifyTaskDone(sessionName, lastText, sessionID string) {
 }
 
 func (n *Notifier) NotifyTaskDoneWithReply(instanceID, sessionName, lastText, sessionID, requestID string, reply ReplyAction) {
+	n.NotifyTaskDoneWithAuthority(instanceID, "", sessionName, lastText, sessionID, requestID, reply)
+}
+
+func (n *Notifier) NotifyTaskDoneWithAuthority(instanceID, instanceName, sessionName, lastText, sessionID, requestID string, reply ReplyAction) {
 	summary := summarize(lastText)
 	sessionKey, _ := identity.MakeSessionKey(instanceID, sessionID)
 	data := map[string]string{
@@ -215,6 +219,9 @@ func (n *Notifier) NotifyTaskDoneWithReply(instanceID, sessionName, lastText, se
 		"title": "✓ " + sessionName, "body": summary, "authority_instance_id": instanceID,
 		"request_id": requestID, "session_key": sessionKey, "schema_version": fcmPayloadSchemaVersion,
 		"event_id": "task_done:" + sessionKey + ":" + requestID,
+	}
+	if instanceName != "" {
+		data["authority_name"] = instanceName
 	}
 	addReplyAction(data, reply)
 	android := v1message{}
@@ -291,6 +298,12 @@ func (n *Notifier) NotifyWorkAttention(instanceID, workItemID, title string, rev
 // removal of a stale card is never delayed.
 func (n *Notifier) NotifySessionStatus(instanceID, sessionID, sessionName, phase, stage, stageMessage string,
 	revision uint64, updatedAt, activeStartedAt int64, activeRequestID string, queueLength int, reply ReplyAction) {
+	n.NotifySessionStatusWithAuthority(instanceID, "", sessionID, sessionName, phase, stage, stageMessage,
+		revision, updatedAt, activeStartedAt, activeRequestID, queueLength, reply)
+}
+
+func (n *Notifier) NotifySessionStatusWithAuthority(instanceID, instanceName, sessionID, sessionName, phase, stage, stageMessage string,
+	revision uint64, updatedAt, activeStartedAt int64, activeRequestID string, queueLength int, reply ReplyAction) {
 	if instanceID == "" || sessionID == "" || revision == 0 {
 		return
 	}
@@ -306,6 +319,9 @@ func (n *Notifier) NotifySessionStatus(instanceID, sessionID, sessionName, phase
 		"queue_length": fmt.Sprint(queueLength),
 		"deep_link":    "bridge://chat?session_id=" + sessionID,
 		"event_id":     "session_status:" + sessionKey + ":" + fmt.Sprint(revision),
+	}
+	if instanceName != "" {
+		msg.Message.Data["authority_name"] = instanceName
 	}
 	addReplyAction(msg.Message.Data, reply)
 	msg.Message.Android = &v1androidConfig{
@@ -350,7 +366,7 @@ func (n *Notifier) enqueueSessionStatus(key, phase string, msg v1message, immedi
 	now := time.Now()
 	interval := n.statusMinInterval
 	if interval <= 0 {
-		interval = 8 * time.Second
+		interval = 15 * time.Second
 	}
 	last := n.statusLastSent[key]
 	phaseChanged := n.statusLastPhase[key] != "" && n.statusLastPhase[key] != phase

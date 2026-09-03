@@ -70,7 +70,7 @@ type Hub struct {
 	search              *search.Index
 	fcm                 *fcm.Notifier
 	workAttentionPush   func(instanceID, workItemID, title string, revision uint64, kind string)
-	runtimeStatusPush   func(instanceID, sessionID, sessionName, phase, stage, stageMessage string, revision uint64, updatedAt, activeStartedAt int64, activeRequestID string, queueLength int, reply fcm.ReplyAction)
+	runtimeStatusPush   func(instanceID, instanceName, sessionID, sessionName, phase, stage, stageMessage string, revision uint64, updatedAt, activeStartedAt int64, activeRequestID string, queueLength int, reply fcm.ReplyAction)
 	feed                *feed.Store
 	inbox               *inbox.Store
 	mediaScan           *media.Scanner
@@ -280,7 +280,7 @@ func (h *Hub) SetFCM(n *fcm.Notifier) {
 	h.runtimeStatusPush = nil
 	if n != nil {
 		h.workAttentionPush = n.NotifyWorkAttention
-		h.runtimeStatusPush = n.NotifySessionStatus
+		h.runtimeStatusPush = n.NotifySessionStatusWithAuthority
 		// Construction recovers stale active turns before FCM is wired. Publish
 		// those terminal revisions now so a lock-screen card from the previous
 		// Bridge process cannot remain stuck as "running".
@@ -622,7 +622,7 @@ func (h *Hub) accumulateTurn(event any) {
 			}
 		}
 		replyURL, fallbackURL, capability, expiresAt := h.notificationReplyAction(e.SessionID)
-		go h.fcm.NotifyTaskDoneWithReply(h.cfg.InstanceID, name, text, e.SessionID, e.RequestID,
+		go h.fcm.NotifyTaskDoneWithAuthority(h.cfg.InstanceID, h.cfg.InstanceName, name, text, e.SessionID, e.RequestID,
 			fcm.ReplyAction{URL: replyURL, FallbackURL: fallbackURL, Capability: capability, ExpiresAt: expiresAt})
 	case protocol.Stopped:
 		h.turnMu.Lock()
