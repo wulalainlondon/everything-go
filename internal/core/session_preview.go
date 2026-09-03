@@ -52,6 +52,41 @@ func resolveSessionPreview(persistedText, persistedRole string, persistedAt int6
 	return
 }
 
+// historyAssistantPreview extracts only human-facing assistant text. Codex
+// history intentionally exposes tool calls as assistant messages so the chat
+// can render command cards; their content field is the command itself and must
+// never become a Session-row preview. Commentary attached to a tool call is a
+// text block and remains eligible.
+func historyAssistantPreview(message map[string]any) string {
+	blocks, hasBlocks := message["blocks"]
+	if hasBlocks {
+		var textParts []string
+		appendBlock := func(block map[string]any) {
+			if kind, _ := block["type"].(string); kind != "text" {
+				return
+			}
+			if value, _ := block["text"].(string); strings.TrimSpace(value) != "" {
+				textParts = append(textParts, value)
+			}
+		}
+		switch values := blocks.(type) {
+		case []map[string]any:
+			for _, block := range values {
+				appendBlock(block)
+			}
+		case []any:
+			for _, value := range values {
+				if block, ok := value.(map[string]any); ok {
+					appendBlock(block)
+				}
+			}
+		}
+		return strings.Join(textParts, "\n")
+	}
+	text, _ := message["content"].(string)
+	return text
+}
+
 func lastPreviewByRole(messages []protocol.RecentMessage, role string) string {
 	for i := len(messages) - 1; i >= 0; i-- {
 		if messages[i].Role != role {

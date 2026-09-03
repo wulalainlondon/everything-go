@@ -875,6 +875,10 @@ func (h *Hub) sendHistory(c *Client, s *session.Session, cmd clientproto.Command
 		if role, _ := message["role"].(string); role != "assistant" {
 			continue
 		}
+		assistantText := historyAssistantPreview(message)
+		if normalizePreviewText(assistantText) == "" {
+			continue
+		}
 		var observedAt int64
 		switch timestamp := message["timestamp"].(type) {
 		case int64:
@@ -886,7 +890,7 @@ func (h *Hub) sendHistory(c *Client, s *session.Session, cmd clientproto.Command
 		}
 		if observedAt >= latestAssistantAt {
 			latestAssistantAt = observedAt
-			latestAssistantText, _ = message["content"].(string)
+			latestAssistantText = assistantText
 		}
 	}
 	// Pagination into older history must never move the canonical row backward.

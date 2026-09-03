@@ -65,3 +65,23 @@ func TestNewerExternalCLIProjectionSupersedesPersistedPreview(t *testing.T) {
 		t.Fatalf("newer external result was ignored: (%q,%q,%d)", text, role, at)
 	}
 }
+
+func TestHistoryAssistantPreviewRejectsToolCommandButKeepsCommentary(t *testing.T) {
+	toolOnly := map[string]any{
+		"role": "assistant", "content": "const r = await tools.exec_command(...)",
+		"blocks": []map[string]any{{"type": "tool", "name": "exec", "command": "const r = await tools.exec_command(...)"}},
+	}
+	if got := historyAssistantPreview(toolOnly); got != "" {
+		t.Fatalf("tool command leaked into row preview: %q", got)
+	}
+	withCommentary := map[string]any{
+		"role": "assistant", "content": "const r = await tools.exec_command(...)",
+		"blocks": []any{
+			map[string]any{"type": "text", "text": "正在驗證正式簽名。"},
+			map[string]any{"type": "tool", "name": "exec"},
+		},
+	}
+	if got := historyAssistantPreview(withCommentary); got != "正在驗證正式簽名。" {
+		t.Fatalf("human commentary was not preserved: %q", got)
+	}
+}
