@@ -871,12 +871,16 @@ func (h *Hub) sendHistory(c *Client, s *session.Session, cmd clientproto.Command
 	}
 	latestAssistantAt := int64(0)
 	latestAssistantText := ""
+	toolOnlyPreviews := make(map[string]struct{})
 	for _, message := range msgs {
 		if role, _ := message["role"].(string); role != "assistant" {
 			continue
 		}
 		assistantText := historyAssistantPreview(message)
 		if normalizePreviewText(assistantText) == "" {
+			if raw, _ := message["content"].(string); raw != "" {
+				toolOnlyPreviews[truncateGraphemes(normalizePreviewText(raw), 160)] = struct{}{}
+			}
 			continue
 		}
 		var observedAt int64
@@ -898,7 +902,15 @@ func (h *Hub) sendHistory(c *Client, s *session.Session, cmd clientproto.Command
 	// are safe repair sources after a Bridge restart.
 	if latestAssistantAt > 0 && cmd.Before == "" {
 		if preview := truncateGraphemes(normalizePreviewText(latestAssistantText), 160); preview != "" {
-			if _, _, err := h.registry.CommitPreviewAndPersist(s.ID, preview, "assistant", latestAssistantAt); err != nil {
+			current := s.Snapshot()
+			_, invalidToolProjection := toolOnlyPreviews[current.PreviewText]
+			var err error
+			if invalidToolProjection && current.PreviewRole == "assistant" {
+				_, _, err = h.registry.RepairPreviewAndPersist(s.ID, current.PreviewText, preview, "assistant", latestAssistantAt)
+			} else {
+				_, _, err = h.registry.CommitPreviewAndPersist(s.ID, preview, "assistant", latestAssistantAt)
+			}
+			if err != nil {
 				log.Printf("[session-preview] history reconciliation failed session=%s: %v", s.ID, err)
 			}
 		}

@@ -5,9 +5,34 @@ import (
 	"os"
 	"testing"
 
+	"everything-go/internal/backend"
+	"everything-go/internal/clientproto"
+	"everything-go/internal/history"
 	"everything-go/internal/protocol"
 	"everything-go/internal/search"
+	"everything-go/internal/session"
 )
+
+type previewHistoryProvider struct{ messages []map[string]any }
+
+func (p *previewHistoryProvider) LoadHistory(string, history.Opts) (*history.Result, error) {
+	return &history.Result{Kind: "snapshot", Messages: p.messages, SourceCount: len(p.messages), KnownIDFound: true}, nil
+}
+func (p *previewHistoryProvider) ResumableSessions(int) ([]history.ResumableSession, error) {
+	return nil, nil
+}
+
+type previewHistoryExec struct {
+	fakeExec
+	provider *previewHistoryProvider
+}
+
+func (e *previewHistoryExec) ProviderFor(*session.Session) (backend.HistoryProvider, bool) {
+	return e.provider, true
+}
+func (e *previewHistoryExec) AllProviders() []backend.HistoryProvider {
+	return []backend.HistoryProvider{e.provider}
+}
 
 func TestSessionPreviewSharedVectors(t *testing.T) {
 	data, err := os.ReadFile("../../../contracts/v3/normalization_vectors.json")
@@ -83,5 +108,32 @@ func TestHistoryAssistantPreviewRejectsToolCommandButKeepsCommentary(t *testing.
 	}
 	if got := historyAssistantPreview(withCommentary); got != "正在驗證正式簽名。" {
 		t.Fatalf("human commentary was not preserved: %q", got)
+	}
+}
+
+func TestHistoryReconciliationRepairsPersistedToolProjection(t *testing.T) {
+	h, _ := newTestHub(t)
+	provider := &previewHistoryProvider{messages: []map[string]any{
+		{
+			"role": "assistant", "content": "human-facing update", "timestamp": int64(2_000),
+			"blocks": []map[string]any{{"type": "text", "text": "human-facing update"}},
+		},
+		{
+			"role": "assistant", "content": "const r = await tools.exec_command(...)", "timestamp": int64(3_000),
+			"blocks": []map[string]any{{"type": "tool", "name": "exec"}},
+		},
+	}}
+	h.SetExecutor(&previewHistoryExec{fakeExec: fakeExec{sink: h}, provider: provider})
+	s := h.registry.Create("s1", "Work", "/work", "codex", "", "", "thread-1")
+	if _, changed, err := h.registry.CommitPreviewAndPersist(s.ID, "const r = await tools.exec_command(...)", "assistant", 3_000); err != nil || !changed {
+		t.Fatalf("seed tool projection: changed=%v err=%v", changed, err)
+	}
+	c := newTestClient(h)
+	h.sendHistory(c, s, clientproto.Command{SessionID: s.ID, Mode: "snapshot"})
+	waitForType(t, c, "history_snapshot")
+
+	snap := s.Snapshot()
+	if snap.PreviewText != "human-facing update" || snap.PreviewUpdatedAt != 2_000 || snap.PreviewRevision != 2 {
+		t.Fatalf("history did not self-heal tool projection: %+v", snap)
 	}
 }

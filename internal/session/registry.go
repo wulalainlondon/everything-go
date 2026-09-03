@@ -488,6 +488,52 @@ func (r *Registry) CommitPreviewAndPersist(id, text, role string, updatedAt int6
 	return after, true, nil
 }
 
+// RepairPreviewAndPersist replaces a projection only when it still exactly
+// matches expectedInvalidText. This narrow compare-and-swap is used to migrate
+// previews that history can prove came from a tool-only card. It deliberately
+// permits an older human message timestamp while never reducing LastActivity.
+func (r *Registry) RepairPreviewAndPersist(id, expectedInvalidText, text, role string, updatedAt int64) (Snapshot, bool, error) {
+	text = strings.TrimSpace(text)
+	role = strings.TrimSpace(role)
+	if expectedInvalidText == "" || text == "" || (role != "user" && role != "assistant") || updatedAt <= 0 {
+		return Snapshot{}, false, ErrPreviewInvalid
+	}
+
+	r.mutationMu.Lock()
+	defer r.mutationMu.Unlock()
+	s, ok := r.Get(id)
+	if !ok {
+		return Snapshot{}, false, ErrSessionMissing
+	}
+	before := s.Snapshot()
+	if before.PreviewText != expectedInvalidText || before.PreviewRole != "assistant" {
+		return before, false, nil
+	}
+
+	s.mu.Lock()
+	s.previewText = text
+	s.previewRole = role
+	s.previewUpdatedAt = updatedAt
+	s.previewRevision++
+	after := s.snapshotLocked()
+	s.mu.Unlock()
+
+	if r.store != nil {
+		if err := r.store.Save(r.List()); err != nil {
+			s.mu.Lock()
+			if s.previewRevision == after.PreviewRevision {
+				s.previewText = before.PreviewText
+				s.previewRole = before.PreviewRole
+				s.previewUpdatedAt = before.PreviewUpdatedAt
+				s.previewRevision = before.PreviewRevision
+			}
+			s.mu.Unlock()
+			return before, false, err
+		}
+	}
+	return after, true, nil
+}
+
 // RenameAndPersist is the authoritative Session-name commit. The mutation is
 // serialized with every Registry persist, written atomically to disk, and only
 // then returned to the caller for broadcast. A failed disk write rolls memory

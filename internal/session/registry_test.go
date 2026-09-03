@@ -146,6 +146,34 @@ func TestPreviewCommitRollsBackWhenDiskCommitFails(t *testing.T) {
 	}
 }
 
+func TestPreviewRepairRequiresExactInvalidToolProjection(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sessions.json")
+	r := NewRegistry()
+	r.AttachStore(NewStore(path))
+	r.Create("s1", "Work", "/work", "codex", "", "", "thread-1")
+	base := time.Now().UnixMilli()
+	if _, changed, err := r.CommitPreviewAndPersist("s1", "const r = await tools.exec(...) ", "assistant", base+2_000); err != nil || !changed {
+		t.Fatalf("seed invalid projection: changed=%v err=%v", changed, err)
+	}
+	if snap, changed, err := r.RepairPreviewAndPersist("s1", "different command", "human update", "assistant", base+1_000); err != nil || changed || snap.PreviewText != "const r = await tools.exec(...)" {
+		t.Fatalf("non-matching repair changed projection: changed=%v err=%v snapshot=%+v", changed, err, snap)
+	}
+	repaired, changed, err := r.RepairPreviewAndPersist("s1", "const r = await tools.exec(...)", "human update", "assistant", base+1_000)
+	if err != nil || !changed || repaired.PreviewText != "human update" || repaired.PreviewUpdatedAt != base+1_000 || repaired.PreviewRevision != 2 {
+		t.Fatalf("exact repair failed: changed=%v err=%v snapshot=%+v", changed, err, repaired)
+	}
+	if repaired.LastActivity < float64(base+2_000)/1000 {
+		t.Fatalf("repair reduced last activity: %+v", repaired)
+	}
+
+	restarted := NewRegistry()
+	restarted.AttachStore(NewStore(path))
+	got, _ := restarted.Get("s1")
+	if snap := got.Snapshot(); snap.PreviewText != "human update" || snap.PreviewRevision != 2 {
+		t.Fatalf("repair was not durable: %+v", snap)
+	}
+}
+
 func TestRenameAndPersistIsDurableRevisionedAndIdempotent(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "sessions.json")
 	r := NewRegistry()
