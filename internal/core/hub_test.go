@@ -442,6 +442,34 @@ func TestMessageStreamsAndEndsTurn(t *testing.T) {
 
 	s, _ := h.registry.Get("s1")
 	waitState(t, s, session.Idle)
+	snap := s.Snapshot()
+	if snap.PreviewText != "hello world" || snap.PreviewRole != "assistant" || snap.PreviewRevision != 2 || snap.PreviewUpdatedAt == 0 {
+		t.Fatalf("terminal row projection was not committed after accepted request: %+v", snap)
+	}
+}
+
+func TestDoneWakesExactTranscriptPath(t *testing.T) {
+	h, _ := newTestHub(t)
+	path := filepath.Join(t.TempDir(), "rollout.jsonl")
+	fx := &forkExec{fakeExec: fakeExec{sink: h}, prov: &forkProv{path: path}}
+	h.SetExecutor(fx)
+	s := h.registry.Create("s1", "Work", "/work", "codex", "", "", "thread-1")
+	if s.ResumeID() == "" {
+		t.Fatal("test session missing resume id")
+	}
+	woke := make(chan string, 1)
+	h.SetTranscriptChangeNotifier(func(got string) { woke <- got })
+
+	h.Emit(protocol.NewTextChunk("s1", "r1", "finished"))
+	h.Emit(protocol.NewDone("s1", "r1"))
+	select {
+	case got := <-woke:
+		if got != path {
+			t.Fatalf("notifier path=%q want=%q", got, path)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("terminal turn did not wake transcript indexer")
+	}
 }
 
 func TestMessageAckConfirmsBridgeQueueAcceptance(t *testing.T) {
@@ -635,10 +663,16 @@ func TestPerSessionTurnsSerialize(t *testing.T) {
 	c := newTestClient(h)
 
 	starts := make(chan string, 2)
-	release := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	releaseSecond := make(chan struct{})
 	fe.onSend = func(s *session.Session, reqID, content string) {
 		starts <- reqID
-		<-release // hold the turn open until the test releases it
+		if reqID == "r1" {
+			<-releaseFirst
+		} else {
+			<-releaseSecond
+		}
+		h.Emit(protocol.NewTextChunk(s.ID, reqID, "answer "+content))
 		h.Emit(protocol.NewDone(s.ID, reqID))
 	}
 
@@ -655,10 +689,17 @@ func TestPerSessionTurnsSerialize(t *testing.T) {
 		t.Fatalf("second turn %s started before first finished", got)
 	case <-time.After(60 * time.Millisecond):
 	}
-	close(release) // let r1 finish → r2 should start
+	close(releaseFirst) // let r1 finish → r2 should start
 	if got := <-starts; got != "r2" {
 		t.Fatalf("second turn should be r2, got %s", got)
 	}
+	// Turn 1's later completion must not overwrite the actor-ordered preview for
+	// turn 2, which is now the active work.
+	s, _ := h.registry.Get("s1")
+	if snap := s.Snapshot(); snap.PreviewText != "b" || snap.PreviewRole != "user" {
+		t.Fatalf("queued turn preview regressed after prior completion: %+v", snap)
+	}
+	close(releaseSecond)
 }
 
 // Once message_ack confirms the Bridge accepted a follow-up, the turn belongs

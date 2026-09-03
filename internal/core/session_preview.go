@@ -5,10 +5,11 @@ import (
 	"strings"
 
 	"everything-go/internal/protocol"
+	"everything-go/internal/search"
 	"github.com/rivo/uniseg"
 )
 
-const sessionPreviewPolicyVersion = 1
+const sessionPreviewPolicyVersion = 2
 
 var previewWhitespace = regexp.MustCompile(`\s+`)
 
@@ -30,6 +31,25 @@ func selectSessionPreview(messages []protocol.RecentMessage, phase string) (text
 		fallback = "assistant"
 	}
 	return lastPreviewByRole(messages, fallback), fallback
+}
+
+// resolveSessionPreview arbitrates the two legitimate preview producers. A
+// Bridge-owned accepted/completed turn is persisted in the Registry; the
+// search index may only supersede it when an external CLI wrote a newer row.
+func resolveSessionPreview(persistedText, persistedRole string, persistedAt int64, messages []protocol.RecentMessage, indexed *search.SessionPreview, phase string) (text, role string, updatedAt int64) {
+	text, role, updatedAt = persistedText, persistedRole, persistedAt
+	if indexed == nil {
+		return
+	}
+	indexedText, indexedRole := selectSessionPreview(messages, phase)
+	indexedAt := indexed.LastAssistantTS * 1000
+	if indexedRole == "user" {
+		indexedAt = indexed.LastUserTS * 1000
+	}
+	if indexedText != "" && (text == "" || indexedAt > updatedAt) {
+		return indexedText, indexedRole, indexedAt
+	}
+	return
 }
 
 func lastPreviewByRole(messages []protocol.RecentMessage, role string) string {

@@ -21,6 +21,10 @@ type savedEntry struct {
 	ResumeID            string   `json:"resume_id"`
 	ClaudeUUID          string   `json:"claude_uuid"`
 	LastUsed            int64    `json:"last_used"`
+	PreviewText         string   `json:"preview_text,omitempty"`
+	PreviewRole         string   `json:"preview_role,omitempty"`
+	PreviewUpdatedAt    int64    `json:"preview_updated_at,omitempty"`
+	PreviewRevision     uint64   `json:"preview_revision,omitempty"`
 	Cwd                 string   `json:"cwd"`
 	Backend             string   `json:"backend"`
 	Model               string   `json:"model"`
@@ -102,6 +106,8 @@ func (st *Store) Save(sessions []*Session) error {
 			MetadataRevision: snap.MetadataRevision, NameUpdatedAt: snap.NameUpdatedAt,
 			NameUpdatedBy: snap.NameUpdatedBy, LastNameMutationID: snap.LastNameMutationID,
 			LastUsed: lastUsed, Cwd: snap.Cwd, Backend: snap.Backend, Model: snap.Model,
+			PreviewText: snap.PreviewText, PreviewRole: snap.PreviewRole,
+			PreviewUpdatedAt: snap.PreviewUpdatedAt, PreviewRevision: snap.PreviewRevision,
 			Sandbox: snap.Sandbox, CreatedAt: snap.CreatedAt,
 			Effort:      snap.Effort,
 			ServiceTier: snap.ServiceTier, CollaborationMode: snap.CollaborationMode, Personality: snap.Personality,
@@ -200,6 +206,17 @@ func putKnownFields(obj map[string]json.RawMessage, entry savedEntry) {
 	put("resume_id", entry.ResumeID)
 	put("claude_uuid", entry.ClaudeUUID)
 	put("last_used", entry.LastUsed)
+	if entry.PreviewText != "" && entry.PreviewUpdatedAt > 0 {
+		put("preview_text", entry.PreviewText)
+		put("preview_role", entry.PreviewRole)
+		put("preview_updated_at", entry.PreviewUpdatedAt)
+		put("preview_revision", entry.PreviewRevision)
+	} else {
+		delete(obj, "preview_text")
+		delete(obj, "preview_role")
+		delete(obj, "preview_updated_at")
+		delete(obj, "preview_revision")
+	}
 	put("cwd", entry.Cwd)
 	put("backend", entry.Backend)
 	put("model", entry.Model)
@@ -290,6 +307,10 @@ func entryFromRaw(obj map[string]json.RawMessage) savedEntry {
 		ResumeID:            resumeID,
 		ClaudeUUID:          claudeUUID,
 		LastUsed:            lastUsed,
+		PreviewText:         rawString(obj, "preview_text"),
+		PreviewRole:         rawString(obj, "preview_role"),
+		PreviewUpdatedAt:    rawInt64(obj, "preview_updated_at"),
+		PreviewRevision:     uint64(rawInt64(obj, "preview_revision")),
 		Cwd:                 rawString(obj, "cwd"),
 		Backend:             rawString(obj, "backend"),
 		Model:               rawString(obj, "model"),

@@ -208,6 +208,12 @@ func main() {
 			log.Printf("search index disabled: %v", err)
 		} else {
 			hub.SetSearch(idx)
+			hub.SetTranscriptChangeNotifier(func(path string) {
+				searchDirty.Add(path)
+				// app-server may report done just before the final JSONL bytes become
+				// visible. A delayed idempotent wake closes that small durability gap.
+				time.AfterFunc(2*time.Second, func() { searchDirty.Add(path) })
+			})
 			if exePath, err := os.Executable(); err == nil {
 				go runSearchIndexerLoop(ctx, idx, exePath, *dataDir, searchDirty, incrementalSearchEnabled() && nativeWatcherActive, hub.BroadcastSessionSummaries)
 			} else {

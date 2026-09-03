@@ -104,6 +104,10 @@ type Hub struct {
 
 	turnMu   sync.Mutex
 	turnText map[string]*strings.Builder // session_id -> assistant text this turn
+	// transcriptChanged wakes the out-of-process search indexer with the exact
+	// transcript path after a Bridge-owned turn completes. Native filesystem
+	// watching remains a fallback for turns written by an external CLI.
+	transcriptChanged func(string)
 
 	steerMu      sync.Mutex
 	steerResults map[string]protocol.SteerResult // session_id/request_id -> terminal acknowledgement
@@ -245,6 +249,28 @@ func (h *Hub) SetSearch(s *search.Index) {
 	if s != nil {
 		go h.reconcileRestartMarkersFromSearch()
 	}
+}
+
+// SetTranscriptChangeNotifier wires the exact-path search-index wake used by
+// terminal turns. It is intentionally separate from SetSearch because the
+// resident Hub only reads the index while a short-lived child writes it.
+func (h *Hub) SetTranscriptChangeNotifier(notify func(string)) {
+	h.transcriptChanged = notify
+}
+
+func (h *Hub) notifyTranscriptChanged(sessionID string) {
+	if h.transcriptChanged == nil {
+		return
+	}
+	s, ok := h.registry.Get(sessionID)
+	if !ok {
+		return
+	}
+	path, ok := h.transcriptPath(s)
+	if !ok || path == "" {
+		return
+	}
+	h.transcriptChanged(path)
 }
 
 // SetFCM wires the push notifier (nil disables push).
@@ -562,6 +588,17 @@ func (h *Hub) accumulateTurn(event any) {
 		if b != nil {
 			text = b.String()
 		}
+		if preview := truncateGraphemes(normalizePreviewText(text), 160); preview != "" {
+			if _, changed, err := h.registry.CommitPreviewAndPersist(e.SessionID, preview, "assistant", time.Now().UnixMilli()); err != nil {
+				log.Printf("[session-preview] terminal commit failed session=%s request=%s: %v", e.SessionID, e.RequestID, err)
+			} else if changed {
+				log.Printf("[session-preview] terminal commit session=%s request=%s", e.SessionID, e.RequestID)
+			}
+		}
+		// Wake indexing even when the native watcher missed/coalesced the write.
+		// The notifier is also called for empty/error-only replies so the durable
+		// transcript remains the ultimate history source.
+		h.notifyTranscriptChanged(e.SessionID)
 		h.completeRelayRun(e.RequestID, "succeeded", "", text)
 
 		// Scan for media/document paths regardless of FCM being configured.

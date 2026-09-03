@@ -291,6 +291,14 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 			h.updateRuntime(cmd.SessionID, "queued", reqID, 0, "", "")
 		}
 		accepted := s.Submit(func() {
+			// Commit at the actor execution boundary, not at queue acceptance. This
+			// gives previews the exact same order as turns: the result of turn N can
+			// never overwrite the already-queued request for turn N+1.
+			if preview := truncateGraphemes(normalizePreviewText(content), 160); preview != "" {
+				if _, _, err := h.registry.CommitPreviewAndPersist(cmd.SessionID, preview, "user", time.Now().UnixMilli()); err != nil {
+					log.Printf("[session-preview] running request commit failed session=%s request=%s: %v", cmd.SessionID, reqID, err)
+				}
+			}
 			h.updateRuntime(cmd.SessionID, "running", reqID, s.QueueLen(), "", "")
 			if err := h.exec.Send(context.Background(), s, reqID, content, images, files); err != nil {
 				if errors.Is(err, backend.ErrThreadActiveWriter) {
@@ -862,26 +870,34 @@ func (h *Hub) sendHistory(c *Client, s *session.Session, cmd clientproto.Command
 		msgs = []map[string]any{}
 	}
 	latestAssistantAt := int64(0)
+	latestAssistantText := ""
 	for _, message := range msgs {
 		if role, _ := message["role"].(string); role != "assistant" {
 			continue
 		}
+		var observedAt int64
 		switch timestamp := message["timestamp"].(type) {
 		case int64:
-			if timestamp > latestAssistantAt {
-				latestAssistantAt = timestamp
-			}
+			observedAt = timestamp
 		case int:
-			if int64(timestamp) > latestAssistantAt {
-				latestAssistantAt = int64(timestamp)
-			}
+			observedAt = int64(timestamp)
 		case float64:
-			if int64(timestamp) > latestAssistantAt {
-				latestAssistantAt = int64(timestamp)
-			}
+			observedAt = int64(timestamp)
+		}
+		if observedAt >= latestAssistantAt {
+			latestAssistantAt = observedAt
+			latestAssistantText, _ = message["content"].(string)
 		}
 	}
-	if latestAssistantAt > 0 {
+	// Pagination into older history must never move the canonical row backward.
+	// Snapshot/delta requests without a before cursor include the newest tail and
+	// are safe repair sources after a Bridge restart.
+	if latestAssistantAt > 0 && cmd.Before == "" {
+		if preview := truncateGraphemes(normalizePreviewText(latestAssistantText), 160); preview != "" {
+			if _, _, err := h.registry.CommitPreviewAndPersist(s.ID, preview, "assistant", latestAssistantAt); err != nil {
+				log.Printf("[session-preview] history reconciliation failed session=%s: %v", s.ID, err)
+			}
+		}
 		observedPhase := s.State().String()
 		if observedPhase == "streaming" {
 			observedPhase = "running"
@@ -978,19 +994,26 @@ func (h *Hub) sessionSummaries() []protocol.SessionSummary {
 	for _, s := range sessions {
 		snap := s.Snapshot()
 		var recent []protocol.RecentMessage
-		// last_activity must reflect real activity. The session store's last_used
-		// can be flattened/stale; the search index's newest message ts is the
-		// source of truth, so prefer it when available.
+		// Preview text, role and timestamp are one server-authoritative projection.
+		// The search DB is only a fallback for native CLI activity that is newer
+		// than the persisted projection; it must never pair stale text with a fresh
+		// Registry last_used value.
 		lastActivity := snap.LastActivity
+		previewText, previewRole, previewAt := snap.PreviewText, snap.PreviewRole, snap.PreviewUpdatedAt
 		if pv := previewByHubID[snap.ID]; pv != nil {
 			for _, m := range pv.Recent {
 				recent = append(recent, protocol.RecentMessage{Role: m.Role, Text: m.Text})
 			}
-			if pv.LastTS > 0 {
+			if float64(pv.LastTS) > lastActivity {
 				lastActivity = float64(pv.LastTS)
 			}
+			previewText, previewRole, previewAt = resolveSessionPreview(
+				previewText, previewRole, previewAt, recent, pv, runtimePhase[snap.ID],
+			)
 		}
-		previewText, previewRole := selectSessionPreview(recent, runtimePhase[snap.ID])
+		if float64(previewAt)/1000 > lastActivity {
+			lastActivity = float64(previewAt) / 1000
+		}
 		out = append(out, protocol.SessionSummary{
 			ID: snap.ID, Name: snap.Name, IsStreaming: snap.Streaming,
 			AuthorityInstanceID: h.cfg.InstanceID, MetadataRevision: snap.MetadataRevision,

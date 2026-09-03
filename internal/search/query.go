@@ -604,6 +604,7 @@ type SessionPreview struct {
 	Recent          []RecentMsg
 	LastTS          int64 // unix seconds of the newest indexed message; 0 if unknown
 	LastAssistantTS int64 // newest canonical assistant message, used for restart reconciliation
+	LastUserTS      int64 // newest canonical user message, used while a turn is active
 }
 
 // parseISOUnix converts an ISO-8601 timestamp (e.g. "2026-06-07T09:18:58.954Z")
@@ -673,13 +674,14 @@ func (idx *Index) RecentMessagesByUID(uids []SessionUID, n int) map[string]*Sess
 		if role == "assistant" && u > p.LastAssistantTS {
 			p.LastAssistantTS = u
 		}
+		if role == "user" && u > p.LastUserTS {
+			p.LastUserTS = u
+		}
 		text := strings.TrimSpace(content)
 		if text == "" {
 			return
 		}
-		if len(text) > 200 {
-			text = text[:200]
-		}
+		text = truncateRunes(text, 200)
 		p.Recent = append(p.Recent, RecentMsg{Role: role, Text: text})
 	}
 
@@ -811,10 +813,19 @@ func (idx *Index) RecentMessagesBySession(sessionIDs []string, n int) map[string
 		if text == "" {
 			continue
 		}
-		if len(text) > 200 {
-			text = text[:200]
-		}
+		text = truncateRunes(text, 200)
 		out[sid] = append(out[sid], RecentMsg{Role: role, Text: text})
 	}
 	return out
+}
+
+func truncateRunes(value string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	return string(runes[:limit])
 }

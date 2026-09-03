@@ -3,10 +3,12 @@ package session
 import (
 	"encoding/json"
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestCreateIsIdempotent(t *testing.T) {
@@ -87,6 +89,60 @@ func TestPersistRestartRoundTrip(t *testing.T) {
 	}
 	if got.State() != Idle {
 		t.Fatalf("restored session should be Idle, got %s", got.State())
+	}
+}
+
+func TestPreviewCommitIsDurableMonotonicAndIdempotent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sessions.json")
+	r := NewRegistry()
+	r.AttachStore(NewStore(path))
+	r.Create("s1", "Work", "/work", "codex", "", "", "thread-1")
+	base := time.Now().Add(time.Hour).UnixMilli()
+
+	first, changed, err := r.CommitPreviewAndPersist("s1", "accepted request", "user", base)
+	if err != nil || !changed || first.PreviewRevision != 1 {
+		t.Fatalf("first preview commit failed: changed=%v err=%v snapshot=%+v", changed, err, first)
+	}
+	terminal, changed, err := r.CommitPreviewAndPersist("s1", "completed result", "assistant", base+1_000)
+	if err != nil || !changed || terminal.PreviewRevision != 2 || math.Abs(terminal.LastActivity-float64(base+1_000)/1000) > 0.001 {
+		t.Fatalf("terminal preview commit failed: changed=%v err=%v snapshot=%+v", changed, err, terminal)
+	}
+	if retry, changed, err := r.CommitPreviewAndPersist("s1", "completed result", "assistant", base+1_000); err != nil || changed || retry.PreviewRevision != 2 {
+		t.Fatalf("idempotent retry changed projection: changed=%v err=%v snapshot=%+v", changed, err, retry)
+	}
+	if stale, changed, err := r.CommitPreviewAndPersist("s1", "stale search row", "assistant", base+500); err != nil || changed || stale.PreviewText != "completed result" {
+		t.Fatalf("stale observation replaced projection: changed=%v err=%v snapshot=%+v", changed, err, stale)
+	}
+
+	restarted := NewRegistry()
+	restarted.AttachStore(NewStore(path))
+	got, ok := restarted.Get("s1")
+	if !ok {
+		t.Fatal("session missing after restart")
+	}
+	snap := got.Snapshot()
+	if snap.PreviewText != "completed result" || snap.PreviewRole != "assistant" || snap.PreviewUpdatedAt != base+1_000 || snap.PreviewRevision != 2 || math.Abs(snap.LastActivity-float64(base+1_000)/1000) > 0.001 {
+		t.Fatalf("preview projection did not survive restart: %+v", snap)
+	}
+}
+
+func TestPreviewCommitRollsBackWhenDiskCommitFails(t *testing.T) {
+	dir := t.TempDir()
+	blockingFile := filepath.Join(dir, "not-a-directory")
+	if err := os.WriteFile(blockingFile, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := NewRegistry()
+	r.AttachStore(NewStore(filepath.Join(blockingFile, "sessions.json")))
+	s := r.Create("s1", "Work", "/work", "codex", "", "", "thread-1")
+	before := s.Snapshot()
+
+	if _, changed, err := r.CommitPreviewAndPersist("s1", "must roll back", "assistant", time.Now().UnixMilli()); err == nil || changed {
+		t.Fatalf("preview unexpectedly survived failed persistence: changed=%v err=%v", changed, err)
+	}
+	after := s.Snapshot()
+	if after.PreviewText != before.PreviewText || after.PreviewRevision != before.PreviewRevision || after.LastActivity != before.LastActivity {
+		t.Fatalf("failed commit leaked into memory: before=%+v after=%+v", before, after)
 	}
 }
 

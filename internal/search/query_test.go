@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestBuildFTSMatch(t *testing.T) {
@@ -65,8 +66,16 @@ func TestRecentMessagesTracksNewestAssistantTimestampSeparately(t *testing.T) {
 		}
 	}
 	preview := idx.RecentMessagesByUID([]SessionUID{{HubID: "hub", Backend: "claude", UID: "uid-1"}}, 12)["hub"]
-	if preview == nil || preview.LastTS != parseISOUnix("2026-01-01T00:00:03Z") || preview.LastAssistantTS != parseISOUnix("2026-01-01T00:00:02Z") {
+	if preview == nil || preview.LastTS != parseISOUnix("2026-01-01T00:00:03Z") || preview.LastAssistantTS != parseISOUnix("2026-01-01T00:00:02Z") || preview.LastUserTS != parseISOUnix("2026-01-01T00:00:03Z") {
 		t.Fatalf("preview=%+v", preview)
+	}
+}
+
+func TestTruncateRunesKeepsUTF8Valid(t *testing.T) {
+	input := strings.Repeat("最新回覆", 80)
+	got := truncateRunes(input, 200)
+	if !strings.HasPrefix(input, got) || len([]rune(got)) != 200 || !utf8.ValidString(got) {
+		t.Fatalf("invalid rune truncation: runes=%d", len([]rune(got)))
 	}
 }
 

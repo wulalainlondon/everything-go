@@ -51,9 +51,13 @@ type Session struct {
 	pinned              bool
 	hidden              bool
 
-	lastActivity float64
-	contextUsed  int
-	contextMax   int
+	lastActivity     float64
+	previewText      string
+	previewRole      string
+	previewUpdatedAt int64
+	previewRevision  uint64
+	contextUsed      int
+	contextMax       int
 
 	state State
 
@@ -88,6 +92,10 @@ type Snapshot struct {
 	HistoricalResumeIDs []string
 	CreatedAt           float64
 	LastActivity        float64
+	PreviewText         string
+	PreviewRole         string
+	PreviewUpdatedAt    int64
+	PreviewRevision     uint64
 	ContextUsed         int
 	ContextMax          int
 	Pinned              bool
@@ -114,6 +122,8 @@ func (s *Session) snapshotLocked() Snapshot {
 		HistoricalResumeIDs: append([]string(nil), s.historicalResumeIDs...),
 		ServiceTier:         s.serviceTier, CollaborationMode: s.collaborationMode, Personality: s.personality,
 		CreatedAt: s.CreatedAt, LastActivity: s.lastActivity,
+		PreviewText: s.previewText, PreviewRole: s.previewRole,
+		PreviewUpdatedAt: s.previewUpdatedAt, PreviewRevision: s.previewRevision,
 		ContextUsed: s.contextUsed, ContextMax: s.contextMax,
 		Pinned: s.pinned, Hidden: s.hidden,
 		Streaming: s.state == Streaming || s.state == Stopping,
@@ -305,8 +315,7 @@ func (r *Registry) AttachStore(store *Store) {
 		if created == 0 {
 			created = float64(e.LastUsed)
 		}
-		r.mu.Lock()
-		r.sessions[id] = &Session{
+		s := &Session{
 			ID: id, CreatedAt: created,
 			name: e.Name, cwd: e.Cwd, backend: e.Backend,
 			metadataRevision: e.MetadataRevision, nameUpdatedAt: e.NameUpdatedAt,
@@ -317,8 +326,15 @@ func (r *Registry) AttachStore(store *Store) {
 			serviceTier:         e.ServiceTier, collaborationMode: e.CollaborationMode, personality: e.Personality,
 			pinned: e.Pinned, hidden: e.Hidden,
 			lastActivity: float64(e.LastUsed),
-			state:        Idle,
+			previewText:  e.PreviewText, previewRole: e.PreviewRole,
+			previewUpdatedAt: e.PreviewUpdatedAt, previewRevision: e.PreviewRevision,
+			state: Idle,
 		}
+		if previewActivity := float64(e.PreviewUpdatedAt) / 1000; previewActivity > s.lastActivity {
+			s.lastActivity = previewActivity
+		}
+		r.mu.Lock()
+		r.sessions[id] = s
 		r.mu.Unlock()
 	}
 	if len(canonicalIDs) != len(loaded) {
@@ -414,8 +430,63 @@ func (r *Registry) Persist() {
 var (
 	ErrRenameConflict = errors.New("session metadata revision conflict")
 	ErrRenameEmpty    = errors.New("session name is empty")
+	ErrPreviewInvalid = errors.New("session preview is invalid")
 	ErrSessionMissing = errors.New("session not found")
 )
+
+// CommitPreviewAndPersist atomically advances the server-authoritative row
+// preview. The timestamp is part of the same projection as the text and role,
+// so clients never have to combine a fresh activity time with stale content.
+// Older observations are ignored; equal retries are idempotent.
+func (r *Registry) CommitPreviewAndPersist(id, text, role string, updatedAt int64) (Snapshot, bool, error) {
+	text = strings.TrimSpace(text)
+	role = strings.TrimSpace(role)
+	if text == "" || (role != "user" && role != "assistant") || updatedAt <= 0 {
+		return Snapshot{}, false, ErrPreviewInvalid
+	}
+
+	r.mutationMu.Lock()
+	defer r.mutationMu.Unlock()
+	s, ok := r.Get(id)
+	if !ok {
+		return Snapshot{}, false, ErrSessionMissing
+	}
+	before := s.Snapshot()
+	if updatedAt < before.PreviewUpdatedAt ||
+		(updatedAt == before.PreviewUpdatedAt && before.PreviewText == text && before.PreviewRole == role) {
+		return before, false, nil
+	}
+
+	s.mu.Lock()
+	s.previewText = text
+	s.previewRole = role
+	s.previewUpdatedAt = updatedAt
+	s.previewRevision++
+	activity := float64(updatedAt) / 1000
+	if activity > s.lastActivity {
+		s.lastActivity = activity
+	}
+	after := s.snapshotLocked()
+	s.mu.Unlock()
+
+	if r.store != nil {
+		if err := r.store.Save(r.List()); err != nil {
+			s.mu.Lock()
+			if s.previewRevision == after.PreviewRevision {
+				s.previewText = before.PreviewText
+				s.previewRole = before.PreviewRole
+				s.previewUpdatedAt = before.PreviewUpdatedAt
+				s.previewRevision = before.PreviewRevision
+				if s.lastActivity == after.LastActivity {
+					s.lastActivity = before.LastActivity
+				}
+			}
+			s.mu.Unlock()
+			return before, false, err
+		}
+	}
+	return after, true, nil
+}
 
 // RenameAndPersist is the authoritative Session-name commit. The mutation is
 // serialized with every Registry persist, written atomically to disk, and only

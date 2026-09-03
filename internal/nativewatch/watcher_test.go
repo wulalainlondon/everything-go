@@ -86,7 +86,6 @@ func TestParseClaudePath(t *testing.T) {
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-
 	ns, ok := ParsePath(path, Options{ClaudeProjectsDir: root})
 	if !ok {
 		t.Fatal("ParsePath returned false")
@@ -112,6 +111,10 @@ func TestParseCodexPath(t *testing.T) {
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	appendTime := time.Date(2026, 9, 3, 9, 44, 59, 0, time.Local)
+	if err := os.Chtimes(path, appendTime, appendTime); err != nil {
+		t.Fatal(err)
+	}
 
 	ns, ok := ParsePath(path, Options{CodexSessionsDir: root})
 	if !ok {
@@ -120,7 +123,7 @@ func TestParseCodexPath(t *testing.T) {
 	if ns.ID != "jl_x_019e9ccf-aff" || ns.ResumeID != id || ns.Backend != BackendCodex {
 		t.Fatalf("bad identity: %+v", ns)
 	}
-	wantTS := time.Date(2026, 6, 7, 10, 11, 12, 0, time.UTC).Unix()
+	wantTS := appendTime.Unix()
 	if ns.Cwd != "/repo/codex" || ns.Name != "Continue mobile handoff" || ns.LastUsed != wantTS {
 		t.Fatalf("bad metadata: %+v", ns)
 	}

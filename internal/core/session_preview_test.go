@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"everything-go/internal/protocol"
+	"everything-go/internal/search"
 )
 
 func TestSessionPreviewSharedVectors(t *testing.T) {
@@ -44,5 +45,23 @@ func TestSessionPreviewSharedVectors(t *testing.T) {
 func TestTruncateGraphemesDoesNotSplitEmoji(t *testing.T) {
 	if got := truncateGraphemes("A👨‍👩‍👧‍👦B", 2); got != "A👨‍👩‍👧‍👦" {
 		t.Fatalf("got %q", got)
+	}
+}
+
+func TestPersistedPreviewBeatsOlderSearchProjection(t *testing.T) {
+	messages := []protocol.RecentMessage{{Role: "assistant", Text: "stale indexed result"}}
+	indexed := &search.SessionPreview{LastTS: 100, LastAssistantTS: 100}
+	text, role, at := resolveSessionPreview("fresh durable result", "assistant", 200_000, messages, indexed, "idle")
+	if text != "fresh durable result" || role != "assistant" || at != 200_000 {
+		t.Fatalf("older index replaced durable projection: (%q,%q,%d)", text, role, at)
+	}
+}
+
+func TestNewerExternalCLIProjectionSupersedesPersistedPreview(t *testing.T) {
+	messages := []protocol.RecentMessage{{Role: "assistant", Text: "new external result"}}
+	indexed := &search.SessionPreview{LastTS: 300, LastAssistantTS: 300}
+	text, role, at := resolveSessionPreview("old durable result", "assistant", 200_000, messages, indexed, "idle")
+	if text != "new external result" || role != "assistant" || at != 300_000 {
+		t.Fatalf("newer external result was ignored: (%q,%q,%d)", text, role, at)
 	}
 }

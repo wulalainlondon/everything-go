@@ -362,9 +362,12 @@ func parseCodex(path string) (NativeSession, bool) {
 	if title == "" {
 		title = shortID(uid)
 	}
-	last := codexTimestampFromFilename(filepath.Base(path))
+	// A rollout filename records thread creation, not its latest activity. A
+	// long-running Codex thread can be appended for months, so mtime is the only
+	// useful discovery cursor. Filename time is merely a fallback for odd files.
+	last := modUnix(path)
 	if last == 0 {
-		last = modUnix(path)
+		last = codexTimestampFromFilename(filepath.Base(path))
 	}
 	return NativeSession{
 		ID:       "jl_x_" + shortN(uid, 12),
