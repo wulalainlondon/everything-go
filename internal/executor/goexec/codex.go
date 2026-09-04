@@ -64,14 +64,18 @@ type codexState struct {
 	mu       sync.Mutex
 	ensureMu sync.Mutex
 
-	threadID        string
-	currentTurnID   string
-	turnActive      bool
-	turnErr         string
-	turnDone        chan struct{}
-	stopping        bool
-	reqID           string
-	tempImages      []string
+	threadID      string
+	currentTurnID string
+	turnActive    bool
+	turnErr       string
+	turnDone      chan struct{}
+	stopping      bool
+	reqID         string
+	// tempImages is keyed by the owning turn request id. A terminal event can
+	// synchronously release the Session actor and start the next turn before the
+	// previous runTurn defer executes; a flat Session-wide slice lets that older
+	// defer delete the newer turn's images.
+	tempImages      map[string][]string
 	accumulatedText string
 	askExtracted    bool
 	contextUsed     int
@@ -93,7 +97,10 @@ type codexAgent struct {
 }
 
 func newCodexState() *codexState {
-	return &codexState{agents: make(map[string]*codexAgent)}
+	return &codexState{
+		agents:     make(map[string]*codexAgent),
+		tempImages: make(map[string][]string),
+	}
 }
 
 func (st *codexState) finishCompact(errStr string) {
@@ -1894,7 +1901,7 @@ func (c *Codex) Send(ctx context.Context, s *session.Session, reqID, content str
 		st.finish(err.Error())
 		return err
 	}
-	input := c.codexInput(s, reqID, content, images, files, st)
+	input := c.codexInput(s, reqID, reqID, content, images, files, st)
 	go c.runTurn(s, st, threadID, input, done, sandboxOverride)
 	return nil
 }
@@ -1922,7 +1929,7 @@ func (c *Codex) steerActiveTurn(s *session.Session, clientUserMessageID, content
 		return backend.SteerResult{}, backend.ErrNoActiveTurn
 	}
 
-	input := c.codexInput(s, clientUserMessageID, content, images, files, st)
+	input := c.codexInput(s, clientUserMessageID, activeRequestID, content, images, files, st)
 	params := map[string]any{
 		"threadId":            threadID,
 		"expectedTurnId":      turnID,
@@ -1944,10 +1951,10 @@ func (c *Codex) steerActiveTurn(s *session.Session, clientUserMessageID, content
 }
 
 func (c *Codex) runTurn(s *session.Session, st *codexState, threadID string, input []map[string]any, done chan struct{}, sandboxOverride string) {
-	defer c.cleanupTempImages(st)
 	st.mu.Lock()
 	requestID := st.reqID
 	st.mu.Unlock()
+	defer c.cleanupTempImages(st, requestID)
 	c.sink.Emit(backend.NewTurnProgress(s.ID, requestID, "waiting_model", "Waiting for Codex to accept the turn"))
 	if err := c.startTurnWithStaleRetry(s, st, threadID, input, sandboxOverride); err != nil {
 		st.finish("turn/start failed: " + err.Error())
@@ -2893,7 +2900,7 @@ func (c *Codex) PendingInteractions(sessionID string) []backend.UserInputPayload
 
 // --- helpers ---------------------------------------------------------------
 
-func (c *Codex) codexInput(s *session.Session, reqID, content string, images []backend.ImageAttachment, files []backend.FileAttachment, st *codexState) []map[string]any {
+func (c *Codex) codexInput(s *session.Session, reqID, imageOwnerID, content string, images []backend.ImageAttachment, files []backend.FileAttachment, st *codexState) []map[string]any {
 	userText := content
 	for _, f := range files {
 		name := f.Name
@@ -2904,14 +2911,14 @@ func (c *Codex) codexInput(s *session.Session, reqID, content string, images []b
 	}
 	input := []map[string]any{{"type": "text", "text": userText, "text_elements": []any{}}}
 	for _, img := range images {
-		if item := c.prepareCodexImageInput(s, reqID, img, st); item != nil {
+		if item := c.prepareCodexImageInput(s, reqID, imageOwnerID, img, st); item != nil {
 			input = append(input, item)
 		}
 	}
 	return input
 }
 
-func (c *Codex) prepareCodexImageInput(s *session.Session, reqID string, img backend.ImageAttachment, st *codexState) map[string]any {
+func (c *Codex) prepareCodexImageInput(s *session.Session, reqID, imageOwnerID string, img backend.ImageAttachment, st *codexState) map[string]any {
 	raw := strings.TrimSpace(img.Data)
 	if raw == "" {
 		return nil
@@ -2925,30 +2932,34 @@ func (c *Codex) prepareCodexImageInput(s *session.Session, reqID string, img bac
 	if err != nil {
 		return nil
 	}
-	snap := s.Snapshot()
-	base := runtime.ExpandPath(snap.Cwd)
-	if fi, err := os.Stat(base); err != nil || !fi.IsDir() {
-		base, _ = os.UserHomeDir()
-	}
-	root := filepath.Join(base, ".bridge_images")
+	// Stage prompt images under Bridge runtime state, not the Session cwd.
+	// Downloads/Desktop/Documents are TCC-protected on macOS and the shared
+	// Codex daemon (rather than Everything Go.app) is the process that opens a
+	// localImage. Keeping the short-lived handoff outside those folders avoids a
+	// fresh protected-folder prompt after Codex binary updates.
+	root := filepath.Join(c.dataDir, "codex-input-images")
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return nil
 	}
-	safeReqID := strings.ReplaceAll(reqID, "/", "_")
-	path := filepath.Join(root, s.ID+"_"+safeReqID+"_"+randHex(8)+codexImageExt(img.MediaType))
+	sessionHash := sha256.Sum256([]byte(s.ID))
+	requestHash := sha256.Sum256([]byte(reqID))
+	path := filepath.Join(root, fmt.Sprintf("%x_%x_%s%s", sessionHash[:6], requestHash[:6], randHex(8), codexImageExt(img.MediaType)))
 	if err := os.WriteFile(path, blob, 0o600); err != nil {
 		return nil
 	}
 	st.mu.Lock()
-	st.tempImages = append(st.tempImages, path)
+	if st.tempImages == nil {
+		st.tempImages = make(map[string][]string)
+	}
+	st.tempImages[imageOwnerID] = append(st.tempImages[imageOwnerID], path)
 	st.mu.Unlock()
 	return map[string]any{"type": "localImage", "path": path}
 }
 
-func (c *Codex) cleanupTempImages(st *codexState) {
+func (c *Codex) cleanupTempImages(st *codexState, imageOwnerID string) {
 	st.mu.Lock()
-	paths := append([]string(nil), st.tempImages...)
-	st.tempImages = nil
+	paths := append([]string(nil), st.tempImages[imageOwnerID]...)
+	delete(st.tempImages, imageOwnerID)
 	st.mu.Unlock()
 	for _, path := range paths {
 		_ = os.Remove(path)

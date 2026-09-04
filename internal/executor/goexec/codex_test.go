@@ -844,6 +844,8 @@ func TestCodexTurnSandboxPolicyOverridesReviewAndRestoresSessionDefault(t *testi
 
 func TestCodexInputIncludesFilesAndImages(t *testing.T) {
 	c := NewCodex(&capSink{}, "codex")
+	dataDir := t.TempDir()
+	c.SetDataDir(dataDir)
 	reg := session.NewRegistry()
 	cwd := t.TempDir()
 	s := reg.Create("s1", "codex", cwd, "codex", "", "", "")
@@ -852,6 +854,7 @@ func TestCodexInputIncludesFilesAndImages(t *testing.T) {
 
 	input := c.codexInput(
 		s,
+		"r1",
 		"r1",
 		"hello",
 		[]backend.ImageAttachment{{Data: png, MediaType: "image/png"}},
@@ -873,13 +876,62 @@ func TestCodexInputIncludesFilesAndImages(t *testing.T) {
 	if filepath.Ext(path) != ".png" {
 		t.Fatalf("image path extension = %q, want .png", filepath.Ext(path))
 	}
+	if filepath.Dir(path) != filepath.Join(dataDir, "codex-input-images") {
+		t.Fatalf("image staged outside runtime dir: %q", path)
+	}
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("image temp file missing: %v", err)
 	}
 
-	c.cleanupTempImages(st)
+	c.cleanupTempImages(st, "r1")
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("image temp file should be removed, stat err=%v", err)
+	}
+}
+
+func TestCodexTempImageCleanupIsScopedToOwningTurn(t *testing.T) {
+	c := NewCodex(&capSink{}, "codex")
+	c.SetDataDir(t.TempDir())
+	reg := session.NewRegistry()
+	s := reg.Create("s1", "codex", t.TempDir(), "codex", "", "", "")
+	st := c.state(s.ID)
+	png := base64.StdEncoding.EncodeToString([]byte("fake-png"))
+
+	oldInput := c.codexInput(s, "old-request", "old-request", "old", []backend.ImageAttachment{{Data: png, MediaType: "image/png"}}, nil, st)
+	newInput := c.codexInput(s, "new-request", "new-request", "new", []backend.ImageAttachment{{Data: png, MediaType: "image/png"}}, nil, st)
+	oldPath, _ := oldInput[1]["path"].(string)
+	newPath, _ := newInput[1]["path"].(string)
+
+	// This models the critical ordering: the next turn stages its image after
+	// the old turn emits terminal state but before the old runTurn defer runs.
+	c.cleanupTempImages(st, "old-request")
+
+	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
+		t.Fatalf("old turn image should be removed, stat err=%v", err)
+	}
+	if _, err := os.Stat(newPath); err != nil {
+		t.Fatalf("old turn cleanup removed the next turn image: %v", err)
+	}
+	c.cleanupTempImages(st, "new-request")
+}
+
+func TestCodexSteerImagesBelongToActiveTurn(t *testing.T) {
+	c := NewCodex(&capSink{}, "codex")
+	c.SetDataDir(t.TempDir())
+	reg := session.NewRegistry()
+	s := reg.Create("s1", "codex", t.TempDir(), "codex", "", "", "")
+	st := c.state(s.ID)
+	png := base64.StdEncoding.EncodeToString([]byte("fake-png"))
+
+	input := c.codexInput(s, "steer-message", "active-turn", "steer", []backend.ImageAttachment{{Data: png, MediaType: "image/png"}}, nil, st)
+	path, _ := input[1]["path"].(string)
+	c.cleanupTempImages(st, "steer-message")
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("client message id must not own active-turn image: %v", err)
+	}
+	c.cleanupTempImages(st, "active-turn")
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("active turn cleanup should remove steered image, stat err=%v", err)
 	}
 }
 
