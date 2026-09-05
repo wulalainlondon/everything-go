@@ -2700,7 +2700,12 @@ func (c *Codex) ensureThread(s *session.Session, st *codexState) error {
 }
 
 func (c *Codex) UpdateSessionSettings(ctx context.Context, s *session.Session) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	st := c.state(s.ID)
+	st.ensureMu.Lock()
+	defer st.ensureMu.Unlock()
 	st.mu.Lock()
 	threadID := st.threadID
 	st.mu.Unlock()
@@ -2741,6 +2746,38 @@ func (c *Codex) UpdateSessionSettings(ctx context.Context, s *session.Session) e
 		params["collaborationMode"] = c.collaborationModeValue(snap)
 	}
 	_, err := c.rpcCall("thread/settings/update", params, 15*time.Second)
+	if err == nil || !isStaleThreadError(err) {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// settings/update only addresses loaded threads. A durable thread can still
+	// exist on disk after daemon/Bridge restarts. Resume that exact ID, never use
+	// ensureThread's missing-history recovery (which may create a new thread).
+	resumeParams := map[string]any{"threadId": threadID}
+	if c.appServerMode == "daemon" {
+		resumeParams["excludeTurns"] = true
+	}
+	raw, resumeErr := c.rpcCall("thread/resume", resumeParams, 15*time.Second)
+	if resumeErr != nil {
+		return fmt.Errorf("load existing thread for settings: %w", resumeErr)
+	}
+	if extractThreadID(raw, "") != threadID {
+		return fmt.Errorf("load existing thread for settings returned an unexpected thread id")
+	}
+	st.mu.Lock()
+	st.threadID = threadID
+	st.mu.Unlock()
+	c.mu.Lock()
+	c.threadToSession[threadID] = s
+	c.mu.Unlock()
+	// Preserve the requested settings snapshot; resume metadata describes the
+	// old settings. Only an explicit rejection is retried, never a timeout.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	_, err = c.rpcCall("thread/settings/update", params, 15*time.Second)
 	return err
 }
 
