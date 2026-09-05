@@ -28,6 +28,17 @@ type rpcReply struct {
 	err    error
 }
 
+// rpcTimeoutError means the response is unknown, not that the server cancelled
+// the operation. In particular, callers must not replay mutations on this error.
+type rpcTimeoutError struct {
+	Name, Method string
+	Timeout      time.Duration
+}
+
+func (e *rpcTimeoutError) Error() string {
+	return fmt.Sprintf("[%s] %q timed out after %s", e.Name, e.Method, e.Timeout)
+}
+
 func newRPCPlumber(name string) *rpcPlumber {
 	return &rpcPlumber{name: name, nextID: 1, pending: make(map[int]chan rpcReply)}
 }
@@ -80,7 +91,7 @@ func (p *rpcPlumber) request(method string, params any, timeout time.Duration) (
 		p.mu.Lock()
 		delete(p.pending, id)
 		p.mu.Unlock()
-		return nil, fmt.Errorf("[%s] %q timed out after %s", p.name, method, timeout)
+		return nil, &rpcTimeoutError{Name: p.name, Method: method, Timeout: timeout}
 	}
 }
 

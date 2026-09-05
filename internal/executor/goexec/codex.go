@@ -193,6 +193,7 @@ type Codex struct {
 	reconnectMu        sync.Mutex
 	reconnectRunning   bool
 	remoteReconnect    bool
+	health             codexHealth
 }
 
 type codexInteraction struct {
@@ -941,7 +942,18 @@ func (c *Codex) invalidateLiveThreads() {
 // rpcCall sends an RPC and waits for the response. Writes go straight to the
 // pipe, so there is no flush step.
 func (c *Codex) rpcCall(method string, params any, timeout time.Duration) (json.RawMessage, error) {
-	return c.rpc.request(method, params, timeout)
+	if c.appServerMode == "daemon" && healthGatedMethod(method) {
+		if err := c.healthAdmission(); err != nil {
+			return nil, err
+		}
+	}
+	raw, err := c.rpc.request(method, params, timeout)
+	var timeoutErr *rpcTimeoutError
+	if c.appServerMode == "daemon" && (errors.As(err, &timeoutErr) || errors.Is(err, context.DeadlineExceeded)) && healthGatedMethod(method) {
+		c.scheduleHealthCheck(method, params)
+		return raw, fmt.Errorf("%w; server outcome unknown; request was not retried; checking Codex health", err)
+	}
+	return raw, err
 }
 
 // readLoop consumes the app-server's newline-delimited stdout. It uses a
