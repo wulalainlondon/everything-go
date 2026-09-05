@@ -31,6 +31,19 @@ func (w *rpcCaptureWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+func TestCodexDefaultModelFollowsRuntimeCatalog(t *testing.T) {
+	c := NewCodex(&capSink{}, "codex")
+	if got := c.defaultModel(); got != codexDefaultModel {
+		t.Fatalf("startup fallback = %q, want %q", got, codexDefaultModel)
+	}
+	c.catalogMu.Lock()
+	c.catalog = backend.Definition{ID: backend.Codex, DefaultModel: "gpt-6-astra"}
+	c.catalogMu.Unlock()
+	if got := c.defaultModel(); got != "gpt-6-astra" {
+		t.Fatalf("runtime catalog default = %q, want gpt-6-astra", got)
+	}
+}
+
 func TestCodexSteerUsesExpectedActiveTurnAndClientMessageID(t *testing.T) {
 	c := NewCodex(&capSink{}, "codex")
 	reg := session.NewRegistry()

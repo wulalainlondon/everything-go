@@ -24,6 +24,12 @@ func DefaultRegistry(includeRemoteWS bool) []Definition {
 			Label:        "Codex",
 			DefaultModel: "gpt-5.6-sol",
 			Models: []Model{
+				{
+					ID: "gpt-6-astra", Label: "GPT-6-Astra",
+					Description:               "Our most capable model for complex, demanding work.",
+					SupportedReasoningEfforts: []string{"low", "medium", "high", "xhigh", "max"},
+					DefaultReasoningEffort:    "medium", InputModalities: []string{"text", "image"},
+				},
 				{ID: "gpt-5.6-sol", Label: "gpt-5.6-sol"},
 				{ID: "gpt-5.6-terra", Label: "gpt-5.6-terra"},
 				{ID: "gpt-5.6-luna", Label: "gpt-5.6-luna"},

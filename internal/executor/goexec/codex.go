@@ -906,6 +906,20 @@ func (c *Codex) Catalog(ctx context.Context) (backend.Definition, error) {
 	return def, nil
 }
 
+// defaultModel follows the authenticated app-server catalog when available.
+// The static value is only a transport-startup fallback; keeping the runtime
+// catalog authoritative lets newly rolled-out models become the default without
+// requiring every client to send an explicit model id.
+func (c *Codex) defaultModel() string {
+	c.catalogMu.RLock()
+	model := c.catalog.DefaultModel
+	c.catalogMu.RUnlock()
+	if model != "" {
+		return model
+	}
+	return codexDefaultModel
+}
+
 func (c *Codex) invalidateLiveThreads() {
 	c.mu.Lock()
 	c.threadToSession = make(map[string]*session.Session)
@@ -2624,7 +2638,7 @@ func (c *Codex) ensureThread(s *session.Session, st *codexState) error {
 	if threadID == "" {
 		model := snap.Model
 		if model == "" {
-			model = codexDefaultModel
+			model = c.defaultModel()
 		}
 		raw, err := c.rpcCall("thread/start", map[string]any{
 			"model": model, "cwd": cwd, "ephemeral": false,

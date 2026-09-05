@@ -58,3 +58,30 @@ func TestDefaultRegistryAdvertisesSteeringOnlyForCodex(t *testing.T) {
 		}
 	}
 }
+
+func TestDefaultRegistryIncludesAstraFallbackCapabilities(t *testing.T) {
+	definitions := DefaultRegistry(false)
+	var codex *Definition
+	for i := range definitions {
+		if definitions[i].ID == Codex {
+			codex = &definitions[i]
+			break
+		}
+	}
+	if codex == nil {
+		t.Fatal("Codex backend missing")
+	}
+	for _, model := range codex.Models {
+		if model.ID != "gpt-6-astra" {
+			continue
+		}
+		if model.DefaultReasoningEffort != "medium" || len(model.SupportedReasoningEfforts) != 5 {
+			t.Fatalf("Astra fallback metadata = %+v", model)
+		}
+		if len(model.InputModalities) != 2 || model.InputModalities[1] != "image" {
+			t.Fatalf("Astra input modalities = %v", model.InputModalities)
+		}
+		return
+	}
+	t.Fatal("Astra missing from Codex fallback registry")
+}
