@@ -589,6 +589,45 @@ func TestEnsureThreadClassifiesActiveWriter(t *testing.T) {
 	}
 }
 
+func TestUpdateSessionSettingsAddressesPersistedThreadAndClearsOverrides(t *testing.T) {
+	c := NewCodex(&capSink{}, "codex")
+	reg := session.NewRegistry()
+	s := reg.Create("logical", "session", t.TempDir(), backend.Codex, "", "danger-full-access", "thread-desktop")
+	// Leave codexState.threadID empty to model a thread owned by Desktop/shared
+	// daemon. Empty settings intentionally clear runtime overrides.
+	s.SetEffort("")
+	empty := ""
+	s.ApplyCodexSettings(&empty, &empty, &empty)
+
+	writer := &rpcCaptureWriter{writes: make(chan []byte, 1)}
+	c.rpc.setWriter(writer)
+	go func() {
+		request := <-writer.writes
+		var frame struct {
+			ID     int            `json:"id"`
+			Method string         `json:"method"`
+			Params map[string]any `json:"params"`
+		}
+		if err := json.Unmarshal(request, &frame); err != nil {
+			t.Errorf("decode settings request: %v", err)
+			return
+		}
+		if frame.Method != "thread/settings/update" || frame.Params["threadId"] != "thread-desktop" {
+			t.Errorf("unexpected settings frame: %+v", frame)
+		}
+		for _, key := range []string{"model", "effort", "serviceTier", "personality", "collaborationMode"} {
+			if value, exists := frame.Params[key]; !exists || value != nil {
+				t.Errorf("%s should be an explicit null clear, got %#v", key, value)
+			}
+		}
+		c.rpc.dispatchResponse(json.RawMessage(fmt.Sprintf(`{"id":%d,"result":{}}`, frame.ID)))
+	}()
+
+	if err := c.UpdateSessionSettings(context.Background(), s); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestCodexAuthFingerprintChangesOnlyWithContent(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "auth.json")
 	if got, err := codexAuthFingerprint(path); err != nil || got != "missing" {

@@ -2693,6 +2693,15 @@ func (c *Codex) UpdateSessionSettings(ctx context.Context, s *session.Session) e
 	threadID := st.threadID
 	st.mu.Unlock()
 	if threadID == "" {
+		// A native Codex Desktop/CLI may already own the durable thread while
+		// Bridge has no local live state. Address the persisted thread directly
+		// so the caller receives a real runtime ACK/rejection instead of a false
+		// success that only changes Bridge's next-turn snapshot.
+		threadID = s.ResumeID()
+	}
+	if threadID == "" {
+		// Brand-new session: there is no runtime object to update yet. Persisted
+		// settings are authoritative and will be applied by thread/start.
 		return nil
 	}
 	snap := s.Snapshot()
