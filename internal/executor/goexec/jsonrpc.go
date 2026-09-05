@@ -49,6 +49,12 @@ func (p *rpcPlumber) setWriter(w io.Writer) {
 	p.wmu.Unlock()
 }
 
+func (p *rpcPlumber) hasWriter() bool {
+	p.wmu.Lock()
+	defer p.wmu.Unlock()
+	return p.w != nil
+}
+
 func (p *rpcPlumber) write(obj any) error {
 	data, err := json.Marshal(obj)
 	if err != nil {

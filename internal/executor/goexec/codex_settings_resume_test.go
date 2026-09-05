@@ -6,6 +6,8 @@ import (
 	"everything-go/internal/backend"
 	"everything-go/internal/session"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -84,5 +86,31 @@ func TestSettingsResumeOnlyAfterExplicitMissingThread(t *testing.T) {
 			default:
 			}
 		})
+	}
+}
+
+func TestSettingsConnectsDaemonBeforeFirstRPC(t *testing.T) {
+	c := NewCodex(&capSink{}, "codex")
+	c.appServerMode = "daemon"
+	c.remoteReconnect = false
+	home := t.TempDir()
+	c.sessionsRoot = filepath.Join(home, "sessions")
+	c.codexBin = filepath.Join(home, "fake-codex")
+	if err := os.WriteFile(c.codexBin, []byte("#!/bin/sh\necho '{}'\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	methods := make(chan string, 8)
+	socket, _ := healthServer(t, func(method, id string) (any, bool) {
+		methods <- method
+		return map[string]any{}, true
+	})
+	c.appServerSocket = socket
+	t.Cleanup(func() { c.startMu.Lock(); defer c.startMu.Unlock(); _ = c.stopServerLocked() })
+	s := session.NewRegistry().Create("logical", "settings", home, backend.Codex, "gpt-5.6-sol", "danger-full-access", "original")
+	if err := c.UpdateSessionSettings(context.Background(), s); err != nil {
+		t.Fatal(err)
+	}
+	if first, second := <-methods, <-methods; first != "initialize" || second != "thread/settings/update" {
+		t.Fatalf("RPC order: %s %s", first, second)
 	}
 }

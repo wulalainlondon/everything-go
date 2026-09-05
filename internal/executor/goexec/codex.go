@@ -2745,6 +2745,13 @@ func (c *Codex) UpdateSessionSettings(ctx context.Context, s *session.Session) e
 	if snap.CollaborationMode != "" {
 		params["collaborationMode"] = c.collaborationModeValue(snap)
 	}
+	// Settings can be the first operation after Bridge startup; catalog warmup
+	// may not have connected the daemon yet. Initialize before writing the RPC.
+	if !c.rpc.hasWriter() {
+		if err := c.ensureServer(); err != nil {
+			return err
+		}
+	}
 	_, err := c.rpcCall("thread/settings/update", params, 15*time.Second)
 	if err == nil || !isStaleThreadError(err) {
 		return err
