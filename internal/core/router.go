@@ -25,6 +25,31 @@ func truncate(s string, n int) string {
 	return s
 }
 
+func sessionConfigValidationError(cmd clientproto.Command) string {
+	if cmd.Backend != "" {
+		switch cmd.Backend {
+		case backend.Claude, backend.Codex, backend.Ollama, backend.RemoteWS:
+		default:
+			return "unsupported_backend"
+		}
+	}
+	if cmd.Sandbox != "" {
+		switch cmd.Sandbox {
+		case "read-only", "workspace-write", "danger-full-access":
+		default:
+			return "invalid_sandbox"
+		}
+	}
+	if cmd.EffortSet && cmd.Effort != "" && cmd.Effort != "auto" {
+		switch cmd.Effort {
+		case "low", "medium", "high", "xhigh", "max", "ultra":
+		default:
+			return "invalid_effort"
+		}
+	}
+	return ""
+}
+
 // route dispatches an inbound frame on its envelope `type`. Transport-cheap
 // commands are answered locally from the Hub's own state; the rest are forwarded
 // to the Executor. The payload beyond {type, session_id} is only inspected by
@@ -527,19 +552,40 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		}()
 
 	case "switch_session_config":
-		if s, ok := h.registry.Get(cmd.SessionID); ok {
-			s.ApplyConfig(cmd.Backend, cmd.Model, cmd.Sandbox)
-			if cmd.EffortSet {
-				s.SetEffort(cmd.Effort)
-			}
-			s.ApplyCodexSettings(cmd.ServiceTier, cmd.CollaborationMode, cmd.Personality)
-			if updater, ok := h.exec.(interface {
-				UpdateSessionSettings(context.Context, *session.Session) error
-			}); ok && s.Backend() == backend.Codex {
-				go func() { _ = updater.UpdateSessionSettings(context.Background(), s) }()
-			}
-			go h.registry.Persist()
+		s, ok := h.registry.Get(cmd.SessionID)
+		if !ok {
+			c.enqueueEvent(h.client.SessionConfigResult(cmd.SessionID, cmd.MutationID, false, "session_not_found", session.Snapshot{}))
+			return
 		}
+		before := s.Snapshot()
+		if before.Streaming {
+			c.enqueueEvent(h.client.SessionConfigResult(cmd.SessionID, cmd.MutationID, false, "session_busy", before))
+			return
+		}
+		if reason := sessionConfigValidationError(cmd); reason != "" {
+			c.enqueueEvent(h.client.SessionConfigResult(cmd.SessionID, cmd.MutationID, false, reason, before))
+			return
+		}
+
+		s.ApplyConfig(cmd.Backend, cmd.Model, cmd.Sandbox)
+		if cmd.ModelSet {
+			s.SetModel(cmd.Model)
+		}
+		if cmd.EffortSet {
+			s.SetEffort(cmd.Effort)
+		}
+		s.ApplyCodexSettings(cmd.ServiceTier, cmd.CollaborationMode, cmd.Personality)
+		if updater, supported := h.exec.(interface {
+			UpdateSessionSettings(context.Context, *session.Session) error
+		}); supported && s.Backend() == backend.Codex {
+			if err := updater.UpdateSessionSettings(ctx, s); err != nil {
+				s.RestoreConfig(before)
+				c.enqueueEvent(h.client.SessionConfigResult(cmd.SessionID, cmd.MutationID, false, "runtime_rejected: "+err.Error(), before))
+				return
+			}
+		}
+		h.registry.Persist()
+		h.Emit(h.client.SessionConfigResult(cmd.SessionID, cmd.MutationID, true, "", s.Snapshot()))
 
 	case "fork_session":
 		go h.handleFork(c, cmd)

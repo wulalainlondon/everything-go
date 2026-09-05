@@ -161,6 +161,14 @@ func (s *Session) SetEffort(effort string) {
 	s.mu.Unlock()
 }
 
+// SetModel stores an exact model override. Empty means follow the runtime
+// default, so it cannot use ApplyConfig's omit-empty semantics.
+func (s *Session) SetModel(model string) {
+	s.mu.Lock()
+	s.model = model
+	s.mu.Unlock()
+}
+
 // ApplyCodexSettings stores app-server thread settings. Empty values are
 // meaningful for service tier/personality/mode (they clear an override), so
 // callers pass pointers to distinguish omission from clearing.
@@ -175,6 +183,21 @@ func (s *Session) ApplyCodexSettings(serviceTier, collaborationMode, personality
 	if personality != nil {
 		s.personality = *personality
 	}
+	s.mu.Unlock()
+}
+
+// RestoreConfig restores an exact previously captured configuration. Unlike
+// ApplyConfig, empty strings are meaningful here because they clear overrides.
+// It is used to roll back a switch that the active runtime rejected.
+func (s *Session) RestoreConfig(snap Snapshot) {
+	s.mu.Lock()
+	s.backend = snap.Backend
+	s.model = snap.Model
+	s.sandbox = snap.Sandbox
+	s.effort = snap.Effort
+	s.serviceTier = snap.ServiceTier
+	s.collaborationMode = snap.CollaborationMode
+	s.personality = snap.Personality
 	s.mu.Unlock()
 }
 

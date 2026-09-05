@@ -6,6 +6,7 @@ import (
 	"everything-go/internal/backend"
 	"everything-go/internal/eventinbox"
 	"everything-go/internal/protocol"
+	"everything-go/internal/session"
 	"everything-go/internal/workitems"
 )
 
@@ -37,6 +38,7 @@ type Command struct {
 	Cwd             string
 	Backend         string
 	Model           string
+	ModelSet        bool
 	Sandbox         string
 	ResumeClaudeID  string
 	Content         string
@@ -174,6 +176,7 @@ func (AppV1) ParseCommand(in protocol.Inbound) Command {
 		Cwd:             in.Cwd,
 		Backend:         in.Backend,
 		Model:           in.Model,
+		ModelSet:        in.ModelSet,
 		Sandbox:         in.Sandbox,
 		ResumeClaudeID:  in.ResumeClaudeID,
 		Content:         in.Content,
@@ -478,6 +481,18 @@ func (AppV1) SessionMetaUpdated(sessionID string, pinned, hidden *bool) protocol
 		Pinned:    pinned,
 		Hidden:    hidden,
 	}
+}
+
+func (AppV1) SessionConfigResult(sessionID, mutationID string, accepted bool, reason string, snap session.Snapshot) protocol.SessionConfigResult {
+	sandbox := snap.Sandbox
+	if sandbox == "" {
+		sandbox = "danger-full-access"
+	}
+	return protocol.NewSessionConfigResult(
+		sessionID, mutationID, accepted, reason,
+		snap.Backend, snap.Model, snap.Effort, sandbox,
+		snap.ServiceTier, snap.CollaborationMode, snap.Personality,
+	)
 }
 
 func (AppV1) ForkError(sessionID, reason string) protocol.ForkError {

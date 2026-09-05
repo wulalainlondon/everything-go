@@ -2696,14 +2696,24 @@ func (c *Codex) UpdateSessionSettings(ctx context.Context, s *session.Session) e
 		return nil
 	}
 	snap := s.Snapshot()
-	params := map[string]any{"threadId": threadID, "model": snap.Model, "serviceTier": nil, "personality": nil}
+	params := map[string]any{
+		"threadId":          threadID,
+		"model":             nil,
+		"effort":            nil,
+		"serviceTier":       nil,
+		"personality":       nil,
+		"collaborationMode": nil,
+	}
+	if snap.Model != "" {
+		params["model"] = snap.Model
+	}
 	if snap.ServiceTier != "" {
 		params["serviceTier"] = snap.ServiceTier
 	}
 	if snap.Personality != "" {
 		params["personality"] = snap.Personality
 	}
-	if snap.Effort != "" {
+	if snap.Effort != "" && snap.Effort != "auto" {
 		params["effort"] = snap.Effort
 	}
 	if snap.CollaborationMode != "" {

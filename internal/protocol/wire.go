@@ -39,6 +39,7 @@ type Inbound struct {
 	Cwd            string `json:"cwd"`
 	Backend        string `json:"backend"`
 	Model          string `json:"model"`
+	ModelSet       bool   `json:"model_set"`
 	Sandbox        string `json:"sandbox"`
 	ResumeClaudeID string `json:"resume_claude_id"`
 
@@ -1071,6 +1072,33 @@ type SessionMetaUpdated struct {
 	Hidden    *bool   `json:"hidden,omitempty"`
 	Model     *string `json:"model,omitempty"`
 	Effort    *string `json:"effort,omitempty"`
+}
+
+// SessionConfigResult is the authoritative response to switch_session_config.
+// Every value is returned (including empty values that clear an override), so
+// clients never have to infer whether an optimistic selection actually stuck.
+type SessionConfigResult struct {
+	Type              string `json:"type"`
+	SessionID         string `json:"session_id"`
+	MutationID        string `json:"mutation_id,omitempty"`
+	Accepted          bool   `json:"accepted"`
+	Reason            string `json:"reason,omitempty"`
+	Backend           string `json:"backend"`
+	Model             string `json:"model"`
+	Effort            string `json:"effort"`
+	Sandbox           string `json:"sandbox"`
+	ServiceTier       string `json:"service_tier"`
+	CollaborationMode string `json:"collaboration_mode"`
+	Personality       string `json:"personality"`
+}
+
+func NewSessionConfigResult(sessionID, mutationID string, accepted bool, reason string, backend, model, effort, sandbox, serviceTier, collaborationMode, personality string) SessionConfigResult {
+	return SessionConfigResult{
+		Type: "session_config_result", SessionID: sessionID, MutationID: mutationID,
+		Accepted: accepted, Reason: reason, Backend: backend, Model: model,
+		Effort: effort, Sandbox: sandbox, ServiceTier: serviceTier,
+		CollaborationMode: collaborationMode, Personality: personality,
+	}
 }
 
 func NewSessionRuntimeMetadata(sessionID string, model, effort *string) SessionMetaUpdated {

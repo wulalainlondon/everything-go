@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -71,6 +72,12 @@ func (d *diagnosticExec) RuntimeDiagnostics() map[string]any {
 	return map[string]any{"codex": map[string]any{
 		"status": "restart_required", "managed_version": "0.153.0", "running_version": "0.149.0",
 	}}
+}
+
+type rejectingConfigExec struct{ *fakeExec }
+
+func (r *rejectingConfigExec) UpdateSessionSettings(context.Context, *session.Session) error {
+	return errors.New("runtime refused settings")
 }
 
 func TestStatusResultIncludesBackendRuntimeDiagnostics(t *testing.T) {
@@ -383,6 +390,40 @@ func TestSetSessionMetaBroadcastsAndUpdatesSummaries(t *testing.T) {
 	ss, _ := sessions[0].(map[string]any)
 	if ss["pinned"] != true || ss["hidden"] != true {
 		t.Fatalf("sessions_list should include updated meta, got %v", ss)
+	}
+}
+
+func TestSwitchSessionConfigReturnsAuthoritativeSnapshotToEveryDevice(t *testing.T) {
+	h, _ := newTestHub(t)
+	c1 := newTestClient(h)
+	c2 := newTestClient(h)
+	route(h, c1, `{"type":"new_session","session_id":"s1","name":"One","backend":"claude"}`)
+	waitForType(t, c1, "session_created")
+
+	route(h, c1, `{"type":"switch_session_config","session_id":"s1","mutation_id":"cfg-1","effort":"high","sandbox":"workspace-write","service_tier":"fast","collaboration_mode":"plan"}`)
+	for _, c := range []*Client{c1, c2} {
+		ev := waitForType(t, c, "session_config_result")
+		if ev["accepted"] != true || ev["mutation_id"] != "cfg-1" || ev["effort"] != "high" || ev["sandbox"] != "workspace-write" || ev["service_tier"] != "fast" || ev["collaboration_mode"] != "plan" {
+			t.Fatalf("bad authoritative config result: %v", ev)
+		}
+	}
+}
+
+func TestSwitchSessionConfigRollsBackWhenRuntimeRejects(t *testing.T) {
+	h, fe := newTestHub(t)
+	h.SetExecutor(&rejectingConfigExec{fakeExec: fe})
+	c := newTestClient(h)
+	route(h, c, `{"type":"new_session","session_id":"s1","name":"One","backend":"codex","effort":"medium","sandbox":"danger-full-access"}`)
+	waitForType(t, c, "session_created")
+
+	route(h, c, `{"type":"switch_session_config","session_id":"s1","mutation_id":"cfg-2","effort":"","sandbox":"read-only"}`)
+	ev := waitForType(t, c, "session_config_result")
+	if ev["accepted"] != false || ev["mutation_id"] != "cfg-2" || !strings.HasPrefix(ev["reason"].(string), "runtime_rejected") {
+		t.Fatalf("bad rejected config result: %v", ev)
+	}
+	snap, _ := h.registry.Get("s1")
+	if got := snap.Snapshot(); got.Effort != "medium" || got.Sandbox != "danger-full-access" {
+		t.Fatalf("rejected config was not rolled back: %+v", got)
 	}
 }
 
