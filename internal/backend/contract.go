@@ -14,6 +14,7 @@ import (
 var ErrUnsupportedGoal = errors.New("goal mode is only supported for Codex sessions")
 var (
 	ErrUnsupportedSteer   = errors.New("same-turn steering is not supported by this backend")
+	ErrSteerRejected      = errors.New("steering was rejected before applying input")
 	ErrNoActiveTurn       = errors.New("there is no active turn to steer")
 	ErrThreadActiveWriter = errors.New("codex thread is controlled by another client")
 )

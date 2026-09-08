@@ -61,6 +61,7 @@ func newTestHub(t *testing.T) (*Hub, *fakeExec) {
 	reg := session.NewRegistry()
 	pairing := governance.NewPairing(filepath.Join(t.TempDir(), "pairing.json"))
 	h := NewHub(reg, Config{InstanceID: "i1", InstanceName: "test"}, pairing, 0)
+	t.Cleanup(func() { h.messageQueue.Close() })
 	fe := &fakeExec{sink: h}
 	h.SetExecutor(fe)
 	return h, fe

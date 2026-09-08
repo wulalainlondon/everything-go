@@ -61,14 +61,15 @@ type Session struct {
 
 	state State
 
-	// Turn queue (see turn.go). mailbox serializes turns; turnDone signals the
-	// in-flight turn's completion to the worker. mailbox is NEVER closed (that
-	// would race a concurrent Submit into a send-on-closed-channel panic); the
-	// worker is stopped by closing quit instead.
-	mailbox  chan func()
-	quit     chan struct{}
-	workerUp bool
-	turnDone chan struct{}
+	// Queue entries have stable IDs so a waiting message can be reserved for
+	// steering or removed atomically before the worker begins it.
+	mailbox        []*queuedTurn
+	queueChanged   chan struct{}
+	queueHolds     int
+	activeQueuedID string
+	quit           chan struct{}
+	workerUp       bool
+	turnDone       chan struct{}
 }
 
 // Snapshot is an immutable, lock-free copy of a session's fields for callers
@@ -440,14 +441,20 @@ func firstNonEmptyRegistry(values ...string) string {
 // Persist writes the current sessions to the attached store (no-op if none).
 // Safe to call from a goroutine; writes are serialized inside the Store.
 func (r *Registry) Persist() {
+	if err := r.PersistDurably(); err != nil {
+		log.Printf("session persist failed: %v", err)
+	}
+}
+
+// PersistDurably lets durable queues refuse ownership if their Session identity
+// could not be saved. It uses the same mutation boundary as preview/rename.
+func (r *Registry) PersistDurably() error {
 	r.mutationMu.Lock()
 	defer r.mutationMu.Unlock()
 	if r.store == nil {
-		return
+		return nil
 	}
-	if err := r.store.Save(r.List()); err != nil {
-		log.Printf("session persist failed: %v", err)
-	}
+	return r.store.Save(r.List())
 }
 
 var (

@@ -3,67 +3,12 @@ package core
 import (
 	"context"
 	"log"
-	"sort"
-	"time"
 
 	"everything-go/internal/fcm"
 	"everything-go/internal/protocol"
 	"everything-go/internal/runtimejournal"
 	"everything-go/internal/workitems"
 )
-
-const (
-	messageReceiptTTL = 24 * time.Hour
-	messageReceiptMax = 4096
-)
-
-func messageReceiptKey(sessionID, requestID string) string { return sessionID + "\x00" + requestID }
-
-func (h *Hub) reserveMessageRequest(sessionID, requestID string) bool {
-	if sessionID == "" || requestID == "" {
-		return true
-	}
-	now := time.Now()
-	cutoff := now.Add(-messageReceiptTTL).UnixMilli()
-	key := messageReceiptKey(sessionID, requestID)
-	h.messageMu.Lock()
-	defer h.messageMu.Unlock()
-	if _, exists := h.messageReceipts[key]; exists {
-		return false
-	}
-	h.messageReceipts[key] = now.UnixMilli()
-	if len(h.messageReceipts) <= messageReceiptMax {
-		return true
-	}
-	type receipt struct {
-		key string
-		at  int64
-	}
-	all := make([]receipt, 0, len(h.messageReceipts))
-	for candidate, at := range h.messageReceipts {
-		if at < cutoff {
-			delete(h.messageReceipts, candidate)
-			continue
-		}
-		all = append(all, receipt{candidate, at})
-	}
-	if len(h.messageReceipts) > messageReceiptMax {
-		sort.Slice(all, func(i, j int) bool { return all[i].at < all[j].at })
-		for _, candidate := range all[:len(h.messageReceipts)-messageReceiptMax] {
-			delete(h.messageReceipts, candidate.key)
-		}
-	}
-	return true
-}
-
-func (h *Hub) releaseMessageRequest(sessionID, requestID string) {
-	if sessionID == "" || requestID == "" {
-		return
-	}
-	h.messageMu.Lock()
-	delete(h.messageReceipts, messageReceiptKey(sessionID, requestID))
-	h.messageMu.Unlock()
-}
 
 func runtimeEvent(view runtimejournal.View) protocol.SessionRuntime {
 	return protocol.SessionRuntime{
@@ -149,6 +94,15 @@ func (h *Hub) recordTerminalRuntime(event any) (runtimejournal.View, bool, bool)
 		sessionID, requestID, phase, terminal, message = e.SessionID, e.RequestID, "failed", "failed", e.Message
 	default:
 		return runtimejournal.View{}, false, false
+	}
+	if active, ok := h.registry.Get(sessionID); ok {
+		named := active.ActiveQueuedID()
+		if named != "" && requestID != "" && named != requestID {
+			return runtimejournal.View{}, false, false
+		}
+		if requestID == "" {
+			requestID = named
+		}
 	}
 	view, changed := h.runtimes.Update(sessionID, phase, requestID, h.sessionQueueLength(sessionID), terminal, message)
 	return view, changed, true

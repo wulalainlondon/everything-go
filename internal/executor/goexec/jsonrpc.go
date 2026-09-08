@@ -30,6 +30,10 @@ type rpcReply struct {
 
 // rpcTimeoutError means the response is unknown, not that the server cancelled
 // the operation. In particular, callers must not replay mutations on this error.
+type rpcResponseError struct{ raw string }
+
+func (e *rpcResponseError) Error() string { return e.raw }
+
 type rpcTimeoutError struct {
 	Name, Method string
 	Timeout      time.Duration
@@ -132,7 +136,7 @@ func (p *rpcPlumber) dispatchResponse(raw json.RawMessage) bool {
 		return true
 	}
 	if probe.Error != nil {
-		ch <- rpcReply{err: fmt.Errorf("%s", string(probe.Error))}
+		ch <- rpcReply{err: &rpcResponseError{raw: string(probe.Error)}}
 	} else {
 		ch <- rpcReply{result: probe.Result}
 	}

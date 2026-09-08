@@ -1712,3 +1712,35 @@ func NewPermissionResult(requestID, sessionID, action, decision, message string)
 		Action: action, Decision: decision, Message: message,
 	}
 }
+
+// MessageQueueSnapshot is authoritative for one Session. Revision survives
+// reconnect/restart; attachment bodies stay on the server.
+type MessageQueueItem struct {
+	RequestID       string   `json:"request_id"`
+	State           string   `json:"state"`
+	Content         string   `json:"content"`
+	Sequence        int64    `json:"sequence"`
+	ImageCount      int      `json:"image_count"`
+	FileNames       []string `json:"file_names"`
+	CreatedAt       int64    `json:"created_at"`
+	UpdatedAt       int64    `json:"updated_at"`
+	Message         string   `json:"message,omitempty"`
+	ActiveRequestID string   `json:"active_request_id,omitempty"`
+	TurnID          string   `json:"turn_id,omitempty"`
+}
+type MessageQueueSnapshot struct {
+	Type      string             `json:"type"`
+	SessionID string             `json:"session_id"`
+	Revision  uint64             `json:"revision"`
+	Items     []MessageQueueItem `json:"items"`
+}
+type QueueActionResult struct {
+	Type            string `json:"type"`
+	SessionID       string `json:"session_id"`
+	RequestID       string `json:"request_id"`
+	Action          string `json:"action"`
+	Status          string `json:"status"`
+	Message         string `json:"message,omitempty"`
+	ActiveRequestID string `json:"active_request_id,omitempty"`
+	TurnID          string `json:"turn_id,omitempty"`
+}

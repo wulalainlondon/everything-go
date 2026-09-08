@@ -100,6 +100,9 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 				helloInput.Capabilities = append(helloInput.Capabilities, "external_automation_v1")
 			}
 		}
+		if !c.enrollmentOnly && h.messageQueue != nil {
+			helloInput.Capabilities = append(helloInput.Capabilities, "message_queue_v1")
+		}
 		c.enqueueEvent(h.client.HelloAck(helloInput))
 		// A provisional LAN client receives only enough information to complete
 		// claim_bridge. Do not disclose sessions, goals, replay, files or backend
@@ -288,67 +291,25 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		h.Emit(h.client.SessionsList(h.sessionSummaries()))
 
 	case "message":
-		if h.rejectMobileWrite(c, cmd.SessionID) {
-			return
+		h.enqueueChatMessage(c, cmd)
+	case "request_message_queue":
+		h.sendMessageQueue(c, cmd)
+	case "promote_queued_message":
+		if queueRequestValid(cmd) {
+			h.promoteQueuedMessage(c, cmd)
 		}
-		s, ok := h.registry.Get(cmd.SessionID)
-		if !ok {
-			h.Emit(h.client.Error(cmd.SessionID, "no_session", "unknown session"))
-			return
+	case "cancel_queued_message":
+		if queueRequestValid(cmd) {
+			h.cancelQueuedMessage(c, cmd)
 		}
-		if !h.reserveMessageRequest(cmd.SessionID, cmd.RequestID) {
-			c.enqueueEvent(protocol.NewMessageAck(cmd.SessionID, cmd.RequestID, "queued"))
-			return
-		}
-		// Enqueue on the session's turn worker: turns for one session run one at
-		// a time, in order, so two messages can't interleave a backend's stdin.
-		// The turn outlives this connection, so it gets its own context.
-		reqID, content := cmd.RequestID, cmd.Content
-		images, files := cmd.Images, cmd.Files
-		content, files, err := h.resolveUploadedVideos(cmd.SessionID, content, files)
-		if err != nil {
-			h.releaseMessageRequest(cmd.SessionID, cmd.RequestID)
-			h.Emit(h.client.Error(cmd.SessionID, "invalid_attachment", err.Error()))
-			return
-		}
-		queuedBehindActive := s.State() != session.Idle || s.QueueLen() > 0
-		if !queuedBehindActive {
-			h.updateRuntime(cmd.SessionID, "queued", reqID, 0, "", "")
-		}
-		accepted := s.Submit(func() {
-			// Commit at the actor execution boundary, not at queue acceptance. This
-			// gives previews the exact same order as turns: the result of turn N can
-			// never overwrite the already-queued request for turn N+1.
-			if preview := truncateGraphemes(normalizePreviewText(content), 160); preview != "" {
-				if _, _, err := h.registry.CommitPreviewAndPersist(cmd.SessionID, preview, "user", time.Now().UnixMilli()); err != nil {
-					log.Printf("[session-preview] running request commit failed session=%s request=%s: %v", cmd.SessionID, reqID, err)
-				}
-			}
-			h.updateRuntime(cmd.SessionID, "running", reqID, s.QueueLen(), "", "")
-			if err := h.exec.Send(context.Background(), s, reqID, content, images, files); err != nil {
-				if errors.Is(err, backend.ErrThreadActiveWriter) {
-					h.markDesktopWriter(s)
-					h.Emit(backend.NewError(s.ID, reqID, "session_controlled_by_desktop", "This session is currently controlled by the desktop. Exit the desktop TUI and reclaim mobile control before sending a new turn."))
-					return
-				}
-				log.Printf("[%s] send error: %v", s.ID, err)
-			}
-		})
-		if !accepted {
-			h.releaseMessageRequest(cmd.SessionID, cmd.RequestID)
-			h.updateRuntime(cmd.SessionID, "failed", reqID, 0, "failed", "session is closed")
-			h.Emit(h.client.Error(cmd.SessionID, "session_closed", "session is closed"))
-			return
-		}
-		if queuedBehindActive {
-			h.updateRuntimeQueueLength(cmd.SessionID, s.QueueLen())
-		}
-		// This ACK means the Bridge accepted ownership of the request and placed it
-		// in the in-memory per-session actor queue. It is deliberately independent
-		// from turn progress, which may already have advanced on a warm session.
-		c.enqueueEvent(protocol.NewMessageAck(cmd.SessionID, reqID, "queued"))
 
 	case "steer_message":
+		if h.messageQueue != nil {
+			if _, found, err := h.messageQueue.Get(cmd.SessionID, cmd.RequestID); err == nil && found {
+				h.promoteQueuedMessage(c, cmd)
+				return
+			}
+		}
 		if h.rejectMobileWrite(c, cmd.SessionID) {
 			return
 		}
@@ -405,9 +366,11 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 
 	case "stop":
 		if s, ok := h.registry.Get(cmd.SessionID); ok {
+			releaseQueue := s.HoldQueue()
 			s.MarkStopping()
 			h.updateRuntime(cmd.SessionID, "stopping", "", s.QueueLen(), "", "")
 			go func() {
+				defer releaseQueue()
 				_ = h.exec.Stop(context.Background(), s)
 				s.EndTurn() // release the queue even if the backend emits no terminal event
 			}()
@@ -415,7 +378,9 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 
 	case "clear_session":
 		if s, ok := h.registry.Get(cmd.SessionID); ok {
+			releaseQueue := s.HoldQueue()
 			go func() {
+				defer releaseQueue()
 				_ = h.exec.Clear(context.Background(), s)
 				s.EndTurn() // clear cancels an in-flight turn without a done/stopped
 			}()
@@ -424,6 +389,7 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 	case "close_session":
 		if s, ok := h.registry.Get(cmd.SessionID); ok {
 			go func() { _ = h.exec.Close(context.Background(), s) }()
+			h.closeQueuedMessages(cmd.SessionID)
 			h.registry.Delete(cmd.SessionID) // also stops the session's turn worker
 			h.updateRuntime(cmd.SessionID, "closed", "", 0, "closed", "")
 			h.Emit(h.client.SessionClosed(cmd.SessionID))

@@ -1938,7 +1938,7 @@ func (c *Codex) Send(ctx context.Context, s *session.Session, reqID, content str
 // attached to the next turn.
 func (c *Codex) Steer(ctx context.Context, s *session.Session, clientUserMessageID, content string, images []backend.ImageAttachment, files []backend.FileAttachment) (backend.SteerResult, error) {
 	if err := c.ensureServer(); err != nil {
-		return backend.SteerResult{}, err
+		return backend.SteerResult{}, fmt.Errorf("%w: %v", backend.ErrSteerRejected, err)
 	}
 	return c.steerActiveTurn(s, clientUserMessageID, content, images, files)
 }
@@ -1964,6 +1964,10 @@ func (c *Codex) steerActiveTurn(s *session.Session, clientUserMessageID, content
 	}
 	raw, err := c.rpcCall("turn/steer", params, 15*time.Second)
 	if err != nil {
+		var rejected *rpcResponseError
+		if errors.As(err, &rejected) {
+			return backend.SteerResult{}, fmt.Errorf("%w: %v", backend.ErrSteerRejected, err)
+		}
 		return backend.SteerResult{}, err
 	}
 	var response struct {

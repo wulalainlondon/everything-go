@@ -31,6 +31,7 @@ import (
 	"everything-go/internal/governance"
 	"everything-go/internal/inbox"
 	"everything-go/internal/media"
+	"everything-go/internal/messagequeue"
 	"everything-go/internal/nativewatch"
 	"everything-go/internal/notificationreply"
 	"everything-go/internal/protocol"
@@ -60,6 +61,8 @@ type Config struct {
 // the executor.Sink (Emit broadcasts an event to connected clients, or buffers
 // it when none are connected so a reconnecting client can recover it).
 type Hub struct {
+	messageQueue        *messagequeue.Store
+	messageQueueMu      sync.Mutex
 	registry            *session.Registry
 	exec                executor.Executor
 	shells              *runtime.ShellManager
@@ -111,9 +114,6 @@ type Hub struct {
 
 	steerMu      sync.Mutex
 	steerResults map[string]protocol.SteerResult // session_id/request_id -> terminal acknowledgement
-
-	messageMu       sync.Mutex
-	messageReceipts map[string]int64 // session_id/request_id -> accepted unix milliseconds
 
 	storm *stormGuards // dedupe/throttle/semaphore for heavy handlers
 
@@ -168,7 +168,6 @@ func NewHub(reg *session.Registry, cfg Config, pairing *governance.Pairing, port
 		latestByDevice:      make(map[string]*Client),
 		turnText:            make(map[string]*strings.Builder),
 		steerResults:        make(map[string]protocol.SteerResult),
-		messageReceipts:     make(map[string]int64),
 		iceServers:          stunServers,
 		storm:               newStormGuards(),
 		mediaScan:           media.NewScanner(port),
@@ -181,6 +180,14 @@ func NewHub(reg *session.Registry, cfg Config, pairing *governance.Pairing, port
 		automationWake:      make(chan struct{}, 1),
 		relayWake:           make(chan struct{}, 1),
 		relayNonces:         make(map[string]int64),
+	}
+	if store, err := messagequeue.Open(cfg.DataDir); err != nil {
+		log.Printf("[message-queue] storage unavailable: %v", err)
+	} else if err = store.Recover(); err != nil {
+		store.Close()
+		log.Printf("[message-queue] recovery unavailable: %v", err)
+	} else {
+		h.messageQueue = store
 	}
 	if capabilities, err := notificationreply.NewCapabilities(cfg.DataDir, cfg.InstanceID); err != nil {
 		log.Printf("[notification-reply] capability initialization failed: %v", err)
@@ -210,6 +217,7 @@ func NewHub(reg *session.Registry, cfg Config, pairing *governance.Pairing, port
 func (h *Hub) SetExecutor(e executor.Executor) {
 	h.exec = e
 	h.resumeNotificationReplies()
+	h.resumeQueuedMessages()
 }
 
 func (h *Hub) SetRelay(store *relay.Store, peers relay.Peers) {
@@ -467,6 +475,7 @@ func (h *Hub) Emit(event any) {
 	terminalView, terminalChanged, terminalEvent := h.recordTerminalRuntime(event)
 	releaseTurn := func() {}
 	if terminalEvent {
+		h.finishQueuedMessage(terminalView)
 		if s, ok := h.registry.Get(terminalView.SessionID); ok {
 			releaseTurn = s.PrepareEndTurn()
 		}
