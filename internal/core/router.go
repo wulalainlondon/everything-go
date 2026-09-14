@@ -643,7 +643,10 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 
 	case "fcm_token":
 		if h.fcm != nil {
-			h.fcm.SetToken(c.deviceID, cmd.Token, cmd.Platform)
+			// Trust only the authenticated connection's device identity, never
+			// a device_id supplied in this command. Preferences can arrive before
+			// Firebase registration, and must survive later token refreshes.
+			h.fcm.RegisterDevice(c.deviceID, cmd.Token, cmd.Platform, cmd.NotificationPreferences)
 		}
 
 	case "permission_response":

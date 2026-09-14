@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"everything-go/internal/identity"
+	"everything-go/internal/protocol"
 
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
@@ -41,9 +42,10 @@ const (
 )
 
 type deviceRegistration struct {
-	Token     string `json:"token"`
-	Platform  string `json:"platform,omitempty"`
-	UpdatedAt int64  `json:"updated_at"`
+	Token       string                            `json:"token"`
+	Platform    string                            `json:"platform,omitempty"`
+	UpdatedAt   int64                             `json:"updated_at"`
+	Preferences *protocol.NotificationPreferences `json:"notification_preferences,omitempty"`
 }
 
 type tokenRegistry struct {
@@ -129,34 +131,54 @@ func NewFromBytes(data []byte, registryPath string) (*Notifier, error) {
 // registry. Reusing a token under a new device id moves it instead of creating
 // duplicate pushes (e.g. after an app reinstall changes the local device id).
 func (n *Notifier) SetToken(deviceID, token string, platform ...string) {
-	deviceID = strings.TrimSpace(deviceID)
-	token = strings.TrimSpace(token)
 	devicePlatform := ""
 	if len(platform) > 0 {
-		devicePlatform = strings.ToLower(strings.TrimSpace(platform[0]))
-		if devicePlatform != "android" && devicePlatform != "ios" {
-			devicePlatform = ""
-		}
+		devicePlatform = platform[0]
 	}
-	if token == "" || deviceID == "" {
+	n.RegisterDevice(deviceID, token, devicePlatform, nil)
+}
+
+// RegisterDevice installs token and preferences atomically: a newly registered
+// iPhone must never briefly receive an unredacted legacy push before opt-out.
+func (n *Notifier) RegisterDevice(deviceID, token, platform string, preferences *protocol.NotificationPreferences) {
+	deviceID, token = strings.TrimSpace(deviceID), strings.TrimSpace(token)
+	devicePlatform := strings.ToLower(strings.TrimSpace(platform))
+	if devicePlatform != "android" && devicePlatform != "ios" {
+		devicePlatform = ""
+	}
+	if deviceID == "" || (token == "" && preferences == nil) {
 		return
 	}
 	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.devices == nil {
+		n.devices = make(map[string]deviceRegistration)
+	}
 	for id, registration := range n.devices {
-		if id != deviceID && registration.Token == token {
+		if token != "" && id != deviceID && registration.Token == token {
 			delete(n.devices, id)
 		}
 	}
 	current, exists := n.devices[deviceID]
-	if exists && current.Token == token && current.Platform == devicePlatform {
-		n.mu.Unlock()
+	unchangedPreferences := preferences == nil || (current.Preferences != nil && *current.Preferences == *preferences)
+	if exists && (token == "" || current.Token == token) && (devicePlatform == "" || current.Platform == devicePlatform) && unchangedPreferences {
 		return
 	}
-	n.devices[deviceID] = deviceRegistration{Token: token, Platform: devicePlatform, UpdatedAt: time.Now().UnixMilli()}
+	if token != "" {
+		current.Token = token
+	}
+	if devicePlatform != "" {
+		current.Platform = devicePlatform
+	}
+	if preferences != nil {
+		copy := *preferences
+		current.Preferences = &copy
+	}
+	current.UpdatedAt = time.Now().UnixMilli()
+	n.devices[deviceID] = current
 	n.enforceCapLocked()
 	n.persistLocked()
-	n.mu.Unlock()
-	log.Printf("[fcm] device token registered device=%s (len=%d)", deviceID, len(token))
+	log.Printf("[fcm] device registration updated device=%s preferences=%t", deviceID, current.Preferences != nil)
 }
 
 func (n *Notifier) targets() []target {
@@ -236,7 +258,9 @@ func (n *Notifier) NotifyTaskDoneWithAuthority(instanceID, instanceName, session
 	ios.Message.APNS = visibleAPNSConfig(
 		"BRIDGE_SESSION_REPLY",
 		"bridge-session-"+shortStableID(instanceID, sessionID),
-		"bridge-done-"+shortStableID(instanceID, sessionID),
+		// Use the status notification's collapse ID so completion replaces the
+		// stale running/waiting card for this same session on iOS.
+		"bridge-status-"+shortStableID(instanceID, sessionID),
 		legacy.Message.Notification,
 	)
 	n.sendTargets(ios, "task_done", n.targetsForPlatform("ios"))
@@ -519,7 +543,7 @@ func shortStableID(parts ...string) string {
 
 func shouldSurfaceIOSSessionStatus(phase, stage string) bool {
 	switch phase {
-	case "waiting", "stopping":
+	case "waiting", "stopping", "failed":
 		return true
 	case "running":
 		// One visible status per request. Fine-grained thinking/tool progress is
@@ -539,6 +563,8 @@ func iosSessionStatusBody(phase, stage, message string) string {
 		label = "需要你的回覆"
 	case "stopping":
 		label = "正在停止"
+	case "failed":
+		label = "執行失敗"
 	default:
 		label = "正在處理"
 	}
@@ -576,8 +602,14 @@ func (n *Notifier) sendTargets(msg v1message, kind string, targets []target) {
 // matching the Python retry policy. A fatal response removes only the token
 // that failed; other device registrations remain intact.
 func (n *Notifier) send(msg v1message, kind string, dst target) {
-	body, _ := json.Marshal(msg)
 	for attempt := 0; attempt < 3; attempt++ {
+		// Re-read preferences for each actual send/retry, not when a status
+		// first entered the coalescing buffer. Never mutate the shared payload.
+		filtered, allowed := n.messageForDevice(msg, kind, dst)
+		if !allowed {
+			return
+		}
+		body, _ := json.Marshal(filtered)
 		tok, err := n.tokenSource.Token()
 		if err != nil {
 			log.Printf("[fcm] oauth token error: %v", err)
@@ -613,7 +645,9 @@ func (n *Notifier) invalidate(dst target) {
 	n.mu.Lock()
 	current, ok := n.devices[dst.deviceID]
 	if ok && current.Token == dst.token {
-		delete(n.devices, dst.deviceID)
+		// A refreshed token must not resurrect notifications the user disabled.
+		current.Token = ""
+		n.devices[dst.deviceID] = current
 		n.persistLocked()
 	}
 	n.mu.Unlock()

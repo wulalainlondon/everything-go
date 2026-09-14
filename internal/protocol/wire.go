@@ -82,12 +82,13 @@ type Inbound struct {
 	Force   bool   `json:"force"` // kill_process SIGKILL
 
 	// file ops: browse_dir / open_file / fcm
-	Path             string   `json:"path"`
-	Paths            []string `json:"paths"`
-	ClientHash       string   `json:"client_hash"`
-	ExpectedModified *int64   `json:"expected_modified"`
-	Token            string   `json:"token"`
-	Platform         string   `json:"platform"`
+	Path                    string                   `json:"path"`
+	Paths                   []string                 `json:"paths"`
+	ClientHash              string                   `json:"client_hash"`
+	ExpectedModified        *int64                   `json:"expected_modified"`
+	Token                   string                   `json:"token"`
+	Platform                string                   `json:"platform"`
+	NotificationPreferences *NotificationPreferences `json:"notification_preferences,omitempty"`
 
 	// search
 	Query            string         `json:"query"`

@@ -70,12 +70,13 @@ type Command struct {
 	PID     int
 	Force   bool
 
-	Path             string
-	Paths            []string
-	ClientHash       string
-	ExpectedModified *int64
-	Token            string
-	Platform         string
+	Path                    string
+	Paths                   []string
+	ClientHash              string
+	ExpectedModified        *int64
+	Token                   string
+	Platform                string
+	NotificationPreferences *protocol.NotificationPreferences
 
 	Query            string
 	Offset           int
@@ -213,12 +214,13 @@ func (AppV1) ParseCommand(in protocol.Inbound) Command {
 		PID:     in.PID,
 		Force:   in.Force,
 
-		Path:             in.Path,
-		Paths:            in.Paths,
-		ClientHash:       in.ClientHash,
-		ExpectedModified: in.ExpectedModified,
-		Token:            in.Token,
-		Platform:         in.Platform,
+		Path:                    in.Path,
+		Paths:                   in.Paths,
+		ClientHash:              in.ClientHash,
+		ExpectedModified:        in.ExpectedModified,
+		Token:                   in.Token,
+		Platform:                in.Platform,
+		NotificationPreferences: in.NotificationPreferences,
 
 		Query:            in.Query,
 		Offset:           in.Offset,
