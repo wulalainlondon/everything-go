@@ -281,6 +281,11 @@ func (n *Notifier) NotifyFilePush(fileID, filename string) {
 // NotifyTunnelURL mirrors push_registry.send_tunnel_fcm_once.
 // Sends a data-only (silent) push so the app can update its tunnel URL.
 func (n *Notifier) NotifyTunnelURL(wsURL, instanceID string) {
+	// cloudflared reports HTTPS origins; clients consume WebSocket endpoints.
+	// Normalize at the push boundary so native receivers can require WSS.
+	if strings.HasPrefix(wsURL, "https://") {
+		wsURL = "wss://" + strings.TrimPrefix(wsURL, "https://")
+	}
 	msg := v1message{}
 	msg.Message.Data = map[string]string{
 		"type": "tunnel_url", "schema_version": fcmPayloadSchemaVersion, "url": wsURL, "instance_id": instanceID,

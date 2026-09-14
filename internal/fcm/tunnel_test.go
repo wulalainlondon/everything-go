@@ -19,7 +19,7 @@ func TestTunnelPushIncludesAppleBackgroundEnvelope(t *testing.T) {
 	defer server.Close()
 	n := testNotifier(filepath.Join(t.TempDir(), "tokens.json"), server.URL, server.Client())
 	n.SetToken("iphone", "token", "ios")
-	n.NotifyTunnelURL("wss://example.com", "morrie")
+	n.NotifyTunnelURL("https://example.com", "morrie")
 	msg := received.Message
 	if msg.APNS == nil || msg.APNS.Payload.APS.ContentAvailable != 1 {
 		t.Fatal("missing silent push payload")
