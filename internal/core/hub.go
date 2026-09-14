@@ -24,6 +24,7 @@ import (
 	"everything-go/internal/automation"
 	"everything-go/internal/backend"
 	"everything-go/internal/clientproto"
+	"everything-go/internal/deviceinventory"
 	"everything-go/internal/eventinbox"
 	"everything-go/internal/executor"
 	"everything-go/internal/fcm"
@@ -61,6 +62,7 @@ type Config struct {
 // the executor.Sink (Emit broadcasts an event to connected clients, or buffers
 // it when none are connected so a reconnecting client can recover it).
 type Hub struct {
+	deviceInventory     *deviceinventory.Store
 	messageQueue        *messagequeue.Store
 	messageQueueMu      sync.Mutex
 	maintenanceHolds    map[string]func()
@@ -190,6 +192,14 @@ func NewHub(reg *session.Registry, cfg Config, pairing *governance.Pairing, port
 		log.Printf("[message-queue] recovery unavailable: %v", err)
 	} else {
 		h.messageQueue = store
+	}
+	if cfg.DataDir != "" {
+		if inventory, err := deviceinventory.Open(cfg.DataDir); err != nil {
+			log.Printf("[device-inventory] unavailable: %v", err)
+		} else {
+			h.deviceInventory = inventory
+			h.syncDeviceInventory()
+		}
 	}
 	if capabilities, err := notificationreply.NewCapabilities(cfg.DataDir, cfg.InstanceID); err != nil {
 		log.Printf("[notification-reply] capability initialization failed: %v", err)

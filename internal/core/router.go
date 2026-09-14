@@ -65,6 +65,12 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		c.clientSurface = strings.ToLower(strings.TrimSpace(cmd.ClientSurface))
 		c.protocolVersion = cmd.ProtocolVersion
 		c.supportsReplayAck = cmd.ReplayAck
+		if b := c.inventoryBinding.Load(); b != nil && b.deviceID == cmd.DeviceID && !cmd.ConnectionProbe {
+			promoted := *b
+			promoted.probe = false
+			c.inventoryBinding.Store(&promoted)
+			h.observeClientInfo(c, cmd.DeviceID, cmd.ClientInfo)
+		}
 		// Latest-device-wins: evict any older client from the same device so the
 		// half-disconnect storm can't pile up zombie clients (#1).
 		if !c.enrollmentOnly {
@@ -102,6 +108,9 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		}
 		if !c.enrollmentOnly && h.messageQueue != nil {
 			helloInput.Capabilities = append(helloInput.Capabilities, "message_queue_v1")
+		}
+		if !c.enrollmentOnly && h.deviceInventory != nil {
+			helloInput.Capabilities = append(helloInput.Capabilities, "device_inventory_v1")
 		}
 		c.enqueueEvent(h.client.HelloAck(helloInput))
 		// A provisional LAN client receives only enough information to complete
@@ -145,6 +154,9 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		h.sendPendingPushes(c)
 
 	case "ping":
+		if cmd.ClientInfo != nil {
+			h.observeClientInfo(c, c.deviceID, cmd.ClientInfo)
+		}
 		c.enqueueEvent(h.client.Pong())
 
 	case "attachment_upload_init":
@@ -173,6 +185,8 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		}
 		wasEnrollment := c.enrollmentOnly
 		c.enrollmentOnly = false
+		h.syncDeviceInventory()
+		h.bindDeviceInventory(c, cmd.AuthToken, cmd.DeviceID, c.inventoryName, c.clientSurface, c.inventoryProbe)
 		if wasEnrollment {
 			h.registerLatest(c)
 		}
@@ -188,6 +202,7 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 			return
 		}
 		c.enqueueEvent(h.client.UnclaimAck(h.pairing.IsLocked()))
+		h.syncDeviceInventory()
 
 	case "request_sessions_list":
 		c.enqueueEvent(h.client.SessionsList(h.sessionSummaries()))

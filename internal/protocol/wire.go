@@ -24,15 +24,17 @@ type Inbound struct {
 	RequestID string `json:"request_id"`
 
 	// hello / pairing
-	DeviceID        string `json:"device_id"`
-	DeviceName      string `json:"device_name"`
-	ClientSurface   string `json:"client_surface"`
-	AuthToken       string `json:"auth_token"`
-	ReplayAck       bool   `json:"replay_ack"`
-	ProtocolVersion int    `json:"protocol_version"`
-	BatchID         string `json:"batch_id"`
-	Revision        uint64 `json:"revision"`
-	Read            bool   `json:"read"`
+	DeviceID        string      `json:"device_id"`
+	DeviceName      string      `json:"device_name"`
+	ClientSurface   string      `json:"client_surface"`
+	AuthToken       string      `json:"auth_token"`
+	ReplayAck       bool        `json:"replay_ack"`
+	ProtocolVersion int         `json:"protocol_version"`
+	ClientInfo      *ClientInfo `json:"client_info,omitempty"`
+	ConnectionProbe bool        `json:"connection_probe,omitempty"`
+	BatchID         string      `json:"batch_id"`
+	Revision        uint64      `json:"revision"`
+	Read            bool        `json:"read"`
 
 	// new_session
 	Name           string `json:"name"`
@@ -185,6 +187,16 @@ type Inbound struct {
 	CurrentState          string                       `json:"current_state"`
 	SessionIDs            []string                     `json:"session_ids"`
 	SelectedSuggestionIDs []string                     `json:"selected_suggestion_ids"`
+}
+
+// ClientInfo is optional telemetry on authenticated hello/ping frames. Build is
+// a string because iOS and Android use different native build formats.
+type ClientInfo struct {
+	AppID    string `json:"app_id"`
+	Platform string `json:"platform"`
+	Version  string `json:"version"`
+	Build    string `json:"build"`
+	Channel  string `json:"channel"`
 }
 
 // InboundImage is one attached image on a message (app strips the data-URL

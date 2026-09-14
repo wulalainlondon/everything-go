@@ -30,6 +30,7 @@ import (
 	"everything-go/internal/automation"
 	"everything-go/internal/backend"
 	"everything-go/internal/core"
+	"everything-go/internal/deviceinventory"
 	"everything-go/internal/eventinbox"
 	"everything-go/internal/executor"
 	"everything-go/internal/executor/goexec"
@@ -74,9 +75,22 @@ func main() {
 	mdnsOff := flag.Bool("no-mdns", false, "deprecated: mDNS is disabled by default")
 	disableSearch := flag.Bool("disable-search", false, "disable transcript search and background indexing")
 	disableNativeWatcher := flag.Bool("disable-native-watcher", false, "disable native session discovery outside bridge-created sessions")
-	mode := flag.String("mode", "bridge", "run mode: bridge (resident server) | index (one-shot search ingest, then exit)")
+	mode := flag.String("mode", "bridge", "run mode: bridge | index | devices (read-only local device inventory)")
 	indexPathsStdin := flag.Bool("index-paths-stdin", false, "index only newline-delimited transcript paths read from stdin")
 	flag.Parse()
+	if *mode == "devices" {
+		result, err := deviceinventory.Query(context.Background(), *dataDir)
+		if err != nil {
+			log.Printf("device inventory query failed: %v", err)
+			os.Exit(1)
+		}
+		encoder := json.NewEncoder(os.Stdout)
+		encoder.SetIndent("", "  ")
+		if err := encoder.Encode(result); err != nil {
+			os.Exit(1)
+		}
+		return
+	}
 
 	// `--mode=index` is the short-lived indexer child: it ingests the search DB
 	// to completion and exits, keeping the heap-heavy transcript parse out of the
@@ -198,6 +212,7 @@ func main() {
 	// the heap-heavy parse of every transcript lands in a process that exits and
 	// returns its memory to the OS (see runSearchIndexerLoop).
 	ctx := context.Background()
+	hub.StartDeviceInventoryAdmin(ctx)
 	hub.StartWorkScheduler(ctx)
 	hub.StartMaintenanceRecovery(ctx)
 	hub.StartAutomationScheduler(ctx)

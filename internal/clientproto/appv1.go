@@ -30,6 +30,8 @@ type Command struct {
 	AuthToken       string
 	ReplayAck       bool
 	ProtocolVersion int
+	ClientInfo      *protocol.ClientInfo
+	ConnectionProbe bool
 	BatchID         string
 	Revision        uint64
 	Read            bool
@@ -169,6 +171,8 @@ func (AppV1) ParseCommand(in protocol.Inbound) Command {
 		AuthToken:       in.AuthToken,
 		ReplayAck:       in.ReplayAck,
 		ProtocolVersion: in.ProtocolVersion,
+		ClientInfo:      in.ClientInfo,
+		ConnectionProbe: in.ConnectionProbe,
 		BatchID:         in.BatchID,
 		Revision:        in.Revision,
 		Read:            in.Read,

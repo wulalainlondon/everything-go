@@ -111,10 +111,13 @@ type Client struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	clientID        string
-	deviceID        string
-	clientSurface   string
-	protocolVersion int
+	clientID         string
+	deviceID         string
+	clientSurface    string
+	protocolVersion  int
+	inventoryBinding atomic.Pointer[clientInventoryBinding]
+	inventoryName    string
+	inventoryProbe   bool
 	// enrollmentOnly is true when the handshake was admitted solely through a
 	// short-lived LAN pairing window. Such a client may only complete claim_bridge
 	// (or ping) until its credential is persisted.
@@ -235,6 +238,7 @@ func (c *Client) pingLoopEvery(ctx context.Context, interval, timeout time.Durat
 				c.shutdown()
 				return
 			}
+			c.hub.touchDeviceInventory(c)
 		}
 	}
 }
@@ -319,6 +323,9 @@ func (h *Hub) serveConn(ctx context.Context, conn wireConn) {
 	closeReason := c.readLoop(ctx)
 
 	h.removeClient(c)
+	if b := c.inventoryBinding.Load(); b != nil && h.deviceInventory != nil {
+		h.deviceInventory.Disconnect(b.key, c.clientID)
+	}
 	h.cleanupWebRTC(c) // drop the answering PC unless its DataChannel was promoted
 	c.shutdown()       // stop the write pump; background enqueuers now drop silently
 	c.uploads.close()
@@ -353,6 +360,8 @@ func (c *Client) handshake(ctx context.Context) (clientproto.Command, bool) {
 		c.writeNow(ctx, protocol.NewError("", "", "Unauthorized: invalid auth token"))
 		return clientproto.Command{}, false
 	}
+	c.inventoryName, c.inventoryProbe = in.DeviceName, in.ConnectionProbe
+	c.hub.bindDeviceInventory(c, provided, in.DeviceID, in.DeviceName, in.ClientSurface, in.ConnectionProbe)
 	logInbound(in.Type, in.SessionID)
 	return c.hub.client.ParseCommand(in), true
 }
@@ -405,6 +414,7 @@ func (c *Client) readLoop(ctx context.Context) error {
 			continue
 		}
 		logInbound(in.Type, in.SessionID)
+		c.hub.touchDeviceInventory(c)
 		c.hub.route(ctx, c, c.hub.client.ParseCommand(in))
 	}
 }
