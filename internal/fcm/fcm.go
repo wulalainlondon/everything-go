@@ -284,7 +284,17 @@ func (n *Notifier) NotifyTunnelURL(wsURL, instanceID string) {
 	msg := v1message{}
 	msg.Message.Data = map[string]string{
 		"type": "tunnel_url", "schema_version": fcmPayloadSchemaVersion, "url": wsURL, "instance_id": instanceID,
-		"event_id": "tunnel_url:" + instanceID,
+		"event_id":  "tunnel_url:" + instanceID,
+		"issued_at": fmt.Sprint(time.Now().UnixMilli()),
+	}
+	msg.Message.APNS = &v1apnsConfig{
+		Headers: map[string]string{
+			"apns-push-type":   "background",
+			"apns-priority":    "5",
+			"apns-collapse-id": "tunnel-" + shortStableID(instanceID),
+			"apns-expiration":  fmt.Sprint(time.Now().Add(24 * time.Hour).Unix()),
+		},
+		Payload: v1apnsPayload{APS: v1aps{ContentAvailable: 1}},
 	}
 	n.sendAll(msg, "tunnel_url")
 }
