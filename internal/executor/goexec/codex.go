@@ -2198,13 +2198,13 @@ func (c *Codex) runCompact(st *codexState, timeout time.Duration) error {
 
 func (c *Codex) SetGoal(ctx context.Context, s *session.Session, objective, status string, tokenBudget *int) error {
 	if err := c.ensureServer(); err != nil {
-		c.sink.Emit(backend.NewError(s.ID, "", backend.ErrProcessDied, "codex app-server failed: "+err.Error()))
+		c.sink.Emit(backend.NewSessionWarning(s.ID, "codex app-server failed: "+err.Error()))
 		return err
 	}
 	st := c.state(s.ID)
 	if err := c.ensureThread(s, st); err != nil {
 		if !errors.Is(err, backend.ErrThreadActiveWriter) {
-			c.sink.Emit(backend.NewError(s.ID, "", backend.ErrProcessDied, "failed to start codex thread: "+err.Error()))
+			c.sink.Emit(backend.NewSessionWarning(s.ID, "failed to start codex thread: "+err.Error()))
 		}
 		return err
 	}
@@ -2223,13 +2223,13 @@ func (c *Codex) SetGoal(ctx context.Context, s *session.Session, objective, stat
 	}
 	raw, err := c.rpcCall("thread/goal/set", params, 30*time.Second)
 	if err != nil {
-		c.sink.Emit(backend.NewError(s.ID, "", backend.ErrTurn, "goal set failed: "+err.Error()))
+		c.sink.Emit(backend.NewSessionWarning(s.ID, "goal set failed: "+err.Error()))
 		return err
 	}
 	goal, ok := decodeCodexGoal(raw)
 	if !ok {
 		err := fmt.Errorf("thread/goal/set returned no goal")
-		c.sink.Emit(backend.NewError(s.ID, "", backend.ErrTurn, err.Error()))
+		c.sink.Emit(backend.NewSessionWarning(s.ID, err.Error()))
 		return err
 	}
 	c.sink.Emit(backend.NewGoalUpdate(s.ID, goal))
@@ -2238,7 +2238,7 @@ func (c *Codex) SetGoal(ctx context.Context, s *session.Session, objective, stat
 
 func (c *Codex) GetGoal(ctx context.Context, s *session.Session) error {
 	if err := c.ensureServer(); err != nil {
-		c.sink.Emit(backend.NewError(s.ID, "", backend.ErrProcessDied, "codex app-server failed: "+err.Error()))
+		c.sink.Emit(backend.NewSessionWarning(s.ID, "codex app-server failed: "+err.Error()))
 		return err
 	}
 	st := c.state(s.ID)
@@ -2254,7 +2254,7 @@ func (c *Codex) GetGoal(ctx context.Context, s *session.Session) error {
 	if threadID == "" {
 		if err := c.ensureThread(s, st); err != nil {
 			if !errors.Is(err, backend.ErrThreadActiveWriter) {
-				c.sink.Emit(backend.NewError(s.ID, "", backend.ErrProcessDied, "failed to start codex thread: "+err.Error()))
+				c.sink.Emit(backend.NewSessionWarning(s.ID, "failed to start codex thread: "+err.Error()))
 			}
 			return err
 		}
@@ -2268,7 +2268,7 @@ func (c *Codex) GetGoal(ctx context.Context, s *session.Session) error {
 		// already loaded by a desktop client takes the fast read-only path above.
 		if resumeErr := c.ensureThread(s, st); resumeErr != nil {
 			if !errors.Is(resumeErr, backend.ErrThreadActiveWriter) {
-				c.sink.Emit(backend.NewError(s.ID, "", backend.ErrProcessDied, "failed to start codex thread: "+resumeErr.Error()))
+				c.sink.Emit(backend.NewSessionWarning(s.ID, "failed to start codex thread: "+resumeErr.Error()))
 			}
 			return resumeErr
 		}
@@ -2278,7 +2278,7 @@ func (c *Codex) GetGoal(ctx context.Context, s *session.Session) error {
 		raw, err = c.rpcCall("thread/goal/get", map[string]any{"threadId": threadID}, 30*time.Second)
 	}
 	if err != nil {
-		c.sink.Emit(backend.NewError(s.ID, "", backend.ErrTurn, "goal get failed: "+err.Error()))
+		c.sink.Emit(backend.NewSessionWarning(s.ID, "goal get failed: "+err.Error()))
 		return err
 	}
 	goal, ok := decodeCodexGoal(raw)
@@ -2331,13 +2331,13 @@ func (c *Codex) reconcileGoalAfterTurn(s *session.Session, st *codexState) {
 
 func (c *Codex) ClearGoal(ctx context.Context, s *session.Session) error {
 	if err := c.ensureServer(); err != nil {
-		c.sink.Emit(backend.NewError(s.ID, "", backend.ErrProcessDied, "codex app-server failed: "+err.Error()))
+		c.sink.Emit(backend.NewSessionWarning(s.ID, "codex app-server failed: "+err.Error()))
 		return err
 	}
 	st := c.state(s.ID)
 	if err := c.ensureThread(s, st); err != nil {
 		if !errors.Is(err, backend.ErrThreadActiveWriter) {
-			c.sink.Emit(backend.NewError(s.ID, "", backend.ErrProcessDied, "failed to start codex thread: "+err.Error()))
+			c.sink.Emit(backend.NewSessionWarning(s.ID, "failed to start codex thread: "+err.Error()))
 		}
 		return err
 	}
@@ -2345,7 +2345,7 @@ func (c *Codex) ClearGoal(ctx context.Context, s *session.Session) error {
 	threadID := st.threadID
 	st.mu.Unlock()
 	if _, err := c.rpcCall("thread/goal/clear", map[string]any{"threadId": threadID}, 30*time.Second); err != nil {
-		c.sink.Emit(backend.NewError(s.ID, "", backend.ErrTurn, "goal clear failed: "+err.Error()))
+		c.sink.Emit(backend.NewSessionWarning(s.ID, "goal clear failed: "+err.Error()))
 		return err
 	}
 	c.sink.Emit(backend.NewGoalCleared(s.ID))
