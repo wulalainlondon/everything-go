@@ -147,6 +147,16 @@ func (h *Hub) messageQueueSnapshot(sessionID string) (protocol.MessageQueueSnaps
 		return event, err
 	}
 	event.Revision = snapshot.Revision
+	if p, ok := h.exec.(backend.MaintenanceProvider); ok {
+		for _, r := range p.MaintenanceRecords() {
+			if r.SessionID == sessionID {
+				event.Maintenance = r
+			}
+		}
+	}
+	if p, ok := h.exec.(interface{ RuntimeDiagnostics() map[string]any }); ok {
+		event.Diagnostics = p.RuntimeDiagnostics()
+	}
 	for _, e := range snapshot.Items {
 		event.Items = append(event.Items, protocol.MessageQueueItem{RequestID: e.RequestID, State: string(e.State), Content: e.Content, Sequence: e.Sequence, ImageCount: e.ImageCount, FileNames: e.FileNames, CreatedAt: e.CreatedAt, UpdatedAt: e.UpdatedAt, Message: e.Message, ActiveRequestID: e.ActiveRequestID, TurnID: e.TurnID})
 	}
@@ -240,6 +250,11 @@ func (h *Hub) promoteQueuedMessage(c *Client, cmd clientproto.Command) {
 		return
 	}
 	h.messageQueueMu.Lock()
+	if h.maintenanceHolds[cmd.SessionID] != nil {
+		h.messageQueueMu.Unlock()
+		h.queueResult(c, cmd, "promote", "retained", "上下文整理尚未確認，不能插入新指令", messagequeue.Entry{})
+		return
+	}
 	e, found, err := h.messageQueue.Get(cmd.SessionID, cmd.RequestID)
 	if err != nil || !found {
 		h.messageQueueMu.Unlock()

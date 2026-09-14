@@ -1729,10 +1729,12 @@ type MessageQueueItem struct {
 	TurnID          string   `json:"turn_id,omitempty"`
 }
 type MessageQueueSnapshot struct {
-	Type      string             `json:"type"`
-	SessionID string             `json:"session_id"`
-	Revision  uint64             `json:"revision"`
-	Items     []MessageQueueItem `json:"items"`
+	Type        string             `json:"type"`
+	SessionID   string             `json:"session_id"`
+	Revision    uint64             `json:"revision"`
+	Items       []MessageQueueItem `json:"items"`
+	Maintenance any                `json:"maintenance,omitempty"`
+	Diagnostics any                `json:"diagnostics,omitempty"`
 }
 type QueueActionResult struct {
 	Type            string `json:"type"`

@@ -84,6 +84,18 @@ func Open(dataDir string) (*Store, error) {
 }
 func (s *Store) Close() error { return s.db.Close() }
 
+func (s *Store) Touch(sessionID string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err = bump(tx, sessionID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 const columns = `seq,session_id,request_id,state,content,image_count,file_names,payload,payload_hash,message,active_request_id,turn_id,created_at,updated_at`
 
 type scanner interface{ Scan(...any) error }

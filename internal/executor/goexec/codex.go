@@ -68,6 +68,7 @@ type codexState struct {
 	currentTurnID string
 	turnActive    bool
 	turnErr       string
+	turnErrorCode string
 	turnDone      chan struct{}
 	stopping      bool
 	reqID         string
@@ -83,6 +84,7 @@ type codexState struct {
 	compactActive   bool
 	compactErr      string
 	compactDone     chan struct{}
+	compactTurnID   string
 	lastEventAt     time.Time
 	stallWarned     bool
 	pendingHandoff  string
@@ -183,6 +185,8 @@ type Codex struct {
 	stallAbortAfter    time.Duration
 	stallCheckEvery    time.Duration
 	dataDir            string
+	maintenanceMu      sync.Mutex
+	maintenance        map[string]backend.Maintenance
 	rolloverEnabled    bool
 	coldResumeMaxBytes int64
 	checkpointMaxBytes int
@@ -329,6 +333,7 @@ func (c *Codex) RuntimeDiagnostics() map[string]any {
 func (c *Codex) SetDataDir(path string) {
 	if strings.TrimSpace(path) != "" {
 		c.dataDir = runtime.ExpandPath(path)
+		c.loadMaintenance()
 	}
 }
 
@@ -1044,7 +1049,8 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 			ID     string `json:"id"`
 			Status string `json:"status"`
 			Error  struct {
-				Message string `json:"message"`
+				Message string          `json:"message"`
+				Info    json.RawMessage `json:"codexErrorInfo"`
 			} `json:"error"`
 		} `json:"turn"`
 		Item struct {
@@ -1072,7 +1078,8 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 		} `json:"thread"`
 		WillRetry bool `json:"willRetry"`
 		Error     struct {
-			Message string `json:"message"`
+			Message string          `json:"message"`
+			Info    json.RawMessage `json:"codexErrorInfo"`
 		} `json:"error"`
 		TokenUsage codexTokenUsage `json:"tokenUsage"`
 		Usage      codexTokenUsage `json:"usage"`
@@ -1124,6 +1131,12 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 			return
 		}
 		st.mu.Lock()
+		if st.compactActive {
+			st.compactTurnID = p.Turn.ID
+			st.mu.Unlock()
+			c.updateMaintenance(s.ID, "running", "", p.Turn.ID)
+			return
+		}
 		st.currentTurnID = p.Turn.ID
 		st.mu.Unlock()
 		c.sink.Emit(backend.NewTurnProgress(s.ID, reqID, "thinking", ""))
@@ -1260,25 +1273,42 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 			c.emitCodexAgentTree(s)
 			return
 		}
+		st.mu.Lock()
+		compacting := st.compactActive
+		compactTurnID := st.compactTurnID
+		currentTurnID := st.currentTurnID
+		st.mu.Unlock()
+		if compacting {
+			if compactTurnID != "" && p.Turn.ID == compactTurnID {
+				st.finishCompact(p.Turn.Error.Message)
+			}
+			return
+		}
+		if p.Turn.ID != "" && p.Turn.ID != currentTurnID {
+			return
+		}
+		st.mu.Lock()
+		st.turnErrorCode = codexErrorCode(p.Turn.Error.Info, p.Turn.Error.Message)
+		st.mu.Unlock()
 		if p.Turn.Status == "failed" {
 			if p.Turn.Error.Message == "" {
 				p.Turn.Error.Message = "turn failed"
 			}
-			if st.compactActive && !st.turnActive {
-				st.finishCompact(p.Turn.Error.Message)
-			} else {
-				st.finish(p.Turn.Error.Message)
-			}
+			st.finish(p.Turn.Error.Message)
 		} else {
-			if st.compactActive && !st.turnActive {
-				st.finishCompact("")
-			} else {
-				st.finish("")
-			}
+			st.finish("")
 		}
 
 	case "thread/compacted":
-		st.finishCompact("")
+		// Modern daemons report a correlated turn/completed as well. Wait for
+		// it so an uncorrelated, delayed compact notification cannot release
+		// a later operation. Legacy daemons do not send turn/started.
+		st.mu.Lock()
+		legacyCompact := isRootThread && st.compactActive && st.compactTurnID == ""
+		st.mu.Unlock()
+		if legacyCompact {
+			st.finishCompact("")
+		}
 
 	case "thread/tokenUsage/updated":
 		if !isRootThread {
@@ -1303,12 +1333,20 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 			c.emitCodexAgentTree(s)
 			return
 		}
-		if !p.WillRetry {
+		if !p.WillRetry || codexErrorCode(p.Error.Info, p.Error.Message) == "misalignment_policy_violation" {
 			msg := p.Error.Message
 			if msg == "" {
 				msg = "unknown codex error"
 			}
-			st.finish(msg)
+			st.mu.Lock()
+			compacting := st.compactActive
+			st.turnErrorCode = codexErrorCode(p.Error.Info, msg)
+			st.mu.Unlock()
+			if compacting {
+				st.finishCompact(msg)
+			} else {
+				st.finish(msg)
+			}
 		}
 	}
 }
@@ -1912,6 +1950,7 @@ func (c *Codex) Send(ctx context.Context, s *session.Session, reqID, content str
 	st.reqID = reqID
 	st.stopping = false
 	st.turnErr = ""
+	st.turnErrorCode = ""
 	st.turnActive = true
 	st.turnDone = make(chan struct{})
 	st.accumulatedText = ""
@@ -2055,13 +2094,19 @@ func (c *Codex) runTurn(s *session.Session, st *codexState, threadID string, inp
 	// immediately unlocks the per-session queue, so a deferred release could
 	// race the next turn from the same session and delete its newly acquired
 	// route.
-	c.releaseActiveThreads(s)
-
 	switch {
 	case stopping || turnErr == "stopped":
+		c.releaseActiveThreads(s)
 		c.sink.Emit(backend.NewStopped(s.ID, st.reqID))
 	case turnErr != "":
-		c.sink.Emit(backend.NewError(s.ID, st.reqID, backend.ErrTurn, turnErr))
+		st.mu.Lock()
+		code := st.turnErrorCode
+		st.mu.Unlock()
+		if code == "" {
+			code = codexErrorCode(nil, turnErr)
+		}
+		c.releaseActiveThreads(s)
+		c.sink.Emit(backend.NewError(s.ID, st.reqID, code, turnErr))
 	default:
 		c.emitExtractedAskUserQuestion(s, st)
 		// Goal state is durable thread metadata, separate from turn/completed.
@@ -2069,9 +2114,19 @@ func (c *Codex) runTurn(s *session.Session, st *codexState, threadID string, inp
 		// transition when the app-server notification was dropped or arrived while
 		// they were reconnecting.
 		c.reconcileGoalAfterTurn(s, st)
-		c.sink.Emit(backend.NewDone(s.ID, st.reqID))
 		if c.shouldAutoCompact(st) {
-			go c.runAutoCompact(s, st)
+			// Keep the durable session worker occupied until maintenance ends.
+			// Emitting Done first lets the next queued Send race compact/start.
+			c.runAutoCompact(s, st)
+		}
+		st.mu.Lock()
+		stopping = st.stopping
+		st.mu.Unlock()
+		c.releaseActiveThreads(s)
+		if stopping {
+			c.sink.Emit(backend.NewStopped(s.ID, st.reqID))
+		} else {
+			c.sink.Emit(backend.NewDone(s.ID, st.reqID))
 		}
 	}
 }
@@ -2131,7 +2186,9 @@ func (c *Codex) interruptCodexTurn(st *codexState) {
 }
 
 func (c *Codex) runCompactCommand(s *session.Session, st *codexState, reqID string) {
-	if err := c.runCompact(st, 120*time.Second); err != nil {
+	if err := c.runCompact(st, 120*time.Second, func() {
+		c.sink.Emit(backend.NewTurnProgress(s.ID, reqID, "composing", "整理上下文耗時較久，仍在等待執行端確認"))
+	}); err != nil {
 		c.sink.Emit(backend.NewSessionCommandFailed(s.ID, reqID, "compact failed: "+err.Error(), 0))
 		c.sink.Emit(backend.NewError(s.ID, reqID, backend.ErrTurn, "compact failed: "+err.Error()))
 		return
@@ -2141,27 +2198,29 @@ func (c *Codex) runCompactCommand(s *session.Session, st *codexState, reqID stri
 }
 
 func (c *Codex) runAutoCompact(s *session.Session, st *codexState) {
-	reqID := "compact_" + s.ID
-	c.sink.Emit(backend.NewSessionCommandStarted(s.ID, reqID, 0))
-	if err := c.runCompact(st, 120*time.Second); err != nil {
-		c.sink.Emit(backend.NewSessionCommandFailed(s.ID, reqID, "compact failed: "+err.Error(), 0))
+	c.sink.Emit(backend.NewTurnProgress(s.ID, st.reqID, "composing", "正在整理上下文；後續訊息會依序處理"))
+	if err := c.runCompact(st, 120*time.Second, func() {
+		c.sink.Emit(backend.NewTurnProgress(s.ID, st.reqID, "composing", "整理上下文耗時較久，仍在等待執行端確認"))
+	}); err != nil {
+		c.sink.Emit(backend.NewSessionWarning(s.ID, "上下文整理未完成："+err.Error()))
 		log.Printf("[codex] auto compact failed session=%s: %v", s.ID, err)
 		return
 	}
-	c.sink.Emit(backend.NewSessionCommandDone(s.ID, reqID, 0))
 }
 
-func (c *Codex) runCompact(st *codexState, timeout time.Duration) error {
+func (c *Codex) runCompact(st *codexState, timeout time.Duration, onSlow ...func()) error {
 	st.mu.Lock()
 	if st.compactActive {
 		done := st.compactDone
 		st.mu.Unlock()
 		if done != nil {
-			select {
-			case <-done:
-			case <-time.After(timeout):
-				return fmt.Errorf("compact timed out")
-			}
+			<-done
+		}
+		st.mu.Lock()
+		errStr := st.compactErr
+		st.mu.Unlock()
+		if errStr != "" {
+			return errors.New(errStr)
 		}
 		return nil
 	}
@@ -2173,8 +2232,14 @@ func (c *Codex) runCompact(st *codexState, timeout time.Duration) error {
 	st.compactActive = true
 	st.compactErr = ""
 	st.compactDone = make(chan struct{})
+	st.compactTurnID = ""
 	done := st.compactDone
 	st.mu.Unlock()
+	maintenanceID, persistErr := c.beginMaintenance(st)
+	if persistErr != nil {
+		st.finishCompact(persistErr.Error())
+		return persistErr
+	}
 
 	if _, err := c.rpcCall("thread/compact/start", map[string]any{"threadId": threadID}, 30*time.Second); err != nil {
 		st.finishCompact(err.Error())
@@ -2183,7 +2248,13 @@ func (c *Codex) runCompact(st *codexState, timeout time.Duration) error {
 	select {
 	case <-done:
 	case <-time.After(timeout):
-		st.finishCompact("compact timed out")
+		// The deadline measures our wait, not the daemon operation. Only an
+		// actual terminal event or transport loss may settle this operation.
+		log.Printf("[codex] compact still running thread=%s after=%s", threadID, timeout)
+		c.updateMaintenance(maintenanceID, "running", "整理上下文耗時較久，仍在等待執行端確認", "")
+		for _, notify := range onSlow {
+			notify()
+		}
 		<-done
 	}
 
@@ -2191,11 +2262,16 @@ func (c *Codex) runCompact(st *codexState, timeout time.Duration) error {
 	errStr := st.compactErr
 	st.mu.Unlock()
 	if errStr != "" {
+		c.updateMaintenance(maintenanceID, "unknown", errStr, "")
 		return fmt.Errorf("%s", errStr)
 	}
+	c.updateMaintenance(maintenanceID, "completed", "上下文整理完成", "")
 	return nil
 }
 
+// Goal operations are independent of generation. Their failures must remain
+// warnings: a request-less Error would settle the active turn in both the Hub
+// and TerminalSink and falsely fail the client's streaming assistant message.
 func (c *Codex) SetGoal(ctx context.Context, s *session.Session, objective, status string, tokenBudget *int) error {
 	if err := c.ensureServer(); err != nil {
 		c.sink.Emit(backend.NewSessionWarning(s.ID, "codex app-server failed: "+err.Error()))
@@ -2797,7 +2873,19 @@ func (c *Codex) Stop(ctx context.Context, s *session.Session) error {
 	st.mu.Lock()
 	st.stopping = true
 	threadID, turnID, active := st.threadID, st.currentTurnID, st.turnActive
+	compacting := st.compactActive
+	if compacting {
+		turnID = st.compactTurnID
+	}
 	st.mu.Unlock()
+	if compacting {
+		if threadID == "" || turnID == "" {
+			return fmt.Errorf("context maintenance is awaiting its operation ID; stop is not yet confirmed")
+		}
+		_, err := c.rpcCall("turn/interrupt", map[string]any{"threadId": threadID, "turnId": turnID}, 5*time.Second)
+		// Let the correlated terminal notification settle the waiter and queue.
+		return err
+	}
 
 	if threadID != "" && turnID != "" {
 		_, _ = c.rpcCall("turn/interrupt", map[string]any{"threadId": threadID, "turnId": turnID}, 5*time.Second)

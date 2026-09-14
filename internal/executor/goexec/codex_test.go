@@ -129,6 +129,7 @@ func TestCodexRootTurnCompletionFinishesTheOwningSession(t *testing.T) {
 	s := reg.Create("s1", "codex", "/tmp", "codex", "gpt-5.6-sol", "", "")
 	st := c.state(s.ID)
 	st.threadID = "root"
+	st.currentTurnID = "t1"
 	st.turnActive = true
 	st.turnDone = make(chan struct{})
 	c.threadToSession["root"] = s
@@ -180,6 +181,7 @@ func TestCodexActiveTurnRouteCannotBeStolenByDuplicateSession(t *testing.T) {
 	ownerState := c.state(owner.ID)
 	ownerState.threadID = "root"
 	ownerState.reqID = "r-owner"
+	ownerState.currentTurnID = "t1"
 	ownerState.turnActive = true
 	ownerState.turnDone = make(chan struct{})
 	duplicateState := c.state(duplicate.ID)

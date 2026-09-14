@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"fmt"
 
 	"everything-go/internal/backend"
 	"everything-go/internal/session"
@@ -201,6 +202,28 @@ func (m *Mux) RuntimeDiagnostics() map[string]any {
 		}
 	}
 	return out
+}
+
+func (m *Mux) MaintenanceRecords() []backend.Maintenance {
+	var records []backend.Maintenance
+	for _, e := range m.byBackend {
+		if p, ok := e.(backend.MaintenanceProvider); ok {
+			records = append(records, p.MaintenanceRecords()...)
+		}
+	}
+	return records
+}
+func (m *Mux) ReconcileMaintenance(ctx context.Context, id string, release bool) (backend.Maintenance, error) {
+	for _, e := range m.byBackend {
+		if p, ok := e.(backend.MaintenanceProvider); ok {
+			for _, r := range p.MaintenanceRecords() {
+				if r.SessionID == id {
+					return p.ReconcileMaintenance(ctx, id, release)
+				}
+			}
+		}
+	}
+	return backend.Maintenance{}, fmt.Errorf("no maintenance record")
 }
 
 // RespondUserInput tries each interaction-capable backend until one owns the id.

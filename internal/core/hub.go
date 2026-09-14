@@ -63,6 +63,8 @@ type Config struct {
 type Hub struct {
 	messageQueue        *messagequeue.Store
 	messageQueueMu      sync.Mutex
+	maintenanceHolds    map[string]func()
+	maintenanceCheck    sync.Mutex
 	registry            *session.Registry
 	exec                executor.Executor
 	shells              *runtime.ShellManager
@@ -216,6 +218,7 @@ func NewHub(reg *session.Registry, cfg Config, pairing *governance.Pairing, port
 // as its Sink, so the Hub is built first).
 func (h *Hub) SetExecutor(e executor.Executor) {
 	h.exec = e
+	h.restoreMaintenanceHolds()
 	h.resumeNotificationReplies()
 	h.resumeQueuedMessages()
 }
@@ -431,6 +434,10 @@ func (h *Hub) connectedDeviceIDs(exclude string) []string {
 // event for replay on the next reconnect (the offline-recovery path). Safe for
 // concurrent use.
 func (h *Hub) Emit(event any) {
+	if maintenance, ok := event.(backend.Maintenance); ok {
+		h.applyMaintenanceHold(maintenance)
+		return
+	}
 	// Executor progress is intentionally internal. Convert it to the durable,
 	// revisioned per-device runtime view instead of leaking a second transient
 	// status protocol that reconnecting clients could miss.

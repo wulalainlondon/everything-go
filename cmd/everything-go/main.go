@@ -199,6 +199,7 @@ func main() {
 	// returns its memory to the OS (see runSearchIndexerLoop).
 	ctx := context.Background()
 	hub.StartWorkScheduler(ctx)
+	hub.StartMaintenanceRecovery(ctx)
 	hub.StartAutomationScheduler(ctx)
 	hub.StartRelayScheduler(ctx)
 	searchDirty := newDirtyPathQueue(defaultDirtyPathLimit)

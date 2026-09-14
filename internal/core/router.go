@@ -293,7 +293,10 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 	case "message":
 		h.enqueueChatMessage(c, cmd)
 	case "request_message_queue":
+		go h.reconcileMaintenance(cmd.SessionID, false)
 		h.sendMessageQueue(c, cmd)
+	case "resume_session_queue":
+		go h.resumeMaintenanceQueue(c, cmd)
 	case "promote_queued_message":
 		if queueRequestValid(cmd) {
 			h.promoteQueuedMessage(c, cmd)
