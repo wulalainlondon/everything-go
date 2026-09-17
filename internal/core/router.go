@@ -55,6 +55,10 @@ func sessionConfigValidationError(cmd clientproto.Command) string {
 // to the Executor. The payload beyond {type, session_id} is only inspected by
 // the specific handler that needs it.
 func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
+	if c.inventoryProbe && cmd.Kind != "hello" && cmd.Kind != "claim_bridge" && cmd.Kind != "ping" {
+		c.enqueueEvent(h.client.Error("", "", "Connection probes cannot issue application commands"))
+		return
+	}
 	if c.enrollmentOnly && cmd.Kind != "hello" && cmd.Kind != "claim_bridge" && cmd.Kind != "ping" {
 		c.enqueueEvent(h.client.Error("", "", "Pairing required before this device can use the bridge"))
 		return
@@ -75,7 +79,7 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		c.clientSurface = strings.ToLower(strings.TrimSpace(cmd.ClientSurface))
 		c.protocolVersion = cmd.ProtocolVersion
 		c.supportsReplayAck = cmd.ReplayAck
-		if b := c.inventoryBinding.Load(); b != nil && b.deviceID == cmd.DeviceID && !cmd.ConnectionProbe {
+		if b := c.inventoryBinding.Load(); b != nil && b.deviceID == cmd.DeviceID && !cmd.ConnectionProbe && !c.inventoryProbe {
 			promoted := *b
 			promoted.probe = false
 			c.inventoryBinding.Store(&promoted)
@@ -83,7 +87,7 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		}
 		// Latest-device-wins: evict any older client from the same device so the
 		// half-disconnect storm can't pile up zombie clients (#1).
-		if !c.enrollmentOnly {
+		if !c.enrollmentOnly && !c.inventoryProbe && !cmd.ConnectionProbe {
 			h.registerLatest(c)
 		}
 		h.tunnelURLMu.RLock()
@@ -129,9 +133,12 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 			helloInput.Capabilities = append(helloInput.Capabilities, "device_inventory_v1")
 		}
 		if !c.enrollmentOnly {
-			helloInput.Capabilities = append(helloInput.Capabilities, "session_config_revision_v1", "file_attachments_v1", "next_message_config_v1")
+			helloInput.Capabilities = append(helloInput.Capabilities, "session_config_revision_v1", "file_attachments_v1", "next_message_config_v1", "bootstrap_snapshot_v1")
 		}
 		c.enqueueEvent(h.client.HelloAck(helloInput))
+		if c.inventoryProbe || cmd.ConnectionProbe {
+			return
+		}
 		if !c.enrollmentOnly && h.pmEnabled {
 			c.enqueueEvent(h.pmSnapshot("", nil, nil))
 		}
@@ -189,7 +196,7 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		if cmd.ClientInfo != nil {
 			h.observeClientInfo(c, c.deviceID, cmd.ClientInfo)
 		}
-		c.enqueueEvent(h.client.Pong())
+		c.enqueuePong()
 
 	case "attachment_upload_init":
 		c.uploads.initKind(cmd.SessionID, cmd.UploadRequestID, cmd.Name, cmd.MediaType, cmd.SizeBytes, cmd.UploadKind)
@@ -219,7 +226,7 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		c.enrollmentOnly = false
 		h.syncDeviceInventory()
 		h.bindDeviceInventory(c, cmd.AuthToken, cmd.DeviceID, c.inventoryName, c.clientSurface, c.inventoryProbe)
-		if wasEnrollment {
+		if wasEnrollment && !c.inventoryProbe {
 			h.registerLatest(c)
 		}
 		c.enqueueEvent(h.client.ClaimAck())

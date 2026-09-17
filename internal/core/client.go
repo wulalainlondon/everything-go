@@ -94,9 +94,11 @@ func (w wsConn) EnrollmentEligible() bool { return w.canEnroll }
 // Client is one logical connection (WS or WebRTC DataChannel). A single write
 // pump goroutine drains the send channel so conn writes are never concurrent.
 type Client struct {
-	hub  *Hub
-	conn wireConn
-	send chan []byte
+	hub     *Hub
+	conn    wireConn
+	send    chan []byte
+	urgent  chan []byte // small heartbeat replies must not queue behind snapshots
+	writeMu sync.Mutex  // a bounded data write must not race a shorter ping deadline
 	// quit is closed exactly once when the client is torn down. The send channel
 	// is deliberately NEVER closed: background goroutines (sendHistory, sendUsage,
 	// …) outlive the read loop and may call enqueue after disconnect, so closing
@@ -224,9 +226,15 @@ func (c *Client) pingLoopEvery(ctx context.Context, interval, timeout time.Durat
 			if c.uploadActive.Load() {
 				continue
 			}
+			if !c.writeMu.TryLock() {
+				// The write pump has its own finite deadline. Starting a 10s
+				// control ping behind a slow data write falsely kills live peers.
+				continue
+			}
 			pctx, cancel := context.WithTimeout(ctx, timeout)
 			err := p.Ping(pctx)
 			cancel()
+			c.writeMu.Unlock()
 			if err != nil {
 				select {
 				case <-c.quit: // already being torn down; not a zombie
@@ -248,7 +256,9 @@ func (c *Client) pingLoopEvery(ctx context.Context, interval, timeout time.Durat
 // connection closes.
 func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		InsecureSkipVerify: true, // app connects from arbitrary LAN origins
+		InsecureSkipVerify:   true, // app connects from arbitrary LAN origins
+		CompressionMode:      websocket.CompressionNoContextTakeover,
+		CompressionThreshold: 1024,
 	})
 	if err != nil {
 		log.Printf("ws accept error: %v", err)
@@ -291,6 +301,7 @@ func (h *Hub) serveConn(ctx context.Context, conn wireConn) {
 		hub:      h,
 		conn:     conn,
 		send:     make(chan []byte, sendQueue),
+		urgent:   make(chan []byte, 8),
 		quit:     make(chan struct{}),
 		ctx:      cctx,
 		cancel:   cancel,
@@ -315,7 +326,11 @@ func (h *Hub) serveConn(ctx context.Context, conn wireConn) {
 		return
 	}
 
-	h.addClient(c)
+	// Authenticated probes are not application clients: no broadcasts,
+	// offline replay lease, or replacement of the device's active transport.
+	if !c.inventoryProbe {
+		h.addClient(c)
+	}
 	log.Printf("[conn] connected client=%s kind=%s device=%s addr=%s", c.clientID, conn.Kind(), hello.DeviceID, c.remoteAddr())
 
 	go c.writePump(ctx)
@@ -383,18 +398,47 @@ func (c *Client) writeNow(ctx context.Context, event any) {
 
 func (c *Client) writePump(ctx context.Context) {
 	for {
+		var data []byte
 		select {
 		case <-c.quit:
 			return
-		case data := <-c.send:
-			wctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-			err := c.conn.Write(wctx, data)
-			cancel()
-			if err != nil {
-				c.shutdown() // unblock enqueuers waiting on a dead socket
+		case data = <-c.urgent:
+		default:
+		}
+		if data == nil {
+			select {
+			case <-c.quit:
 				return
+			case data = <-c.urgent:
+			case data = <-c.send:
 			}
 		}
+		c.writeMu.Lock()
+		wctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		err := c.conn.Write(wctx, data)
+		cancel()
+		c.writeMu.Unlock()
+		if err != nil {
+			c.shutdown() // unblock enqueuers waiting on a dead socket
+			c.conn.Close("write failed")
+			return
+		}
+	}
+}
+
+func (c *Client) enqueuePong() {
+	if c.urgent == nil { // in-memory/legacy transports
+		c.enqueueEvent(c.hub.client.Pong())
+		return
+	}
+	data, err := marshalEvent(c.hub.client.Pong(), c.wireAuthority())
+	if err != nil {
+		return
+	}
+	select {
+	case c.urgent <- data:
+	case <-c.quit:
+	default: // One queued pong already proves liveness; bound probe floods.
 	}
 }
 
