@@ -54,6 +54,9 @@ type Config struct {
 	RootDir      string
 	DataDir      string
 	LanIP        string
+	// ResolveLANIP is evaluated for each handshake; laptops can change networks
+	// while the hub remains alive. Nil preserves static embedders/tests.
+	ResolveLANIP func() string
 	TailscaleIP  string
 	Backends     []backend.Definition
 	CodexRemote  string

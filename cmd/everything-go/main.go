@@ -145,6 +145,7 @@ func main() {
 		RootDir:      *rootDir,
 		DataDir:      *dataDir,
 		LanIP:        detectLanIP(),
+		ResolveLANIP: detectLanIP,
 		TailscaleIP:  detectTailscaleIP(),
 		Backends:     backend.DefaultRegistry(*remoteWSURL != ""),
 		CodexRemote:  codexRemoteEndpoint(),
@@ -592,7 +593,7 @@ func detectLanIP() string {
 	}
 	for _, iface := range ifaces {
 		// Skip Tailscale virtual interfaces — those are handled by detectTailscaleIP.
-		if strings.HasPrefix(iface.Name, "utun") || iface.Name == "tailscale0" {
+		if iface.Flags&net.FlagUp == 0 || strings.HasPrefix(iface.Name, "utun") || iface.Name == "tailscale0" {
 			continue
 		}
 		addrs, _ := iface.Addrs()
@@ -601,7 +602,7 @@ func detectLanIP() string {
 			if !ok || ipnet.IP.IsLoopback() {
 				continue
 			}
-			if ip4 := ipnet.IP.To4(); ip4 != nil {
+			if ip4 := ipnet.IP.To4(); ip4 != nil && !ip4.IsLinkLocalUnicast() && !ip4.IsUnspecified() {
 				return ip4.String()
 			}
 		}

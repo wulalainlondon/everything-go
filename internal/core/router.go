@@ -111,6 +111,9 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 			helloInput.RootDir = h.cfg.RootDir
 			helloInput.DataDir = h.cfg.DataDir
 			helloInput.LanIP = h.cfg.LanIP
+			if h.cfg.ResolveLANIP != nil {
+				helloInput.LanIP = h.cfg.ResolveLANIP()
+			}
 			helloInput.TunnelURL = tunnelURL
 			helloInput.Backends = h.cfg.Backends
 			if h.work != nil {
