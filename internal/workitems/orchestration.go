@@ -156,7 +156,11 @@ func (s *Store) AdvanceRun(ctx context.Context, sessionID, requestID, status, re
 	item.Version++
 	item.UpdatedAt = now
 	attention := ""
-	if status == "succeeded" && item.Lifecycle == LifecycleActive {
+	managed, err := collaborationItemTx(ctx, tx, item.ID)
+	if err != nil {
+		return RunUpdate{}, err
+	}
+	if status == "succeeded" && item.Lifecycle == LifecycleActive && !managed {
 		item.Lifecycle = LifecycleReview
 		attention = "review_ready"
 	} else if status == "failed" {

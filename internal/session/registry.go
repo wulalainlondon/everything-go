@@ -26,7 +26,10 @@ import (
 // All mutable fields are private; callers go through the methods below so the
 // mutex is always held and reads see a consistent view.
 type Session struct {
-	mu sync.Mutex
+	mu             sync.Mutex
+	configUpdating bool
+	configRevision uint64
+	futureConfig   *Configuration
 
 	// ID and CreatedAt are set once at construction and never change, so they
 	// are exported and safe to read concurrently without the lock.
@@ -75,6 +78,7 @@ type Session struct {
 // Snapshot is an immutable, lock-free copy of a session's fields for callers
 // that need several at once (summaries, task listings, spawn argument building).
 type Snapshot struct {
+	ConfigRevision      uint64
 	ID                  string
 	Name                string
 	MetadataRevision    uint64
@@ -116,7 +120,8 @@ func (s *Session) Snapshot() Snapshot {
 
 func (s *Session) snapshotLocked() Snapshot {
 	return Snapshot{
-		ID: s.ID, Name: s.name, Cwd: s.cwd, Backend: s.backend,
+		ConfigRevision: s.configRevision,
+		ID:             s.ID, Name: s.name, Cwd: s.cwd, Backend: s.backend,
 		MetadataRevision: s.metadataRevision, NameUpdatedAt: s.nameUpdatedAt,
 		NameUpdatedBy: s.nameUpdatedBy, LastNameMutationID: s.lastNameMutationID,
 		Model: s.model, Sandbox: s.sandbox, Effort: s.effort, ResumeID: s.resumeID,
@@ -340,7 +345,8 @@ func (r *Registry) AttachStore(store *Store) {
 			created = float64(e.LastUsed)
 		}
 		s := &Session{
-			ID: id, CreatedAt: created,
+			configRevision: e.ConfigRevision,
+			ID:             id, CreatedAt: created,
 			name: e.Name, cwd: e.Cwd, backend: e.Backend,
 			metadataRevision: e.MetadataRevision, nameUpdatedAt: e.NameUpdatedAt,
 			nameUpdatedBy: e.NameUpdatedBy, lastNameMutationID: e.LastNameMutationID,

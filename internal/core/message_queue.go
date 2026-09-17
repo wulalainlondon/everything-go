@@ -2,6 +2,8 @@ package core
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log"
@@ -17,9 +19,10 @@ import (
 )
 
 type queuedPayload struct {
-	Content string                    `json:"content"`
-	Images  []backend.ImageAttachment `json:"images,omitempty"`
-	Files   []backend.FileAttachment  `json:"files,omitempty"`
+	Configuration *session.Configuration    `json:"configuration,omitempty"`
+	Content       string                    `json:"content"`
+	Images        []backend.ImageAttachment `json:"images,omitempty"`
+	Files         []backend.FileAttachment  `json:"files,omitempty"`
 }
 
 func (h *Hub) queueError(c *Client, cmd clientproto.Command, code, message string) {
@@ -49,17 +52,24 @@ func (h *Hub) enqueueChatMessage(c *Client, cmd clientproto.Command) {
 		h.queueError(c, cmd, "invalid_attachment", err.Error())
 		return
 	}
-	payload, err := json.Marshal(queuedPayload{Content: content, Images: cmd.Images, Files: files})
+	h.messageQueueMu.Lock()
+	defer h.messageQueueMu.Unlock()
+	config := session.ConfigurationFrom(s.SettingsSnapshot())
+	intent, err := json.Marshal(queuedPayload{Content: content, Images: cmd.Images, Files: files})
+	if err != nil {
+		h.queueError(c, cmd, "invalid_message", err.Error())
+		return
+	}
+	intentHash := sha256.Sum256(intent)
+	payload, err := json.Marshal(queuedPayload{Content: content, Images: cmd.Images, Files: files, Configuration: &config})
 	if err != nil {
 		h.queueError(c, cmd, "invalid_message", err.Error())
 		return
 	}
 	names := []string{}
-	for _, file := range files {
+	for _, file := range cmd.Files {
 		names = append(names, file.Name)
 	}
-	h.messageQueueMu.Lock()
-	defer h.messageQueueMu.Unlock()
 	if _, found, lookupErr := h.messageQueue.Get(cmd.SessionID, cmd.RequestID); lookupErr != nil {
 		h.queueError(c, cmd, "queue_unavailable", lookupErr.Error())
 		return
@@ -70,8 +80,12 @@ func (h *Hub) enqueueChatMessage(c *Client, cmd clientproto.Command) {
 			return
 		}
 	}
-	e, inserted, err := h.messageQueue.Enqueue(messagequeue.Entry{SessionID: cmd.SessionID, RequestID: cmd.RequestID, Content: truncateGraphemes(content, 4000), ImageCount: len(cmd.Images), FileNames: names, Payload: payload})
+	e, inserted, err := h.messageQueue.Enqueue(messagequeue.Entry{SessionID: cmd.SessionID, RequestID: cmd.RequestID, Content: truncateGraphemes(content, 4000), ImageCount: len(cmd.Images), FileNames: names, Payload: payload, PayloadHash: hex.EncodeToString(intentHash[:])})
 	if err != nil {
+		if errors.Is(err, messagequeue.ErrRejected) {
+			h.queueError(c, cmd, "message_rejected", "這則訊息先前已被拒絕，不會自動重送。請確認接管狀態後，以新訊息送出。")
+			return
+		}
 		h.queueError(c, cmd, "queue_persist_failed", err.Error())
 		return
 	}
@@ -111,6 +125,17 @@ func (h *Hub) runQueuedMessage(s *session.Session, requestID string) {
 	if err = json.Unmarshal(e.Payload, &payload); err != nil {
 		h.Emit(backend.NewError(s.ID, requestID, "invalid_queued_message", "Queued message could not be decoded"))
 		return
+	}
+	if payload.Configuration != nil {
+		if err = s.ActivateQueuedConfiguration(*payload.Configuration); err != nil {
+			h.Emit(backend.NewError(s.ID, requestID, "queued_configuration_rejected", err.Error()))
+			return
+		}
+		active := s.Snapshot()
+		result := h.client.SessionConfigResult(s.ID, "", true, "", s.SettingsSnapshot())
+		result.ActiveConfiguration = &protocol.ActiveSessionConfiguration{Model: active.Model, Effort: active.Effort, ServiceTier: active.ServiceTier, Revision: active.ConfigRevision}
+		result.EffectiveBoundary = "active_run_snapshot"
+		h.Emit(result)
 	}
 	if preview := truncateGraphemes(normalizePreviewText(payload.Content), 160); preview != "" {
 		if _, _, err := h.registry.CommitPreviewAndPersist(s.ID, preview, "user", time.Now().UnixMilli()); err != nil {
@@ -291,6 +316,12 @@ func (h *Hub) promoteQueuedMessage(c *Client, cmd clientproto.Command) {
 	if !ok {
 		h.messageQueueMu.Unlock()
 		h.queueResult(c, cmd, "promote", "rejected", "Steering is not supported", e)
+		return
+	}
+	var intended queuedPayload
+	if json.Unmarshal(e.Payload, &intended) != nil || (intended.Configuration != nil && *intended.Configuration != session.ConfigurationFrom(s.Snapshot())) {
+		h.messageQueueMu.Unlock()
+		h.queueResult(c, cmd, "promote", "retained", "此訊息的設定與本輪不同，保留原本的排隊位置。", e)
 		return
 	}
 	finish, err := s.ReserveQueued(cmd.RequestID)

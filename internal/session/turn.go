@@ -271,6 +271,9 @@ func (s *Session) beginTurnLocked() <-chan struct{} {
 		return ch
 	}
 	s.state = Streaming
+	if s.futureConfig != nil {
+		s.applyConfigurationLocked(*s.futureConfig)
+	}
 	s.lastActivity = nowSeconds()
 	s.turnDone = make(chan struct{})
 	return s.turnDone
@@ -292,6 +295,9 @@ func (s *Session) PrepareEndTurn() func() {
 	s.mu.Lock()
 	if s.state == Streaming || s.state == Stopping {
 		s.state = Idle
+		if s.futureConfig != nil {
+			s.applyConfigurationLocked(*s.futureConfig)
+		}
 	}
 	done := s.turnDone
 	s.turnDone = nil

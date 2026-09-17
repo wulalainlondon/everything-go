@@ -4,9 +4,11 @@ package clientproto
 
 import (
 	"everything-go/internal/backend"
+	"everything-go/internal/coordination"
 	"everything-go/internal/eventinbox"
 	"everything-go/internal/protocol"
 	"everything-go/internal/session"
+	"everything-go/internal/toolenv"
 	"everything-go/internal/workitems"
 )
 
@@ -19,7 +21,10 @@ func NewAppV1() AppV1 { return AppV1{} }
 
 // Command is the protocol-neutral shape the core router consumes.
 type Command struct {
-	Kind string
+	PM              *coordination.Command
+	Collaboration   *coordination.CollaborationCommand
+	ToolEnvironment *toolenv.Request
+	Kind            string
 
 	SessionID string
 	RequestID string
@@ -46,19 +51,22 @@ type Command struct {
 	Content         string
 	UploadRequestID string
 	UploadID        string
+	UploadKind      string
 	MediaType       string
 	SizeBytes       int64
 
-	Effort            string
-	EffortSet         bool
-	ServiceTier       *string
-	CollaborationMode *string
-	Personality       *string
-	Pinned            *bool
-	Hidden            *bool
-	Objective         string
-	GoalStatus        string
-	TokenBudget       *int
+	Effort                 string
+	EffortSet              bool
+	ExpectedConfigRevision *uint64
+	ConfigScope            string
+	ServiceTier            *string
+	CollaborationMode      *string
+	Personality            *string
+	Pinned                 *bool
+	Hidden                 *bool
+	Objective              string
+	GoalStatus             string
+	TokenBudget            *int
 
 	Limit           int
 	KnownLast       string
@@ -161,9 +169,12 @@ type Command struct {
 
 func (AppV1) ParseCommand(in protocol.Inbound) Command {
 	return Command{
-		Kind:      in.Type,
-		SessionID: in.SessionID,
-		RequestID: in.RequestID,
+		ToolEnvironment: in.ToolEnvironment,
+		PM:              in.PM,
+		Collaboration:   in.Collaboration,
+		Kind:            in.Type,
+		SessionID:       in.SessionID,
+		RequestID:       in.RequestID,
 
 		DeviceID:        in.DeviceID,
 		DeviceName:      in.DeviceName,
@@ -187,6 +198,7 @@ func (AppV1) ParseCommand(in protocol.Inbound) Command {
 		Content:         in.Content,
 		UploadRequestID: in.UploadRequestID,
 		UploadID:        in.UploadID,
+		UploadKind:      in.UploadKind,
 		MediaType:       in.MediaType,
 		SizeBytes:       in.SizeBytes,
 
@@ -196,15 +208,17 @@ func (AppV1) ParseCommand(in protocol.Inbound) Command {
 			}
 			return ""
 		}(),
-		EffortSet:         in.Effort != nil,
-		ServiceTier:       in.ServiceTier,
-		CollaborationMode: in.CollaborationMode,
-		Personality:       in.Personality,
-		Pinned:            in.Pinned,
-		Hidden:            in.Hidden,
-		Objective:         in.Objective,
-		GoalStatus:        in.Status,
-		TokenBudget:       in.TokenBudget,
+		EffortSet:              in.Effort != nil,
+		ExpectedConfigRevision: in.ExpectedConfigRevision,
+		ConfigScope:            in.ConfigScope,
+		ServiceTier:            in.ServiceTier,
+		CollaborationMode:      in.CollaborationMode,
+		Personality:            in.Personality,
+		Pinned:                 in.Pinned,
+		Hidden:                 in.Hidden,
+		Objective:              in.Objective,
+		GoalStatus:             in.Status,
+		TokenBudget:            in.TokenBudget,
 
 		Limit:           in.Limit,
 		KnownLast:       in.KnownLast,
@@ -327,11 +341,12 @@ func inboundFilesToBackend(files []protocol.InboundFile) []backend.FileAttachmen
 	out := make([]backend.FileAttachment, 0, len(files))
 	for _, f := range files {
 		out = append(out, backend.FileAttachment{
-			Name:       f.Name,
-			Content:    f.Content,
-			MediaType:  f.MediaType,
-			RemotePath: f.RemotePath,
-			SizeBytes:  f.SizeBytes,
+			Name:         f.Name,
+			Content:      f.Content,
+			MediaType:    f.MediaType,
+			RemotePath:   f.RemotePath,
+			AttachmentID: f.AttachmentID,
+			SizeBytes:    f.SizeBytes,
 		})
 	}
 	return out
@@ -378,11 +393,13 @@ func (AppV1) HelloAck(in HelloInput) protocol.HelloAck {
 }
 
 func (AppV1) UsageReport(rep backend.UsageReport) protocol.UsageReport {
-	return protocol.NewUsageReport(
+	out := protocol.NewUsageReport(
 		usageWindowToWire(rep.FiveHour),
 		usageWindowToWire(rep.SevenDay),
 		usageWindowToWire(rep.SevenDaySonnet),
 	)
+	out.BackendID, out.Source, out.CollectedAt = rep.BackendID, rep.Source, rep.CollectedAt
+	return out
 }
 
 func usageWindowToWire(w *backend.UsageWindow) *protocol.UsageWindow {
@@ -392,6 +409,7 @@ func usageWindowToWire(w *backend.UsageWindow) *protocol.UsageWindow {
 	return &protocol.UsageWindow{
 		Utilization: w.Utilization,
 		ResetsAt:    w.ResetsAt,
+		Unit:        w.Unit, Label: w.Label, DurationMinutes: w.DurationMinutes,
 	}
 }
 
@@ -494,11 +512,13 @@ func (AppV1) SessionConfigResult(sessionID, mutationID string, accepted bool, re
 	if sandbox == "" {
 		sandbox = "danger-full-access"
 	}
-	return protocol.NewSessionConfigResult(
+	result := protocol.NewSessionConfigResult(
 		sessionID, mutationID, accepted, reason,
 		snap.Backend, snap.Model, snap.Effort, sandbox,
 		snap.ServiceTier, snap.CollaborationMode, snap.Personality,
 	)
+	result.ConfigRevision = snap.ConfigRevision
+	return result
 }
 
 func (AppV1) ForkError(sessionID, reason string) protocol.ForkError {

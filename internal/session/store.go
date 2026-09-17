@@ -13,6 +13,7 @@ import (
 // saved_sessions.json. Store writes known fields back into the original raw JSON
 // object so Python-only metadata survives Go updates.
 type savedEntry struct {
+	ConfigRevision      uint64   `json:"config_revision,omitempty"`
 	Name                string   `json:"name"`
 	MetadataRevision    uint64   `json:"metadata_revision,omitempty"`
 	NameUpdatedAt       int64    `json:"name_updated_at,omitempty"`
@@ -90,7 +91,7 @@ func (st *Store) Save(sessions []*Session) error {
 	raw := st.loadRawLocked()
 	currentIDs := make(map[string]bool, len(sessions))
 	for _, s := range sessions {
-		snap := s.Snapshot()
+		snap := s.SettingsSnapshot()
 		currentIDs[snap.ID] = true
 		// last_used must reflect the session's real last activity, NOT now.
 		// Stamping every session with now on each Save flattens the whole file to
@@ -103,7 +104,7 @@ func (st *Store) Save(sessions []*Session) error {
 		}
 		entry := savedEntry{
 			Name: snap.Name, ResumeID: snap.ResumeID, ClaudeUUID: snap.ResumeID,
-			MetadataRevision: snap.MetadataRevision, NameUpdatedAt: snap.NameUpdatedAt,
+			ConfigRevision: snap.ConfigRevision, MetadataRevision: snap.MetadataRevision, NameUpdatedAt: snap.NameUpdatedAt,
 			NameUpdatedBy: snap.NameUpdatedBy, LastNameMutationID: snap.LastNameMutationID,
 			LastUsed: lastUsed, Cwd: snap.Cwd, Backend: snap.Backend, Model: snap.Model,
 			PreviewText: snap.PreviewText, PreviewRole: snap.PreviewRole,
@@ -200,6 +201,7 @@ func putKnownFields(obj map[string]json.RawMessage, entry savedEntry) {
 	}
 	put("name", entry.Name)
 	put("metadata_revision", entry.MetadataRevision)
+	put("config_revision", entry.ConfigRevision)
 	put("name_updated_at", entry.NameUpdatedAt)
 	put("name_updated_by", entry.NameUpdatedBy)
 	put("last_name_mutation_id", entry.LastNameMutationID)
@@ -301,6 +303,7 @@ func entryFromRaw(obj map[string]json.RawMessage) savedEntry {
 	return savedEntry{
 		Name:                rawString(obj, "name"),
 		MetadataRevision:    uint64(rawInt64(obj, "metadata_revision")),
+		ConfigRevision:      uint64(rawInt64(obj, "config_revision")),
 		NameUpdatedAt:       rawInt64(obj, "name_updated_at"),
 		NameUpdatedBy:       rawString(obj, "name_updated_by"),
 		LastNameMutationID:  rawString(obj, "last_name_mutation_id"),

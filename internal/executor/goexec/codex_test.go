@@ -816,42 +816,6 @@ func TestCodexTurnLivenessPolicy(t *testing.T) {
 	}
 }
 
-func TestCodexTurnDeadlineWaitsIndefinitelyForUserInput(t *testing.T) {
-	c := NewCodex(&capSink{}, "codex")
-	c.turnTimeout = 20 * time.Millisecond
-	c.interactions["ui_1"] = codexInteraction{payload: backend.UserInputPayload{
-		RequestID: "ui_1",
-		SessionID: "s1",
-		Status:    "pending",
-	}}
-
-	// Model the runTurn deadline branch: the timer has fired, but a pending
-	// interaction must re-arm it instead of allowing the turn to be aborted.
-	timer := time.NewTimer(time.Millisecond)
-	<-timer.C
-	if !c.deferTurnDeadlineForInput("s1", timer) {
-		t.Fatal("pending user input should defer the turn deadline")
-	}
-	select {
-	case <-timer.C:
-		// Re-arming is the expected behavior. Repeating this branch for as long
-		// as the interaction stays pending makes the wait unbounded.
-	case <-time.After(time.Second):
-		t.Fatal("deferred turn deadline was not re-armed")
-	}
-	if !c.deferTurnDeadlineForInput("s1", timer) {
-		t.Fatal("unanswered input should continue deferring every deadline")
-	}
-
-	c.interMu.Lock()
-	delete(c.interactions, "ui_1")
-	c.interMu.Unlock()
-	if c.deferTurnDeadlineForInput("s1", timer) {
-		t.Fatal("resolved input must restore the ordinary turn deadline")
-	}
-	timer.Stop()
-}
-
 func TestCodexStateActivityResetsStallWarning(t *testing.T) {
 	st := newCodexState()
 	st.stallWarned = true

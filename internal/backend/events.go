@@ -39,13 +39,19 @@ type (
 // normalized 0..1 fraction unless the backend explicitly documents another
 // unit; ResetsAt is an optional ISO timestamp.
 type UsageWindow struct {
-	Utilization *float64
-	ResetsAt    *string
+	Utilization     *float64
+	ResetsAt        *string
+	Unit            string
+	Label           string
+	DurationMinutes int
 }
 
 // UsageReport is the backend-neutral usage payload. Client protocol adapters
 // choose the outbound event name and wire tags.
 type UsageReport struct {
+	BackendID      string
+	Source         string
+	CollectedAt    int64
 	FiveHour       *UsageWindow
 	SevenDay       *UsageWindow
 	SevenDaySonnet *UsageWindow

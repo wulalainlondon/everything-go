@@ -41,6 +41,8 @@ import (
 	"everything-go/internal/runtimejournal"
 	"everything-go/internal/search"
 	"everything-go/internal/session"
+	"everything-go/internal/toolenv"
+	"everything-go/internal/widgetaccess"
 	"everything-go/internal/workitems"
 )
 
@@ -62,6 +64,12 @@ type Config struct {
 // the executor.Sink (Emit broadcasts an event to connected clients, or buffers
 // it when none are connected so a reconnecting client can recover it).
 type Hub struct {
+	pmMu                sync.Mutex
+	pmEnabled           bool
+	pmSecret            []byte
+	pmURL               string
+	toolOperations      *toolenv.Store
+	toolRepairRunning   atomic.Bool
 	deviceInventory     *deviceinventory.Store
 	messageQueue        *messagequeue.Store
 	messageQueueMu      sync.Mutex
@@ -84,6 +92,8 @@ type Hub struct {
 	attachments         *attachmentjournal.Store
 	controls            *governance.SessionControlStore
 	runtimes            *runtimejournal.Store
+	widgetMu            sync.Mutex
+	widgetSigner        *widgetaccess.Signer
 	recoveredRuntimes   []runtimejournal.View
 	replyCaps           *notificationreply.Capabilities
 	notificationReplies *notificationreply.Store
@@ -161,6 +171,7 @@ type Hub struct {
 func NewHub(reg *session.Registry, cfg Config, pairing *governance.Pairing, port int) *Hub {
 	cfg.Port = port
 	h := &Hub{
+		toolOperations:      toolenv.Open(cfg.DataDir),
 		registry:            reg,
 		pairing:             pairing,
 		offline:             governance.NewOfflineBuffer(),
@@ -356,6 +367,14 @@ func (h *Hub) StartNativeWatcher(ctx context.Context, onTranscriptChange ...func
 		return
 	}
 	opts := nativewatch.DefaultOptions()
+	turnWatcher := nativewatch.NewTurnWatcher()
+	go turnWatcher.Run(ctx, func(activity nativewatch.TurnActivity) {
+		if s, ok := h.registry.Get(activity.Session.ID); ok && s.ResumeID() == activity.Session.ResumeID {
+			if observer, supported := h.exec.(backend.NativeTurnObserver); supported {
+				observer.ObserveNativeLifecycle(s, activity.TurnID, activity.Phase)
+			}
+		}
+	})
 	if v := strings.TrimSpace(os.Getenv("EVERYTHING_GO_NATIVE_POLL_INTERVAL")); v != "" {
 		if d, err := time.ParseDuration(v); err == nil && d > 0 {
 			opts.PollInterval = d
@@ -404,7 +423,11 @@ func (h *Hub) StartNativeWatcher(ctx context.Context, onTranscriptChange ...func
 		if h.cfg.RootDir != "" && !pathInsideRoot(ns.Cwd, h.cfg.RootDir) {
 			return
 		}
-		_, changed := h.registry.UpsertExternal(ns.ID, ns.Name, ns.Cwd, ns.Backend, ns.ResumeID, ns.LastUsed)
+		s, changed := h.registry.UpsertExternal(ns.ID, ns.Name, ns.Cwd, ns.Backend, ns.ResumeID, ns.LastUsed)
+		if s != nil {
+			ns.ID = s.ID // Registry may have deduplicated a Bridge-created session.
+			turnWatcher.Track(ns)
+		}
 		if !changed {
 			return
 		}
@@ -444,6 +467,13 @@ func (h *Hub) connectedDeviceIDs(exclude string) []string {
 // event for replay on the next reconnect (the offline-recovery path). Safe for
 // concurrent use.
 func (h *Hub) Emit(event any) {
+	observedTerminal := false
+	if observed, ok := event.(backend.ObservedTurn); ok {
+		event, observedTerminal = h.observedTurnEvent(observed)
+		if !observedTerminal {
+			return
+		}
+	}
 	if maintenance, ok := event.(backend.Maintenance); ok {
 		h.applyMaintenanceHold(maintenance)
 		return
@@ -482,16 +512,24 @@ func (h *Hub) Emit(event any) {
 		}
 	}
 
-	// Accumulate assistant text per turn so a push notification can carry a
-	// summary when the turn completes (mirrors the Python notify_fcm payload).
-	h.accumulateTurn(event)
 	// Record terminal state before exposing the terminal event, but hold the
 	// actor release until done -> runtime has been published in order. Marking
 	// the Session idle now also lets a client safely reclaim control as soon as
 	// it observes an active-writer error.
 	terminalView, terminalChanged, terminalEvent := h.recordTerminalRuntime(event)
-	releaseTurn := func() {}
+	// Persist the terminal revision before building a completion push. It must
+	// be self-contained even when a suspended iPhone missed all running events.
+	h.accumulateTurn(event, terminalView)
 	if terminalEvent {
+		switch e := event.(type) {
+		case protocol.Error:
+			h.finishPMTurn(terminalView.SessionID, terminalView.ActiveRequestID, "failed", e.Message)
+		case protocol.Stopped:
+			h.finishPMTurn(terminalView.SessionID, terminalView.ActiveRequestID, "interrupted", "工作已停止；請確認目前成果後繼續。")
+		}
+	}
+	releaseTurn := func() {}
+	if terminalEvent && !observedTerminal {
 		h.finishQueuedMessage(terminalView)
 		if s, ok := h.registry.Get(terminalView.SessionID); ok {
 			releaseTurn = s.PrepareEndTurn()
@@ -598,7 +636,7 @@ func (h *Hub) driveTurnState(event any) {
 // accumulateTurn tracks assistant text_chunks per session and, on the turn's
 // done event, fires a task-done push with the accumulated summary. stopped
 // clears the buffer without notifying.
-func (h *Hub) accumulateTurn(event any) {
+func (h *Hub) accumulateTurn(event any, terminal runtimejournal.View) {
 	switch e := event.(type) {
 	case protocol.TextChunk:
 		h.turnMu.Lock()
@@ -619,6 +657,7 @@ func (h *Hub) accumulateTurn(event any) {
 		if b != nil {
 			text = b.String()
 		}
+		h.finishPMTurn(e.SessionID, e.RequestID, "succeeded", text)
 		if preview := truncateGraphemes(normalizePreviewText(text), 160); preview != "" {
 			if _, changed, err := h.registry.CommitPreviewAndPersist(e.SessionID, preview, "assistant", time.Now().UnixMilli()); err != nil {
 				log.Printf("[session-preview] terminal commit failed session=%s request=%s: %v", e.SessionID, e.RequestID, err)
@@ -653,8 +692,13 @@ func (h *Hub) accumulateTurn(event any) {
 			}
 		}
 		replyURL, fallbackURL, capability, expiresAt := h.notificationReplyAction(e.SessionID)
+		projection := fcm.TerminalProjection{}
+		if terminal.SessionID == e.SessionID && terminal.ActiveRequestID == e.RequestID && terminal.Phase == "completed" {
+			projection = fcm.TerminalProjection{Revision: terminal.Revision, UpdatedAt: terminal.UpdatedAt,
+				ActiveStartedAt: terminal.ActiveStartedAt, CompletedAt: terminal.CompletedAt}
+		}
 		go h.fcm.NotifyTaskDoneWithAuthority(h.cfg.InstanceID, h.cfg.InstanceName, name, text, e.SessionID, e.RequestID,
-			fcm.ReplyAction{URL: replyURL, FallbackURL: fallbackURL, Capability: capability, ExpiresAt: expiresAt})
+			fcm.ReplyAction{URL: replyURL, FallbackURL: fallbackURL, Capability: capability, ExpiresAt: expiresAt}, projection)
 	case protocol.Stopped:
 		h.turnMu.Lock()
 		delete(h.turnText, e.SessionID)

@@ -233,7 +233,14 @@ func (n *Notifier) NotifyTaskDoneWithReply(instanceID, sessionName, lastText, se
 	n.NotifyTaskDoneWithAuthority(instanceID, "", sessionName, lastText, sessionID, requestID, reply)
 }
 
-func (n *Notifier) NotifyTaskDoneWithAuthority(instanceID, instanceName, sessionName, lastText, sessionID, requestID string, reply ReplyAction) {
+// TerminalProjection makes a completion independently orderable when iOS did
+// not receive intermediate lifecycle pushes while the host was suspended.
+type TerminalProjection struct {
+	Revision                                uint64
+	UpdatedAt, ActiveStartedAt, CompletedAt int64
+}
+
+func (n *Notifier) NotifyTaskDoneWithAuthority(instanceID, instanceName, sessionName, lastText, sessionID, requestID string, reply ReplyAction, terminal ...TerminalProjection) {
 	summary := summarize(lastText)
 	sessionKey, _ := identity.MakeSessionKey(instanceID, sessionID)
 	data := map[string]string{
@@ -241,6 +248,14 @@ func (n *Notifier) NotifyTaskDoneWithAuthority(instanceID, instanceName, session
 		"title": "✓ " + sessionName, "body": summary, "authority_instance_id": instanceID,
 		"request_id": requestID, "session_key": sessionKey, "schema_version": fcmPayloadSchemaVersion,
 		"event_id": "task_done:" + sessionKey + ":" + requestID,
+	}
+	if len(terminal) > 0 && terminal[0].Revision > 0 {
+		t := terminal[0]
+		data["revision"] = fmt.Sprint(t.Revision)
+		data["updated_at"] = fmt.Sprint(t.UpdatedAt)
+		data["active_started_at"] = fmt.Sprint(t.ActiveStartedAt)
+		data["completed_at"] = fmt.Sprint(t.CompletedAt)
+		data["stage"] = "completed"
 	}
 	if instanceName != "" {
 		data["authority_name"] = instanceName

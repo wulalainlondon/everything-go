@@ -17,9 +17,27 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 5
+const schemaVersion = 7
 
 const schema = `
+CREATE TABLE IF NOT EXISTS work_pm_state (
+  id INTEGER PRIMARY KEY CHECK(id=1),
+  payload TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS work_collaboration_records (
+  kind TEXT NOT NULL,
+  id TEXT NOT NULL,
+  project_id TEXT NOT NULL DEFAULT '',
+  task_id TEXT NOT NULL DEFAULT '',
+  work_item_id TEXT NOT NULL DEFAULT '',
+  revision INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT '',
+  payload TEXT NOT NULL,
+  PRIMARY KEY(kind,id)
+);
+CREATE INDEX IF NOT EXISTS work_collaboration_pending ON work_collaboration_records(project_id,kind,status);
+CREATE INDEX IF NOT EXISTS work_collaboration_task ON work_collaboration_records(task_id,kind,revision);
+CREATE INDEX IF NOT EXISTS work_collaboration_item ON work_collaboration_records(work_item_id,kind);
 CREATE TABLE IF NOT EXISTS work_schema (
   version INTEGER NOT NULL
 );
@@ -265,7 +283,7 @@ func (s *Store) backupLegacySchema(ctx context.Context) error {
 	if errors.Is(err, sql.ErrNoRows) || (err != nil && strings.Contains(err.Error(), "no such table")) {
 		return nil
 	}
-	if err != nil || (version != 1 && version != 2 && version != 3 && version != 4) {
+	if err != nil || version < 1 || version >= schemaVersion {
 		return err
 	}
 	backupPath := s.dbPath + fmt.Sprintf(".pre-v%d.bak", version+1)
@@ -360,7 +378,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			if _, err := tx.ExecContext(ctx, "UPDATE work_schema SET version=?", schemaVersion); err != nil {
 				return err
 			}
-		case 4:
+		case 4, 5, 6:
 			if _, err := tx.ExecContext(ctx, "UPDATE work_schema SET version=?", schemaVersion); err != nil {
 				return err
 			}
@@ -686,6 +704,19 @@ func (s *Store) MoveItem(ctx context.Context, in MoveItemInput) (WorkItem, error
 }
 
 func (s *Store) writeItemMutation(ctx context.Context, tx *sql.Tx, item WorkItem, kind string, actor Actor, payload ChangePayload) (WorkItem, error) {
+	updated, err := s.writeItemMutationTx(ctx, tx, item, kind, actor, payload)
+	if err != nil {
+		return WorkItem{}, err
+	}
+	if err = tx.Commit(); err != nil {
+		return WorkItem{}, err
+	}
+	return updated, nil
+}
+
+// writeItemMutationTx participates in an existing transaction. The caller owns
+// commit, allowing collaboration records and the outcome to change atomically.
+func (s *Store) writeItemMutationTx(ctx context.Context, tx *sql.Tx, item WorkItem, kind string, actor Actor, payload ChangePayload) (WorkItem, error) {
 	result, err := tx.ExecContext(ctx, `UPDATE work_items SET
 		title=?,description=?,outcome=?,next_step=?,acceptance_criteria=?,lifecycle=?,priority=?,sort_key=?,version=?,
 		blocked_reason_code=?,blocked_note=?,assignee=?,due_at=?,labels=?,automation_mode=?,workflow_id=?,workflow_node_id=?,
@@ -728,9 +759,6 @@ func (s *Store) writeItemMutation(ctx context.Context, tx *sql.Tx, item WorkItem
 	payload.Item = &item
 	payload.Activity = &activity
 	if err := updateChangePayload(ctx, tx, revision, payload); err != nil {
-		return WorkItem{}, err
-	}
-	if err := tx.Commit(); err != nil {
 		return WorkItem{}, err
 	}
 	return item, nil

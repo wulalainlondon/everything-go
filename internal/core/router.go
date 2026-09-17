@@ -59,7 +59,17 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		c.enqueueEvent(h.client.Error("", "", "Pairing required before this device can use the bridge"))
 		return
 	}
+	if h.rejectToolMaintenanceWrite(c, cmd) {
+		return
+	}
+	if h.rejectPMCommand(c, cmd) {
+		return
+	}
 	switch cmd.Kind {
+	case "human_ai_collaboration":
+		h.handleCollaboration(c, cmd)
+	case "pm_collaboration":
+		h.handlePM(c, cmd)
 	case "hello":
 		c.deviceID = cmd.DeviceID
 		c.clientSurface = strings.ToLower(strings.TrimSpace(cmd.ClientSurface))
@@ -87,7 +97,13 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 			PairingOpen:  h.pairing.EnrollmentOpen(),
 			InstanceName: h.cfg.InstanceName,
 		}
+		if !c.enrollmentOnly && h.pmEnabled {
+			helloInput.Capabilities = append(helloInput.Capabilities, "pm_collaboration_v1", "human_ai_collaboration_v2")
+		}
 		if !c.enrollmentOnly {
+			if _, ok := h.exec.(backend.ToolEnvironmentExecutor); ok {
+				helloInput.Capabilities = append(helloInput.Capabilities, "tool_environment_v1")
+			}
 			helloInput.RootDir = h.cfg.RootDir
 			helloInput.DataDir = h.cfg.DataDir
 			helloInput.LanIP = h.cfg.LanIP
@@ -112,7 +128,13 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		if !c.enrollmentOnly && h.deviceInventory != nil {
 			helloInput.Capabilities = append(helloInput.Capabilities, "device_inventory_v1")
 		}
+		if !c.enrollmentOnly {
+			helloInput.Capabilities = append(helloInput.Capabilities, "session_config_revision_v1", "file_attachments_v1", "next_message_config_v1")
+		}
 		c.enqueueEvent(h.client.HelloAck(helloInput))
+		if !c.enrollmentOnly && h.pmEnabled {
+			c.enqueueEvent(h.pmSnapshot("", nil, nil))
+		}
 		// A provisional LAN client receives only enough information to complete
 		// claim_bridge. Do not disclose sessions, goals, replay, files or backend
 		// metadata before its per-device credential is persisted.
@@ -153,6 +175,16 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		// Python bridge, which re-emits pending file_push frames on hello).
 		h.sendPendingPushes(c)
 
+	case "request_tool_environment":
+		h.handleToolEnvironment(c, cmd)
+	case "prepare_tool_environment_repair":
+		h.handleToolEnvironment(c, cmd)
+	case "apply_tool_environment_repair":
+		h.handleToolEnvironment(c, cmd)
+	case "request_tool_environment_operation":
+		h.handleToolEnvironment(c, cmd)
+	case "cancel_tool_environment_repair":
+		h.handleToolEnvironment(c, cmd)
 	case "ping":
 		if cmd.ClientInfo != nil {
 			h.observeClientInfo(c, c.deviceID, cmd.ClientInfo)
@@ -160,7 +192,7 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		c.enqueueEvent(h.client.Pong())
 
 	case "attachment_upload_init":
-		c.uploads.init(cmd.SessionID, cmd.UploadRequestID, cmd.Name, cmd.MediaType, cmd.SizeBytes)
+		c.uploads.initKind(cmd.SessionID, cmd.UploadRequestID, cmd.Name, cmd.MediaType, cmd.SizeBytes, cmd.UploadKind)
 
 	case "attachment_upload_finish":
 		c.uploads.finish(cmd.UploadID)
@@ -465,13 +497,6 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 			go h.registry.Persist()
 		}
 
-	case "set_effort":
-		// Stored on the session; applied as --effort on the next claude spawn.
-		if s, ok := h.registry.Get(cmd.SessionID); ok {
-			s.SetEffort(cmd.Effort)
-			go h.registry.Persist()
-		}
-
 	case "codex_goal_set":
 		s, ok := h.registry.Get(cmd.SessionID)
 		if !ok {
@@ -535,17 +560,33 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 			}
 		}()
 
+	case "set_effort":
+		cmd.Kind = "switch_session_config"
+		cmd.EffortSet = true
+		h.route(ctx, c, cmd)
+
 	case "switch_session_config":
 		s, ok := h.registry.Get(cmd.SessionID)
 		if !ok {
 			c.enqueueEvent(h.client.SessionConfigResult(cmd.SessionID, cmd.MutationID, false, "session_not_found", session.Snapshot{}))
 			return
 		}
-		before := s.Snapshot()
-		if before.Streaming {
-			c.enqueueEvent(h.client.SessionConfigResult(cmd.SessionID, cmd.MutationID, false, "session_busy", before))
+		if cmd.ConfigScope == "next_message" {
+			h.setNextMessageConfiguration(c, cmd, s)
 			return
 		}
+		if cmd.ConfigScope != "" {
+			c.enqueueEvent(h.client.SessionConfigResult(cmd.SessionID, cmd.MutationID, false, "invalid_config_scope", s.SettingsSnapshot()))
+			return
+		}
+		h.messageQueueMu.Lock()
+		defer h.messageQueueMu.Unlock()
+		before, release, reserveErr := s.ReserveConfiguration(cmd.ExpectedConfigRevision)
+		if reserveErr != nil {
+			c.enqueueEvent(h.client.SessionConfigResult(cmd.SessionID, cmd.MutationID, false, reserveErr.Error(), before))
+			return
+		}
+		defer release()
 		if reason := sessionConfigValidationError(cmd); reason != "" {
 			c.enqueueEvent(h.client.SessionConfigResult(cmd.SessionID, cmd.MutationID, false, reason, before))
 			return
@@ -561,14 +602,25 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		s.ApplyCodexSettings(cmd.ServiceTier, cmd.CollaborationMode, cmd.Personality)
 		if updater, supported := h.exec.(interface {
 			UpdateSessionSettings(context.Context, *session.Session) error
-		}); supported && s.Backend() == backend.Codex {
+		}); supported {
 			if err := updater.UpdateSessionSettings(ctx, s); err != nil {
 				s.RestoreConfig(before)
 				c.enqueueEvent(h.client.SessionConfigResult(cmd.SessionID, cmd.MutationID, false, "runtime_rejected: "+err.Error(), before))
 				return
 			}
 		}
-		h.registry.Persist()
+		s.SetConfigRevision(before.ConfigRevision + 1)
+		if err := h.registry.PersistDurably(); err != nil {
+			s.RestoreConfig(before)
+			s.SetConfigRevision(before.ConfigRevision)
+			if updater, supported := h.exec.(interface {
+				UpdateSessionSettings(context.Context, *session.Session) error
+			}); supported {
+				_ = updater.UpdateSessionSettings(ctx, s)
+			}
+			c.enqueueEvent(h.client.SessionConfigResult(cmd.SessionID, cmd.MutationID, false, "config_persist_failed", before))
+			return
+		}
 		h.Emit(h.client.SessionConfigResult(cmd.SessionID, cmd.MutationID, true, "", s.Snapshot()))
 
 	case "fork_session":
@@ -1048,7 +1100,8 @@ func (h *Hub) sessionSummaries() []protocol.SessionSummary {
 	}
 
 	for _, s := range sessions {
-		snap := s.Snapshot()
+		snap := s.SettingsSnapshot()
+		active := s.Snapshot()
 		var recent []protocol.RecentMessage
 		// Preview text, role and timestamp are one server-authoritative projection.
 		// The search DB is only a fallback for native CLI activity that is newer
@@ -1071,7 +1124,9 @@ func (h *Hub) sessionSummaries() []protocol.SessionSummary {
 			lastActivity = float64(previewAt) / 1000
 		}
 		out = append(out, protocol.SessionSummary{
-			ID: snap.ID, Name: snap.Name, IsStreaming: snap.Streaming,
+			ActiveModel: active.Model, ActiveEffort: active.Effort, ActiveServiceTier: active.ServiceTier, ActiveConfigRevision: active.ConfigRevision,
+			ConfigRevision: snap.ConfigRevision,
+			ID:             snap.ID, Name: snap.Name, IsStreaming: snap.Streaming || runtimePhaseActive(runtimePhase[snap.ID]),
 			AuthorityInstanceID: h.cfg.InstanceID, MetadataRevision: snap.MetadataRevision,
 			NameUpdatedAt: snap.NameUpdatedAt, NameUpdatedBy: snap.NameUpdatedBy,
 			LastNameMutationID: snap.LastNameMutationID,

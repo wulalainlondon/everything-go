@@ -188,7 +188,9 @@ func main() {
 	case "go":
 		terminal := executor.NewTerminalSink(hub)
 		claude := goexec.NewClaude(terminal, *claudeBin)
+		claude.SetPMProvider(hub)
 		codex := goexec.NewCodex(terminal, *codexBin)
+		codex.SetPMProvider(hub)
 		codex.SetDataDir(*dataDir)
 		ollama := goexec.NewOllama(terminal, *ollamaHost, "")
 		backends := map[string]executor.Executor{
@@ -199,7 +201,12 @@ func main() {
 		if *remoteWSURL != "" {
 			backends["remote-ws"] = remote.NewWS(terminal, *remoteWSURL, *remoteWSToken)
 		}
-		hub.SetExecutor(executor.NewReliableMux(backends, claude, terminal))
+		mux := executor.NewReliableMux(backends, claude, terminal)
+		mux.SetTurnAdmission(hub)
+		hub.SetExecutor(mux)
+		if err := hub.EnablePMCollaboration(context.Background()); err != nil {
+			log.Fatalf("initialize PM collaboration: %v", err)
+		}
 	case "python":
 		log.Fatal("--executor=python not yet implemented (config 3 comes after config 2 is proven)")
 	default:
@@ -324,6 +331,7 @@ func main() {
 	mux.HandleFunc("/api/automation/v1/", hub.ServeAutomationAPI)
 	mux.HandleFunc("/api/relay/v1/", hub.ServeRelayAPI)
 	mux.HandleFunc("/api/notification/v1/replies", hub.ServeNotificationReplyAPI)
+	mux.HandleFunc("/api/widgets/v1/", hub.ServeWidgetAPI)
 	mux.HandleFunc("/hooks/github", hub.ServeGitHubWebhook)
 	mux.HandleFunc("/hooks/apple-app-store", hub.ServeAppStoreWebhook)
 	mux.HandleFunc("/hooks/apple-app-store/", hub.ServeAppStoreWebhook)

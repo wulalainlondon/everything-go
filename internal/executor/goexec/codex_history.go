@@ -37,12 +37,13 @@ func (c *Codex) LoadHistory(resumeID string, opts history.Opts) (*history.Result
 	}
 	if fi, err := os.Stat(path); err == nil && !fi.IsDir() {
 		key := history.FileKey{Path: path, MtimeNS: fi.ModTime().UnixNano(), Size: fi.Size()}
-		cacheName := "codex:" + resumeID
+		// Parsed cache v2 preserves native turn boundaries for request identity.
+		cacheName := "codex:turns-v2:" + resumeID
 		if messages, ok := history.DefaultCache().Load(cacheName, key); ok {
 			if !opts.IncludeThinking {
 				messages = history.StripThinkingBlocks(messages)
 			}
-			res := history.Slice(messages, opts)
+			res := history.Slice(c.withHistoryRequestIDs(messages, resumeID), opts)
 			if fi.Size() > int64(history.LoadMaxBytes()) {
 				res.HasMoreBefore = true
 			}
@@ -59,7 +60,7 @@ func (c *Codex) LoadHistory(resumeID string, opts history.Opts) (*history.Result
 		if !opts.IncludeThinking {
 			messages = history.StripThinkingBlocks(messages)
 		}
-		res := history.Slice(messages, opts)
+		res := history.Slice(c.withHistoryRequestIDs(messages, resumeID), opts)
 		if truncated {
 			res.HasMoreBefore = true
 		}
@@ -72,7 +73,7 @@ func (c *Codex) LoadHistory(resumeID string, opts history.Opts) (*history.Result
 	if !opts.IncludeThinking {
 		messages = history.StripThinkingBlocks(messages)
 	}
-	return history.Slice(messages, opts), nil
+	return history.Slice(c.withHistoryRequestIDs(messages, resumeID), opts), nil
 }
 
 func (c *Codex) ResumableSessions(limit int) ([]history.ResumableSession, error) {
@@ -251,19 +252,36 @@ func parseCodexHistoryLines(lines []history.TailLine, resumeID string, truncated
 	type rec struct {
 		lineNo int
 		row    codexHistoryRow
+		turnID string
 	}
 	var records []rec
 	toolOutputs := map[string]string{}
 	var messages []map[string]any
+	turnID := ""
+	turnBySource := map[string]string{}
 	for _, ln := range lines {
 		var row codexHistoryRow
 		if json.Unmarshal(ln.Data, &row) != nil {
 			continue
 		}
+		if row.Type == "turn_context" || row.Type == "event_msg" {
+			var event struct {
+				Type   string `json:"type"`
+				TurnID string `json:"turn_id"`
+			}
+			if json.Unmarshal(row.Payload, &event) == nil {
+				if row.Type == "turn_context" || event.Type == "task_started" {
+					turnID = event.TurnID
+				} else if event.Type == "task_complete" || event.Type == "turn_aborted" {
+					turnID = ""
+				}
+			}
+		}
 		if row.Type != "response_item" {
 			continue
 		}
-		records = append(records, rec{lineNo: ln.LineNo, row: row})
+		records = append(records, rec{lineNo: ln.LineNo, row: row, turnID: turnID})
+		turnBySource["codex:"+resumeID+":line:"+itoa(ln.LineNo)] = turnID
 		if id, out, ok := codexResponseToolOutput(row.Payload); ok {
 			toolOutputs[id] = out
 		}
@@ -294,7 +312,12 @@ func parseCodexHistoryLines(lines []history.TailLine, resumeID string, truncated
 		return merged
 	}
 
+	previousTurn := ""
 	for _, rc := range records {
+		if rc.turnID != previousTurn {
+			flushPendingCommentary()
+		}
+		previousTurn = rc.turnID
 		if tool, ok := normalizeCodexResponseTool(rc.row.Payload, toolOutputs[codexPayloadCallID(rc.row.Payload)]); ok {
 			blocks := attachPendingCommentary([]map[string]any{tool.historyBlock()})
 			messages = append(messages, history.CompleteMsg(
@@ -337,6 +360,12 @@ func parseCodexHistoryLines(lines []history.TailLine, resumeID string, truncated
 		))
 	}
 	flushPendingCommentary()
+	for _, message := range messages {
+		sourceID, _ := message["source_message_id"].(string)
+		if turn := turnBySource[sourceID]; turn != "" {
+			message["source_turn_id"] = turn
+		}
+	}
 	return messages, truncated, nil
 }
 
