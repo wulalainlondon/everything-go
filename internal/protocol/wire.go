@@ -899,11 +899,12 @@ func NewStopped(sessionID, reqID string) Stopped {
 }
 
 type Error struct {
-	Type      string `json:"type"`
-	SessionID string `json:"session_id,omitempty"`
-	RequestID string `json:"request_id,omitempty"`
-	Code      string `json:"code,omitempty"`
-	Message   string `json:"message"`
+	CommandType string `json:"command_type,omitempty"`
+	Type        string `json:"type"`
+	SessionID   string `json:"session_id,omitempty"`
+	RequestID   string `json:"request_id,omitempty"`
+	Code        string `json:"code,omitempty"`
+	Message     string `json:"message"`
 }
 
 func NewError(sessionID, code, msg string) Error {
@@ -1658,8 +1659,10 @@ func NewUserInputRequest(p UserInputRequestPayload) UserInputRequestEvent {
 }
 
 type PendingInteractionsList struct {
-	Type         string                    `json:"type"`
-	Interactions []UserInputRequestPayload `json:"interactions"`
+	ScopeSessionID string                    `json:"scope_session_id,omitempty"`
+	SnapshotAll    bool                      `json:"snapshot_all,omitempty"`
+	Type           string                    `json:"type"`
+	Interactions   []UserInputRequestPayload `json:"interactions"`
 }
 
 func NewPendingInteractionsList(items []UserInputRequestPayload) PendingInteractionsList {
@@ -1759,25 +1762,29 @@ func NewPermissionResult(requestID, sessionID, action, decision, message string)
 // MessageQueueSnapshot is authoritative for one Session. Revision survives
 // reconnect/restart; attachment bodies stay on the server.
 type MessageQueueItem struct {
-	RequestID       string   `json:"request_id"`
-	State           string   `json:"state"`
-	Content         string   `json:"content"`
-	Sequence        int64    `json:"sequence"`
-	ImageCount      int      `json:"image_count"`
-	FileNames       []string `json:"file_names"`
-	CreatedAt       int64    `json:"created_at"`
-	UpdatedAt       int64    `json:"updated_at"`
-	Message         string   `json:"message,omitempty"`
-	ActiveRequestID string   `json:"active_request_id,omitempty"`
-	TurnID          string   `json:"turn_id,omitempty"`
+	FullContent      string   `json:"full_content,omitempty"`
+	ContentTruncated bool     `json:"content_truncated,omitempty"`
+	RequestID        string   `json:"request_id"`
+	State            string   `json:"state"`
+	Content          string   `json:"content"`
+	Sequence         int64    `json:"sequence"`
+	ImageCount       int      `json:"image_count"`
+	FileNames        []string `json:"file_names"`
+	CreatedAt        int64    `json:"created_at"`
+	UpdatedAt        int64    `json:"updated_at"`
+	Message          string   `json:"message,omitempty"`
+	ActiveRequestID  string   `json:"active_request_id,omitempty"`
+	TurnID           string   `json:"turn_id,omitempty"`
 }
 type MessageQueueSnapshot struct {
-	Type        string             `json:"type"`
-	SessionID   string             `json:"session_id"`
-	Revision    uint64             `json:"revision"`
-	Items       []MessageQueueItem `json:"items"`
-	Maintenance any                `json:"maintenance,omitempty"`
-	Diagnostics any                `json:"diagnostics,omitempty"`
+	DetailRequestID string             `json:"detail_request_id,omitempty"`
+	Detail          *MessageQueueItem  `json:"detail,omitempty"`
+	Type            string             `json:"type"`
+	SessionID       string             `json:"session_id"`
+	Revision        uint64             `json:"revision"`
+	Items           []MessageQueueItem `json:"items"`
+	Maintenance     any                `json:"maintenance,omitempty"`
+	Diagnostics     any                `json:"diagnostics,omitempty"`
 }
 type QueueActionResult struct {
 	Type            string `json:"type"`

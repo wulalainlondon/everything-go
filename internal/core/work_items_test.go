@@ -316,7 +316,7 @@ func TestWorkHelloAdvertisesCapabilityAndReconcilesFromClientCursor(t *testing.T
 	route(h, c, `{"type":"hello","device_id":"phone"}`)
 	hello := waitForType(t, c, "hello_ack")
 	capabilities, ok := hello["capabilities"].([]any)
-	if !ok || len(capabilities) != 9 || capabilities[4] != "message_queue_v1" || capabilities[0] != "work_coordination_v1" || capabilities[1] != "work_items_v1" || capabilities[2] != "project_bootstrap_v1" || capabilities[3] != "work_review_feedback_v1" || capabilities[5] != "session_config_revision_v1" || capabilities[6] != "file_attachments_v1" || capabilities[7] != "next_message_config_v1" || capabilities[8] != "bootstrap_snapshot_v1" {
+	if !ok || len(capabilities) != 10 || capabilities[4] != "message_queue_v1" || capabilities[0] != "work_coordination_v1" || capabilities[1] != "work_items_v1" || capabilities[2] != "project_bootstrap_v1" || capabilities[3] != "work_review_feedback_v1" || capabilities[5] != "queue_message_detail_v1" || capabilities[6] != "session_config_revision_v1" || capabilities[7] != "file_attachments_v1" || capabilities[8] != "next_message_config_v1" || capabilities[9] != "bootstrap_snapshot_v1" {
 		t.Fatalf("hello capabilities=%v", hello["capabilities"])
 	}
 	assertNoTypeWithin(t, c, "work_snapshot", 50*time.Millisecond)

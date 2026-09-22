@@ -9,6 +9,7 @@ import (
 	"log"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"everything-go/internal/backend"
 	"everything-go/internal/clientproto"
@@ -27,7 +28,7 @@ type queuedPayload struct {
 
 func (h *Hub) queueError(c *Client, cmd clientproto.Command, code, message string) {
 	// A delivery/queue rejection is not a terminal event for the active AI turn.
-	c.enqueueEvent(protocol.Error{Type: "error", SessionID: cmd.SessionID, RequestID: cmd.RequestID, Code: code, Message: message})
+	c.enqueueEvent(protocol.Error{Type: "error", CommandType: cmd.Kind, SessionID: cmd.SessionID, RequestID: cmd.RequestID, Code: code, Message: message})
 }
 
 func (h *Hub) enqueueChatMessage(c *Client, cmd clientproto.Command) {
@@ -206,6 +207,31 @@ func (h *Hub) sendMessageQueue(c *Client, cmd clientproto.Command) {
 	if err != nil {
 		h.queueError(c, cmd, "queue_unavailable", err.Error())
 		return
+	}
+	// Full text is explicitly requested, never materialized for routine queue
+	// broadcasts. Attachment bytes, secrets in metadata, and configuration are
+	// not exposed. The durable session/request pair is the only lookup key.
+	if cmd.RequestID != "" {
+		entry, found, loadErr := h.messageQueue.Get(cmd.SessionID, cmd.RequestID)
+		if loadErr != nil || !found {
+			h.queueError(c, cmd, "queue_not_found", "Queued message is unavailable for this session")
+			return
+		}
+		var payload queuedPayload
+		if json.Unmarshal(entry.Payload, &payload) != nil {
+			h.queueError(c, cmd, "queue_unavailable", "Queued message content is unavailable")
+			return
+		}
+		detail := protocol.MessageQueueItem{RequestID: entry.RequestID, State: string(entry.State), Content: entry.Content,
+			FullContent: payload.Content, ImageCount: entry.ImageCount, FileNames: entry.FileNames, CreatedAt: entry.CreatedAt, UpdatedAt: entry.UpdatedAt}
+		if len(detail.FullContent) > 1024*1024 {
+			detail.FullContent = detail.FullContent[:1024*1024]
+			for !utf8.ValidString(detail.FullContent) {
+				detail.FullContent = detail.FullContent[:len(detail.FullContent)-1]
+			}
+			detail.ContentTruncated = true
+		}
+		snapshot.DetailRequestID, snapshot.Detail = cmd.RequestID, &detail
 	}
 	c.enqueueEvent(snapshot)
 }

@@ -130,7 +130,7 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 			}
 		}
 		if !c.enrollmentOnly && h.messageQueue != nil {
-			helloInput.Capabilities = append(helloInput.Capabilities, "message_queue_v1")
+			helloInput.Capabilities = append(helloInput.Capabilities, "message_queue_v1", "queue_message_detail_v1")
 		}
 		if !c.enrollmentOnly && h.deviceInventory != nil {
 			helloInput.Capabilities = append(helloInput.Capabilities, "device_inventory_v1")
@@ -869,7 +869,9 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		if ir, ok := h.exec.(interactionResponder); ok {
 			items = ir.PendingInteractions(cmd.SessionID)
 		}
-		c.enqueueEvent(h.client.PendingInteractionsList(items))
+		snapshot := h.client.PendingInteractionsList(items)
+		snapshot.ScopeSessionID, snapshot.SnapshotAll = cmd.SessionID, cmd.SessionID == ""
+		c.enqueueEvent(snapshot)
 
 	// --- Search (FTS5) ----------------------------------------------------
 
