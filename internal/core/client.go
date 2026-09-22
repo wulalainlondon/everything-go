@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -68,11 +69,22 @@ type wsConn struct {
 	c         *websocket.Conn
 	addr      string // r.RemoteAddr captured at accept time, for logging
 	canEnroll bool
+	progress  *atomic.Int64 // bytes read within a data message, not merely its header
 }
 
 func (w wsConn) Read(ctx context.Context) ([]byte, error) {
-	_, data, err := w.c.Read(ctx)
-	return data, err
+	_, reader, err := w.c.Reader(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return io.ReadAll(inboundProgressReader{Reader: reader, progress: w.progress})
+}
+
+func (w wsConn) LastInboundProgress() time.Time {
+	if w.progress == nil || w.progress.Load() == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, w.progress.Load())
 }
 
 func (w wsConn) Write(ctx context.Context, data []byte) error {
@@ -231,9 +243,7 @@ func (c *Client) pingLoopEvery(ctx context.Context, interval, timeout time.Durat
 				// control ping behind a slow data write falsely kills live peers.
 				continue
 			}
-			pctx, cancel := context.WithTimeout(ctx, timeout)
-			err := p.Ping(pctx)
-			cancel()
+			err := pingWithInboundProgress(ctx, p, timeout, 2*time.Minute)
 			c.writeMu.Unlock()
 			if err != nil {
 				select {
@@ -266,7 +276,7 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 	}
 	conn.SetReadLimit(32 * 1024 * 1024)
 	h.serveConn(context.Background(), wsConn{
-		c: conn, addr: r.RemoteAddr, canEnroll: directPrivateRequest(r),
+		c: conn, addr: r.RemoteAddr, canEnroll: directPrivateRequest(r), progress: &atomic.Int64{},
 	})
 }
 
