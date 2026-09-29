@@ -34,6 +34,15 @@ mkdir -p "$MACOS_DIR" "$RES_DIR"
 
 cp "$BIN_SRC" "$MACOS_DIR/everything-go"
 chmod +x "$MACOS_DIR/everything-go"
+case "$ARCH" in
+  arm64) SWIFT_TARGET="arm64-apple-macosx14.0" ;;
+  amd64) SWIFT_TARGET="x86_64-apple-macosx14.0" ;;
+  *) echo "unsupported macOS architecture: $ARCH" >&2; exit 2 ;;
+esac
+xcrun swiftc -parse-as-library -O -target "$SWIFT_TARGET" \
+  -o "$MACOS_DIR/bridge-remote-helper" "$(dirname "$0")/../native/bridge-remote-helper.swift"
+xcrun swiftc -parse-as-library -O -target "$SWIFT_TARGET" \
+  -o "$MACOS_DIR/bridge-remote-stream" "$(dirname "$0")/../native/bridge-remote-stream.swift"
 "$(dirname "$0")/write_release_provenance.sh" "$RES_DIR/release-provenance.json"
 
 cat > "$APP_DIR/Contents/Info.plist" <<EOF

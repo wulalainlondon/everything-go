@@ -72,6 +72,13 @@ func (h *Hub) handleWorkCommand(c *Client, cmd clientproto.Command) {
 		return
 	}
 	ctx := context.Background()
+	if cmd.WorkItemID != "" && cmd.Kind != "work_item_read" {
+		managed, err := h.work.IsCollaborationItem(ctx, cmd.WorkItemID)
+		if err != nil || managed {
+			h.sendWorkError(c, cmd.MutationID, errors.New("protocol_upgrade_required"))
+			return
+		}
+	}
 	actorType := workitems.ActorUser
 	switch c.clientSurface {
 	case "android", "ios":

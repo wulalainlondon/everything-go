@@ -120,6 +120,14 @@ func main() {
 		fmt.Fprintln(os.Stdout, "permission check passed")
 		return
 	}
+	// Claim the port before opening durable stores. A second launchd job must
+	// fail without running message-queue recovery against the live process.
+	addr := fmt.Sprintf(":%d", *port)
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		log.Fatalf("listen tcp %s before state initialization: %v", addr, err)
+	}
+	defer listener.Close()
 
 	reg := session.NewRegistry()
 	reg.AttachStore(session.NewStore(sessionStorePath))
@@ -145,11 +153,17 @@ func main() {
 		RootDir:      *rootDir,
 		DataDir:      *dataDir,
 		LanIP:        detectLanIP(),
+		ResolveLANIP: detectLanIP,
 		TailscaleIP:  detectTailscaleIP(),
 		Backends:     backend.DefaultRegistry(*remoteWSURL != ""),
 		CodexRemote:  codexRemoteEndpoint(),
 	}
 	hub := core.NewHub(reg, cfg, pairing, *port)
+	defer hub.CloseDelegations()
+	remoteDesktopListener := startRemoteDesktop(cfg.TailscaleIP, cfg.DataDir, hub.HTTPAuthorized)
+	if remoteDesktopListener != nil {
+		defer remoteDesktopListener.Close()
+	}
 	workService, err := workitems.OpenService(*dataDir, instanceID)
 	if err != nil {
 		log.Fatalf("open native work items: %v", err)
@@ -188,7 +202,10 @@ func main() {
 	case "go":
 		terminal := executor.NewTerminalSink(hub)
 		claude := goexec.NewClaude(terminal, *claudeBin)
+		claude.SetPMProvider(hub)
 		codex := goexec.NewCodex(terminal, *codexBin)
+		codex.SetPMProvider(hub)
+		codex.SetDelegationProvider(hub)
 		codex.SetDataDir(*dataDir)
 		ollama := goexec.NewOllama(terminal, *ollamaHost, "")
 		backends := map[string]executor.Executor{
@@ -199,7 +216,12 @@ func main() {
 		if *remoteWSURL != "" {
 			backends["remote-ws"] = remote.NewWS(terminal, *remoteWSURL, *remoteWSToken)
 		}
-		hub.SetExecutor(executor.NewReliableMux(backends, claude, terminal))
+		mux := executor.NewReliableMux(backends, claude, terminal)
+		mux.SetTurnAdmission(hub)
+		hub.SetExecutor(mux)
+		if err := hub.EnablePMCollaboration(context.Background()); err != nil {
+			log.Fatalf("initialize PM collaboration: %v", err)
+		}
 	case "python":
 		log.Fatal("--executor=python not yet implemented (config 3 comes after config 2 is proven)")
 	default:
@@ -217,6 +239,9 @@ func main() {
 	hub.StartMaintenanceRecovery(ctx)
 	hub.StartAutomationScheduler(ctx)
 	hub.StartRelayScheduler(ctx)
+	delegationCtx, stopDelegations := context.WithCancel(ctx)
+	defer stopDelegations()
+	hub.StartDelegationScheduler(delegationCtx)
 	searchDirty := newDirtyPathQueue(defaultDirtyPathLimit)
 	nativeWatcherActive := !*disableNativeWatcher && strings.TrimSpace(os.Getenv("EVERYTHING_GO_NATIVE_WATCH")) != "0"
 	if !*disableSearch {
@@ -324,6 +349,7 @@ func main() {
 	mux.HandleFunc("/api/automation/v1/", hub.ServeAutomationAPI)
 	mux.HandleFunc("/api/relay/v1/", hub.ServeRelayAPI)
 	mux.HandleFunc("/api/notification/v1/replies", hub.ServeNotificationReplyAPI)
+	mux.HandleFunc("/api/widgets/v1/", hub.ServeWidgetAPI)
 	mux.HandleFunc("/hooks/github", hub.ServeGitHubWebhook)
 	mux.HandleFunc("/hooks/apple-app-store", hub.ServeAppStoreWebhook)
 	mux.HandleFunc("/hooks/apple-app-store/", hub.ServeAppStoreWebhook)
@@ -331,9 +357,8 @@ func main() {
 	mux.HandleFunc("/hooks/sentry/", hub.ServeSentryWebhook)
 	mux.HandleFunc("/", hub.ServeWS)
 
-	addr := fmt.Sprintf(":%d", *port)
 	log.Printf("everything-go listening on %s (executor=%s)", addr, *execName)
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	if err := http.Serve(listener, mux); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -584,7 +609,7 @@ func detectLanIP() string {
 	}
 	for _, iface := range ifaces {
 		// Skip Tailscale virtual interfaces — those are handled by detectTailscaleIP.
-		if strings.HasPrefix(iface.Name, "utun") || iface.Name == "tailscale0" {
+		if iface.Flags&net.FlagUp == 0 || strings.HasPrefix(iface.Name, "utun") || iface.Name == "tailscale0" {
 			continue
 		}
 		addrs, _ := iface.Addrs()
@@ -593,7 +618,7 @@ func detectLanIP() string {
 			if !ok || ipnet.IP.IsLoopback() {
 				continue
 			}
-			if ip4 := ipnet.IP.To4(); ip4 != nil {
+			if ip4 := ipnet.IP.To4(); ip4 != nil && !ip4.IsLinkLocalUnicast() && !ip4.IsUnspecified() {
 				return ip4.String()
 			}
 		}

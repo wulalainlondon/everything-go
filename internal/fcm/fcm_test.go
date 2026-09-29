@@ -196,7 +196,8 @@ func TestTaskDoneUsesNativeAndroidPayloadAndLegacyNotificationElsewhere(t *testi
 	n.SetToken("ipad", "ios-token", "ios")
 	n.SetToken("legacy", "legacy-token")
 	n.NotifyTaskDoneWithAuthority("wulala", "Wulala", "Release QA", "Done.", "s1", "request-7",
-		ReplyAction{URL: "http://100.64.0.1/reply", Capability: "signed", ExpiresAt: 999})
+		ReplyAction{URL: "http://100.64.0.1/reply", Capability: "signed", ExpiresAt: 999},
+		TerminalProjection{Revision: 8, UpdatedAt: 1000, ActiveStartedAt: 900, CompletedAt: 1000})
 	mu.Lock()
 	android, androidOK := got["android-token"]
 	ios, iosOK := got["ios-token"]
@@ -204,6 +205,12 @@ func TestTaskDoneUsesNativeAndroidPayloadAndLegacyNotificationElsewhere(t *testi
 	mu.Unlock()
 	if !androidOK || !iosOK || !legacyOK {
 		t.Fatalf("platform fanout=%v", got)
+	}
+	for _, msg := range []v1message{android, ios, legacy} {
+		data := msg.Message.Data
+		if data["revision"] != "8" || data["completed_at"] != "1000" || data["active_started_at"] != "900" || data["updated_at"] != "1000" {
+			t.Fatalf("completion cannot be ordered independently: %+v", data)
+		}
 	}
 	if android.Message.Notification != nil || android.Message.Data["reply_capability"] != "signed" || android.Message.Data["authority_name"] != "Wulala" ||
 		android.Message.Data["request_id"] != "request-7" {

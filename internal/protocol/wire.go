@@ -9,9 +9,11 @@ package protocol
 
 import (
 	"encoding/json"
+	"everything-go/internal/coordination"
 
 	"everything-go/internal/eventinbox"
 	"everything-go/internal/identity"
+	"everything-go/internal/toolenv"
 	"everything-go/internal/workitems"
 )
 
@@ -19,9 +21,12 @@ import (
 // All fields are optional; only `Type` is always present. New command fields can
 // be appended without breaking older ones.
 type Inbound struct {
-	Type      string `json:"type"`
-	SessionID string `json:"session_id"`
-	RequestID string `json:"request_id"`
+	ToolEnvironment *toolenv.Request                   `json:"tool_environment,omitempty"`
+	PM              *coordination.Command              `json:"pm,omitempty"`
+	Collaboration   *coordination.CollaborationCommand `json:"collaboration,omitempty"`
+	Type            string                             `json:"type"`
+	SessionID       string                             `json:"session_id"`
+	RequestID       string                             `json:"request_id"`
 
 	// hello / pairing
 	DeviceID        string      `json:"device_id"`
@@ -51,6 +56,7 @@ type Inbound struct {
 	// binary video upload control frames
 	UploadRequestID string `json:"upload_request_id"`
 	UploadID        string `json:"upload_id"`
+	UploadKind      string `json:"upload_kind,omitempty"`
 	MediaType       string `json:"media_type"`
 	SizeBytes       int64  `json:"size_bytes"`
 
@@ -64,12 +70,14 @@ type Inbound struct {
 	IncludeThinking bool `json:"include_thinking"`
 
 	// rename / meta / effort
-	Effort            *string `json:"effort"`
-	ServiceTier       *string `json:"service_tier"`
-	CollaborationMode *string `json:"collaboration_mode"`
-	Personality       *string `json:"personality"`
-	Pinned            *bool   `json:"pinned"`
-	Hidden            *bool   `json:"hidden"`
+	Effort                 *string `json:"effort"`
+	ExpectedConfigRevision *uint64 `json:"expected_config_revision,omitempty"`
+	ConfigScope            string  `json:"config_scope,omitempty"`
+	ServiceTier            *string `json:"service_tier"`
+	CollaborationMode      *string `json:"collaboration_mode"`
+	Personality            *string `json:"personality"`
+	Pinned                 *bool   `json:"pinned"`
+	Hidden                 *bool   `json:"hidden"`
 
 	// Codex goal commands.
 	Objective   string `json:"objective"`
@@ -208,11 +216,12 @@ type InboundImage struct {
 
 // InboundFile is one attached file on a message.
 type InboundFile struct {
-	Name       string `json:"name"`
-	Content    string `json:"content"`
-	MediaType  string `json:"media_type"`
-	RemotePath string `json:"remote_path"`
-	SizeBytes  int64  `json:"size_bytes"`
+	Name         string `json:"name"`
+	Content      string `json:"content"`
+	MediaType    string `json:"media_type"`
+	RemotePath   string `json:"remote_path"`
+	AttachmentID string `json:"attachment_id,omitempty"`
+	SizeBytes    int64  `json:"size_bytes"`
 }
 
 // SearchFilters mirrors the nested `filters` object on request_search.
@@ -554,30 +563,35 @@ type RecentMessage struct {
 
 // SessionSummary mirrors SessionSummarySchema.
 type SessionSummary struct {
-	ID                  string          `json:"id"`
-	Name                string          `json:"name"`
-	AuthorityInstanceID string          `json:"authority_instance_id,omitempty"`
-	MetadataRevision    uint64          `json:"metadata_revision"`
-	NameUpdatedAt       int64           `json:"name_updated_at,omitempty"`
-	NameUpdatedBy       string          `json:"name_updated_by,omitempty"`
-	LastNameMutationID  string          `json:"last_name_mutation_id,omitempty"`
-	IsStreaming         bool            `json:"is_streaming"`
-	CreatedAt           float64         `json:"created_at"`
-	LastActivity        float64         `json:"last_activity,omitempty"`
-	Cwd                 string          `json:"cwd,omitempty"`
-	Model               string          `json:"model,omitempty"`
-	Effort              string          `json:"effort,omitempty"`
-	ServiceTier         string          `json:"service_tier,omitempty"`
-	CollaborationMode   string          `json:"collaboration_mode,omitempty"`
-	Personality         string          `json:"personality,omitempty"`
-	Backend             string          `json:"backend,omitempty"`
-	Sandbox             string          `json:"sandbox,omitempty"`
-	Pinned              bool            `json:"pinned"`
-	Hidden              bool            `json:"hidden"`
-	RecentMessages      []RecentMessage `json:"recent_messages,omitempty"`
-	PreviewText         string          `json:"preview_text,omitempty"`
-	PreviewRole         string          `json:"preview_role,omitempty"`
-	PreviewVersion      int             `json:"preview_version,omitempty"`
+	ActiveModel          string          `json:"active_model,omitempty"`
+	ActiveEffort         string          `json:"active_effort,omitempty"`
+	ActiveServiceTier    string          `json:"active_service_tier,omitempty"`
+	ActiveConfigRevision uint64          `json:"active_config_revision"`
+	ConfigRevision       uint64          `json:"config_revision"`
+	ID                   string          `json:"id"`
+	Name                 string          `json:"name"`
+	AuthorityInstanceID  string          `json:"authority_instance_id,omitempty"`
+	MetadataRevision     uint64          `json:"metadata_revision"`
+	NameUpdatedAt        int64           `json:"name_updated_at,omitempty"`
+	NameUpdatedBy        string          `json:"name_updated_by,omitempty"`
+	LastNameMutationID   string          `json:"last_name_mutation_id,omitempty"`
+	IsStreaming          bool            `json:"is_streaming"`
+	CreatedAt            float64         `json:"created_at"`
+	LastActivity         float64         `json:"last_activity,omitempty"`
+	Cwd                  string          `json:"cwd,omitempty"`
+	Model                string          `json:"model,omitempty"`
+	Effort               string          `json:"effort,omitempty"`
+	ServiceTier          string          `json:"service_tier,omitempty"`
+	CollaborationMode    string          `json:"collaboration_mode,omitempty"`
+	Personality          string          `json:"personality,omitempty"`
+	Backend              string          `json:"backend,omitempty"`
+	Sandbox              string          `json:"sandbox,omitempty"`
+	Pinned               bool            `json:"pinned"`
+	Hidden               bool            `json:"hidden"`
+	RecentMessages       []RecentMessage `json:"recent_messages,omitempty"`
+	PreviewText          string          `json:"preview_text,omitempty"`
+	PreviewRole          string          `json:"preview_role,omitempty"`
+	PreviewVersion       int             `json:"preview_version,omitempty"`
 }
 
 // CodexLiveDiff carries the latest aggregated turn diff. Replacing rather than
@@ -885,11 +899,12 @@ func NewStopped(sessionID, reqID string) Stopped {
 }
 
 type Error struct {
-	Type      string `json:"type"`
-	SessionID string `json:"session_id,omitempty"`
-	RequestID string `json:"request_id,omitempty"`
-	Code      string `json:"code,omitempty"`
-	Message   string `json:"message"`
+	CommandType string `json:"command_type,omitempty"`
+	Type        string `json:"type"`
+	SessionID   string `json:"session_id,omitempty"`
+	RequestID   string `json:"request_id,omitempty"`
+	Code        string `json:"code,omitempty"`
+	Message     string `json:"message"`
 }
 
 func NewError(sessionID, code, msg string) Error {
@@ -1091,18 +1106,28 @@ type SessionMetaUpdated struct {
 // Every value is returned (including empty values that clear an override), so
 // clients never have to infer whether an optimistic selection actually stuck.
 type SessionConfigResult struct {
-	Type              string `json:"type"`
-	SessionID         string `json:"session_id"`
-	MutationID        string `json:"mutation_id,omitempty"`
-	Accepted          bool   `json:"accepted"`
-	Reason            string `json:"reason,omitempty"`
-	Backend           string `json:"backend"`
-	Model             string `json:"model"`
-	Effort            string `json:"effort"`
-	Sandbox           string `json:"sandbox"`
-	ServiceTier       string `json:"service_tier"`
-	CollaborationMode string `json:"collaboration_mode"`
-	Personality       string `json:"personality"`
+	ActiveConfiguration *ActiveSessionConfiguration `json:"active_configuration,omitempty"`
+	EffectiveBoundary   string                      `json:"effective_boundary,omitempty"`
+	ConfigRevision      uint64                      `json:"config_revision"`
+	Type                string                      `json:"type"`
+	SessionID           string                      `json:"session_id"`
+	MutationID          string                      `json:"mutation_id,omitempty"`
+	Accepted            bool                        `json:"accepted"`
+	Reason              string                      `json:"reason,omitempty"`
+	Backend             string                      `json:"backend"`
+	Model               string                      `json:"model"`
+	Effort              string                      `json:"effort"`
+	Sandbox             string                      `json:"sandbox"`
+	ServiceTier         string                      `json:"service_tier"`
+	CollaborationMode   string                      `json:"collaboration_mode"`
+	Personality         string                      `json:"personality"`
+}
+
+type ActiveSessionConfiguration struct {
+	Model       string `json:"model"`
+	Effort      string `json:"effort"`
+	ServiceTier string `json:"service_tier"`
+	Revision    uint64 `json:"revision"`
 }
 
 func NewSessionConfigResult(sessionID, mutationID string, accepted bool, reason string, backend, model, effort, sandbox, serviceTier, collaborationMode, personality string) SessionConfigResult {
@@ -1341,12 +1366,18 @@ func NewFileSaved(path, name, content string, size, modified int64, mimeType, er
 // UsageWindow mirrors one quota window. Utilization is a 0..1 fraction (or a
 // raw token count for the Codex token fallback); both fields are nullable.
 type UsageWindow struct {
-	Utilization *float64 `json:"utilization"`
-	ResetsAt    *string  `json:"resets_at"`
+	Utilization     *float64 `json:"utilization"`
+	ResetsAt        *string  `json:"resets_at"`
+	Unit            string   `json:"unit,omitempty"`
+	Label           string   `json:"label,omitempty"`
+	DurationMinutes int      `json:"duration_minutes,omitempty"`
 }
 
 type UsageReport struct {
 	Type           string       `json:"type"`
+	BackendID      string       `json:"backend_id,omitempty"`
+	Source         string       `json:"source,omitempty"`
+	CollectedAt    int64        `json:"collected_at,omitempty"`
 	FiveHour       *UsageWindow `json:"five_hour"`
 	SevenDay       *UsageWindow `json:"seven_day"`
 	SevenDaySonnet *UsageWindow `json:"seven_day_sonnet"`
@@ -1628,8 +1659,10 @@ func NewUserInputRequest(p UserInputRequestPayload) UserInputRequestEvent {
 }
 
 type PendingInteractionsList struct {
-	Type         string                    `json:"type"`
-	Interactions []UserInputRequestPayload `json:"interactions"`
+	ScopeSessionID string                    `json:"scope_session_id,omitempty"`
+	SnapshotAll    bool                      `json:"snapshot_all,omitempty"`
+	Type           string                    `json:"type"`
+	Interactions   []UserInputRequestPayload `json:"interactions"`
 }
 
 func NewPendingInteractionsList(items []UserInputRequestPayload) PendingInteractionsList {
@@ -1729,25 +1762,29 @@ func NewPermissionResult(requestID, sessionID, action, decision, message string)
 // MessageQueueSnapshot is authoritative for one Session. Revision survives
 // reconnect/restart; attachment bodies stay on the server.
 type MessageQueueItem struct {
-	RequestID       string   `json:"request_id"`
-	State           string   `json:"state"`
-	Content         string   `json:"content"`
-	Sequence        int64    `json:"sequence"`
-	ImageCount      int      `json:"image_count"`
-	FileNames       []string `json:"file_names"`
-	CreatedAt       int64    `json:"created_at"`
-	UpdatedAt       int64    `json:"updated_at"`
-	Message         string   `json:"message,omitempty"`
-	ActiveRequestID string   `json:"active_request_id,omitempty"`
-	TurnID          string   `json:"turn_id,omitempty"`
+	FullContent      string   `json:"full_content,omitempty"`
+	ContentTruncated bool     `json:"content_truncated,omitempty"`
+	RequestID        string   `json:"request_id"`
+	State            string   `json:"state"`
+	Content          string   `json:"content"`
+	Sequence         int64    `json:"sequence"`
+	ImageCount       int      `json:"image_count"`
+	FileNames        []string `json:"file_names"`
+	CreatedAt        int64    `json:"created_at"`
+	UpdatedAt        int64    `json:"updated_at"`
+	Message          string   `json:"message,omitempty"`
+	ActiveRequestID  string   `json:"active_request_id,omitempty"`
+	TurnID           string   `json:"turn_id,omitempty"`
 }
 type MessageQueueSnapshot struct {
-	Type        string             `json:"type"`
-	SessionID   string             `json:"session_id"`
-	Revision    uint64             `json:"revision"`
-	Items       []MessageQueueItem `json:"items"`
-	Maintenance any                `json:"maintenance,omitempty"`
-	Diagnostics any                `json:"diagnostics,omitempty"`
+	DetailRequestID string             `json:"detail_request_id,omitempty"`
+	Detail          *MessageQueueItem  `json:"detail,omitempty"`
+	Type            string             `json:"type"`
+	SessionID       string             `json:"session_id"`
+	Revision        uint64             `json:"revision"`
+	Items           []MessageQueueItem `json:"items"`
+	Maintenance     any                `json:"maintenance,omitempty"`
+	Diagnostics     any                `json:"diagnostics,omitempty"`
 }
 type QueueActionResult struct {
 	Type            string `json:"type"`

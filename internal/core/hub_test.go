@@ -408,6 +408,14 @@ func TestSwitchSessionConfigReturnsAuthoritativeSnapshotToEveryDevice(t *testing
 			t.Fatalf("bad authoritative config result: %v", ev)
 		}
 	}
+
+	route(h, c1, `{"type":"switch_session_config","session_id":"s1","mutation_id":"cfg-2","collaboration_mode":"default"}`)
+	for _, c := range []*Client{c1, c2} {
+		ev := waitForType(t, c, "session_config_result")
+		if ev["accepted"] != true || ev["mutation_id"] != "cfg-2" || ev["collaboration_mode"] != "default" {
+			t.Fatalf("Default mode was not broadcast authoritatively: %v", ev)
+		}
+	}
 }
 
 func TestSwitchSessionConfigRollsBackWhenRuntimeRejects(t *testing.T) {

@@ -1,6 +1,9 @@
 package backend
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 func TestDefaultRegistryRemoteWSIsOptIn(t *testing.T) {
 	without := DefaultRegistry(false)
@@ -84,4 +87,28 @@ func TestDefaultRegistryIncludesAstraFallbackCapabilities(t *testing.T) {
 		return
 	}
 	t.Fatal("Astra missing from Codex fallback registry")
+}
+
+func TestDefaultRegistryIncludesSol6WithoutChangingDefault(t *testing.T) {
+	for _, definition := range DefaultRegistry(false) {
+		if definition.ID != Codex {
+			continue
+		}
+		if definition.DefaultModel != "gpt-5.6-sol" {
+			t.Fatalf("adding an option changed the default: %s", definition.DefaultModel)
+		}
+		for _, model := range definition.Models {
+			if model.ID != "gpt-6-sol" {
+				continue
+			}
+			if model.Label != "GPT-6-Sol" || model.DefaultReasoningEffort != "medium" || model.IsDefault {
+				t.Fatalf("Sol 6 metadata = %+v", model)
+			}
+			if !reflect.DeepEqual(model.SupportedReasoningEfforts, []string{"low", "medium", "high", "xhigh", "max", "ultra"}) || !reflect.DeepEqual(model.InputModalities, []string{"text", "image"}) {
+				t.Fatalf("Sol 6 capabilities = %+v", model)
+			}
+			return
+		}
+	}
+	t.Fatal("Sol 6 missing from Codex fallback registry")
 }

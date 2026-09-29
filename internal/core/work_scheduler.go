@@ -72,6 +72,24 @@ func (h *Hub) drainWorkQueue(ctx context.Context) {
 }
 
 func (h *Hub) dispatchQueuedRun(ctx context.Context, run workitems.Run) bool {
+	if h.work != nil {
+		if pmState, err := h.work.Collaboration(ctx); err == nil {
+			if project, task, managed := pmState.ProjectForSession(run.SessionID); managed && task != nil {
+				if project.Mode != "active" {
+					h.deferQueuedRun(ctx, run, time.Now().Add(2*time.Second), "pm_paused")
+					return false
+				}
+				if !task.Provisioned {
+					h.deferQueuedRun(ctx, run, time.Now().Add(time.Second), "pm_provisioning")
+					return false
+				}
+				if !pmState.WorkerAllowed(run.SessionID, run.RequestID) {
+					_, _ = h.work.AdvanceRun(ctx, run.SessionID, run.RequestID, "interrupted", "PM control or authorization changed; request was not executed")
+					return true
+				}
+			}
+		}
+	}
 	s, ok := h.registry.Get(run.SessionID)
 	if !ok {
 		h.deferQueuedRun(ctx, run, time.Now().Add(time.Minute), "session_unavailable")
@@ -110,6 +128,14 @@ func (h *Hub) dispatchQueuedRun(ctx context.Context, run workitems.Run) bool {
 	}
 	pack.Prompt, pack.Truncated = workitems.RenderContextPrompt(pack, 24_000, pack.Truncated)
 	content := h.workRunContent(pack, run.Instruction, h.cfg.Port)
+	if state, err := h.work.Collaboration(ctx); err != nil {
+		h.deferQueuedRun(ctx, run, time.Now().Add(time.Minute), "collaboration_unavailable")
+		return false
+	} else if project, task, ok := state.ProjectForSession(run.SessionID); ok && task != nil && project.EngineVersion == 2 {
+		meta := state.Collaboration.Tasks[task.ID]
+		manifest := state.Collaboration.Manifests[meta.ManifestID]
+		content = manifest.Required + "\nPhase: " + meta.Phase + "\n" + collaborationWorkerInstructions + "\nRead work_get_context for saved answers and pending review findings.\n"
+	}
 	accepted := s.Submit(func() {
 		if err := h.work.MarkRunSubmitted(context.Background(), run.ID); err != nil {
 			log.Printf("[work-queue] mark submitted %s: %v", run.ID, err)

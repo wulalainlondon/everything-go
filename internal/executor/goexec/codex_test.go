@@ -591,12 +591,13 @@ func TestEnsureThreadClassifiesActiveWriter(t *testing.T) {
 	}
 }
 
-func TestUpdateSessionSettingsAddressesPersistedThreadAndClearsOverrides(t *testing.T) {
+func TestUpdateSessionSettingsAddressesPersistedThreadWithLegacyUnsetMode(t *testing.T) {
 	c := NewCodex(&capSink{}, "codex")
 	reg := session.NewRegistry()
 	s := reg.Create("logical", "session", t.TempDir(), backend.Codex, "", "danger-full-access", "thread-desktop")
 	// Leave codexState.threadID empty to model a thread owned by Desktop/shared
-	// daemon. Empty settings intentionally clear runtime overrides.
+	// daemon. An empty legacy mode leaves the runtime mode unspecified; the UI
+	// now sends "default" explicitly when the user leaves Plan.
 	s.SetEffort("")
 	empty := ""
 	s.ApplyCodexSettings(&empty, &empty, &empty)
@@ -619,7 +620,7 @@ func TestUpdateSessionSettingsAddressesPersistedThreadAndClearsOverrides(t *test
 		}
 		for _, key := range []string{"model", "effort", "serviceTier", "personality", "collaborationMode"} {
 			if value, exists := frame.Params[key]; !exists || value != nil {
-				t.Errorf("%s should be an explicit null clear, got %#v", key, value)
+				t.Errorf("%s should be null when unspecified, got %#v", key, value)
 			}
 		}
 		c.rpc.dispatchResponse(json.RawMessage(fmt.Sprintf(`{"id":%d,"result":{}}`, frame.ID)))
@@ -627,6 +628,55 @@ func TestUpdateSessionSettingsAddressesPersistedThreadAndClearsOverrides(t *test
 
 	if err := c.UpdateSessionSettings(context.Background(), s); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestUpdateSessionSettingsSendsExplicitDefaultAndPreservesModel(t *testing.T) {
+	c := NewCodex(&capSink{}, "codex")
+	c.collaborationModes["default"] = map[string]any{
+		"mode": "default", "settings": map[string]any{"model": "catalog-default", "reasoning_effort": nil},
+	}
+	s := session.NewRegistry().Create("logical", "session", t.TempDir(), backend.Codex, "gpt-6-sol", "danger-full-access", "thread-desktop")
+	s.SetEffort("high")
+	defaultMode := "default"
+	s.ApplyCodexSettings(nil, &defaultMode, nil)
+
+	writer := &rpcCaptureWriter{writes: make(chan []byte, 1)}
+	c.rpc.setWriter(writer)
+	done := make(chan error, 1)
+	go func() { done <- c.UpdateSessionSettings(context.Background(), s) }()
+	select {
+	case request := <-writer.writes:
+		var frame struct {
+			ID     int            `json:"id"`
+			Method string         `json:"method"`
+			Params map[string]any `json:"params"`
+		}
+		if err := json.Unmarshal(request, &frame); err != nil {
+			t.Fatal(err)
+		}
+		if frame.Method != "thread/settings/update" || frame.Params["model"] != "gpt-6-sol" || frame.Params["effort"] != "high" {
+			t.Fatalf("unexpected settings update: %+v", frame)
+		}
+		mode, ok := frame.Params["collaborationMode"].(map[string]any)
+		if !ok || mode["mode"] != "default" {
+			t.Fatalf("Default mode was not explicit: %+v", frame.Params["collaborationMode"])
+		}
+		settings, ok := mode["settings"].(map[string]any)
+		if !ok || settings["model"] != "gpt-6-sol" || settings["reasoning_effort"] != "high" {
+			t.Fatalf("Default mode lost session model/effort: %+v", mode)
+		}
+		c.rpc.dispatchResponse(json.RawMessage(fmt.Sprintf(`{"id":%d,"result":{}}`, frame.ID)))
+	case <-time.After(time.Second):
+		t.Fatal("missing settings update")
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	turn := c.codexTurnParamsForSession("thread-desktop", nil, s.Snapshot(), "")
+	mode, ok := turn["collaborationMode"].(map[string]any)
+	if !ok || mode["mode"] != "default" {
+		t.Fatalf("next turn did not retain explicit Default mode: %+v", turn)
 	}
 }
 
@@ -814,42 +864,6 @@ func TestCodexTurnLivenessPolicy(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestCodexTurnDeadlineWaitsIndefinitelyForUserInput(t *testing.T) {
-	c := NewCodex(&capSink{}, "codex")
-	c.turnTimeout = 20 * time.Millisecond
-	c.interactions["ui_1"] = codexInteraction{payload: backend.UserInputPayload{
-		RequestID: "ui_1",
-		SessionID: "s1",
-		Status:    "pending",
-	}}
-
-	// Model the runTurn deadline branch: the timer has fired, but a pending
-	// interaction must re-arm it instead of allowing the turn to be aborted.
-	timer := time.NewTimer(time.Millisecond)
-	<-timer.C
-	if !c.deferTurnDeadlineForInput("s1", timer) {
-		t.Fatal("pending user input should defer the turn deadline")
-	}
-	select {
-	case <-timer.C:
-		// Re-arming is the expected behavior. Repeating this branch for as long
-		// as the interaction stays pending makes the wait unbounded.
-	case <-time.After(time.Second):
-		t.Fatal("deferred turn deadline was not re-armed")
-	}
-	if !c.deferTurnDeadlineForInput("s1", timer) {
-		t.Fatal("unanswered input should continue deferring every deadline")
-	}
-
-	c.interMu.Lock()
-	delete(c.interactions, "ui_1")
-	c.interMu.Unlock()
-	if c.deferTurnDeadlineForInput("s1", timer) {
-		t.Fatal("resolved input must restore the ordinary turn deadline")
-	}
-	timer.Stop()
 }
 
 func TestCodexStateActivityResetsStallWarning(t *testing.T) {

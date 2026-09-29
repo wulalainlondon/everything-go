@@ -43,6 +43,11 @@ func (h *Hub) ServeWorkAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	itemID, operation := parts[0], parts[1]
+	managed, err := h.work.IsCollaborationItem(r.Context(), itemID)
+	if err != nil || managed {
+		http.Error(w, "v2 managed work requires run-scoped collaboration tools", http.StatusForbidden)
+		return
+	}
 	switch {
 	case r.Method == http.MethodGet && operation == "context":
 		maxCharacters, _ := strconv.Atoi(r.URL.Query().Get("max_characters"))

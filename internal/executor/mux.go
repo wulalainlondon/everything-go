@@ -35,9 +35,18 @@ func (m *Mux) CatalogDefinitions(ctx context.Context, base []backend.Definition)
 // connection core supports multiple AI runtimes simultaneously, mirroring the
 // Python bridge's backend registry.
 type Mux struct {
+	admission backend.TurnAdmission
 	byBackend map[string]Executor
 	def       Executor
 	terminal  *TerminalSink
+}
+
+func (m *Mux) SetTurnAdmission(p backend.TurnAdmission) { m.admission = p }
+
+func (m *Mux) ObserveNativeLifecycle(s *session.Session, turnID, phase string) {
+	if observer, ok := m.pick(s).(backend.NativeTurnObserver); ok {
+		observer.ObserveNativeLifecycle(s, turnID, phase)
+	}
 }
 
 func NewMux(byBackend map[string]Executor, def Executor) *Mux {
@@ -56,6 +65,17 @@ func (m *Mux) pick(s *session.Session) Executor {
 }
 
 func (m *Mux) Send(ctx context.Context, s *session.Session, reqID, content string, images []backend.ImageAttachment, files []backend.FileAttachment) error {
+	if m.admission != nil {
+		updated, release, err := m.admission.AdmitTurn(s, reqID, content)
+		if err != nil {
+			if m.terminal != nil {
+				m.terminal.Emit(backend.NewError(s.ID, reqID, "pm_policy_rejected", err.Error()))
+			}
+			return err
+		}
+		defer release()
+		content = updated
+	}
 	e := m.pick(s)
 	if m.terminal == nil {
 		return e.Send(ctx, s, reqID, content, images, files)
@@ -128,6 +148,18 @@ func (m *Mux) UpdateSessionSettings(ctx context.Context, s *session.Session) err
 func (m *Mux) ProviderFor(s *session.Session) (backend.HistoryProvider, bool) {
 	hp, ok := m.pick(s).(backend.HistoryProvider)
 	return hp, ok
+}
+
+// FinalAnswerForSession provides the exact terminal answer for Bridge-managed
+// delegation. It never substitutes streaming commentary for a final answer.
+func (m *Mux) FinalAnswerForSession(s *session.Session, requestID string) (string, bool, error) {
+	reader, ok := m.pick(s).(interface {
+		FinalAnswerForRequest(*session.Session, string) (string, bool, error)
+	})
+	if !ok {
+		return "", false, fmt.Errorf("final answer unavailable for backend %s", s.Backend())
+	}
+	return reader.FinalAnswerForRequest(s, requestID)
 }
 
 // AllProviders returns the distinct history providers across all backends,

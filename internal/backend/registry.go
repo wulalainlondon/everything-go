@@ -30,6 +30,13 @@ func DefaultRegistry(includeRemoteWS bool) []Definition {
 					SupportedReasoningEfforts: []string{"low", "medium", "high", "xhigh", "max"},
 					DefaultReasoningEffort:    "medium", InputModalities: []string{"text", "image"},
 				},
+				{
+					ID: "gpt-6-sol", Label: "GPT-6-Sol",
+					Description: "Built to power complex coding and agentic workflows.",
+					// Codex 0.156.1 authenticated model/list capabilities.
+					SupportedReasoningEfforts: []string{"low", "medium", "high", "xhigh", "max", "ultra"},
+					DefaultReasoningEffort:    "medium", InputModalities: []string{"text", "image"},
+				},
 				{ID: "gpt-5.6-sol", Label: "gpt-5.6-sol"},
 				{ID: "gpt-5.6-terra", Label: "gpt-5.6-terra"},
 				{ID: "gpt-5.6-luna", Label: "gpt-5.6-luna"},

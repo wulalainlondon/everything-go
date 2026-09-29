@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,6 +32,7 @@ const (
 )
 
 var ErrConflict = errors.New("request ID already belongs to different message content")
+var ErrRejected = errors.New("message request was permanently rejected")
 
 type Entry struct {
 	Sequence                         int64
@@ -76,7 +78,8 @@ func Open(dataDir string) (*Store, error) {
  payload_hash TEXT NOT NULL, message TEXT NOT NULL DEFAULT '',
  active_request_id TEXT NOT NULL DEFAULT '', turn_id TEXT NOT NULL DEFAULT '',
  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, payload BLOB NOT NULL, UNIQUE(session_id, request_id));
- CREATE INDEX IF NOT EXISTS queue_pending ON queue_commands(session_id, state, seq);`); err != nil {
+ CREATE INDEX IF NOT EXISTS queue_pending ON queue_commands(session_id, state, seq);
+ CREATE TABLE IF NOT EXISTS queue_rejections (session_id TEXT NOT NULL, request_id TEXT NOT NULL, reason TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(session_id,request_id));`); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -127,11 +130,25 @@ func bump(tx *sql.Tx, sessionID string) error {
 func (s *Store) Enqueue(e Entry) (Entry, bool, error) {
 	hash := sha256.Sum256(e.Payload)
 	hashText := hex.EncodeToString(hash[:])
+	// The caller may pin server-side admission metadata in Payload while
+	// hashing only the immutable user intent (e.g. per-message settings).
+	if e.PayloadHash != "" {
+		if decoded, err := hex.DecodeString(e.PayloadHash); err != nil || len(decoded) != sha256.Size {
+			return Entry{}, false, ErrConflict
+		}
+		hashText = e.PayloadHash
+	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return Entry{}, false, err
 	}
 	defer tx.Rollback()
+	var rejection string
+	if err := tx.QueryRow(`SELECT reason FROM queue_rejections WHERE session_id=? AND request_id=?`, e.SessionID, e.RequestID).Scan(&rejection); err == nil {
+		return Entry{}, false, fmt.Errorf("%w: %s", ErrRejected, rejection)
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return Entry{}, false, err
+	}
 	if previous, found, err := lookup(tx, e.SessionID, e.RequestID); err != nil {
 		return Entry{}, false, err
 	} else if found {
@@ -163,6 +180,30 @@ func (s *Store) Enqueue(e Entry) (Entry, bool, error) {
 		return Entry{}, false, err
 	}
 	return inserted, true, nil
+}
+
+// Reject records a durable negative receipt, without ever creating a queued
+// payload. A reconnect/lost-ACK retry cannot become authorized after takeover.
+// Never overwrite the ownership of a message that was already accepted.
+func (s *Store) Reject(sessionID, requestID, reason string) error {
+	if sessionID == "" || requestID == "" {
+		return errors.New("missing rejection identity")
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, found, err := lookup(tx, sessionID, requestID); err != nil {
+		return err
+	} else if found {
+		return nil
+	}
+	_, err = tx.Exec(`INSERT OR IGNORE INTO queue_rejections(session_id,request_id,reason,created_at) VALUES(?,?,?,?)`, sessionID, requestID, reason, time.Now().UnixMilli())
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) Transition(sessionID, requestID string, from []State, to State, message, activeRequestID, turnID string) (Entry, bool, error) {

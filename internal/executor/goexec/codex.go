@@ -38,7 +38,6 @@ import (
 const (
 	codexDefaultModel     = "gpt-5.6-sol"
 	codexCompactThreshold = 0.80
-	codexTurnTimeout      = 100 * time.Minute
 	codexStallWarnAfter   = 5 * time.Minute
 	codexStallAbortAfter  = 30 * time.Minute
 	codexStallCheckEvery  = 30 * time.Second
@@ -64,32 +63,37 @@ type codexState struct {
 	mu       sync.Mutex
 	ensureMu sync.Mutex
 
-	threadID      string
-	currentTurnID string
-	turnActive    bool
-	turnErr       string
-	turnErrorCode string
-	turnDone      chan struct{}
-	stopping      bool
-	reqID         string
+	threadID          string
+	currentTurnID     string
+	turnActive        bool
+	turnErr           string
+	turnErrorCode     string
+	turnDone          chan struct{}
+	stopping          bool
+	reqID             string
+	observedTurnID    string
+	observedRequestID string
+	retiredTurns      []string
 	// tempImages is keyed by the owning turn request id. A terminal event can
 	// synchronously release the Session actor and start the next turn before the
 	// previous runTurn defer executes; a flat Session-wide slice lets that older
 	// defer delete the newer turn's images.
-	tempImages      map[string][]string
-	accumulatedText string
-	askExtracted    bool
-	contextUsed     int
-	contextMax      int
-	compactActive   bool
-	compactErr      string
-	compactDone     chan struct{}
-	compactTurnID   string
-	lastEventAt     time.Time
-	stallWarned     bool
-	pendingHandoff  string
-	pendingRecovery *codexRecovery
-	agents          map[string]*codexAgent
+	tempImages              map[string][]string
+	accumulatedText         string
+	askExtracted            bool
+	contextUsed             int
+	contextMax              int
+	compactActive           bool
+	compactErr              string
+	compactDone             chan struct{}
+	compactTurnID           string
+	lastEventAt             time.Time
+	stallWarned             bool
+	inactivityStopRequested bool
+	inactivityStopReason    string
+	pendingHandoff          string
+	pendingRecovery         *codexRecovery
+	agents                  map[string]*codexAgent
 }
 
 type codexAgent struct {
@@ -129,6 +133,7 @@ func (st *codexState) finish(errStr string) {
 		return
 	}
 	st.turnActive = false
+	st.retireTurnLocked(st.currentTurnID)
 	st.currentTurnID = ""
 	if st.turnErr == "" {
 		st.turnErr = errStr
@@ -147,12 +152,16 @@ func (st *codexState) touch(now time.Time) {
 
 // Codex implements executor.Executor over the codex app-server.
 type Codex struct {
-	sink         executor.Sink
-	tools        *toolEmitter
-	codexBin     string
-	sessionsRoot string
-	indexPath    string
-	rpc          *rpcPlumber
+	pmProvider         backend.PMProvider
+	delegationProvider backend.DelegationProvider
+	toolEnvironment    toolEnvironmentState
+	toolRPCGate        sync.RWMutex
+	sink               executor.Sink
+	tools              *toolEmitter
+	codexBin           string
+	sessionsRoot       string
+	indexPath          string
+	rpc                *rpcPlumber
 
 	startMu               sync.Mutex
 	proc                  *exec.Cmd
@@ -180,11 +189,11 @@ type Codex struct {
 	rolloutScannedAt   time.Time
 	rolloutPaths       []string
 	rolloutByID        map[string]string
-	turnTimeout        time.Duration
 	stallWarnAfter     time.Duration
 	stallAbortAfter    time.Duration
 	stallCheckEvery    time.Duration
 	dataDir            string
+	historyRequestMu   sync.Mutex
 	maintenanceMu      sync.Mutex
 	maintenance        map[string]backend.Maintenance
 	rolloverEnabled    bool
@@ -227,7 +236,6 @@ func NewCodex(sink executor.Sink, codexBin string) *Codex {
 		activeThreadOwner:  make(map[string]*session.Session),
 		interactions:       make(map[string]codexInteraction),
 		collaborationModes: make(map[string]map[string]any),
-		turnTimeout:        codexTurnTimeout,
 		stallWarnAfter:     codexStallWarnAfter,
 		stallAbortAfter:    codexStallAbortAfter,
 		stallCheckEvery:    codexStallCheckEvery,
@@ -534,6 +542,7 @@ func (c *Codex) startRemoteServerLocked(codexHome string) error {
 	c.serverAuthFingerprint = "shared-daemon"
 	c.authReloadDeferred = false
 	c.rpc.setWriter(websocketRPCWriter{conn: conn})
+	c.toolEnvironment.epoch.Add(1)
 	go c.readRemoteLoop(readCtx, conn, done)
 	if err := c.initializeRPC(); err != nil {
 		cancelRead()
@@ -599,16 +608,23 @@ func (c *Codex) readRemoteLoop(ctx context.Context, conn *websocket.Conn, done c
 
 func (c *Codex) failLiveOperations(message string) {
 	c.mu.Lock()
-	states := make([]*codexState, 0, len(c.states))
-	for _, st := range c.states {
-		states = append(states, st)
+	states := make(map[string]*codexState, len(c.states))
+	for sessionID, st := range c.states {
+		states[sessionID] = st
 	}
 	c.mu.Unlock()
-	for _, st := range states {
+	for sessionID, st := range states {
 		st.mu.Lock()
 		turnActive := st.turnActive
 		compactActive := st.compactActive
+		observedRequestID := st.observedRequestID
+		st.observedTurnID, st.observedRequestID = "", ""
 		st.mu.Unlock()
+		if observedRequestID != "" {
+			// Transport loss is not native completion. Do not retire the native
+			// ID: correlated live activity after reattachment can recover it.
+			c.sink.Emit(backend.ObservedTurn{SessionID: sessionID, RequestID: observedRequestID, Phase: "interrupted", Message: message})
+		}
 		if turnActive {
 			st.finish(message + "; the submitted turn was not retried automatically")
 		}
@@ -947,6 +963,12 @@ func (c *Codex) invalidateLiveThreads() {
 // rpcCall sends an RPC and waits for the response. Writes go straight to the
 // pipe, so there is no flush step.
 func (c *Codex) rpcCall(method string, params any, timeout time.Duration) (json.RawMessage, error) {
+	// A confirmed tool maintenance window serializes our submission RPCs, not
+	// interrupt/release or read-only diagnostics. It never restarts the daemon.
+	if toolMutationMethod(method) {
+		c.toolRPCGate.RLock()
+		defer c.toolRPCGate.RUnlock()
+	}
 	if c.appServerMode == "daemon" && healthGatedMethod(method) {
 		if err := c.healthAdmission(); err != nil {
 			return nil, err
@@ -1032,6 +1054,7 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 
 	var p struct {
 		ThreadID  string            `json:"threadId"`
+		TurnID    string            `json:"turnId"`
 		RequestID json.RawMessage   `json:"requestId"`
 		Diff      string            `json:"diff"`
 		Message   string            `json:"message"`
@@ -1115,8 +1138,21 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 	rootThreadID := st.threadID
 	st.mu.Unlock()
 	isRootThread := p.ThreadID == rootThreadID
+	if isRootThread {
+		turnID := firstNonEmpty(p.TurnID, p.Turn.ID)
+		var accept bool
+		reqID, accept = c.observeNativeTurn(s, st, m.Method, turnID)
+		if !accept {
+			return
+		}
+	}
 
 	switch m.Method {
+	case "mcpServer/startupStatus/updated":
+		c.toolEnvironment.epoch.Add(1)
+		c.toolEnvironment.mu.Lock()
+		c.toolEnvironment.cache = nil
+		c.toolEnvironment.mu.Unlock()
 	case "serverRequest/resolved":
 		c.resolveServerRequest(p.RequestID)
 
@@ -1137,7 +1173,9 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 			c.updateMaintenance(s.ID, "running", "", p.Turn.ID)
 			return
 		}
-		st.currentTurnID = p.Turn.ID
+		if st.turnActive {
+			st.currentTurnID = p.Turn.ID
+		}
 		st.mu.Unlock()
 		c.sink.Emit(backend.NewTurnProgress(s.ID, reqID, "thinking", ""))
 
@@ -1273,6 +1311,16 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 			c.emitCodexAgentTree(s)
 			return
 		}
+		phase, message := "completed", p.Turn.Error.Message
+		if p.Turn.Status == "interrupted" {
+			phase = "interrupted"
+		} else if p.Turn.Status == "failed" {
+			phase = "failed"
+			message = firstNonEmpty(message, "turn failed")
+		}
+		if c.finishObservedTurn(s, st, p.Turn.ID, phase, codexErrorCode(p.Turn.Error.Info, message), message) {
+			return
+		}
 		st.mu.Lock()
 		compacting := st.compactActive
 		compactTurnID := st.compactTurnID
@@ -1287,10 +1335,23 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 		if p.Turn.ID != "" && p.Turn.ID != currentTurnID {
 			return
 		}
-		st.mu.Lock()
-		st.turnErrorCode = codexErrorCode(p.Turn.Error.Info, p.Turn.Error.Message)
-		st.mu.Unlock()
-		if p.Turn.Status == "failed" {
+		if p.Turn.Status == "interrupted" {
+			st.mu.Lock()
+			reason := st.inactivityStopReason
+			manualStop := st.stopping
+			if reason != "" && !manualStop {
+				st.turnErrorCode = codexInactivityTimeoutCode
+			}
+			st.mu.Unlock()
+			if reason != "" && !manualStop {
+				st.finish(reason)
+			} else {
+				st.finish("stopped")
+			}
+		} else if p.Turn.Status == "failed" {
+			st.mu.Lock()
+			st.turnErrorCode = codexErrorCode(p.Turn.Error.Info, p.Turn.Error.Message)
+			st.mu.Unlock()
 			if p.Turn.Error.Message == "" {
 				p.Turn.Error.Message = "turn failed"
 			}
@@ -1337,6 +1398,9 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 			msg := p.Error.Message
 			if msg == "" {
 				msg = "unknown codex error"
+			}
+			if c.finishObservedTurn(s, st, p.TurnID, "failed", codexErrorCode(p.Error.Info, msg), msg) {
+				return
 			}
 			st.mu.Lock()
 			compacting := st.compactActive
@@ -1539,6 +1603,12 @@ func (c *Codex) BuildAgentTree(resumeID string) (int, []*protocol.AgentNode) {
 }
 
 func (c *Codex) handleServerRequest(id any, method string, raw json.RawMessage) {
+	if c.handlePMServerRequest(id, method, raw) {
+		return
+	}
+	if c.handleDelegationServerRequest(id, method, raw) {
+		return
+	}
 	approval := map[string]bool{
 		"item/commandExecution/requestApproval": true,
 		"item/fileChange/requestApproval":       true,
@@ -1904,6 +1974,9 @@ func codexJSON(v any) string {
 // --- Executor interface ----------------------------------------------------
 
 func (c *Codex) Send(ctx context.Context, s *session.Session, reqID, content string, images []backend.ImageAttachment, files []backend.FileAttachment) error {
+	if err := validateCodexInlineFiles(files); err != nil {
+		return err
+	}
 	sandboxOverride, _ := backend.SandboxOverride(ctx)
 	if err := c.ensureServer(); err != nil {
 		c.sink.Emit(backend.NewError(s.ID, reqID, backend.ErrProcessDied, "codex app-server failed: "+err.Error()))
@@ -1926,6 +1999,15 @@ func (c *Codex) Send(ctx context.Context, s *session.Session, reqID, content str
 			c.sink.Emit(backend.NewError(s.ID, reqID, backend.ErrProcessDied, "failed to start codex thread: "+err.Error()))
 		}
 		return err
+	}
+	// Durable chat admission pins a configuration per message. Apply it only
+	// after Mux authorization and after the prior turn is terminal; no daemon
+	// restart, fork or mutation of a currently running turn is involved.
+	if s.ActiveQueuedID() != "" {
+		if err := c.UpdateSessionSettings(ctx, s); err != nil && err.Error() != "pm_role_settings_locked" {
+			c.sink.Emit(backend.NewError(s.ID, reqID, "queued_configuration_rejected", err.Error()))
+			return err
+		}
 	}
 	c.sink.Emit(backend.NewTurnProgress(s.ID, reqID, "submitting_turn", "Sending the turn to Codex"))
 	isCompactCommand := strings.TrimSpace(content) == "/compact"
@@ -1958,6 +2040,8 @@ func (c *Codex) Send(ctx context.Context, s *session.Session, reqID, content str
 	st.currentTurnID = ""
 	st.lastEventAt = time.Now()
 	st.stallWarned = false
+	st.inactivityStopRequested = false
+	st.inactivityStopReason = ""
 	threadID := st.threadID
 	done := st.turnDone
 	st.mu.Unlock()
@@ -1976,6 +2060,9 @@ func (c *Codex) Send(ctx context.Context, s *session.Session, reqID, content str
 // between the local snapshot and the RPC is safely rejected instead of being
 // attached to the next turn.
 func (c *Codex) Steer(ctx context.Context, s *session.Session, clientUserMessageID, content string, images []backend.ImageAttachment, files []backend.FileAttachment) (backend.SteerResult, error) {
+	if err := validateCodexInlineFiles(files); err != nil {
+		return backend.SteerResult{}, fmt.Errorf("%w: %v", backend.ErrSteerRejected, err)
+	}
 	if err := c.ensureServer(); err != nil {
 		return backend.SteerResult{}, fmt.Errorf("%w: %v", backend.ErrSteerRejected, err)
 	}
@@ -2029,57 +2116,11 @@ func (c *Codex) runTurn(s *session.Session, st *codexState, threadID string, inp
 		st.finish("turn/start failed: " + err.Error())
 	}
 
-	timeout := time.NewTimer(c.turnTimeout)
-	defer timeout.Stop()
 	stallTicker := time.NewTicker(c.stallCheckEvery)
 	defer stallTicker.Stop()
-
-	waiting := true
-	for waiting {
-		select {
-		case <-done:
-			waiting = false
-		case <-timeout.C:
-			// A request_user_input / MCP elicitation is an explicit hand-off to a
-			// human. Human think time must not consume the turn deadline: the app
-			// may be backgrounded or disconnected for hours and will recover the
-			// pending interaction when it reconnects. Re-arm the full execution
-			// window while any interaction for this session remains unresolved.
-			// Once the user answers (or explicitly cancels), the next deadline is
-			// again an ordinary execution deadline.
-			if c.deferTurnDeadlineForInput(s.ID, timeout) {
-				continue
-			}
-			c.interruptCodexTurn(st)
-			st.finish("Codex turn timed out")
-			<-done
-			waiting = false
-		case now := <-stallTicker.C:
-			st.mu.Lock()
-			lastEventAt := st.lastEventAt
-			warned := st.stallWarned
-			st.mu.Unlock()
-			action := codexLivenessActionAt(
-				now, lastEventAt, warned, c.hasPendingInteraction(s.ID),
-				c.stallWarnAfter, c.stallAbortAfter,
-			)
-			switch action {
-			case codexLivenessWarn:
-				st.mu.Lock()
-				st.stallWarned = true
-				st.mu.Unlock()
-				c.sink.Emit(backend.NewSessionWarning(s.ID, fmt.Sprintf(
-					"Codex has produced no events for %s; it is still running and will be interrupted after %s of inactivity.",
-					c.stallWarnAfter.Round(time.Second), c.stallAbortAfter.Round(time.Second),
-				)))
-			case codexLivenessAbort:
-				c.interruptCodexTurn(st)
-				st.finish(fmt.Sprintf("Codex turn stalled for %s and was interrupted", c.stallAbortAfter.Round(time.Second)))
-				<-done
-				waiting = false
-			}
-		}
-	}
+	// Long turns remain live while progress continues. Only inactivity (not
+	// total wall-clock runtime) is subject to the watchdog.
+	c.waitForCodexTurn(s, st, done, stallTicker.C)
 
 	st.mu.Lock()
 	completedThreadID := st.threadID
@@ -2131,14 +2172,6 @@ func (c *Codex) runTurn(s *session.Session, st *codexState, threadID string, inp
 	}
 }
 
-func (c *Codex) deferTurnDeadlineForInput(sessionID string, timer *time.Timer) bool {
-	if !c.hasPendingInteraction(sessionID) {
-		return false
-	}
-	timer.Reset(c.turnTimeout)
-	return true
-}
-
 type codexLivenessAction uint8
 
 const (
@@ -2173,16 +2206,15 @@ func (c *Codex) hasPendingInteraction(sessionID string) bool {
 	return false
 }
 
-func (c *Codex) interruptCodexTurn(st *codexState) {
-	st.mu.Lock()
-	threadID, turnID := st.threadID, st.currentTurnID
-	st.mu.Unlock()
+func (c *Codex) interruptCodexTurn(threadID, turnID string) error {
 	if threadID == "" || turnID == "" {
-		return
+		return fmt.Errorf("cannot interrupt without an active thread and turn id")
 	}
 	if _, err := c.rpcCall("turn/interrupt", map[string]any{"threadId": threadID, "turnId": turnID}, 5*time.Second); err != nil {
 		log.Printf("[codex] turn interrupt failed thread=%s turn=%s: %v", threadID, turnID, err)
+		return err
 	}
+	return nil
 }
 
 func (c *Codex) runCompactCommand(s *session.Session, st *codexState, reqID string) {
@@ -2449,7 +2481,10 @@ func (c *Codex) shouldAutoCompact(st *codexState) bool {
 
 func (c *Codex) startTurnWithStaleRetry(s *session.Session, st *codexState, threadID string, input []map[string]any, sandboxOverride string) error {
 	snap := s.Snapshot()
-	err := c.startTurn(threadID, input, snap, sandboxOverride)
+	st.mu.Lock()
+	requestID := st.reqID
+	st.mu.Unlock()
+	err := c.startTurn(threadID, input, snap, sandboxOverride, requestID)
 	if err == nil {
 		c.finalizePendingRecovery(s, st, threadID)
 		return nil
@@ -2469,7 +2504,7 @@ func (c *Codex) startTurnWithStaleRetry(s *session.Session, st *codexState, thre
 	if err := c.moveActiveThreadClaim(threadID, newThreadID, s); err != nil {
 		return err
 	}
-	if err := c.startTurn(newThreadID, input, snap, sandboxOverride); err != nil {
+	if err := c.startTurn(newThreadID, input, snap, sandboxOverride, requestID); err != nil {
 		return err
 	}
 	c.finalizePendingRecovery(s, st, newThreadID)
@@ -2595,19 +2630,51 @@ func (c *Codex) codexTurnParamsForSession(threadID string, input []map[string]an
 	return params
 }
 
-func (c *Codex) startTurn(threadID string, input []map[string]any, snap session.Snapshot, sandboxOverride string) error {
-	_, err := c.rpcCall("turn/start", c.codexTurnParamsForSession(threadID, input, snap, sandboxOverride), 30*time.Second)
+func (c *Codex) startTurn(threadID string, input []map[string]any, snap session.Snapshot, sandboxOverride, requestID string) error {
+	params := c.codexTurnParamsForSession(threadID, input, snap, sandboxOverride)
+	if err := c.applyPMTurnPolicy(snap.ID, params); err != nil {
+		return err
+	}
+	raw, err := c.rpcCall("turn/start", params, 30*time.Second)
+	if err == nil {
+		var response struct {
+			Turn struct {
+				ID string `json:"id"`
+			} `json:"turn"`
+		}
+		if json.Unmarshal(raw, &response) == nil && response.Turn.ID != "" {
+			if saveErr := c.rememberTurnRequest(threadID, response.Turn.ID, requestID); saveErr != nil {
+				// The turn was accepted: a metadata failure must never resubmit it.
+				log.Printf("[codex] could not persist history request identity: %v", saveErr)
+			}
+		}
+	}
 	return err
 }
 
 func (c *Codex) collaborationModeValue(snap session.Snapshot) map[string]any {
+	modeName := strings.ToLower(strings.TrimSpace(snap.CollaborationMode))
+	if modeName == "default" {
+		// Codex treats a null collaborationMode as "keep the current mode".
+		// Send an explicit Default preset while retaining this session's model and
+		// effort, instead of silently leaving a previously selected Plan active.
+		model := strings.TrimSpace(snap.Model)
+		if model == "" {
+			model = c.defaultModel()
+		}
+		var effort any
+		if snap.Effort != "" && snap.Effort != "auto" {
+			effort = snap.Effort
+		}
+		return map[string]any{"mode": "default", "settings": map[string]any{"model": model, "reasoning_effort": effort, "developer_instructions": nil}}
+	}
 	c.catalogMu.RLock()
-	mode := c.collaborationModes[strings.ToLower(snap.CollaborationMode)]
+	mode := c.collaborationModes[modeName]
 	c.catalogMu.RUnlock()
 	if mode != nil {
 		return mode
 	}
-	return map[string]any{"mode": strings.ToLower(snap.CollaborationMode), "settings": map[string]any{"model": snap.Model, "reasoning_effort": nil, "developer_instructions": nil}}
+	return map[string]any{"mode": modeName, "settings": map[string]any{"model": snap.Model, "reasoning_effort": nil, "developer_instructions": nil}}
 }
 
 func (c *Codex) forgetThread(s *session.Session, st *codexState, threadID string) {
@@ -2663,6 +2730,23 @@ func (c *Codex) ensureThread(s *session.Session, st *codexState) error {
 	have := st.threadID
 	st.mu.Unlock()
 	if have != "" {
+		// Rebind managed tools on the SAME thread, including v1 -> v2 upgrades.
+		// No global daemon config or native history is reset.
+		if c.pmProvider != nil {
+			policy, err := c.pmProvider.PMConfiguration(s.ID)
+			if err != nil {
+				return err
+			}
+			if policy != nil {
+				params := map[string]any{"threadId": have, "excludeTurns": true, "approvalPolicy": "never"}
+				if err := c.applyPMThreadPolicy(s, params); err != nil {
+					return err
+				}
+				if _, err := c.rpcCall("thread/resume", params, 15*time.Second); err != nil {
+					return fmt.Errorf("collaboration policy rebind: %w", err)
+				}
+			}
+		}
 		return nil
 	}
 
@@ -2704,6 +2788,10 @@ func (c *Codex) ensureThread(s *session.Session, st *codexState) error {
 				// and notification subscription semantics while returning metadata.
 				resumeParams["excludeTurns"] = true
 			}
+			c.applyDelegationThreadTools(s, resumeParams)
+			if err := c.applyPMThreadPolicy(s, resumeParams); err != nil {
+				return err
+			}
 			raw, err := c.rpcCall("thread/resume", resumeParams, 15*time.Second)
 			if err == nil {
 				threadID = extractThreadID(raw, snap.ResumeID)
@@ -2732,7 +2820,7 @@ func (c *Codex) ensureThread(s *session.Session, st *codexState) error {
 		if model == "" {
 			model = c.defaultModel()
 		}
-		raw, err := c.rpcCall("thread/start", map[string]any{
+		startParams := map[string]any{
 			"model": model, "cwd": cwd, "ephemeral": false,
 			"approvalPolicy": "never", "approvalsReviewer": "user", "sandbox": sandbox,
 			"serviceTier": func() any {
@@ -2747,7 +2835,12 @@ func (c *Codex) ensureThread(s *session.Session, st *codexState) error {
 				}
 				return snap.Personality
 			}(),
-		}, 15*time.Second)
+		}
+		c.applyDelegationThreadTools(s, startParams)
+		if err := c.applyPMThreadPolicy(s, startParams); err != nil {
+			return err
+		}
+		raw, err := c.rpcCall("thread/start", startParams, 15*time.Second)
 		if err != nil {
 			return err
 		}
@@ -2780,6 +2873,15 @@ func (c *Codex) ensureThread(s *session.Session, st *codexState) error {
 }
 
 func (c *Codex) UpdateSessionSettings(ctx context.Context, s *session.Session) error {
+	if c.pmProvider != nil {
+		p, err := c.pmProvider.PMConfiguration(s.ID)
+		if err != nil {
+			return err
+		}
+		if p != nil {
+			return errors.New("pm_role_settings_locked")
+		}
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -2873,11 +2975,21 @@ func (c *Codex) Stop(ctx context.Context, s *session.Session) error {
 	st.mu.Lock()
 	st.stopping = true
 	threadID, turnID, active := st.threadID, st.currentTurnID, st.turnActive
+	observedTurnID := st.observedTurnID
 	compacting := st.compactActive
 	if compacting {
 		turnID = st.compactTurnID
 	}
 	st.mu.Unlock()
+	if !active && !compacting && observedTurnID != "" {
+		if threadID == "" {
+			threadID = s.ResumeID()
+		}
+		// Wait for the exact native terminal notification; never report an
+		// unconfirmed interrupt as completed or release the Bridge queue.
+		_, err := c.rpcCall("turn/interrupt", map[string]any{"threadId": threadID, "turnId": observedTurnID}, 5*time.Second)
+		return err
+	}
 	if compacting {
 		if threadID == "" || turnID == "" {
 			return fmt.Errorf("context maintenance is awaiting its operation ID; stop is not yet confirmed")
@@ -3011,6 +3123,9 @@ func (c *Codex) RespondUserInput(id string, answers map[string]any, cancelled bo
 	if !ok {
 		return false
 	}
+	// Human wait time is not model inactivity. Start a fresh liveness window
+	// when the answer is submitted, even before the next model event arrives.
+	c.state(ci.payload.SessionID).touch(time.Now())
 	if answers == nil {
 		answers = map[string]any{}
 	}
@@ -3080,6 +3195,15 @@ func (c *Codex) PendingInteractions(sessionID string) []backend.UserInputPayload
 }
 
 // --- helpers ---------------------------------------------------------------
+
+func validateCodexInlineFiles(files []backend.FileAttachment) error {
+	for _, file := range files {
+		if file.MediaType == "application/pdf" || file.RemotePath != "" || file.AttachmentID != "" {
+			return errors.New("binary attachments must be materialized and validated by Bridge admission before Codex execution")
+		}
+	}
+	return nil
+}
 
 func (c *Codex) codexInput(s *session.Session, reqID, imageOwnerID, content string, images []backend.ImageAttachment, files []backend.FileAttachment, st *codexState) []map[string]any {
 	userText := content

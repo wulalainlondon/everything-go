@@ -1,11 +1,60 @@
 package main
 
 import (
+	"context"
+	"flag"
+	"net"
+	"os"
+	"os/exec"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"everything-go/internal/search"
 )
+
+func TestOccupiedPortDoesNotTouchDurableState(t *testing.T) {
+	listener, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	dataDir := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestOccupiedPortChild$")
+	cmd.Env = append(os.Environ(),
+		"EVERYTHING_GO_OCCUPIED_PORT_CHILD=1",
+		"EVERYTHING_GO_OCCUPIED_PORT="+strconv.Itoa(listener.Addr().(*net.TCPAddr).Port),
+		"EVERYTHING_GO_OCCUPIED_DATA_DIR="+dataDir,
+	)
+	output, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("occupied-port child timed out: %v", ctx.Err())
+	}
+	if err == nil || !strings.Contains(string(output), "before state initialization") {
+		t.Fatalf("expected early listener rejection, err=%v output=%q", err, output)
+	}
+	entries, err := os.ReadDir(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("port loser created durable state: %v", entries)
+	}
+}
+
+func TestOccupiedPortChild(t *testing.T) {
+	if os.Getenv("EVERYTHING_GO_OCCUPIED_PORT_CHILD") != "1" {
+		return
+	}
+	flag.CommandLine = flag.NewFlagSet("everything-go", flag.ExitOnError)
+	os.Args = []string{"everything-go", "--port", os.Getenv("EVERYTHING_GO_OCCUPIED_PORT"),
+		"--data-dir", os.Getenv("EVERYTHING_GO_OCCUPIED_DATA_DIR"), "--executor", "python"}
+	main()
+	t.Fatal("occupied-port bridge unexpectedly returned")
+}
 
 func TestIndexBackoff(t *testing.T) {
 	min := time.Minute

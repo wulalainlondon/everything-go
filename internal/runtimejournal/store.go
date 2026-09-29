@@ -24,6 +24,7 @@ type Terminal struct {
 	RequestID string `json:"request_id,omitempty"`
 	Status    string `json:"status"`
 	At        int64  `json:"at"`
+	Source    string `json:"source,omitempty"` // bridge_recovery is uncertain, not a native terminal
 }
 
 type Record struct {
@@ -112,7 +113,10 @@ func (s *Store) Update(sessionID, phase, requestID string, queueLength int, term
 		phase = r.Phase
 	}
 	previousRequestID := r.ActiveRequestID
-	newTurn := terminal == "" && requestID != "" && requestID != previousRequestID &&
+	// A native turn can continue after the Bridge transport was interrupted.
+	// Its exact request identity stays the same, but the interruption must no
+	// longer be presented as the current result once live execution is observed.
+	newTurn := terminal == "" && requestID != "" && (requestID != previousRequestID || r.Phase == "interrupted") &&
 		(phase == "queued" || phase == "running")
 	if r.Phase == phase && r.ActiveRequestID == requestID && r.QueueLength == queueLength &&
 		r.LastTerminal == terminal && r.LastError == lastError {
@@ -288,7 +292,7 @@ func (s *Store) Recover(sessionID string, actuallyActive bool) (View, bool) {
 	r.StageMessage = r.LastError
 	r.StageStartedAt = r.UpdatedAt
 	r.CompletedAt = r.UpdatedAt
-	r.Terminals = append(r.Terminals, Terminal{Revision: r.Revision, RequestID: r.ActiveRequestID, Status: "interrupted", At: r.CompletedAt})
+	r.Terminals = append(r.Terminals, Terminal{Revision: r.Revision, RequestID: r.ActiveRequestID, Status: "interrupted", At: r.CompletedAt, Source: "bridge_recovery"})
 	r.ActiveRequestID = ""
 	r.ActiveStartedAt = 0
 	s.saveLocked()
@@ -319,7 +323,7 @@ func (s *Store) RecoverAllStale() []View {
 		r.StageMessage = r.LastError
 		r.StageStartedAt = r.UpdatedAt
 		r.CompletedAt = r.UpdatedAt
-		r.Terminals = append(r.Terminals, Terminal{Revision: r.Revision, RequestID: r.ActiveRequestID, Status: "interrupted", At: r.CompletedAt})
+		r.Terminals = append(r.Terminals, Terminal{Revision: r.Revision, RequestID: r.ActiveRequestID, Status: "interrupted", At: r.CompletedAt, Source: "bridge_recovery"})
 		r.ActiveRequestID = ""
 		r.ActiveStartedAt = 0
 		recovered = append(recovered, viewLocked(r, ""))
@@ -375,6 +379,24 @@ func (s *Store) Snapshot(deviceID string, sessionIDs []string) []View {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].SessionID < out[j].SessionID })
 	return out
+}
+
+// WidgetTerminals retains request identities independently from a session-wide
+// read cursor. The device's native widget ledger applies its exact result reads.
+func (s *Store) WidgetTerminals(sessionID string, since int64) []Terminal {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r := s.records[sessionID]
+	if r == nil {
+		return nil
+	}
+	var result []Terminal
+	for _, terminal := range r.Terminals {
+		if terminal.At >= since && terminal.RequestID != "" {
+			result = append(result, terminal)
+		}
+	}
+	return result
 }
 
 // Ack advances only the named device. read=true additionally marks terminal

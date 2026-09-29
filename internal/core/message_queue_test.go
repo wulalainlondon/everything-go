@@ -11,8 +11,33 @@ import (
 	"everything-go/internal/governance"
 	"everything-go/internal/messagequeue"
 	"everything-go/internal/protocol"
+	"everything-go/internal/runtimejournal"
 	"everything-go/internal/session"
 )
+
+func TestConfirmedTerminalReconcilesUncertainQueueItem(t *testing.T) {
+	h, _ := newTestHub(t)
+	if _, _, err := h.messageQueue.Enqueue(messagequeue.Entry{
+		SessionID: "s1", RequestID: "a", Content: "a", Payload: []byte(`{"content":"a"}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, transition := range []struct {
+		from messagequeue.State
+		to   messagequeue.State
+	}{
+		{messagequeue.Queued, messagequeue.Running},
+		{messagequeue.Running, messagequeue.Uncertain},
+	} {
+		if _, changed, err := h.messageQueue.Transition("s1", "a", []messagequeue.State{transition.from}, transition.to, "", "", ""); err != nil || !changed {
+			t.Fatalf("transition to %s: changed=%v err=%v", transition.to, changed, err)
+		}
+	}
+	h.finishQueuedMessage(runtimejournal.View{SessionID: "s1", ActiveRequestID: "other", LastTerminal: "completed"})
+	expectState(t, h, "a", messagequeue.Uncertain)
+	h.finishQueuedMessage(runtimejournal.View{SessionID: "s1", ActiveRequestID: "a", LastTerminal: "completed"})
+	expectState(t, h, "a", messagequeue.Completed)
+}
 
 func enqueueTestMessage(t *testing.T, h *Hub, c *Client, id string) {
 	t.Helper()

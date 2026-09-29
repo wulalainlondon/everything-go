@@ -2,11 +2,14 @@ package core
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"everything-go/internal/backend"
 	"everything-go/internal/clientproto"
@@ -17,14 +20,15 @@ import (
 )
 
 type queuedPayload struct {
-	Content string                    `json:"content"`
-	Images  []backend.ImageAttachment `json:"images,omitempty"`
-	Files   []backend.FileAttachment  `json:"files,omitempty"`
+	Configuration *session.Configuration    `json:"configuration,omitempty"`
+	Content       string                    `json:"content"`
+	Images        []backend.ImageAttachment `json:"images,omitempty"`
+	Files         []backend.FileAttachment  `json:"files,omitempty"`
 }
 
 func (h *Hub) queueError(c *Client, cmd clientproto.Command, code, message string) {
 	// A delivery/queue rejection is not a terminal event for the active AI turn.
-	c.enqueueEvent(protocol.Error{Type: "error", SessionID: cmd.SessionID, RequestID: cmd.RequestID, Code: code, Message: message})
+	c.enqueueEvent(protocol.Error{Type: "error", CommandType: cmd.Kind, SessionID: cmd.SessionID, RequestID: cmd.RequestID, Code: code, Message: message})
 }
 
 func (h *Hub) enqueueChatMessage(c *Client, cmd clientproto.Command) {
@@ -49,17 +53,24 @@ func (h *Hub) enqueueChatMessage(c *Client, cmd clientproto.Command) {
 		h.queueError(c, cmd, "invalid_attachment", err.Error())
 		return
 	}
-	payload, err := json.Marshal(queuedPayload{Content: content, Images: cmd.Images, Files: files})
+	h.messageQueueMu.Lock()
+	defer h.messageQueueMu.Unlock()
+	config := session.ConfigurationFrom(s.SettingsSnapshot())
+	intent, err := json.Marshal(queuedPayload{Content: content, Images: cmd.Images, Files: files})
+	if err != nil {
+		h.queueError(c, cmd, "invalid_message", err.Error())
+		return
+	}
+	intentHash := sha256.Sum256(intent)
+	payload, err := json.Marshal(queuedPayload{Content: content, Images: cmd.Images, Files: files, Configuration: &config})
 	if err != nil {
 		h.queueError(c, cmd, "invalid_message", err.Error())
 		return
 	}
 	names := []string{}
-	for _, file := range files {
+	for _, file := range cmd.Files {
 		names = append(names, file.Name)
 	}
-	h.messageQueueMu.Lock()
-	defer h.messageQueueMu.Unlock()
 	if _, found, lookupErr := h.messageQueue.Get(cmd.SessionID, cmd.RequestID); lookupErr != nil {
 		h.queueError(c, cmd, "queue_unavailable", lookupErr.Error())
 		return
@@ -70,8 +81,12 @@ func (h *Hub) enqueueChatMessage(c *Client, cmd clientproto.Command) {
 			return
 		}
 	}
-	e, inserted, err := h.messageQueue.Enqueue(messagequeue.Entry{SessionID: cmd.SessionID, RequestID: cmd.RequestID, Content: truncateGraphemes(content, 4000), ImageCount: len(cmd.Images), FileNames: names, Payload: payload})
+	e, inserted, err := h.messageQueue.Enqueue(messagequeue.Entry{SessionID: cmd.SessionID, RequestID: cmd.RequestID, Content: truncateGraphemes(content, 4000), ImageCount: len(cmd.Images), FileNames: names, Payload: payload, PayloadHash: hex.EncodeToString(intentHash[:])})
 	if err != nil {
+		if errors.Is(err, messagequeue.ErrRejected) {
+			h.queueError(c, cmd, "message_rejected", "這則訊息先前已被拒絕，不會自動重送。請確認接管狀態後，以新訊息送出。")
+			return
+		}
 		h.queueError(c, cmd, "queue_persist_failed", err.Error())
 		return
 	}
@@ -112,7 +127,18 @@ func (h *Hub) runQueuedMessage(s *session.Session, requestID string) {
 		h.Emit(backend.NewError(s.ID, requestID, "invalid_queued_message", "Queued message could not be decoded"))
 		return
 	}
-	if preview := truncateGraphemes(normalizePreviewText(payload.Content), 160); preview != "" {
+	if payload.Configuration != nil {
+		if err = s.ActivateQueuedConfiguration(*payload.Configuration); err != nil {
+			h.Emit(backend.NewError(s.ID, requestID, "queued_configuration_rejected", err.Error()))
+			return
+		}
+		active := s.Snapshot()
+		result := h.client.SessionConfigResult(s.ID, "", true, "", s.SettingsSnapshot())
+		result.ActiveConfiguration = &protocol.ActiveSessionConfiguration{Model: active.Model, Effort: active.Effort, ServiceTier: active.ServiceTier, Revision: active.ConfigRevision}
+		result.EffectiveBoundary = "active_run_snapshot"
+		h.Emit(result)
+	}
+	if preview := truncateGraphemes(normalizePreviewText(payload.Content), 160); preview != "" && h.delegationMessageOrigin(s.ID, requestID) == "" {
 		if _, _, err := h.registry.CommitPreviewAndPersist(s.ID, preview, "user", time.Now().UnixMilli()); err != nil {
 			log.Printf("[session-preview] queued start commit failed: %v", err)
 		}
@@ -181,6 +207,31 @@ func (h *Hub) sendMessageQueue(c *Client, cmd clientproto.Command) {
 	if err != nil {
 		h.queueError(c, cmd, "queue_unavailable", err.Error())
 		return
+	}
+	// Full text is explicitly requested, never materialized for routine queue
+	// broadcasts. Attachment bytes, secrets in metadata, and configuration are
+	// not exposed. The durable session/request pair is the only lookup key.
+	if cmd.RequestID != "" {
+		entry, found, loadErr := h.messageQueue.Get(cmd.SessionID, cmd.RequestID)
+		if loadErr != nil || !found {
+			h.queueError(c, cmd, "queue_not_found", "Queued message is unavailable for this session")
+			return
+		}
+		var payload queuedPayload
+		if json.Unmarshal(entry.Payload, &payload) != nil {
+			h.queueError(c, cmd, "queue_unavailable", "Queued message content is unavailable")
+			return
+		}
+		detail := protocol.MessageQueueItem{RequestID: entry.RequestID, State: string(entry.State), Content: entry.Content,
+			FullContent: payload.Content, ImageCount: entry.ImageCount, FileNames: entry.FileNames, CreatedAt: entry.CreatedAt, UpdatedAt: entry.UpdatedAt}
+		if len(detail.FullContent) > 1024*1024 {
+			detail.FullContent = detail.FullContent[:1024*1024]
+			for !utf8.ValidString(detail.FullContent) {
+				detail.FullContent = detail.FullContent[:len(detail.FullContent)-1]
+			}
+			detail.ContentTruncated = true
+		}
+		snapshot.DetailRequestID, snapshot.Detail = cmd.RequestID, &detail
 	}
 	c.enqueueEvent(snapshot)
 }
@@ -293,6 +344,12 @@ func (h *Hub) promoteQueuedMessage(c *Client, cmd clientproto.Command) {
 		h.queueResult(c, cmd, "promote", "rejected", "Steering is not supported", e)
 		return
 	}
+	var intended queuedPayload
+	if json.Unmarshal(e.Payload, &intended) != nil || (intended.Configuration != nil && *intended.Configuration != session.ConfigurationFrom(s.Snapshot())) {
+		h.messageQueueMu.Unlock()
+		h.queueResult(c, cmd, "promote", "retained", "此訊息的設定與本輪不同，保留原本的排隊位置。", e)
+		return
+	}
 	finish, err := s.ReserveQueued(cmd.RequestID)
 	if err != nil {
 		h.messageQueueMu.Unlock()
@@ -362,7 +419,14 @@ func (h *Hub) finishQueuedMessage(view runtimejournal.View) {
 	if view.LastTerminal != "completed" {
 		next = messagequeue.Failed
 	}
-	_, changed, err := h.messageQueue.Transition(view.SessionID, requestID, []messagequeue.State{messagequeue.Running}, next, view.LastError, "", "")
+	from := []messagequeue.State{messagequeue.Running}
+	if view.ActiveRequestID == requestID {
+		// An independent startup can have marked a live run uncertain before
+		// losing the port race. A terminal for this exact request confirms the
+		// outcome; do not leave a duplicate pending card in the client.
+		from = append(from, messagequeue.Uncertain)
+	}
+	_, changed, err := h.messageQueue.Transition(view.SessionID, requestID, from, next, view.LastError, "", "")
 	if err != nil {
 		log.Printf("[message-queue] terminal save failed: %v", err)
 		return
