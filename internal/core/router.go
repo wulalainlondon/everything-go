@@ -105,6 +105,9 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 			helloInput.Capabilities = append(helloInput.Capabilities, "pm_collaboration_v1", "human_ai_collaboration_v2")
 		}
 		if !c.enrollmentOnly {
+			if _, ok := h.exec.(backend.RecapExecutor); ok {
+				helloInput.Capabilities = append(helloInput.Capabilities, "session_recap_v1")
+			}
 			if _, ok := h.exec.(backend.ToolEnvironmentExecutor); ok {
 				helloInput.Capabilities = append(helloInput.Capabilities, "tool_environment_v1")
 			}
@@ -463,6 +466,11 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 			return
 		}
 		go h.sendHistory(c, s, cmd)
+
+	case "request_session_recap":
+		h.handleSessionRecap(c, cmd)
+	case "generate_session_recap":
+		h.handleSessionRecap(c, cmd)
 
 	case "get_resumable_sessions":
 		go h.sendResumable(c, 100)

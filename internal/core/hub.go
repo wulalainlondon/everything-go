@@ -68,6 +68,7 @@ type Config struct {
 // the executor.Sink (Emit broadcasts an event to connected clients, or buffers
 // it when none are connected so a reconnecting client can recover it).
 type Hub struct {
+	recapJobs           chan struct{}
 	pmMu                sync.Mutex
 	pmEnabled           bool
 	pmSecret            []byte
@@ -177,6 +178,7 @@ type Hub struct {
 func NewHub(reg *session.Registry, cfg Config, pairing *governance.Pairing, port int) *Hub {
 	cfg.Port = port
 	h := &Hub{
+		recapJobs:           make(chan struct{}, 4),
 		toolOperations:      toolenv.Open(cfg.DataDir),
 		registry:            reg,
 		pairing:             pairing,

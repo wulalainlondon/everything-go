@@ -30,6 +30,7 @@ import (
 	"everything-go/internal/backend"
 	"everything-go/internal/executor"
 	"everything-go/internal/protocol"
+	"everything-go/internal/recap"
 	"everything-go/internal/runtime"
 	"everything-go/internal/session"
 	"everything-go/internal/sourcepolicy"
@@ -152,6 +153,9 @@ func (st *codexState) touch(now time.Time) {
 
 // Codex implements executor.Executor over the codex app-server.
 type Codex struct {
+	recapStoreMu       sync.Mutex
+	recapStore         *recap.Store
+	recapSlots         chan struct{}
 	pmProvider         backend.PMProvider
 	delegationProvider backend.DelegationProvider
 	toolEnvironment    toolEnvironmentState
@@ -224,6 +228,7 @@ func NewCodex(sink executor.Sink, codexBin string) *Codex {
 	codexHome := sourcepolicy.CodexHome()
 	home, _ := os.UserHomeDir()
 	return &Codex{
+		recapSlots:         make(chan struct{}, 2),
 		sink:               sink,
 		tools:              newToolEmitter(sink),
 		codexBin:           codexBin,
