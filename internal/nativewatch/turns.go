@@ -84,9 +84,11 @@ func (w *TurnWatcher) poll(emit func(TurnActivity)) {
 		if turnID == "" || (turnID == f.turnID && phase == f.phase) {
 			continue
 		}
-		previousTurn, previousPhase := f.turnID, f.phase
 		f.turnID, f.phase = turnID, phase
-		if phase == "running" || (!initial && previousPhase == "running" && previousTurn == turnID) {
+		// A short turn may start and finish between polls. Forward its committed
+		// terminal even when the start was missed; the executor checks ownership
+		// and the exact turn ID. Never replay old completions on cold startup.
+		if phase == "running" || !initial {
 			emit(TurnActivity{Session: f.session, TurnID: turnID, Phase: phase})
 		}
 	}
@@ -124,8 +126,9 @@ func latestNativeTurn(path string, size int64) (string, string) {
 			var row struct {
 				Type    string `json:"type"`
 				Payload struct {
-					Type   string `json:"type"`
-					TurnID string `json:"turn_id"`
+					Type   string          `json:"type"`
+					TurnID string          `json:"turn_id"`
+					Error  json.RawMessage `json:"error"`
 				} `json:"payload"`
 			}
 			if json.Unmarshal(line, &row) != nil || row.Type != "event_msg" || row.Payload.TurnID == "" {
@@ -136,6 +139,9 @@ func latestNativeTurn(path string, size int64) (string, string) {
 				turnID, phase = row.Payload.TurnID, "running"
 			case "task_complete":
 				turnID, phase = row.Payload.TurnID, "completed"
+				if len(row.Payload.Error) > 0 && string(row.Payload.Error) != "null" {
+					phase = "failed"
+				}
 			case "turn_aborted":
 				turnID, phase = row.Payload.TurnID, "interrupted"
 			}

@@ -53,6 +53,17 @@ func (c *Codex) loadTurnRequests(threadID string) (codexTurnRequests, error) {
 }
 
 func (c *Codex) rememberTurnRequest(threadID, turnID, requestID string) error {
+	return c.saveTurnRequest(threadID, turnID, requestID, false)
+}
+
+// Only an accepted turn/start response can transfer the synthetic observer
+// identity to the submitting Bridge request. Real Bridge identities stay
+// immutable, and merely observing activity never claims an external turn.
+func (c *Codex) rememberAcceptedTurnRequest(threadID, turnID, requestID string) error {
+	return c.saveTurnRequest(threadID, turnID, requestID, true)
+}
+
+func (c *Codex) saveTurnRequest(threadID, turnID, requestID string, accepted bool) error {
 	if threadID == "" || turnID == "" || requestID == "" {
 		return nil
 	}
@@ -64,9 +75,12 @@ func (c *Codex) rememberTurnRequest(threadID, turnID, requestID string) error {
 	}
 	if previous, exists := r.Requests[turnID]; exists {
 		if previous != requestID {
-			return fmt.Errorf("conflicting turn request association")
+			if !accepted || previous != "codex_external_"+turnID {
+				return fmt.Errorf("conflicting turn request association")
+			}
+		} else {
+			return nil
 		}
-		return nil
 	}
 	r.Requests[turnID] = requestID
 	data, err := json.Marshal(r)

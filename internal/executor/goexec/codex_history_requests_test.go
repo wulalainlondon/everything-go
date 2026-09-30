@@ -85,3 +85,21 @@ func TestCodexTurnRequestBindingConflictAndAuthority(t *testing.T) {
 		t.Fatalf("lost original binding: %v %+v", err, r)
 	}
 }
+
+func TestAcceptedJoinCannotOverwriteAnotherBridgeOrExternalTurn(t *testing.T) {
+	c := NewCodex(&capSink{}, "codex")
+	c.SetDataDir(t.TempDir())
+	for _, previous := range []string{"real-bridge-request", "codex_external_other-turn"} {
+		thread := "thread-" + previous
+		if err := c.rememberTurnRequest(thread, "turn", previous); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.rememberAcceptedTurnRequest(thread, "turn", "new-bridge-request"); err == nil {
+			t.Fatal("accepted join overwrote foreign identity")
+		}
+		journal, err := c.loadTurnRequests(thread)
+		if err != nil || journal.Requests["turn"] != previous {
+			t.Fatal("binding changed after conflict")
+		}
+	}
+}

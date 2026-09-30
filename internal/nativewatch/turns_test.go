@@ -75,3 +75,37 @@ func TestLatestNativeTurnSkipsToolPayloadAndPartialRecords(t *testing.T) {
 		t.Fatalf("large tool hid terminal: %q %q", turn, phase)
 	}
 }
+
+func TestNativeTurnWatcherDoesNotLoseFastTerminalBetweenPolls(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout.jsonl")
+	text := nativeLifecycleLine("task_complete", "old")
+	if err := os.WriteFile(path, []byte(text), 0600); err != nil {
+		t.Fatal(err)
+	}
+	w := NewTurnWatcher()
+	w.Track(NativeSession{ID: "s1", ResumeID: "root", Backend: BackendCodex, Path: path})
+	var events []TurnActivity
+	emit := func(e TurnActivity) { events = append(events, e) }
+	w.poll(emit)
+	text += nativeLifecycleLine("task_started", "fast") + nativeLifecycleLine("task_complete", "fast")
+	if err := os.WriteFile(path, []byte(text), 0600); err != nil {
+		t.Fatal(err)
+	}
+	w.poll(emit)
+	w.poll(emit)
+	if len(events) != 1 || events[0].TurnID != "fast" || events[0].Phase != "completed" {
+		t.Fatalf("missed/duplicated committed terminal: %+v", events)
+	}
+}
+
+func TestNativeTaskCompleteWithErrorIsNeverSuccessful(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout.jsonl")
+	text := nativeLifecycleLine("task_started", "failed") + `{"type":"event_msg","payload":{"type":"task_complete","turn_id":"failed","last_agent_message":null,"error":{"message":"model unavailable","codex_error_info":"server_overloaded"}}}` + "\n"
+	if err := os.WriteFile(path, []byte(text), 0600); err != nil {
+		t.Fatal(err)
+	}
+	turn, phase := latestNativeTurn(path, int64(len(text)))
+	if turn != "failed" || phase != "failed" {
+		t.Fatalf("native error became success: %s/%s", turn, phase)
+	}
+}

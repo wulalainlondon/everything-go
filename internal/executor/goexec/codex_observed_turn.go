@@ -21,14 +21,22 @@ func (st *codexState) retireTurnLocked(turnID string) {
 }
 
 func (c *Codex) ObserveNativeLifecycle(s *session.Session, turnID, phase string) {
-	if s.IsStreaming() || s.ResumeID() == "" || turnID == "" {
+	if s.ResumeID() == "" || turnID == "" {
 		return
 	}
 	st := c.state(s.ID)
 	st.mu.Lock()
-	owned := st.turnActive || st.compactActive
+	owned, compacting, threadID := st.turnActive, st.compactActive, st.threadID
 	st.mu.Unlock()
 	if owned {
+		if !compacting && threadID == s.ResumeID() && codexTerminalStatus(phase) {
+			// A committed native terminal is an independent completion source for
+			// this exact owned turn, not an external event or a queue-release ACK.
+			st.completeOwnedTurn(codexTurnTerminal{ID: turnID, Status: phase})
+		}
+		return
+	}
+	if compacting || s.IsStreaming() {
 		return
 	}
 	if phase == "running" {
@@ -48,7 +56,7 @@ func (c *Codex) observeNativeTurn(s *session.Session, st *codexState, method, tu
 	}
 	if st.turnActive || st.compactActive {
 		requestID := st.reqID
-		accept := st.currentTurnID == "" || turnID == "" || st.currentTurnID == turnID || st.compactActive
+		accept := st.turnStartPending || st.currentTurnID == "" || turnID == "" || st.currentTurnID == turnID || st.compactActive
 		st.mu.Unlock()
 		return requestID, accept
 	}

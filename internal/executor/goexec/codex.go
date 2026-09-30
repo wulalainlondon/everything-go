@@ -66,6 +66,8 @@ type codexState struct {
 
 	threadID          string
 	currentTurnID     string
+	turnStartPending  bool
+	pendingTerminals  map[string]codexTurnTerminal
 	turnActive        bool
 	turnErr           string
 	turnErrorCode     string
@@ -130,12 +132,18 @@ func (st *codexState) finishCompact(errStr string) {
 func (st *codexState) finish(errStr string) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
+	st.finishTurnLocked(errStr)
+}
+
+func (st *codexState) finishTurnLocked(errStr string) {
 	if !st.turnActive {
 		return
 	}
 	st.turnActive = false
 	st.retireTurnLocked(st.currentTurnID)
 	st.currentTurnID = ""
+	st.turnStartPending = false
+	st.pendingTerminals = nil
 	if st.turnErr == "" {
 		st.turnErr = errStr
 	}
@@ -1329,7 +1337,6 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 		st.mu.Lock()
 		compacting := st.compactActive
 		compactTurnID := st.compactTurnID
-		currentTurnID := st.currentTurnID
 		st.mu.Unlock()
 		if compacting {
 			if compactTurnID != "" && p.Turn.ID == compactTurnID {
@@ -1337,33 +1344,8 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 			}
 			return
 		}
-		if p.Turn.ID != "" && p.Turn.ID != currentTurnID {
-			return
-		}
-		if p.Turn.Status == "interrupted" {
-			st.mu.Lock()
-			reason := st.inactivityStopReason
-			manualStop := st.stopping
-			if reason != "" && !manualStop {
-				st.turnErrorCode = codexInactivityTimeoutCode
-			}
-			st.mu.Unlock()
-			if reason != "" && !manualStop {
-				st.finish(reason)
-			} else {
-				st.finish("stopped")
-			}
-		} else if p.Turn.Status == "failed" {
-			st.mu.Lock()
-			st.turnErrorCode = codexErrorCode(p.Turn.Error.Info, p.Turn.Error.Message)
-			st.mu.Unlock()
-			if p.Turn.Error.Message == "" {
-				p.Turn.Error.Message = "turn failed"
-			}
-			st.finish(p.Turn.Error.Message)
-		} else {
-			st.finish("")
-		}
+		st.completeOwnedTurn(codexTurnTerminal{ID: p.Turn.ID, Status: p.Turn.Status,
+			Message: p.Turn.Error.Message, ErrorCode: codexErrorCode(p.Turn.Error.Info, p.Turn.Error.Message)})
 
 	case "thread/compacted":
 		// Modern daemons report a correlated turn/completed as well. Wait for
@@ -1409,11 +1391,16 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 			}
 			st.mu.Lock()
 			compacting := st.compactActive
-			st.turnErrorCode = codexErrorCode(p.Error.Info, msg)
 			st.mu.Unlock()
 			if compacting {
 				st.finishCompact(msg)
+			} else if p.TurnID != "" {
+				st.completeOwnedTurn(codexTurnTerminal{ID: p.TurnID, Status: "failed",
+					Message: msg, ErrorCode: codexErrorCode(p.Error.Info, msg)})
 			} else {
+				st.mu.Lock()
+				st.turnErrorCode = codexErrorCode(p.Error.Info, msg)
+				st.mu.Unlock()
 				st.finish(msg)
 			}
 		}
@@ -2043,6 +2030,8 @@ func (c *Codex) Send(ctx context.Context, s *session.Session, reqID, content str
 	st.accumulatedText = ""
 	st.askExtracted = false
 	st.currentTurnID = ""
+	st.turnStartPending = true
+	st.pendingTerminals = nil
 	st.lastEventAt = time.Now()
 	st.stallWarned = false
 	st.inactivityStopRequested = false
@@ -2143,7 +2132,7 @@ func (c *Codex) runTurn(s *session.Session, st *codexState, threadID string, inp
 	switch {
 	case stopping || turnErr == "stopped":
 		c.releaseActiveThreads(s)
-		c.sink.Emit(backend.NewStopped(s.ID, st.reqID))
+		c.sink.Emit(backend.NewStopped(s.ID, requestID))
 	case turnErr != "":
 		st.mu.Lock()
 		code := st.turnErrorCode
@@ -2152,7 +2141,7 @@ func (c *Codex) runTurn(s *session.Session, st *codexState, threadID string, inp
 			code = codexErrorCode(nil, turnErr)
 		}
 		c.releaseActiveThreads(s)
-		c.sink.Emit(backend.NewError(s.ID, st.reqID, code, turnErr))
+		c.sink.Emit(backend.NewError(s.ID, requestID, code, turnErr))
 	default:
 		c.emitExtractedAskUserQuestion(s, st)
 		// Goal state is durable thread metadata, separate from turn/completed.
@@ -2170,9 +2159,9 @@ func (c *Codex) runTurn(s *session.Session, st *codexState, threadID string, inp
 		st.mu.Unlock()
 		c.releaseActiveThreads(s)
 		if stopping {
-			c.sink.Emit(backend.NewStopped(s.ID, st.reqID))
+			c.sink.Emit(backend.NewStopped(s.ID, requestID))
 		} else {
-			c.sink.Emit(backend.NewDone(s.ID, st.reqID))
+			c.sink.Emit(backend.NewDone(s.ID, requestID))
 		}
 	}
 }
@@ -2640,18 +2629,19 @@ func (c *Codex) startTurn(threadID string, input []map[string]any, snap session.
 	if err := c.applyPMTurnPolicy(snap.ID, params); err != nil {
 		return err
 	}
+	st := c.state(snap.ID)
+	st.mu.Lock()
+	if st.turnActive && st.reqID == requestID && st.threadID == threadID {
+		st.turnStartPending = true
+	}
+	st.mu.Unlock()
 	raw, err := c.rpcCall("turn/start", params, 30*time.Second)
 	if err == nil {
 		var response struct {
-			Turn struct {
-				ID string `json:"id"`
-			} `json:"turn"`
+			Turn codexTurnResponse `json:"turn"`
 		}
 		if json.Unmarshal(raw, &response) == nil && response.Turn.ID != "" {
-			if saveErr := c.rememberTurnRequest(threadID, response.Turn.ID, requestID); saveErr != nil {
-				// The turn was accepted: a metadata failure must never resubmit it.
-				log.Printf("[codex] could not persist history request identity: %v", saveErr)
-			}
+			c.confirmOwnedTurnSubmission(st, threadID, requestID, response.Turn)
 		}
 	}
 	return err

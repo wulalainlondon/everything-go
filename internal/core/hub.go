@@ -546,10 +546,15 @@ func (h *Hub) Emit(event any) {
 		}
 	}
 	releaseTurn := func() {}
-	if terminalEvent && !observedTerminal {
+	if terminalEvent {
 		h.finishQueuedMessage(terminalView)
-		if s, ok := h.registry.Get(terminalView.SessionID); ok {
-			releaseTurn = s.PrepareEndTurn()
+		// After a Bridge restart the native daemon can still be executing the
+		// accepted request. Its correlated terminal settles the recovered queue
+		// entry, but an observer must never release a different actor's work.
+		if !observedTerminal {
+			if s, ok := h.registry.Get(terminalView.SessionID); ok {
+				releaseTurn = s.PrepareEndTurn()
+			}
 		}
 	}
 

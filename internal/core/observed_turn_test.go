@@ -5,7 +5,9 @@ import (
 	"time"
 
 	"everything-go/internal/backend"
+	"everything-go/internal/messagequeue"
 	"everything-go/internal/protocol"
+	"everything-go/internal/session"
 )
 
 func TestObservedTurnProjectsRunningListChatAndReconnect(t *testing.T) {
@@ -57,5 +59,28 @@ func TestObservedTerminalCannotReleaseBridgeQueue(t *testing.T) {
 	}
 	if view := h.runtimeSnapshot("phone").Items[0]; view.Phase != "running" || view.ActiveRequestID != "owned" {
 		t.Fatalf("observer replaced owned runtime: %+v", view)
+	}
+}
+
+func TestObservedTerminalSettlesRecoveredUncertainRequestWithoutResend(t *testing.T) {
+	h, exec := newTestHub(t)
+	h.registry.Create("s1", "surviving native turn", t.TempDir(), "codex", "", "", "root")
+	exec.onSend = func(_ *session.Session, _, _ string) { t.Error("recovered uncertain request was resubmitted") }
+	if _, _, err := h.messageQueue.Enqueue(messagequeue.Entry{SessionID: "s1", RequestID: "accepted", Content: "work", Payload: []byte(`{"content":"work"}`)}); err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range []struct{ from, to messagequeue.State }{{messagequeue.Queued, messagequeue.Running}, {messagequeue.Running, messagequeue.Uncertain}} {
+		if _, changed, err := h.messageQueue.Transition("s1", "accepted", []messagequeue.State{step.from}, step.to, "", "", ""); err != nil || !changed {
+			t.Fatal("transition", err)
+		}
+	}
+	h.Emit(backend.ObservedTurn{SessionID: "s1", RequestID: "other-native", Phase: "running"})
+	h.Emit(backend.ObservedTurn{SessionID: "s1", RequestID: "other-native", Phase: "completed"})
+	expectState(t, h, "accepted", messagequeue.Uncertain)
+	h.Emit(backend.ObservedTurn{SessionID: "s1", RequestID: "accepted", Phase: "running"})
+	h.Emit(backend.ObservedTurn{SessionID: "s1", RequestID: "accepted", Phase: "completed"})
+	expectState(t, h, "accepted", messagequeue.Completed)
+	if view := h.runtimeSnapshot("phone").Items[0]; view.Phase != "completed" || view.ActiveRequestID != "accepted" {
+		t.Fatalf("recovered completion did not reconcile: %+v", view)
 	}
 }
