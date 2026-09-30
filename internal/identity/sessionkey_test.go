@@ -7,7 +7,7 @@ import (
 )
 
 func TestSessionKeySharedVectors(t *testing.T) {
-	data, err := os.ReadFile("../../../contracts/v1/session_key_vectors.json")
+	data, err := os.ReadFile("../../contracts/v1/session_key_vectors.json")
 	if err != nil {
 		t.Fatal(err)
 	}

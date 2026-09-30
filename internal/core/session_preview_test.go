@@ -35,7 +35,7 @@ func (e *previewHistoryExec) AllProviders() []backend.HistoryProvider {
 }
 
 func TestSessionPreviewSharedVectors(t *testing.T) {
-	data, err := os.ReadFile("../../../contracts/v3/normalization_vectors.json")
+	data, err := os.ReadFile("../../contracts/v3/normalization_vectors.json")
 	if err != nil {
 		t.Fatal(err)
 	}
