@@ -95,8 +95,8 @@ func New(serviceAccountPath, registryPath string) (*Notifier, error) {
 	return NewFromBytes(data, registryPath)
 }
 
-// NewFromBytes is like New but accepts the service account JSON directly
-// (e.g. from an //go:embed directive).
+// NewFromBytes parses private runtime credentials already read by the caller.
+// Service-account private keys must never be compiled into an application.
 func NewFromBytes(data []byte, registryPath string) (*Notifier, error) {
 	var sa struct {
 		ProjectID string `json:"project_id"`

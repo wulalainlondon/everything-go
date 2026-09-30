@@ -5,9 +5,10 @@
 # Local recovery snapshots created during executor experiments.
 *.backup-record2-*
 
-# FCM service account key — injected at CI build time via FCM_SERVICE_ACCOUNT_JSON secret.
-# Never commit; the binary embeds it at build time via //go:embed.
+# Private FCM credentials are provisioned at runtime, never compiled or shipped.
 cmd/everything-go/keys/*.json
+fcm_service_account.json
+serviceAccountKey.json
 internal/core/notification_reply_secret
 /release-artifacts/
 *.log

@@ -11,7 +11,6 @@ package main
 import (
 	"bytes"
 	"context"
-	_ "embed"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -35,7 +34,6 @@ import (
 	"everything-go/internal/executor"
 	"everything-go/internal/executor/goexec"
 	"everything-go/internal/executor/remote"
-	"everything-go/internal/fcm"
 	"everything-go/internal/feed"
 	"everything-go/internal/filetransfer"
 	"everything-go/internal/governance"
@@ -48,9 +46,6 @@ import (
 	"everything-go/internal/sourcepolicy"
 	"everything-go/internal/workitems"
 )
-
-//go:embed keys/fcm_service_account.json
-var embeddedFCMKey []byte
 
 func main() {
 	port := flag.Int("port", 8767, "WebSocket listen port (Python prod uses 8766)")
@@ -66,7 +61,7 @@ func main() {
 	rootDir := flag.String("root-dir", "", "filesystem jail root (\"\" = no jail)")
 	permissionCheck := flag.Bool("permission-check", false, "check filesystem permissions needed by the resident bridge and exit")
 	permissionCheckPaths := flag.String("permission-check-paths", "", "additional filesystem paths to check, separated by ':' on Unix or ';' on Windows")
-	serviceAccount := flag.String("service-account", "", "path to Firebase serviceAccountKey.json for FCM push (empty = disabled)")
+	serviceAccount := flag.String("service-account", os.Getenv("EVERYTHING_GO_FCM_SERVICE_ACCOUNT"), "private runtime Firebase service account JSON path (default = DATA_DIR/fcm_service_account.json; absent = push disabled)")
 	discovery := flag.Bool("discovery", false, "enable the LAN UDP discovery beacon")
 	noDiscovery := flag.Bool("no-discovery", false, "deprecated: discovery is disabled by default")
 	discoveryPort := flag.Int("discovery-port", 8767, "UDP port the app's discovery listener binds")
@@ -287,22 +282,12 @@ func main() {
 		})
 	}
 
-	// FCM push: explicit --service-account flag overrides the embedded key.
-	fcmTokenPath := filepath.Join(*dataDir, "fcm_tokens.json")
-	if *serviceAccount != "" {
-		if notifier, err := fcm.New(*serviceAccount, fcmTokenPath); err != nil {
-			log.Printf("FCM disabled: %v", err)
-		} else {
-			hub.SetFCM(notifier)
-			log.Printf("FCM push enabled (service account: %s)", *serviceAccount)
-		}
+	// Credentials are operator-provisioned runtime state, never release input.
+	if notifier, err := loadRuntimeFCM(*serviceAccount, *dataDir); err != nil {
+		log.Printf("FCM disabled: %v", err)
 	} else {
-		if notifier, err := fcm.NewFromBytes(embeddedFCMKey, fcmTokenPath); err != nil {
-			log.Printf("FCM disabled (embedded key): %v", err)
-		} else {
-			hub.SetFCM(notifier)
-			log.Printf("FCM push enabled (embedded key)")
-		}
+		hub.SetFCM(notifier)
+		log.Printf("FCM push enabled (private runtime credentials)")
 	}
 
 	// Network presence services (P3 discovery + P4 tunnel). They are opt-in so

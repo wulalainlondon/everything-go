@@ -9,10 +9,28 @@
 | CI trigger | push tag matching `v*` |
 | CI file | `.github/workflows/release.yml` |
 
-All 8 GitHub Secrets are pre-configured — do not modify them:
+The 7 macOS signing/notarization GitHub Secrets are pre-configured — do not modify them:
 `MACOS_CERTIFICATE_P12_BASE64`, `MACOS_CERTIFICATE_PASSWORD`, `MACOS_KEYCHAIN_PASSWORD`,
 `MACOS_CODESIGN_IDENTITY`, `APPSTORE_CONNECT_API_KEY_ID`, `APPSTORE_CONNECT_API_ISSUER_ID`,
-`APPSTORE_CONNECT_API_KEY_P8_BASE64`, `FCM_SERVICE_ACCOUNT_JSON`
+`APPSTORE_CONNECT_API_KEY_P8_BASE64`
+
+FCM service-account credentials are **runtime-only**. The release workflow must
+not read or inject `FCM_SERVICE_ACCOUNT_JSON`, and no private key may be embedded
+in the application. CI scans every compiled binary before packaging; the local
+macOS packager applies the same gate.
+
+Provision a newly issued runtime credential on each host outside the source
+checkout, with owner-only permissions. The default location is
+`DATA_DIR/fcm_service_account.json`; an explicit `--service-account` argument or
+`EVERYTHING_GO_FCM_SERVICE_ACCOUNT` path overrides it. On macOS/Linux the file
+must be private (`0600` or read-only `0400`). Missing, invalid, overly large or
+non-private credentials disable FCM without stopping other Bridge services.
+Provision the runtime credential **before** upgrading an embedded-key release
+to avoid interrupting push notifications.
+
+If a key was included in a publicly accessible application, treat it as exposed
+and rotate/revoke it; removing an artifact alone cannot invalidate downloaded
+copies. See [Google Cloud's service-account key guidance](https://docs.cloud.google.com/iam/docs/best-practices-for-managing-service-account-keys).
 
 ---
 
@@ -57,10 +75,10 @@ pass the exact Developer ID signing gate.
 | Wulala | Apple Silicon `arm64` / `darwin-arm64` | 8766 | `~/.everything-go-runtime` |
 | Morrie | **Intel `x86_64` (`GOARCH=amd64`)** / `darwin-amd64` | 8766 | `/Users/morrie/.everything-go-runtime-9453` (legacy data-dir name retained) |
 
-Morrie's active launchd label is `com.morrie.everything-go`. The former Python
-Bridge on 8766, its separately managed cloudflared process, and the Go 9453
-LaunchAgent are disabled. Everything Go now owns 8766 and its tunnel directly;
-the old 9453 wrapper/plist are retained only as an explicit rollback artifact.
+Morrie's active launchd label is `com.morrie.everything-go-9453`; the legacy name
+and data-directory suffix are retained, but the service listens on 8766. The
+retired `com.morrie.everything-go` plist and former Python Bridge must remain
+disabled. Everything Go owns 8766 and its tunnel directly.
 
 Morrie is an Intel Mac. Never deploy the Wulala `darwin-arm64` bundle to it:
 Developer ID verification can still succeed for the wrong architecture, but

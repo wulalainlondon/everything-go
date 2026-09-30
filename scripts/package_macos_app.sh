@@ -7,6 +7,7 @@ if [ "$#" -ne 3 ]; then
 fi
 
 BIN_SRC="$1"
+node "$(dirname "$0")/check_release_secrets.mjs" "$BIN_SRC"
 ARCH="$2"
 OUT_ZIP="$3"
 OUT_DIR="$(dirname "$OUT_ZIP")"
