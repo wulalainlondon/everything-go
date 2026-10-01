@@ -24,6 +24,7 @@ type fixture struct {
 	states                map[string]string
 	goals                 map[string]string
 	queued                int
+	streamingOverride     *int
 	ackSession, ackStatus string
 	mu                    sync.Mutex
 	methods               []string
@@ -89,6 +90,9 @@ func testFixture(t *testing.T) *fixture {
 					if s.Streaming {
 						count++
 					}
+				}
+				if f.streamingOverride != nil {
+					count = *f.streamingOverride
 				}
 				writeWS(r.Context(), conn, map[string]any{"type": "status_result", "status": map[string]int{"sessions_total": len(f.sessions), "sessions_streaming": count, "queued_commands": f.queued}})
 			case "request_sessions_list":

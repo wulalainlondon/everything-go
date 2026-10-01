@@ -236,6 +236,7 @@ func inspect(ctx context.Context, c config, seen map[string]tracked) ([]string, 
 	targetFound := false
 	byID := map[string]sessionView{}
 	busy := []string{}
+	projectedStreaming := 0
 	for _, s := range snapshot.Sessions {
 		byID[s.ID] = s
 		if s.ID == c.Target {
@@ -263,7 +264,10 @@ func inspect(ctx context.Context, c config, seen map[string]tracked) ([]string, 
 			}
 			ignoreProjection = count == 0
 		}
-		if s.Streaming || s.Queue > 0 || v.Queue > 0 || (activePhase(v.Phase) && !ignoreProjection) {
+		if ignoreProjection && s.Streaming {
+			projectedStreaming++
+		}
+		if (s.Streaming && !ignoreProjection) || s.Queue > 0 || v.Queue > 0 || (activePhase(v.Phase) && !ignoreProjection) {
 			busy = append(busy, label(s.ID, s.Name))
 			if s.ID != c.Target {
 				seen[s.ID] = tracked{Name: s.Name, Request: v.Request}
@@ -292,7 +296,9 @@ func inspect(ctx context.Context, c config, seen map[string]tracked) ([]string, 
 			streaming++
 		}
 	}
-	if streaming != snapshot.Streaming {
+	// sessions_list also includes runtime presentation, whereas request_status
+	// counts actual Session actors. Subtract only the exact audited projections.
+	if streaming-projectedStreaming != snapshot.Streaming {
 		return nil, nil, errors.New("bridge_snapshot_changed")
 	}
 	p, err := openNative(ctx, c.Socket)

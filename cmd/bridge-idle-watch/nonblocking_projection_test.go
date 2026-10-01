@@ -13,6 +13,11 @@ func TestAuditedNonBlockingProjectionNeverHidesNativeOrOwnedWork(t *testing.T) {
 		t.Run(scenario, func(t *testing.T) {
 			f := testFixture(t)
 			f.runtimes[1].Phase, f.runtimes[1].Request = "waiting", "question"
+			// Production sessions_list projects waiting as is_streaming=true,
+			// but request_status's actor count remains zero for these idle asks.
+			f.sessions[1].Streaming = true
+			actors := 0
+			f.streamingOverride = &actors
 			f.config.NonBlockingProjectionFile = filepath.Join(f.config.DataDir, "audit.json")
 			if err := os.WriteFile(f.config.NonBlockingProjectionFile, []byte(`{"work":{"request_id":"question","thread_id":"work-thread"}}`), 0600); err != nil {
 				t.Fatal(err)
@@ -21,7 +26,7 @@ func TestAuditedNonBlockingProjectionNeverHidesNativeOrOwnedWork(t *testing.T) {
 			case "native-active":
 				f.states["work-thread"] = "active"
 			case "bridge-streaming":
-				f.sessions[1].Streaming = true
+				actors = 1
 			case "queued":
 				f.runtimes[1].Queue = 1
 			case "wrong-question":
