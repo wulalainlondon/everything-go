@@ -206,11 +206,17 @@ func (h *Hub) driveRuntimeState(event any) {
 		// ordering boundary before the next queued turn is released.
 		return
 	case protocol.UserInputRequestEvent:
-		h.updateRuntime(e.SessionID, "waiting", e.RequestID, 0, "", "")
+		// Async questions require an eventual answer, not a blocked model turn.
+		// They remain deliverable interaction events without changing runtime.
+		if e.IsBlocking != nil && !*e.IsBlocking {
+			return
+		}
+		if view, changed := h.runtimes.WaitForInteraction(e.SessionID, e.RequestID); changed {
+			h.publishRuntime(view)
+		}
 	case protocol.InteractionResolved:
-		if e.SessionID != "" {
-			h.updateRuntime(e.SessionID, "running", "", 0, "", "")
-			h.updateRuntimeProgress(e.SessionID, "", "thinking", "")
+		if view, changed := h.runtimes.ResolveInteraction(e.SessionID, e.RequestID); changed {
+			h.publishRuntime(view)
 		}
 	}
 }

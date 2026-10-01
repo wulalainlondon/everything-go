@@ -30,6 +30,7 @@ type config struct {
 	Bridge, Socket, DataDir, SessionsFile, Target, TargetThread, Authority, Job, StateFile string
 	Poll, Quiet                                                                            time.Duration
 	Once, Notify                                                                           bool
+	NonBlockingProjectionFile                                                              string
 }
 
 type savedSession struct {
@@ -103,6 +104,7 @@ func main() {
 	flag.DurationVar(&c.Quiet, "quiet", 60*time.Second, "continuous corroborated idle window")
 	flag.BoolVar(&c.Once, "once", false, "read-only preflight; no notification/checkpoint writes")
 	flag.BoolVar(&c.Notify, "notify", false, "authorize one notification, not a deployment")
+	flag.StringVar(&c.NonBlockingProjectionFile, "nonblocking-projections", "", "exact audited question projections; native activity and durable commands still block")
 	flag.Parse()
 	if err := validateConfig(c); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -211,6 +213,15 @@ func run(ctx context.Context, c config) error {
 }
 
 func inspect(ctx context.Context, c config, seen map[string]tracked) ([]string, []string, error) {
+	projections := map[string]struct {
+		RequestID string `json:"request_id"`
+		ThreadID  string `json:"thread_id"`
+	}{}
+	if c.NonBlockingProjectionFile != "" {
+		if err := readJSON(c.NonBlockingProjectionFile, &projections); err != nil {
+			return nil, nil, errors.New("nonblocking_projection_audit_unavailable")
+		}
+	}
 	var saved map[string]savedSession
 	if err := readJSON(c.SessionsFile, &saved); err != nil {
 		return nil, nil, errors.New("session_source_unavailable")
@@ -234,7 +245,25 @@ func inspect(ctx context.Context, c config, seen map[string]tracked) ([]string, 
 		if !ok {
 			return nil, nil, errors.New("runtime_coverage_incomplete")
 		}
-		if s.Streaming || s.Queue > 0 || v.Queue > 0 || activePhase(v.Phase) {
+		projection, audited := projections[s.ID]
+		ignoreProjection := audited && projection.RequestID != "" && v.Request == projection.RequestID &&
+			v.Phase == "waiting" && projection.ThreadID != "" && projection.ThreadID == saved[s.ID].thread()
+		if ignoreProjection {
+			// An actual reply may use the same ID as the question. Even a settled
+			// receipt disqualifies this classification; never ignore by ID prefix.
+			db, err := sql.Open("sqlite", "file:"+filepath.Join(c.DataDir, "message_queue.sqlite")+"?mode=ro")
+			if err != nil {
+				return nil, nil, errors.New("projection_queue_unavailable")
+			}
+			var count int
+			err = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM queue_commands WHERE session_id=? AND request_id=?", s.ID, projection.RequestID).Scan(&count)
+			db.Close()
+			if err != nil {
+				return nil, nil, errors.New("projection_queue_unavailable")
+			}
+			ignoreProjection = count == 0
+		}
+		if s.Streaming || s.Queue > 0 || v.Queue > 0 || (activePhase(v.Phase) && !ignoreProjection) {
 			busy = append(busy, label(s.ID, s.Name))
 			if s.ID != c.Target {
 				seen[s.ID] = tracked{Name: s.Name, Request: v.Request}
@@ -276,6 +305,12 @@ func inspect(ctx context.Context, c config, seen map[string]tracked) ([]string, 
 		return nil, nil, err
 	}
 	all := map[string]bool{c.TargetThread: true}
+	for id, projection := range projections {
+		if saved[id].thread() != projection.ThreadID || projection.ThreadID == "" {
+			return nil, nil, errors.New("nonblocking_projection_thread_changed")
+		}
+		all[projection.ThreadID] = true
+	}
 	for _, id := range ids {
 		all[id] = true
 	}

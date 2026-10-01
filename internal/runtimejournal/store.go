@@ -44,6 +44,9 @@ type Record struct {
 	Terminals       []Terminal        `json:"terminals,omitempty"`
 	AckedByDevice   map[string]uint64 `json:"acked_by_device,omitempty"`
 	ReadByDevice    map[string]uint64 `json:"read_by_device,omitempty"`
+	// Question IDs are not turn IDs. Keep their correlation internal so a
+	// delayed resolution cannot resume a terminal or a different turn.
+	WaitingInteractions map[string]string `json:"waiting_interactions,omitempty"`
 }
 
 // View is safe to send to one device; internal device maps are never exposed.
@@ -125,6 +128,9 @@ func (s *Store) Update(sessionID, phase, requestID string, queueLength int, term
 	now := s.now().UnixMilli()
 	r.Revision++
 	r.Phase = phase
+	if phase != "waiting" || requestID != previousRequestID {
+		r.WaitingInteractions = nil
+	}
 	r.Stage = defaultStageForPhase(phase)
 	r.StageMessage = ""
 	r.StageStartedAt = now
