@@ -9,6 +9,12 @@ from silently defining different identity or lifecycle rules.
 
 ## Topology
 
+Managed customer push now has a device-scoped broker implementation. Customers
+keep only their own broker credential; Google server credentials stay in the
+operator's trusted environment. The released mobile token/notification format
+is preserved. See [setup, security and deployment gates](docs/PUSH_RELAY.md).
+This is locally verified source, not an already deployed managed push service.
+
 One managed Go Bridge owns Session metadata, runtime, attachments, delivery
 cursors, Work Items and external events. It connects to the managed shared
 Codex app-server over a Unix socket and exposes protocol v3 to clients. LAN,

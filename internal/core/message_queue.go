@@ -31,19 +31,19 @@ func (h *Hub) queueError(c *Client, cmd clientproto.Command, code, message strin
 	c.enqueueEvent(protocol.Error{Type: "error", CommandType: cmd.Kind, SessionID: cmd.SessionID, RequestID: cmd.RequestID, Code: code, Message: message})
 }
 
-func (h *Hub) enqueueChatMessage(c *Client, cmd clientproto.Command) {
+func (h *Hub) enqueueChatMessage(c *Client, cmd clientproto.Command) bool {
 	if h.messageQueue == nil {
 		h.queueError(c, cmd, "queue_unavailable", "Message queue storage is unavailable")
-		return
+		return false
 	}
 	if !h.controls.MobileMayWrite(cmd.SessionID) {
 		h.queueError(c, cmd, "session_controlled_by_desktop", "Reclaim this conversation before sending a message")
-		return
+		return false
 	}
 	s, ok := h.registry.Get(cmd.SessionID)
 	if !ok {
 		h.queueError(c, cmd, "no_session", "Unknown session")
-		return
+		return false
 	}
 	if cmd.RequestID == "" {
 		cmd.RequestID = "legacy_" + randomID()
@@ -51,7 +51,7 @@ func (h *Hub) enqueueChatMessage(c *Client, cmd clientproto.Command) {
 	content, files, err := h.resolveUploadedVideos(cmd.SessionID, cmd.Content, cmd.Files)
 	if err != nil {
 		h.queueError(c, cmd, "invalid_attachment", err.Error())
-		return
+		return false
 	}
 	h.messageQueueMu.Lock()
 	defer h.messageQueueMu.Unlock()
@@ -59,13 +59,13 @@ func (h *Hub) enqueueChatMessage(c *Client, cmd clientproto.Command) {
 	intent, err := json.Marshal(queuedPayload{Content: content, Images: cmd.Images, Files: files})
 	if err != nil {
 		h.queueError(c, cmd, "invalid_message", err.Error())
-		return
+		return false
 	}
 	intentHash := sha256.Sum256(intent)
 	payload, err := json.Marshal(queuedPayload{Content: content, Images: cmd.Images, Files: files, Configuration: &config})
 	if err != nil {
 		h.queueError(c, cmd, "invalid_message", err.Error())
-		return
+		return false
 	}
 	names := []string{}
 	for _, file := range cmd.Files {
@@ -73,22 +73,22 @@ func (h *Hub) enqueueChatMessage(c *Client, cmd clientproto.Command) {
 	}
 	if _, found, lookupErr := h.messageQueue.Get(cmd.SessionID, cmd.RequestID); lookupErr != nil {
 		h.queueError(c, cmd, "queue_unavailable", lookupErr.Error())
-		return
+		return false
 	} else if !found {
 		s.SetLastActivity(float64(time.Now().UnixMilli()) / 1000)
 		if err := h.registry.PersistDurably(); err != nil {
 			h.queueError(c, cmd, "session_persist_failed", err.Error())
-			return
+			return false
 		}
 	}
 	e, inserted, err := h.messageQueue.Enqueue(messagequeue.Entry{SessionID: cmd.SessionID, RequestID: cmd.RequestID, Content: truncateGraphemes(content, 4000), ImageCount: len(cmd.Images), FileNames: names, Payload: payload, PayloadHash: hex.EncodeToString(intentHash[:])})
 	if err != nil {
 		if errors.Is(err, messagequeue.ErrRejected) {
 			h.queueError(c, cmd, "message_rejected", "這則訊息先前已被拒絕，不會自動重送。請確認接管狀態後，以新訊息送出。")
-			return
+			return false
 		}
 		h.queueError(c, cmd, "queue_persist_failed", err.Error())
-		return
+		return false
 	}
 	if inserted {
 		behind := s.State() != session.Idle || s.QueueLen() > 0
@@ -96,7 +96,7 @@ func (h *Hub) enqueueChatMessage(c *Client, cmd clientproto.Command) {
 			_, _, _ = h.messageQueue.Transition(cmd.SessionID, cmd.RequestID, []messagequeue.State{messagequeue.Queued}, messagequeue.Failed, "Queue is full or session is closed", "", "")
 			h.publishMessageQueue(cmd.SessionID)
 			h.queueError(c, cmd, "queue_full", "Queue is full or session is closed; this message was not started")
-			return
+			return false
 		}
 		if !behind {
 			h.updateRuntime(cmd.SessionID, "queued", cmd.RequestID, s.QueueLen(), "", "")
@@ -106,6 +106,7 @@ func (h *Hub) enqueueChatMessage(c *Client, cmd clientproto.Command) {
 	// ACK is durable ownership, independent of how far execution has advanced.
 	c.enqueueEvent(protocol.NewMessageAck(cmd.SessionID, e.RequestID, "queued"))
 	h.publishMessageQueue(cmd.SessionID)
+	return true
 }
 
 func (h *Hub) runQueuedMessage(s *session.Session, requestID string) {

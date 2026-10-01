@@ -5,6 +5,7 @@ import (
 	"log"
 
 	"everything-go/internal/fcm"
+	"everything-go/internal/liveactivity"
 	"everything-go/internal/protocol"
 	"everything-go/internal/runtimejournal"
 	"everything-go/internal/workitems"
@@ -122,6 +123,10 @@ func (h *Hub) notifyRuntimeStatus(view runtimejournal.View) {
 	go h.runtimeStatusPush(h.cfg.InstanceID, h.cfg.InstanceName, view.SessionID, name, view.Phase, view.Stage,
 		view.StageMessage, view.Revision, view.UpdatedAt, view.ActiveStartedAt, view.ActiveRequestID, view.QueueLength,
 		fcm.ReplyAction{URL: replyURL, FallbackURL: fallbackURL, Capability: capability, ExpiresAt: expiresAt})
+	if h.fcm != nil {
+		h.fcm.NotifyLiveActivity(h.cfg.InstanceID, view.SessionID, view.ActiveRequestID, liveactivity.State{Phase: view.Phase, Stage: view.Stage,
+			Revision: view.Revision, UpdatedAt: view.UpdatedAt, StartedAt: view.ActiveStartedAt, ResultPending: view.HistoryReconcile})
+	}
 }
 
 func (h *Hub) projectWorkRun(sessionID, requestID, phase, reason string) {

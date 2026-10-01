@@ -59,6 +59,63 @@ func TestLongCodexTurnWithProgressDoesNotHaveWallClockCutoff(t *testing.T) {
 		t.Fatal("normal completion changed", st.turnErr)
 	}
 }
+func TestDefaultInactivityOnlyWarnsAndNeverInterrupts(t *testing.T) {
+	c, s, state, writer, sink := livenessFixture(t)
+	for _, elapsed := range []time.Duration{6 * time.Minute, time.Hour, 24 * time.Hour} {
+		c.checkCodexTurnLiveness(s, state, state.lastEventAt.Add(elapsed))
+	}
+	if len(writer.methods) != 0 || !state.turnActive || state.inactivityStopRequested {
+		t.Fatal("default inactivity automatically stopped live work")
+	}
+	if sink.count(func(event any) bool {
+		value, ok := event.(protocol.SessionWarning)
+		return ok && strings.Contains(value.Message, "可手動停止")
+	}) != 1 {
+		t.Fatal("warning-only message missing or repeated")
+	}
+	completeLivenessTurn(c, "completed")
+}
+func TestManualStopFailureAndAckDoNotManufactureTerminal(t *testing.T) {
+	c, s, state, writer, _ := livenessFixture(t)
+	writer.reply = func(string, json.RawMessage) (any, error) { return nil, errors.New("interrupt unavailable") }
+	if err := c.Stop(context.Background(), s); err == nil {
+		t.Fatal("interrupt failure ignored")
+	}
+	if !state.turnActive || state.turnErr != "" || state.stopping {
+		t.Fatal("failed stop finished turn or prevented retry")
+	}
+	writer.reply = func(string, json.RawMessage) (any, error) { return map[string]any{}, nil }
+	if err := c.Stop(context.Background(), s); err != nil {
+		t.Fatal(err)
+	}
+	if !state.turnActive || state.turnErr != "" {
+		t.Fatal("RPC ACK was treated as native terminal")
+	}
+	completeLivenessTurn(c, "interrupted")
+	if state.turnActive || state.turnErr != "stopped" {
+		t.Fatal("confirmed native stop did not finish")
+	}
+}
+func TestNaturalCompletionWinsRaceWithManualStopIntent(t *testing.T) {
+	c, s, state, writer, sink := livenessFixture(t)
+	writer.reply = func(method string, _ json.RawMessage) (any, error) {
+		if method == "turn/start" {
+			state.mu.Lock()
+			state.stopping = true
+			state.mu.Unlock()
+			completeLivenessTurn(c, "completed")
+			return map[string]any{"turn": map[string]string{"id": "turn-1", "status": "completed"}}, nil
+		}
+		return map[string]any{}, nil
+	}
+	c.runTurn(s, state, "root", nil, state.turnDone, "")
+	if sink.count(func(event any) bool { _, ok := event.(protocol.Done); return ok }) != 1 {
+		t.Fatal("confirmed natural completion lost")
+	}
+	if sink.count(func(event any) bool { _, ok := event.(protocol.Stopped); return ok }) != 0 {
+		t.Fatal("stop intent overwrote natural completion")
+	}
+}
 
 func TestCodexWaiterUsesProgressTicksNotElapsedDeadline(t *testing.T) {
 	c, s, st, w, _ := livenessFixture(t)
@@ -82,6 +139,7 @@ func TestCodexWaiterUsesProgressTicksNotElapsedDeadline(t *testing.T) {
 
 func TestInactivityWarnsOnceThenInterruptsOnlyTheCurrentTurn(t *testing.T) {
 	c, s, st, w, sink := livenessFixture(t)
+	c.stallAbortAfter = 30 * time.Minute // Explicit opt-in; production defaults to warning-only.
 	start := st.lastEventAt
 	c.checkCodexTurnLiveness(s, st, start.Add(6*time.Minute))
 	c.checkCodexTurnLiveness(s, st, start.Add(7*time.Minute))
@@ -142,6 +200,7 @@ func TestAnswerResetsInactivityEvenBeforeNextModelEvent(t *testing.T) {
 
 func TestUnconfirmedInactivityStopDoesNotFinishOrRetryTurn(t *testing.T) {
 	c, s, st, w, sink := livenessFixture(t)
+	c.stallAbortAfter = 30 * time.Minute
 	w.reply = func(string, json.RawMessage) (any, error) { return nil, errors.New("connection unavailable") }
 	c.checkCodexTurnLiveness(s, st, st.lastEventAt.Add(time.Hour))
 	c.checkCodexTurnLiveness(s, st, st.lastEventAt.Add(2*time.Hour))
@@ -158,6 +217,7 @@ func TestUnconfirmedInactivityStopDoesNotFinishOrRetryTurn(t *testing.T) {
 
 func TestNaturalCompletionWinsRaceWithInactivityInterrupt(t *testing.T) {
 	c, s, st, w, _ := livenessFixture(t)
+	c.stallAbortAfter = 30 * time.Minute
 	w.reply = func(string, json.RawMessage) (any, error) {
 		completeLivenessTurn(c, "completed")
 		return map[string]any{}, nil
@@ -175,6 +235,10 @@ func TestManualAndExternalInterruptNeverBecomeSuccessfulCompletion(t *testing.T)
 			if err := c.Stop(context.Background(), s); err != nil {
 				t.Fatal(err)
 			}
+			if !st.turnActive {
+				t.Fatal("manual stop ACK prematurely finished the turn")
+			}
+			completeLivenessTurn(c, "interrupted")
 		} else {
 			completeLivenessTurn(c, "interrupted")
 		}
@@ -186,6 +250,7 @@ func TestManualAndExternalInterruptNeverBecomeSuccessfulCompletion(t *testing.T)
 
 func TestInactivityTerminalCarriesReasonAndNeverEmitsDone(t *testing.T) {
 	c, s, st, w, sink := livenessFixture(t)
+	c.stallAbortAfter = 30 * time.Minute
 	c.stallCheckEvery = time.Millisecond
 	st.lastEventAt = time.Now().Add(-31 * time.Minute)
 	w.reply = func(method string, p json.RawMessage) (any, error) {

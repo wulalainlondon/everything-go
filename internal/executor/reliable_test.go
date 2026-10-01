@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"everything-go/internal/backend"
 	"everything-go/internal/history"
@@ -21,6 +22,24 @@ type reliableFake struct {
 	panic  bool
 	emit   any
 	called bool
+}
+
+func TestTerminalSinkIgnoresLegacyWallClockTimeoutUntilRealTerminal(t *testing.T) {
+	sink := &capSink{}
+	terminal := NewTerminalSinkWithTimeout(sink, time.Millisecond)
+	key := terminal.Begin("long-running", "owned-request")
+	time.Sleep(25 * time.Millisecond)
+	if terminal.Done(key) || len(sink.events) != 0 {
+		t.Fatal("elapsed time manufactured a terminal")
+	}
+	terminal.Emit(protocol.NewDone("long-running", "other-request"))
+	if terminal.Done(key) {
+		t.Fatal("unrelated terminal released long turn")
+	}
+	terminal.Emit(protocol.NewStopped("long-running", "owned-request"))
+	if !terminal.Done(key) {
+		t.Fatal("confirmed stop did not settle long turn")
+	}
 }
 
 func (f *reliableFake) Send(ctx context.Context, s *session.Session, reqID, content string, images []backend.ImageAttachment, files []backend.FileAttachment) error {

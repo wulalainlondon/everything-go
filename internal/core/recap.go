@@ -77,7 +77,7 @@ func (h *Hub) handleSessionRecap(c *Client, cmd clientproto.Command) {
 		if err != nil {
 			// Adapters return fixed reason codes only, never raw model/tool errors.
 			switch err.Error() {
-			case "backend_unsupported", "daemon_not_connected", "recap_history_empty", "recap_history_unavailable", "recap_busy", "recap_timeout", "recap_source_changed", "recap_cache_unavailable", "recap_cache_invalid", "recap_invalid", "recap_tools_unavailable":
+			case "backend_unsupported", "daemon_not_connected", "recap_history_empty", "recap_history_unavailable", "recap_busy", "recap_timeout", "recap_source_changed", "recap_cache_unavailable", "recap_cache_invalid", "recap_invalid", "recap_tools_unavailable", "recap_model_busy", "recap_model_rate_limited":
 				e.Error = err.Error()
 			default:
 				e.Error = "recap_generation_failed"

@@ -242,11 +242,19 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		c.enqueueEvent(h.client.PairingWindowAck(expiresAt.Unix()))
 
 	case "unclaim_bridge":
+		removedDeviceID := ""
+		for _, binding := range h.pairing.DeviceBindings() {
+			if binding.Token == cmd.AuthToken {
+				removedDeviceID = binding.DeviceID
+				break
+			}
+		}
 		if err := h.pairing.Unclaim(cmd.AuthToken); err != nil {
 			c.enqueueEvent(h.client.Error("", "", err.Error()))
 			return
 		}
 		c.enqueueEvent(h.client.UnclaimAck(h.pairing.IsLocked()))
+		h.removeUnpairedPushDevice(removedDeviceID)
 		h.syncDeviceInventory()
 
 	case "request_sessions_list":
@@ -430,12 +438,27 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 	case "stop":
 		if s, ok := h.registry.Get(cmd.SessionID); ok {
 			releaseQueue := s.HoldQueue()
+			requestID := s.ActiveQueuedID()
+			previousPhase := "running"
+			if views := h.runtimes.Snapshot("", []string{cmd.SessionID}); len(views) == 1 {
+				previousPhase = views[0].Phase
+				if requestID == "" {
+					requestID = views[0].ActiveRequestID
+				}
+			}
 			s.MarkStopping()
-			h.updateRuntime(cmd.SessionID, "stopping", "", s.QueueLen(), "", "")
+			h.updateRuntime(cmd.SessionID, "stopping", requestID, s.QueueLen(), "", "")
 			go func() {
 				defer releaseQueue()
-				_ = h.exec.Stop(context.Background(), s)
-				s.EndTurn() // release the queue even if the backend emits no terminal event
+				if err := h.exec.Stop(context.Background(), s); err != nil {
+					// RPC failure is not proof of termination. Keep ownership;
+					// only a correlated backend terminal can release this turn.
+					s.RestoreStreamingAfterUnconfirmedStop(requestID)
+					if view, changed := h.runtimes.RestoreUnconfirmedStop(cmd.SessionID, requestID, previousPhase); changed {
+						h.publishRuntime(view)
+					}
+					h.Emit(backend.NewSessionWarning(cmd.SessionID, "停止指令尚未獲得執行端確認，工作仍保持鎖定。可以稍後再次按停止；未重送工作或啟動下一個排隊工作。"))
+				}
 			}()
 		}
 
@@ -866,20 +889,44 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 
 	case "user_input_response":
 		cancelled := cmd.Cancelled != nil && *cmd.Cancelled
+		if native, ok := h.exec.(backend.NativeAsyncInteractions); ok {
+			sid, content, handled, err := native.PrepareAsyncReply(cmd.RequestID, cmd.Answers, cancelled)
+			if handled {
+				cmd.SessionID = sid
+				if err != nil {
+					h.queueError(c, cmd, "interaction_reply_rejected", err.Error())
+					return
+				}
+				cmd.Content = content
+				cmd.Images, cmd.Files = nil, nil // A question answer is text only.
+				admission := cmd
+				admission.Kind = "message"
+				if h.rejectToolMaintenanceWrite(c, admission) || h.rejectPMCommand(c, admission) {
+					return
+				}
+				if !h.enqueueChatMessage(c, cmd) {
+					return
+				}
+				// Promotion uses the same persisted entry and expected-turn guard;
+				// rejection leaves it in FIFO rather than silently starting a turn.
+				if s, found := h.registry.Get(sid); found && s.IsStreaming() {
+					admission.Kind = "promote_queued_message"
+					if !h.rejectPMCommand(c, admission) {
+						h.promoteQueuedMessage(c, cmd)
+					}
+				}
+				return
+			}
+		}
 		if ir, ok := h.exec.(interactionResponder); ok {
 			if !ir.RespondUserInput(cmd.RequestID, cmd.Answers, cancelled) {
 				log.Printf("client %s: user_input_response for unknown request %q", c.clientID, cmd.RequestID)
+				h.queueError(c, cmd, "interaction_reply_rejected", "Question was not found or the reply could not be delivered; refresh pending questions")
 			}
 		}
 
 	case "pending_interactions_list":
-		var items []backend.UserInputPayload
-		if ir, ok := h.exec.(interactionResponder); ok {
-			items = ir.PendingInteractions(cmd.SessionID)
-		}
-		snapshot := h.client.PendingInteractionsList(items)
-		snapshot.ScopeSessionID, snapshot.SnapshotAll = cmd.SessionID, cmd.SessionID == ""
-		c.enqueueEvent(snapshot)
+		go h.sendPendingInteractions(c, cmd)
 
 	// --- Search (FTS5) ----------------------------------------------------
 
@@ -929,6 +976,31 @@ type historyRouter interface {
 type interactionResponder interface {
 	RespondUserInput(id string, answers map[string]any, cancelled bool) bool
 	PendingInteractions(sessionID string) []backend.UserInputPayload
+}
+
+func (h *Hub) sendPendingInteractions(c *Client, cmd clientproto.Command) {
+	// At most one expensive canonical scan runs. A reconnect burst gets the
+	// current scoped snapshot; the finishing scan publishes an updated snapshot.
+	if h.interactionSnapshotMu.TryLock() {
+		if native, ok := h.exec.(backend.NativeAsyncInteractions); ok {
+			for _, s := range h.registry.List() {
+				if !c.live() {
+					break
+				}
+				if cmd.SessionID == "" || s.ID == cmd.SessionID {
+					native.ReconcileAsyncQuestions(s)
+				}
+			}
+		}
+		h.interactionSnapshotMu.Unlock()
+	}
+	var items []backend.UserInputPayload
+	if ir, ok := h.exec.(interactionResponder); ok {
+		items = ir.PendingInteractions(cmd.SessionID)
+	}
+	snapshot := h.client.PendingInteractionsList(items)
+	snapshot.ScopeSessionID, snapshot.SnapshotAll = cmd.SessionID, cmd.SessionID == ""
+	c.enqueueEvent(snapshot)
 }
 
 func (h *Hub) sendHistory(c *Client, s *session.Session, cmd clientproto.Command) {

@@ -9,7 +9,11 @@ func (n *Notifier) SetPreferences(deviceID string, preferences protocol.Notifica
 func (n *Notifier) messageForDevice(msg v1message, kind string, dst target) (v1message, bool) {
 	n.mu.RLock()
 	registration, exists := n.devices[dst.deviceID]
+	allowed := n.deviceAllowed
 	n.mu.RUnlock()
+	if allowed != nil && !allowed(dst.deviceID) {
+		return msg, false
+	}
 	if !exists || registration.Token != dst.token {
 		return msg, false
 	}

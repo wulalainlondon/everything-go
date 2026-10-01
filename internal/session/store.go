@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"sort"
 	"sync"
 	"time"
 )
@@ -40,12 +39,9 @@ type savedEntry struct {
 	Hidden              bool     `json:"hidden,omitempty"`
 }
 
-const (
-	pruneAfterDays = 30
-	maxSaved       = 500
-)
-
-// Store persists session metadata to a JSON file with atomic writes + pruning.
+// Store persists session metadata with atomic, lock-protected writes. Saving
+// metadata never evicts sessions by age or count; removal is an explicit
+// registry operation, not a retention side effect of saving another session.
 type Store struct {
 	path     string
 	mu       sync.Mutex
@@ -74,8 +70,11 @@ func (st *Store) Load() map[string]savedEntry {
 	return out
 }
 
-// Save atomically writes the given sessions, applying the same prune rules as
-// the Python bridge (drop >30d idle; cap at 500, evicting resumable ones first).
+// Save atomically merges session metadata, preserving entries added by other
+// writers and unknown fields. It only removes entries this store knows were
+// explicitly removed from its registry; age and index size are not deletion
+// signals. In particular, saving or restarting a large index must not discard
+// older, pinned, hidden, or resumable conversations.
 func (st *Store) Save(sessions []*Session) error {
 	now := time.Now().Unix()
 
@@ -131,36 +130,6 @@ func (st *Store) Save(sessions []*Session) error {
 		if !currentIDs[id] {
 			delete(raw, id)
 			delete(st.knownIDs, id)
-		}
-	}
-
-	cutoff := now - pruneAfterDays*24*3600
-	for k, obj := range raw {
-		if currentIDs[k] {
-			continue
-		}
-		if rawInt64(obj, "last_used") <= cutoff {
-			delete(raw, k)
-			delete(st.knownIDs, k)
-		}
-	}
-	if len(raw) > maxSaved {
-		type kv struct {
-			k string
-			v map[string]json.RawMessage
-		}
-		var resumable []kv
-		for k, v := range raw {
-			if rawString(v, "resume_id") != "" || rawString(v, "claude_uuid") != "" {
-				resumable = append(resumable, kv{k, v})
-			}
-		}
-		sort.Slice(resumable, func(i, j int) bool {
-			return rawInt64(resumable[i].v, "last_used") < rawInt64(resumable[j].v, "last_used")
-		})
-		for i := 0; i < len(raw)-maxSaved && i < len(resumable); i++ {
-			delete(raw, resumable[i].k)
-			delete(st.knownIDs, resumable[i].k)
 		}
 	}
 

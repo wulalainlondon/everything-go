@@ -28,6 +28,7 @@ import (
 
 	"everything-go/internal/identity"
 	"everything-go/internal/protocol"
+	"everything-go/internal/pushrelay"
 
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
@@ -67,11 +68,15 @@ type ReplyAction struct {
 
 // Notifier holds the OAuth2 token source and a per-device token registry.
 type Notifier struct {
-	projectID    string
-	tokenSource  oauth2.TokenSource
-	registryPath string
-	endpoint     string
-	http         *http.Client
+	live          liveRegistry
+	relay         *pushrelay.Client
+	relayCancel   context.CancelFunc
+	deviceAllowed func(string) bool
+	projectID     string
+	tokenSource   oauth2.TokenSource
+	registryPath  string
+	endpoint      string
+	http          *http.Client
 
 	mu      sync.RWMutex
 	devices map[string]deviceRegistration
@@ -141,6 +146,12 @@ func (n *Notifier) SetToken(deviceID, token string, platform ...string) {
 // RegisterDevice installs token and preferences atomically: a newly registered
 // iPhone must never briefly receive an unredacted legacy push before opt-out.
 func (n *Notifier) RegisterDevice(deviceID, token, platform string, preferences *protocol.NotificationPreferences) {
+	n.mu.RLock()
+	allowed := n.deviceAllowed
+	n.mu.RUnlock()
+	if allowed != nil && !allowed(strings.TrimSpace(deviceID)) {
+		return
+	}
 	deviceID, token = strings.TrimSpace(deviceID), strings.TrimSpace(token)
 	devicePlatform := strings.ToLower(strings.TrimSpace(platform))
 	if devicePlatform != "android" && devicePlatform != "ios" {
@@ -191,6 +202,9 @@ func (n *Notifier) targetsForPlatform(platform string) []target {
 	out := make([]target, 0, len(n.devices))
 	seen := make(map[string]struct{}, len(n.devices))
 	for deviceID, registration := range n.devices {
+		if n.deviceAllowed != nil && !n.deviceAllowed(deviceID) {
+			continue
+		}
 		if registration.Token == "" {
 			continue
 		}
@@ -212,6 +226,9 @@ func (n *Notifier) targetsForUnspecifiedPlatform() []target {
 	out := make([]target, 0, len(n.devices))
 	seen := make(map[string]struct{}, len(n.devices))
 	for deviceID, registration := range n.devices {
+		if n.deviceAllowed != nil && !n.deviceAllowed(deviceID) {
+			continue
+		}
 		if registration.Token == "" || registration.Platform != "" {
 			continue
 		}
@@ -632,6 +649,10 @@ func (n *Notifier) sendTargets(msg v1message, kind string, targets []target) {
 // matching the Python retry policy. A fatal response removes only the token
 // that failed; other device registrations remain intact.
 func (n *Notifier) send(msg v1message, kind string, dst target) {
+	if n.relay != nil {
+		n.sendRelay(msg, kind, dst)
+		return
+	}
 	for attempt := 0; attempt < 3; attempt++ {
 		// Re-read preferences for each actual send/retry, not when a status
 		// first entered the coalescing buffer. Never mutate the shared payload.

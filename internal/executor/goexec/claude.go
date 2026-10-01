@@ -56,9 +56,11 @@ type proc struct {
 	// Tool/todo presentation state, touched only by this proc's readStdout goroutine.
 	tools *toolNormalizer
 
-	mu                sync.Mutex
-	lastActivity      time.Time
-	compactInProgress bool
+	mu                  sync.Mutex
+	lastActivity        time.Time
+	compactInProgress   bool
+	manualStop          bool
+	manualStopRequestID string
 }
 
 func (p *proc) beginTurn(reqID string, compact bool) {
@@ -269,14 +271,36 @@ func (c *Claude) UpdateSessionSettings(ctx context.Context, s *session.Session) 
 func (c *Claude) Stop(ctx context.Context, s *session.Session) error {
 	c.mu.Lock()
 	p := c.procs[s.ID]
-	delete(c.procs, s.ID)
 	c.mu.Unlock()
 
 	if p != nil {
-		p.cancel() // SIGKILL via context; the reader goroutine exits on EOF
+		p.mu.Lock()
+		p.manualStop = true
+		if p.manualStopRequestID == "" {
+			p.manualStopRequestID = p.reqID
+		}
+		p.mu.Unlock()
+		p.cancel() // Request process termination; do not claim it has exited yet.
+		if p.exited == nil {
+			return fmt.Errorf("Claude process exit is not yet observable")
+		}
+		timer := time.NewTimer(5 * time.Second)
+		defer timer.Stop()
+		select {
+		case <-p.exited:
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+			return fmt.Errorf("Claude stop requested but process exit is not confirmed")
+		}
 	}
 	c.cancelInteractionsFor(s.ID)
-	c.sink.Emit(backend.NewStopped(s.ID, ""))
+	if p == nil {
+		if s.IsStreaming() {
+			return fmt.Errorf("Claude stop is unconfirmed while the backend is preparing the process")
+		}
+		c.sink.Emit(backend.NewStopped(s.ID, ""))
+	}
 	return nil
 }
 
@@ -731,7 +755,17 @@ func (c *Claude) watchProc(s *session.Session, p *proc) {
 	delete(c.procs, s.ID)
 	c.mu.Unlock()
 
-	reqID := p.reqID
+	p.mu.Lock()
+	reqID, manualStop := p.reqID, p.manualStop
+	if manualStop && p.manualStopRequestID != "" {
+		reqID = p.manualStopRequestID
+	}
+	p.mu.Unlock()
+	if manualStop {
+		c.cancelInteractionsFor(s.ID)
+		c.sink.Emit(backend.NewStopped(s.ID, reqID))
+		return // Manual stop must not auto-restart the killed process.
+	}
 	if reqID != "" {
 		c.sink.Emit(backend.NewError(
 			s.ID, reqID, backend.ErrProcessDied,

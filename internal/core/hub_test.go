@@ -25,6 +25,7 @@ type fakeExec struct {
 	onSend        func(s *session.Session, reqID, content string)
 	onSendContext func(ctx context.Context, s *session.Session, reqID, content string)
 	onSteer       func(s *session.Session, reqID, content string) (backend.SteerResult, error)
+	onStop        func(s *session.Session) error
 }
 
 func (f *fakeExec) Send(ctx context.Context, s *session.Session, reqID, content string, _ []backend.ImageAttachment, _ []backend.FileAttachment) error {
@@ -38,6 +39,9 @@ func (f *fakeExec) Send(ctx context.Context, s *session.Session, reqID, content 
 }
 
 func (f *fakeExec) Stop(_ context.Context, s *session.Session) error {
+	if f.onStop != nil {
+		return f.onStop(s)
+	}
 	f.sink.Emit(protocol.NewStopped(s.ID, ""))
 	return nil
 }
