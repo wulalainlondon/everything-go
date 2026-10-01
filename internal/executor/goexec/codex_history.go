@@ -294,11 +294,13 @@ func parseCodexHistoryLines(lines []history.TailLine, resumeID string, truncated
 		if pendingCommentary == "" {
 			return
 		}
-		messages = append(messages, history.CompleteMsg(
+		message := history.CompleteMsg(
 			"codex", resumeID, "codex:"+resumeID+":line:"+itoa(pendingCommentaryLine),
 			"assistant", pendingCommentary, pendingCommentaryTS,
 			[]map[string]any{{"type": "text", "text": pendingCommentary}},
-		))
+		)
+		message["history_read_result_verified"] = false
+		messages = append(messages, message)
 		pendingCommentary = ""
 	}
 	attachPendingCommentary := func(blocks []map[string]any) []map[string]any {
@@ -354,10 +356,12 @@ func parseCodexHistoryLines(lines []history.TailLine, resumeID string, truncated
 		if role == "assistant" {
 			blocks = attachPendingCommentary(blocks)
 		}
-		messages = append(messages, history.CompleteMsg(
+		message := history.CompleteMsg(
 			"codex", resumeID, "codex:"+resumeID+":line:"+itoa(rc.lineNo),
 			role, text, ts, blocks,
-		))
+		)
+		message["history_read_result_verified"] = role == "assistant" && payload.Phase == "final_answer"
+		messages = append(messages, message)
 	}
 	flushPendingCommentary()
 	for _, message := range messages {

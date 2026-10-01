@@ -258,6 +258,24 @@ func (m *Mux) ReconcileMaintenance(ctx context.Context, id string, release bool)
 	return backend.Maintenance{}, fmt.Errorf("no maintenance record")
 }
 
+// PrepareAsyncReply never submits input outside the Hub's durable admission.
+func (m *Mux) PrepareAsyncReply(id string, answers map[string]any, cancelled bool) (string, string, bool, error) {
+	for _, e := range m.byBackend {
+		if native, ok := e.(backend.NativeAsyncInteractions); ok {
+			if sid, content, handled, err := native.PrepareAsyncReply(id, answers, cancelled); handled {
+				return sid, content, true, err
+			}
+		}
+	}
+	return "", "", false, nil
+}
+
+func (m *Mux) ReconcileAsyncQuestions(s *session.Session) {
+	if native, ok := m.pick(s).(backend.NativeAsyncInteractions); ok {
+		native.ReconcileAsyncQuestions(s)
+	}
+}
+
 // RespondUserInput tries each interaction-capable backend until one owns the id.
 // The answer carries no session, so the backend matches by request_id/tool_use_id.
 func (m *Mux) RespondUserInput(id string, answers map[string]any, cancelled bool) bool {

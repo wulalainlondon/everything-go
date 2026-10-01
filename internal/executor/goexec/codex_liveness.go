@@ -57,7 +57,11 @@ func (c *Codex) checkCodexTurnLiveness(s *session.Session, st *codexState, now t
 	st.mu.Unlock()
 	switch action {
 	case codexLivenessWarn:
-		c.sink.Emit(backend.NewSessionWarning(s.ID, fmt.Sprintf("Codex 已連續 %s 未收到進度事件，仍在等待；若達 %s 無回應，將要求停止。持續有進度的長任務沒有總時間上限。", c.stallWarnAfter, c.stallAbortAfter)))
+		message := fmt.Sprintf("Codex 已連續 %s 未收到進度事件，仍在等待；不會因時間經過而自動停止或釋放佇列。需要時可手動停止。", c.stallWarnAfter)
+		if c.stallAbortAfter > 0 {
+			message = fmt.Sprintf("Codex 已連續 %s 未收到進度事件，仍在等待；若達 %s 無回應，將要求停止。持續有進度的長任務沒有總時間上限。", c.stallWarnAfter, c.stallAbortAfter)
+		}
+		c.sink.Emit(backend.NewSessionWarning(s.ID, message))
 	case codexLivenessAbort:
 		log.Printf("[codex] inactivity_timeout session=%s request=%s thread=%s turn=%s last_event_at=%s idle=%s", s.ID, requestID, threadID, turnID, lastEventAt.Format(time.RFC3339Nano), now.Sub(lastEventAt).Round(time.Second))
 		if err := c.interruptCodexTurn(threadID, turnID); err != nil {

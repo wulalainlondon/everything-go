@@ -59,3 +59,22 @@ func TestFCMInvalidRuntimeInputNeverLogsCredentialContents(t *testing.T) {
 		t.Fatal("directory accepted as credentials")
 	}
 }
+
+func TestRelayModeNeedsNoGoogleKeyAndNeverFallsBack(t *testing.T) {
+	dir := t.TempDir()
+	n, err := loadConfiguredPush("https://push.example.invalid", "", dir, "bridge-test")
+	if err != nil || n == nil || !n.RelayEnabled() {
+		t.Fatal("relay mode required a Google key", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "fcm_service_account.json")); !os.IsNotExist(err) {
+		t.Fatal("relay provisioned a Google key")
+	}
+	// A valid local runtime Google fixture must not mask an unsafe relay URL.
+	fixture := []byte(`{"type":"service_account","project_id":"runtime-test","private_key":"not-a-real-key","client_email":"runtime@example.invalid"}`)
+	if err := os.WriteFile(filepath.Join(dir, "fcm_service_account.json"), fixture, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := loadConfiguredPush("http://untrusted.example", "", dir, "bridge-test"); n != nil || err == nil {
+		t.Fatal("invalid relay silently fell back to Google credentials")
+	}
+}

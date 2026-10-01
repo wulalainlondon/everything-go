@@ -34,12 +34,15 @@ type Inbound struct {
 	ClientSurface   string      `json:"client_surface"`
 	AuthToken       string      `json:"auth_token"`
 	ReplayAck       bool        `json:"replay_ack"`
+	SessionReadSync bool        `json:"session_read_sync,omitempty"`
 	ProtocolVersion int         `json:"protocol_version"`
 	ClientInfo      *ClientInfo `json:"client_info,omitempty"`
 	ConnectionProbe bool        `json:"connection_probe,omitempty"`
 	BatchID         string      `json:"batch_id"`
 	Revision        uint64      `json:"revision"`
 	Read            bool        `json:"read"`
+	ReadEpoch       string      `json:"read_epoch,omitempty"`
+	ReadToken       string      `json:"read_token,omitempty"`
 
 	// new_session
 	Name           string `json:"name"`
@@ -388,23 +391,48 @@ type SessionControlState struct {
 // logical session. It is compact and durable; message content is reconciled
 // separately from native history.
 type SessionRuntime struct {
-	Type               string `json:"type"`
-	SessionID          string `json:"session_id"`
-	Revision           uint64 `json:"revision"`
-	Phase              string `json:"phase"`
-	Stage              string `json:"stage,omitempty"`
-	StageMessage       string `json:"stage_message,omitempty"`
-	StageStartedAt     int64  `json:"stage_started_at,omitempty"`
-	ActiveStartedAt    int64  `json:"active_started_at,omitempty"`
-	ActiveRequestID    string `json:"active_request_id,omitempty"`
-	QueueLength        int    `json:"queue_length"`
-	LastTerminalStatus string `json:"last_terminal_status,omitempty"`
-	LastError          string `json:"last_error,omitempty"`
-	UpdatedAt          int64  `json:"updated_at"`
-	CompletedAt        int64  `json:"completed_at,omitempty"`
-	Unread             int    `json:"unread"`
-	DeliveryPending    bool   `json:"delivery_pending"`
-	HistoryReconcile   bool   `json:"history_reconcile"`
+	Type                  string `json:"type"`
+	SessionID             string `json:"session_id"`
+	Revision              uint64 `json:"revision"`
+	Phase                 string `json:"phase"`
+	Stage                 string `json:"stage,omitempty"`
+	StageMessage          string `json:"stage_message,omitempty"`
+	StageStartedAt        int64  `json:"stage_started_at,omitempty"`
+	ActiveStartedAt       int64  `json:"active_started_at,omitempty"`
+	ActiveRequestID       string `json:"active_request_id,omitempty"`
+	QueueLength           int    `json:"queue_length"`
+	LastTerminalStatus    string `json:"last_terminal_status,omitempty"`
+	LastError             string `json:"last_error,omitempty"`
+	UpdatedAt             int64  `json:"updated_at"`
+	CompletedAt           int64  `json:"completed_at,omitempty"`
+	Unread                int    `json:"unread"`
+	DeliveryPending       bool   `json:"delivery_pending"`
+	HistoryReconcile      bool   `json:"history_reconcile"`
+	ReadEpoch             string `json:"read_epoch,omitempty"`
+	ReadRevision          uint64 `json:"read_revision,omitempty"`
+	ReadVersion           uint64 `json:"read_version,omitempty"`
+	LastCompletedRevision uint64 `json:"last_completed_revision,omitempty"`
+}
+
+type SessionReadState struct {
+	Type                  string `json:"type"`
+	SessionID             string `json:"session_id"`
+	ReadEpoch             string `json:"read_epoch"`
+	ReadRevision          uint64 `json:"read_revision"`
+	ReadVersion           uint64 `json:"read_version"`
+	RuntimeRevision       uint64 `json:"runtime_revision"`
+	Unread                int    `json:"unread"`
+	LastCompletedRevision uint64 `json:"last_completed_revision"`
+}
+
+type SessionReadRejected struct {
+	Type      string `json:"type"`
+	SessionID string `json:"session_id"`
+	ReadEpoch string `json:"read_epoch"`
+	ReadToken string `json:"read_token,omitempty"`
+	Revision  uint64 `json:"revision"`
+	Reason    string `json:"reason"`
+	Retryable bool   `json:"retryable"`
 }
 
 type SessionRuntimeSnapshot struct {
@@ -960,13 +988,16 @@ func NewSessionInitInfo(sessionID, model, permissionMode string, tools, slashCom
 // --- History ----------------------------------------------------------------
 
 type HistorySnapshot struct {
-	Type           string           `json:"type"`
-	SessionID      string           `json:"session_id"`
-	Messages       []map[string]any `json:"messages"`
-	SourceCount    int              `json:"source_count"`
-	HasMoreBefore  bool             `json:"has_more_before"`
-	KnownIDFound   bool             `json:"known_id_found"`
-	SnapshotReason string           `json:"snapshot_reason,omitempty"`
+	Type                string           `json:"type"`
+	SessionID           string           `json:"session_id"`
+	Messages            []map[string]any `json:"messages"`
+	SourceCount         int              `json:"source_count"`
+	HasMoreBefore       bool             `json:"has_more_before"`
+	KnownIDFound        bool             `json:"known_id_found"`
+	SnapshotReason      string           `json:"snapshot_reason,omitempty"`
+	HistoryReadEpoch    string           `json:"history_read_epoch,omitempty"`
+	HistoryReadRevision uint64           `json:"history_read_revision,omitempty"`
+	HistoryReadToken    string           `json:"history_read_token,omitempty"`
 }
 
 type HistoryDelta struct {
@@ -975,6 +1006,9 @@ type HistoryDelta struct {
 	AfterSourceMessageID string           `json:"after_source_message_id"`
 	Messages             []map[string]any `json:"messages"`
 	SourceCount          int              `json:"source_count"`
+	HistoryReadEpoch     string           `json:"history_read_epoch,omitempty"`
+	HistoryReadRevision  uint64           `json:"history_read_revision,omitempty"`
+	HistoryReadToken     string           `json:"history_read_token,omitempty"`
 }
 
 type ResumableSessions struct {

@@ -24,6 +24,7 @@ type Terminal struct {
 	RequestID string `json:"request_id,omitempty"`
 	Status    string `json:"status"`
 	At        int64  `json:"at"`
+	StartedAt int64  `json:"started_at,omitempty"`
 	Source    string `json:"source,omitempty"` // bridge_recovery is uncertain, not a native terminal
 }
 
@@ -44,26 +45,35 @@ type Record struct {
 	Terminals       []Terminal        `json:"terminals,omitempty"`
 	AckedByDevice   map[string]uint64 `json:"acked_by_device,omitempty"`
 	ReadByDevice    map[string]uint64 `json:"read_by_device,omitempty"`
+	// Stable across restarts, different when a logical Session is recreated.
+	ReadEpoch string `json:"read_epoch,omitempty"`
+	// Question IDs are not turn IDs. Keep their correlation internal so a
+	// delayed resolution cannot resume a terminal or a different turn.
+	WaitingInteractions map[string]string `json:"waiting_interactions,omitempty"`
 }
 
 // View is safe to send to one device; internal device maps are never exposed.
 type View struct {
-	SessionID        string `json:"session_id"`
-	Revision         uint64 `json:"revision"`
-	Phase            string `json:"phase"`
-	Stage            string `json:"stage,omitempty"`
-	StageMessage     string `json:"stage_message,omitempty"`
-	StageStartedAt   int64  `json:"stage_started_at,omitempty"`
-	ActiveStartedAt  int64  `json:"active_started_at,omitempty"`
-	ActiveRequestID  string `json:"active_request_id,omitempty"`
-	QueueLength      int    `json:"queue_length"`
-	LastTerminal     string `json:"last_terminal_status,omitempty"`
-	LastError        string `json:"last_error,omitempty"`
-	UpdatedAt        int64  `json:"updated_at"`
-	CompletedAt      int64  `json:"completed_at,omitempty"`
-	Unread           int    `json:"unread"`
-	DeliveryPending  bool   `json:"delivery_pending"`
-	HistoryReconcile bool   `json:"history_reconcile"`
+	SessionID             string `json:"session_id"`
+	Revision              uint64 `json:"revision"`
+	Phase                 string `json:"phase"`
+	Stage                 string `json:"stage,omitempty"`
+	StageMessage          string `json:"stage_message,omitempty"`
+	StageStartedAt        int64  `json:"stage_started_at,omitempty"`
+	ActiveStartedAt       int64  `json:"active_started_at,omitempty"`
+	ActiveRequestID       string `json:"active_request_id,omitempty"`
+	QueueLength           int    `json:"queue_length"`
+	LastTerminal          string `json:"last_terminal_status,omitempty"`
+	LastError             string `json:"last_error,omitempty"`
+	UpdatedAt             int64  `json:"updated_at"`
+	CompletedAt           int64  `json:"completed_at,omitempty"`
+	Unread                int    `json:"unread"`
+	DeliveryPending       bool   `json:"delivery_pending"`
+	HistoryReconcile      bool   `json:"history_reconcile"`
+	ReadEpoch             string `json:"read_epoch,omitempty"`
+	ReadRevision          uint64 `json:"read_revision,omitempty"`
+	ReadVersion           uint64 `json:"read_version,omitempty"`
+	LastCompletedRevision uint64 `json:"last_completed_revision,omitempty"`
 }
 
 type snapshot struct {
@@ -79,23 +89,29 @@ type cursorEntry struct {
 }
 
 type Store struct {
-	mu         sync.Mutex
-	path       string
-	cursorPath string
-	records    map[string]*Record
-	now        func() time.Time
-	flushTimer *time.Timer
-	dirty      bool
-	writes     uint64
+	mu                sync.Mutex
+	path              string
+	cursorPath        string
+	sharedReadPath    string
+	sharedReadLoadErr error
+	sharedReads       map[string]sharedReadRecord
+	persistedRecords  map[string]persistedRuntimeRecord
+	records           map[string]*Record
+	now               func() time.Time
+	flushTimer        *time.Timer
+	dirty             bool
+	writes            uint64
 }
 
 func New(dataDir string) *Store {
-	s := &Store{records: make(map[string]*Record), now: time.Now}
+	s := &Store{records: make(map[string]*Record), sharedReads: make(map[string]sharedReadRecord), persistedRecords: make(map[string]persistedRuntimeRecord), now: time.Now}
 	if dataDir != "" {
 		s.path = filepath.Join(dataDir, "session_runtime.json")
 		s.cursorPath = filepath.Join(dataDir, "session_runtime_cursors.jsonl")
+		s.sharedReadPath = filepath.Join(dataDir, "session_shared_reads.json")
 	}
 	s.load()
+	s.loadSharedReads()
 	return s
 }
 
@@ -125,6 +141,9 @@ func (s *Store) Update(sessionID, phase, requestID string, queueLength int, term
 	now := s.now().UnixMilli()
 	r.Revision++
 	r.Phase = phase
+	if phase != "waiting" || requestID != previousRequestID {
+		r.WaitingInteractions = nil
+	}
 	r.Stage = defaultStageForPhase(phase)
 	r.StageMessage = ""
 	r.StageStartedAt = now
@@ -138,7 +157,7 @@ func (s *Store) Update(sessionID, phase, requestID string, queueLength int, term
 		r.LastTerminal = terminal
 		r.LastError = lastError
 		r.CompletedAt = r.UpdatedAt
-		r.Terminals = append(r.Terminals, Terminal{Revision: r.Revision, RequestID: requestID, Status: terminal, At: r.CompletedAt})
+		r.Terminals = append(r.Terminals, Terminal{Revision: r.Revision, RequestID: requestID, Status: terminal, At: r.CompletedAt, StartedAt: r.ActiveStartedAt})
 		if len(r.Terminals) > 128 {
 			r.Terminals = append([]Terminal(nil), r.Terminals[len(r.Terminals)-128:]...)
 		}
@@ -437,6 +456,7 @@ func (s *Store) Remove(sessionID string) {
 	defer s.mu.Unlock()
 	if _, ok := s.records[sessionID]; ok {
 		delete(s.records, sessionID)
+		delete(s.sharedReads, sessionID)
 		s.saveLocked()
 	}
 }
@@ -444,7 +464,7 @@ func (s *Store) Remove(sessionID string) {
 func (s *Store) ensureLocked(sessionID string) *Record {
 	r := s.records[sessionID]
 	if r == nil {
-		r = &Record{SessionID: sessionID, Phase: "idle", AckedByDevice: map[string]uint64{}, ReadByDevice: map[string]uint64{}}
+		r = &Record{SessionID: sessionID, Phase: "idle", ReadEpoch: newReadEpoch(), AckedByDevice: map[string]uint64{}, ReadByDevice: map[string]uint64{}}
 		s.records[sessionID] = r
 	}
 	if r.AckedByDevice == nil {
@@ -491,6 +511,7 @@ func defaultStageForPhase(phase string) string {
 
 func viewLocked(r *Record, deviceID string) View {
 	unread := 0
+	lastCompletedRevision := uint64(0)
 	readRevision := r.ReadByDevice[deviceID]
 	historyReconcile := false
 	for _, terminal := range r.Terminals {
@@ -499,6 +520,9 @@ func viewLocked(r *Record, deviceID string) View {
 		}
 		if terminal.Status == "completed" && terminal.Revision > readRevision {
 			unread++
+		}
+		if terminal.Status == "completed" && terminal.Revision > lastCompletedRevision {
+			lastCompletedRevision = terminal.Revision
 		}
 	}
 	lastTerminal, lastError, completedAt := r.LastTerminal, r.LastError, r.CompletedAt
@@ -513,8 +537,9 @@ func viewLocked(r *Record, deviceID string) View {
 		ActiveRequestID: r.ActiveRequestID, QueueLength: r.QueueLength,
 		LastTerminal: lastTerminal, LastError: lastError, UpdatedAt: r.UpdatedAt,
 		CompletedAt: completedAt, Unread: unread,
-		DeliveryPending:  deviceID != "" && r.AckedByDevice[deviceID] < r.Revision,
-		HistoryReconcile: deviceID != "" && historyReconcile}
+		LastCompletedRevision: lastCompletedRevision,
+		DeliveryPending:       deviceID != "" && r.AckedByDevice[deviceID] < r.Revision,
+		HistoryReconcile:      deviceID != "" && historyReconcile}
 }
 
 func (s *Store) enforceCapLocked() {
@@ -543,6 +568,7 @@ func (s *Store) load() {
 	}
 	for id := range s.records {
 		s.ensureLocked(id)
+		s.persistedRecords[id] = persistedRuntimeRecord{revision: s.records[id].Revision, epoch: s.records[id].ReadEpoch, durable: true}
 	}
 	s.loadCursorLog()
 	s.enforceCapLocked()
@@ -636,22 +662,5 @@ func (s *Store) scheduleSaveLocked() {
 }
 
 func (s *Store) writeLocked() {
-	if s.path == "" || os.MkdirAll(filepath.Dir(s.path), 0o700) != nil {
-		return
-	}
-	data, err := json.Marshal(snapshot{Records: s.records})
-	if err != nil {
-		return
-	}
-	tmp := s.path + ".tmp"
-	if os.WriteFile(tmp, data, 0o600) == nil {
-		if os.Rename(tmp, s.path) == nil {
-			s.writes++
-			// The canonical snapshot now contains every cursor. Only touch the
-			// append journal when it has content, avoiding an idle truncate event.
-			if info, err := os.Stat(s.cursorPath); err == nil && info.Size() > 0 {
-				_ = os.WriteFile(s.cursorPath, nil, 0o600)
-			}
-		}
-	}
+	_ = s.writeRuntimeSnapshotLocked(false)
 }

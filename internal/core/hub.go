@@ -68,6 +68,9 @@ type Config struct {
 // the executor.Sink (Emit broadcasts an event to connected clients, or buffers
 // it when none are connected so a reconnecting client can recover it).
 type Hub struct {
+	pushSetupMu         sync.Mutex
+	pushSetupCSRF       string
+	pushSetupChallenges map[string]pushSetupPending
 	recapJobs           chan struct{}
 	pmMu                sync.Mutex
 	pmEnabled           bool
@@ -133,8 +136,9 @@ type Hub struct {
 	// watching remains a fallback for turns written by an external CLI.
 	transcriptChanged func(string)
 
-	steerMu      sync.Mutex
-	steerResults map[string]protocol.SteerResult // session_id/request_id -> terminal acknowledgement
+	steerMu               sync.Mutex
+	interactionSnapshotMu sync.Mutex
+	steerResults          map[string]protocol.SteerResult // session_id/request_id -> terminal acknowledgement
 
 	storm *stormGuards // dedupe/throttle/semaphore for heavy handlers
 
@@ -325,6 +329,10 @@ func (h *Hub) SetFCM(n *fcm.Notifier) {
 	h.workAttentionPush = nil
 	h.runtimeStatusPush = nil
 	if n != nil {
+		n.SetLiveActivityAuthorizer(func(id, digest string) bool { return h.pairedPushDevices()[id] && h.widgetCredentialValid(id, digest) })
+		if n.RelayEnabled() {
+			n.SetDeviceFilter(func(id string) bool { return h.pairedPushDevices()[id] })
+		}
 		h.workAttentionPush = n.NotifyWorkAttention
 		h.runtimeStatusPush = n.NotifySessionStatusWithAuthority
 		// Construction recovers stale active turns before FCM is wired. Publish

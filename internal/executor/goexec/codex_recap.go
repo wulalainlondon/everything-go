@@ -75,6 +75,31 @@ type recapConnection struct {
 	id                                                   int
 	threadID, turnID, completedTurn, status, text, final string
 	failed                                               bool
+	failureCode                                          string
+}
+
+type recapUpstreamError struct {
+	Message string          `json:"message"`
+	Info    json.RawMessage `json:"codexErrorInfo"`
+}
+
+// Only fixed public reason codes reach the UI, never raw provider/config data.
+func recapFailureCode(e *recapUpstreamError) string {
+	if e == nil {
+		return ""
+	}
+	var code string
+	_ = json.Unmarshal(e.Info, &code)
+	switch code {
+	case "server_overloaded", "serverOverloaded":
+		return "recap_model_busy"
+	case "rate_limit_exceeded", "rateLimitExceeded", "usage_limit_exceeded", "usageLimitExceeded":
+		return "recap_model_rate_limited"
+	}
+	if strings.Contains(strings.ToLower(e.Message), "selected model is at capacity") {
+		return "recap_model_busy"
+	}
+	return "recap_generation_failed"
 }
 
 func (c *Codex) openRecapConnection(ctx context.Context) (*recapConnection, error) {
@@ -112,12 +137,16 @@ func (p *recapConnection) consume(ctx context.Context, raw []byte) error {
 		ID     json.RawMessage `json:"id"`
 		Method string          `json:"method"`
 		Params struct {
-			ThreadID  string                             `json:"threadId"`
-			TurnID    string                             `json:"turnId"`
-			Delta     string                             `json:"delta"`
-			WillRetry bool                               `json:"willRetry"`
-			Turn      struct{ ID, Status string }        `json:"turn"`
-			Item      struct{ Type, Text, Phase string } `json:"item"`
+			ThreadID  string              `json:"threadId"`
+			TurnID    string              `json:"turnId"`
+			Delta     string              `json:"delta"`
+			WillRetry bool                `json:"willRetry"`
+			Error     *recapUpstreamError `json:"error"`
+			Turn      struct {
+				ID, Status string
+				Error      *recapUpstreamError `json:"error"`
+			} `json:"turn"`
+			Item struct{ Type, Text, Phase string } `json:"item"`
 		} `json:"params"`
 	}
 	if json.Unmarshal(raw, &m) != nil {
@@ -158,12 +187,17 @@ func (p *recapConnection) consume(ctx context.Context, raw []byte) error {
 	case "error":
 		if !m.Params.WillRetry {
 			p.failed = true
+			p.failureCode = recapFailureCode(m.Params.Error)
 		}
 	case "turn/completed":
 		if p.turnID != "" && m.Params.Turn.ID != p.turnID {
 			return nil
 		}
 		p.completedTurn, p.status = m.Params.Turn.ID, m.Params.Turn.Status
+		if m.Params.Turn.Error != nil {
+			p.failed = true
+			p.failureCode = recapFailureCode(m.Params.Turn.Error)
+		}
 	}
 	return nil
 }
@@ -304,6 +338,9 @@ func (c *Codex) generateRecap(ctx context.Context, model, conversation string) (
 		}
 	}
 	if p.completedTurn != p.turnID || p.status != "completed" || p.failed {
+		if p.failureCode != "" {
+			return recap.Generated{}, errors.New(p.failureCode)
+		}
 		return recap.Generated{}, errors.New("recap_generation_failed")
 	}
 	text := p.final

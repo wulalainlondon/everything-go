@@ -33,6 +33,9 @@ fcm_token.txt
 /*_secret
 /instance_id
 /fcm_tokens.json
+push_relay_client.json
+.push-relay-client-*
+/push-relay-data/
 /session_runtime.json
 /goal_snapshots.json
 /codex_maintenance.json

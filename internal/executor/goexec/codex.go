@@ -40,8 +40,9 @@ const (
 	codexDefaultModel     = "gpt-5.6-sol"
 	codexCompactThreshold = 0.80
 	codexStallWarnAfter   = 5 * time.Minute
-	codexStallAbortAfter  = 30 * time.Minute
-	codexStallCheckEvery  = 30 * time.Second
+	// Manual control by default: inactivity warns, never auto-interrupts work.
+	codexStallAbortAfter = time.Duration(0)
+	codexStallCheckEvery = 30 * time.Second
 	// A thread/resume response contains the complete serialized history in one
 	// WebSocket message. coder/websocket defaults to 32 KiB, which disconnects
 	// healthy daemon sessions as soon as a non-trivial thread is resumed. Keep a
@@ -193,6 +194,11 @@ type Codex struct {
 	activeThreadOwner  map[string]*session.Session
 	interMu            sync.Mutex
 	interactions       map[string]codexInteraction
+	asyncMu            sync.Mutex
+	asyncResolved      map[string]bool
+	asyncSessions      map[string]*session.Session
+	asyncScanMu        sync.Mutex
+	asyncScanned       map[string]asyncScanStamp
 	catalogMu          sync.RWMutex
 	catalog            backend.Definition
 	collaborationModes map[string]map[string]any
@@ -227,6 +233,8 @@ type codexInteraction struct {
 	responseKind string
 	reqID        string
 	mcpParams    json.RawMessage
+	nativeThread string
+	submitting   bool
 }
 
 func NewCodex(sink executor.Sink, codexBin string) *Codex {
@@ -651,9 +659,16 @@ func (c *Codex) expireDisconnectedInteractions() {
 	c.interMu.Lock()
 	pending := make([]codexInteraction, 0, len(c.interactions))
 	for _, interaction := range c.interactions {
+		if interaction.nativeThread != "" {
+			continue // Ordinary async annotations survive an RPC transport loss.
+		}
 		pending = append(pending, interaction)
 	}
-	c.interactions = make(map[string]codexInteraction)
+	for id, interaction := range c.interactions {
+		if interaction.nativeThread == "" {
+			delete(c.interactions, id)
+		}
+	}
 	c.interMu.Unlock()
 	for _, interaction := range pending {
 		c.sink.Emit(backend.NewInteractionResolved(interaction.payload.RequestID, interaction.payload.SessionID, "expired"))
@@ -1142,7 +1157,22 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 	}
 	c.mu.Unlock()
 	if s == nil {
+		// Reconciliation can know a native conversation without claiming or
+		// resuming its writer. Route only its async annotations via that map.
+		if m.Method == "item/completed" {
+			c.asyncMu.Lock()
+			recipient := c.asyncSessions[p.ThreadID]
+			c.asyncMu.Unlock()
+			if recipient != nil {
+				c.observeAsyncItem(recipient, p.ThreadID, m.Params)
+			}
+		}
 		return
+	}
+	// Async annotations are independent of the generating turn's lifetime. A
+	// replayed completed item must not be discarded by retired-turn filtering.
+	if m.Method == "item/completed" {
+		c.observeAsyncItem(s, p.ThreadID, m.Params)
 	}
 	st := c.state(s.ID)
 	st.touch(time.Now())
@@ -1754,7 +1784,7 @@ func (c *Codex) resolveServerRequest(requestID json.RawMessage) {
 	c.interMu.Lock()
 	var resolved *codexInteraction
 	for bridgeID, interaction := range c.interactions {
-		if rpcIDKey(interaction.rpcID) != wanted {
+		if interaction.rpcID == nil || rpcIDKey(interaction.rpcID) != wanted {
 			continue
 		}
 		copy := interaction
@@ -1966,6 +1996,10 @@ func codexJSON(v any) string {
 // --- Executor interface ----------------------------------------------------
 
 func (c *Codex) Send(ctx context.Context, s *session.Session, reqID, content string, images []backend.ImageAttachment, files []backend.FileAttachment) error {
+	asyncThread, asyncErr := c.validateAsyncReply(s, reqID, content)
+	if asyncErr != nil {
+		return asyncErr
+	}
 	if err := validateCodexInlineFiles(files); err != nil {
 		return err
 	}
@@ -1986,7 +2020,13 @@ func (c *Codex) Send(ctx context.Context, s *session.Session, reqID, content str
 		}
 	}
 
-	if err := c.ensureThread(s, st); err != nil {
+	var threadErr error
+	if asyncThread != "" {
+		threadErr = c.ensureExactAsyncThread(s, st, asyncThread)
+	} else {
+		threadErr = c.ensureThread(s, st)
+	}
+	if err := threadErr; err != nil {
 		if !errors.Is(err, backend.ErrThreadActiveWriter) {
 			c.sink.Emit(backend.NewError(s.ID, reqID, backend.ErrProcessDied, "failed to start codex thread: "+err.Error()))
 		}
@@ -2016,7 +2056,13 @@ func (c *Codex) Send(ctx context.Context, s *session.Session, reqID, content str
 	handoff := st.pendingHandoff
 	st.pendingHandoff = ""
 	st.mu.Unlock()
-	if handoff != "" {
+	if handoff != "" && asyncThread != "" {
+		// A native question reply must remain a standalone typed annotation;
+		// retain recovery context for the next ordinary human message.
+		st.mu.Lock()
+		st.pendingHandoff = handoff
+		st.mu.Unlock()
+	} else if handoff != "" {
 		content = handoff + "\n\n<current_user_request>\n" + content + "\n</current_user_request>"
 	}
 
@@ -2054,6 +2100,9 @@ func (c *Codex) Send(ctx context.Context, s *session.Session, reqID, content str
 // between the local snapshot and the RPC is safely rejected instead of being
 // attached to the next turn.
 func (c *Codex) Steer(ctx context.Context, s *session.Session, clientUserMessageID, content string, images []backend.ImageAttachment, files []backend.FileAttachment) (backend.SteerResult, error) {
+	if _, err := c.validateAsyncReply(s, clientUserMessageID, content); err != nil {
+		return backend.SteerResult{}, fmt.Errorf("%w: %v", backend.ErrSteerRejected, err)
+	}
 	if err := validateCodexInlineFiles(files); err != nil {
 		return backend.SteerResult{}, fmt.Errorf("%w: %v", backend.ErrSteerRejected, err)
 	}
@@ -2093,10 +2142,19 @@ func (c *Codex) steerActiveTurn(s *session.Session, clientUserMessageID, content
 	var response struct {
 		TurnID string `json:"turnId"`
 	}
-	if json.Unmarshal(raw, &response) != nil || response.TurnID == "" {
+	decodeErr := json.Unmarshal(raw, &response)
+	if strings.HasPrefix(clientUserMessageID, "ui_async_") && (decodeErr != nil || response.TurnID != turnID) {
+		// A malformed/mismatched ACK is uncertain, not a definitive rejection
+		// that can be automatically replayed into another turn.
+		return backend.SteerResult{}, fmt.Errorf("native async reply acceptance could not be correlated to the expected turn")
+	}
+	if decodeErr != nil || response.TurnID == "" {
 		response.TurnID = turnID
 	}
 	st.touch(time.Now())
+	if strings.HasPrefix(clientUserMessageID, "ui_async_") {
+		c.resolveAsyncReplies(s, threadID, content)
+	}
 	return backend.SteerResult{TurnID: response.TurnID, RequestID: activeRequestID}, nil
 }
 
@@ -2130,7 +2188,7 @@ func (c *Codex) runTurn(s *session.Session, st *codexState, threadID string, inp
 	// race the next turn from the same session and delete its newly acquired
 	// route.
 	switch {
-	case stopping || turnErr == "stopped":
+	case turnErr == "stopped":
 		c.releaseActiveThreads(s)
 		c.sink.Emit(backend.NewStopped(s.ID, requestID))
 	case turnErr != "":
@@ -2149,20 +2207,19 @@ func (c *Codex) runTurn(s *session.Session, st *codexState, threadID string, inp
 		// transition when the app-server notification was dropped or arrived while
 		// they were reconnecting.
 		c.reconcileGoalAfterTurn(s, st)
-		if c.shouldAutoCompact(st) {
+		st.mu.Lock()
+		stopping = st.stopping
+		st.mu.Unlock()
+		if !stopping && c.shouldAutoCompact(st) {
 			// Keep the durable session worker occupied until maintenance ends.
 			// Emitting Done first lets the next queued Send race compact/start.
 			c.runAutoCompact(s, st)
 		}
-		st.mu.Lock()
-		stopping = st.stopping
-		st.mu.Unlock()
 		c.releaseActiveThreads(s)
-		if stopping {
-			c.sink.Emit(backend.NewStopped(s.ID, requestID))
-		} else {
-			c.sink.Emit(backend.NewDone(s.ID, requestID))
-		}
+		// The owned native turn completed naturally. A concurrent stop intent
+		// (or stopping optional maintenance afterwards) cannot rewrite that
+		// confirmed terminal as 'interrupted'.
+		c.sink.Emit(backend.NewDone(s.ID, requestID))
 	}
 }
 
@@ -2480,10 +2537,14 @@ func (c *Codex) startTurnWithStaleRetry(s *session.Session, st *codexState, thre
 	st.mu.Unlock()
 	err := c.startTurn(threadID, input, snap, sandboxOverride, requestID)
 	if err == nil {
+		if strings.HasPrefix(requestID, "ui_async_") && len(input) > 0 {
+			text, _ := input[0]["text"].(string)
+			c.resolveAsyncReplies(s, threadID, text)
+		}
 		c.finalizePendingRecovery(s, st, threadID)
 		return nil
 	}
-	if !isStaleThreadError(err) {
+	if !isStaleThreadError(err) || strings.HasPrefix(requestID, "ui_async_") {
 		return err
 	}
 
@@ -2640,7 +2701,11 @@ func (c *Codex) startTurn(threadID string, input []map[string]any, snap session.
 		var response struct {
 			Turn codexTurnResponse `json:"turn"`
 		}
-		if json.Unmarshal(raw, &response) == nil && response.Turn.ID != "" {
+		decodeErr := json.Unmarshal(raw, &response)
+		if strings.HasPrefix(requestID, "ui_async_") && (decodeErr != nil || response.Turn.ID == "") {
+			return fmt.Errorf("native async reply acceptance did not contain a turn identity")
+		}
+		if decodeErr == nil && response.Turn.ID != "" {
 			c.confirmOwnedTurnSubmission(st, threadID, requestID, response.Turn)
 		}
 	}
@@ -2994,11 +3059,30 @@ func (c *Codex) Stop(ctx context.Context, s *session.Session) error {
 		return err
 	}
 
-	if threadID != "" && turnID != "" {
-		_, _ = c.rpcCall("turn/interrupt", map[string]any{"threadId": threadID, "turnId": turnID}, 5*time.Second)
-	}
 	if active {
-		st.finish("stopped") // runTurn emits stopped
+		if threadID == "" || turnID == "" {
+			st.mu.Lock()
+			if st.turnActive && st.currentTurnID == "" {
+				st.stopping = false
+			}
+			st.mu.Unlock()
+			return fmt.Errorf("Codex stop is unconfirmed while the turn identity is pending; retry after acceptance")
+		}
+		if err := c.interruptCodexTurn(threadID, turnID); err != nil {
+			st.mu.Lock()
+			if st.turnActive && st.threadID == threadID && st.currentTurnID == turnID {
+				st.stopping = false
+			}
+			st.mu.Unlock()
+			return err
+		}
+		// An RPC ACK means 'requested', not 'interrupted'. Do not finish here:
+		// only the exact turn/completed notification may settle the waiter.
+	} else if s.IsStreaming() {
+		st.mu.Lock()
+		st.stopping = false
+		st.mu.Unlock()
+		return fmt.Errorf("Codex stop is unconfirmed while the backend is preparing the turn")
 	} else {
 		c.sink.Emit(backend.NewStopped(s.ID, st.reqID))
 	}
@@ -3111,8 +3195,13 @@ func (c *Codex) RespondUserInput(id string, answers map[string]any, cancelled bo
 			}
 		}
 	}
+	if ok && (ci.nativeThread != "" || ci.submitting) {
+		c.interMu.Unlock()
+		return false
+	}
 	if ok {
-		delete(c.interactions, id)
+		ci.submitting = true
+		c.interactions[id] = ci
 	}
 	c.interMu.Unlock()
 	if !ok {
@@ -3132,14 +3221,27 @@ func (c *Codex) RespondUserInput(id string, answers map[string]any, cancelled bo
 		case "dynamic_tool":
 			text := codexAnyString(answers["result"])
 			result = map[string]any{"contentItems": []any{map[string]any{"type": "inputText", "text": text}}, "success": !cancelled}
-			c.tools.ResultEnd(ci.payload.SessionID, ci.reqID, ci.payload.ToolUseID, text)
 		case "request_user_input_v2":
 			result = map[string]any{"answers": codexV2UserInputAnswers(ci.payload.Questions, answers, cancelled)}
 		default:
 			result = map[string]any{"answers": answers, "cancelled": cancelled}
 		}
-		_ = c.rpc.write(map[string]any{"id": ci.rpcID, "result": result})
+		if err := c.rpc.write(map[string]any{"id": ci.rpcID, "result": result}); err != nil {
+			c.interMu.Lock()
+			if pending, exists := c.interactions[id]; exists {
+				pending.submitting = false
+				c.interactions[id] = pending
+			}
+			c.interMu.Unlock()
+			return false
+		}
+		if ci.responseKind == "dynamic_tool" {
+			c.tools.ResultEnd(ci.payload.SessionID, ci.reqID, ci.payload.ToolUseID, codexAnyString(answers["result"]))
+		}
 	}
+	c.interMu.Lock()
+	delete(c.interactions, id)
+	c.interMu.Unlock()
 	status := "resolved"
 	if cancelled {
 		status = "cancelled"
@@ -3280,7 +3382,7 @@ func normalizeCodexQuestions(raw []map[string]any) []backend.UserInputQuestion {
 		options := normalizeCodexOptions(codexFirstAny(q, "options", "choices"))
 		qtype := codexFirstString(q, "type", "kind")
 		multi := codexBoolField(q, "multiSelect", "multi_select", "multiple")
-		freeForm := codexBoolField(q, "freeForm", "free_form", "allowFreeForm")
+		freeForm := codexBoolField(q, "freeForm", "free_form", "allowFreeForm", "isOther", "is_other")
 		secret := codexBoolField(q, "isSecret", "is_secret", "secret")
 		if qtype == "" {
 			switch {

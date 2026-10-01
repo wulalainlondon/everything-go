@@ -34,12 +34,15 @@ type Command struct {
 	ClientSurface   string
 	AuthToken       string
 	ReplayAck       bool
+	SessionReadSync bool
 	ProtocolVersion int
 	ClientInfo      *protocol.ClientInfo
 	ConnectionProbe bool
 	BatchID         string
 	Revision        uint64
 	Read            bool
+	ReadEpoch       string
+	ReadToken       string
 
 	Name            string
 	Cwd             string
@@ -181,12 +184,15 @@ func (AppV1) ParseCommand(in protocol.Inbound) Command {
 		ClientSurface:   in.ClientSurface,
 		AuthToken:       in.AuthToken,
 		ReplayAck:       in.ReplayAck,
+		SessionReadSync: in.SessionReadSync,
 		ProtocolVersion: in.ProtocolVersion,
 		ClientInfo:      in.ClientInfo,
 		ConnectionProbe: in.ConnectionProbe,
 		BatchID:         in.BatchID,
 		Revision:        in.Revision,
 		Read:            in.Read,
+		ReadEpoch:       in.ReadEpoch,
+		ReadToken:       in.ReadToken,
 
 		Name:            in.Name,
 		Cwd:             in.Cwd,

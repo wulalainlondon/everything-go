@@ -99,6 +99,15 @@ func (p *Pairing) LockedTo(token string) bool {
 	return token != "" && ok
 }
 
+// Read scope membership comes from the authenticated credential's persisted
+// binding, never from the device ID or owner name asserted by a hello frame.
+func (p *Pairing) MatchesDevice(token, deviceID string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	device, ok := p.devices[token]
+	return ok && token != "" && deviceID != "" && device.DeviceID == deviceID
+}
+
 func (p *Pairing) OpenEnrollment(duration time.Duration) time.Time {
 	p.mu.Lock()
 	defer p.mu.Unlock()

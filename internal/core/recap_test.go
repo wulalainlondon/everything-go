@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"everything-go/internal/recap"
 	"everything-go/internal/session"
 	"strings"
@@ -15,13 +16,41 @@ type recapExec struct {
 	calls    atomic.Int32
 	generate atomic.Bool
 	force    atomic.Bool
+	failure  string
 }
 
 func (f *recapExec) SessionRecap(_ context.Context, s *session.Session, generate, force bool) (recap.Result, error) {
 	f.calls.Add(1)
 	f.generate.Store(generate)
 	f.force.Store(force)
-	return recap.Result{Snapshot: &recap.Snapshot{ThreadID: s.ResumeID(), SourceHash: strings.Repeat("a", 64), Summary: "Built, not deployed", GeneratedAt: time.Now().UnixMilli()}}, nil
+	result := recap.Result{Snapshot: &recap.Snapshot{ThreadID: s.ResumeID(), SourceHash: strings.Repeat("a", 64), Summary: "Built, not deployed", GeneratedAt: time.Now().UnixMilli()}}
+	if f.failure != "" {
+		return result, errors.New(f.failure)
+	}
+	return result, nil
+}
+
+func TestRecapFailureCodesPreserveSnapshotWithoutExposingRawProviderErrors(t *testing.T) {
+	for _, code := range []string{"recap_model_busy", "recap_model_rate_limited", "PRIVATE_PROVIDER_DATA"} {
+		t.Run(code, func(t *testing.T) {
+			h, f := newControlTestHub(t, t.TempDir())
+			h.SetExecutor(&recapExec{fakeExec: f, failure: code})
+			c := newTestClient(h)
+			c.deviceID = "phone"
+			c.ctx = context.Background()
+			h.registerLatest(c)
+			h.registry.Create("s", "test", "/work", "codex", "", "", "native")
+			route(h, c, `{"type":"generate_session_recap","session_id":"s","request_id":"r"}`)
+			e := waitForType(t, c, "session_recap")
+			want := code
+			if code == "PRIVATE_PROVIDER_DATA" {
+				want = "recap_generation_failed"
+			}
+			if e["error_code"] != want || e["snapshot"] == nil {
+				t.Fatal("lost cached summary or leaked provider data", e)
+			}
+		})
+	}
 }
 
 func TestRecapIsRequesterOnlyAndCannotCompleteChat(t *testing.T) {

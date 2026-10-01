@@ -2,9 +2,7 @@ package session
 
 import (
 	"errors"
-	"log"
 	"sync"
-	"time"
 )
 
 // State is the explicit session lifecycle. Transitions:
@@ -45,12 +43,6 @@ func (st State) String() string {
 // almost never pipelines turns for one session; this is headroom, not a design
 // point.
 const mailboxSize = 64
-
-// turnWatchdog is a backstop, NOT a turn time limit: if a turn never produces a
-// terminal event and is never stopped/cleared (an executor bug), it releases
-// the worker so the session doesn't wedge forever. Real turns finish via
-// EndTurn long before this fires.
-const turnWatchdog = 2 * time.Hour
 
 // State returns the current lifecycle state.
 func (s *Session) State() State {
@@ -251,9 +243,6 @@ func (s *Session) runWorker(quit <-chan struct{}) {
 		case <-done:
 		case <-quit:
 			return
-		case <-time.After(turnWatchdog):
-			log.Printf("[%s] turn watchdog fired after %s — releasing queue", s.ID, turnWatchdog)
-			s.EndTurn()
 		}
 		s.mu.Lock()
 		s.activeQueuedID = ""
@@ -281,7 +270,8 @@ func (s *Session) beginTurnLocked() <-chan struct{} {
 
 // EndTurn marks the in-flight turn complete and releases the worker. Called by
 // the connection core when the executor emits a terminal event (done/stopped/
-// error) and by stop/clear/kill paths that forcibly cancel a turn. Idempotent.
+// error) and by confirmed clear/kill paths. A stop request alone cannot release
+// the actor. Idempotent.
 func (s *Session) EndTurn() {
 	s.PrepareEndTurn()()
 }
@@ -322,6 +312,18 @@ func (s *Session) MarkStopping() {
 		s.state = Stopping
 	}
 	s.mu.Unlock()
+}
+
+// RestoreStreamingAfterUnconfirmedStop changes presentation only. It cannot
+// release the actor, and a late failed stop cannot affect a newer queued turn.
+func (s *Session) RestoreStreamingAfterUnconfirmedStop(requestID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state != Stopping || s.activeQueuedID != requestID {
+		return false
+	}
+	s.state = Streaming
+	return true
 }
 
 // Close moves the session to the terminal state and shuts the turn worker down.

@@ -73,10 +73,14 @@ func recapServer(t *testing.T, mode string) (string, func() []map[string]any) {
 					}
 					send(map[string]any{"method": "item/completed", "params": map[string]any{"threadId": "recap-thread", "item": map[string]string{"type": "agentMessage", "phase": "final_answer", "text": text}}})
 					status := "completed"
-					if mode == "failed" {
+					if mode == "failed" || mode == "overloaded" {
 						status = "failed"
 					}
-					send(map[string]any{"method": "turn/completed", "params": map[string]any{"threadId": "recap-thread", "turn": map[string]string{"id": "recap-turn", "status": status}}})
+					turn := map[string]any{"id": "recap-turn", "status": status}
+					if mode == "overloaded" {
+						turn["error"] = map[string]any{"message": "Selected model is at capacity. SECRET_DO_NOT_FORWARD", "codexErrorInfo": "server_overloaded"}
+					}
+					send(map[string]any{"method": "turn/completed", "params": map[string]any{"threadId": "recap-thread", "turn": turn}})
 				}
 			}
 			send(map[string]any{"id": req["id"], "result": result})
@@ -85,6 +89,29 @@ func recapServer(t *testing.T, mode string) (string, func() []map[string]any) {
 	go server.Serve(listener)
 	t.Cleanup(func() { server.Close() })
 	return path, func() []map[string]any { mu.Lock(); defer mu.Unlock(); return append([]map[string]any(nil), calls...) }
+}
+
+func TestCodexRecapClassifiesModelCapacityWithoutExposingProviderErrors(t *testing.T) {
+	path, _ := recapServer(t, "overloaded")
+	c := NewCodex(&capSink{}, "codex")
+	c.appServerSocket = path
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, err := c.generateRecap(ctx, "fixture", "user: Summarize only")
+	if err == nil || err.Error() != "recap_model_busy" {
+		t.Fatal("expected fixed capacity reason", err)
+	}
+}
+
+func TestRecapNonRetryErrorPreservesOnlyFixedReasonCode(t *testing.T) {
+	p := &recapConnection{threadID: "recap-thread", turnID: "recap-turn"}
+	err := p.consume(context.Background(), json.RawMessage(`{"method":"error","params":{"threadId":"recap-thread","turnId":"recap-turn","willRetry":false,"error":{"message":"provider secret","codexErrorInfo":"usageLimitExceeded"}}}`))
+	if err != nil || !p.failed || p.failureCode != "recap_model_rate_limited" {
+		t.Fatal(p, err)
+	}
+	if got := recapFailureCode(&recapUpstreamError{Message: "arbitrary private provider data"}); got != "recap_generation_failed" {
+		t.Fatal("leaked raw error", got)
+	}
 }
 
 func TestCodexRecapUsesEphemeralSharedDaemonClientAndNoParentMutation(t *testing.T) {

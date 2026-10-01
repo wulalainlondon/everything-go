@@ -5,6 +5,7 @@ import (
 	"log"
 
 	"everything-go/internal/fcm"
+	"everything-go/internal/liveactivity"
 	"everything-go/internal/protocol"
 	"everything-go/internal/runtimejournal"
 	"everything-go/internal/workitems"
@@ -19,6 +20,8 @@ func runtimeEvent(view runtimejournal.View) protocol.SessionRuntime {
 		LastTerminalStatus: view.LastTerminal, LastError: view.LastError,
 		UpdatedAt: view.UpdatedAt, CompletedAt: view.CompletedAt, Unread: view.Unread,
 		DeliveryPending: view.DeliveryPending, HistoryReconcile: view.HistoryReconcile,
+		ReadEpoch: view.ReadEpoch, ReadRevision: view.ReadRevision, ReadVersion: view.ReadVersion,
+		LastCompletedRevision: view.LastCompletedRevision,
 	}
 }
 
@@ -122,6 +125,10 @@ func (h *Hub) notifyRuntimeStatus(view runtimejournal.View) {
 	go h.runtimeStatusPush(h.cfg.InstanceID, h.cfg.InstanceName, view.SessionID, name, view.Phase, view.Stage,
 		view.StageMessage, view.Revision, view.UpdatedAt, view.ActiveStartedAt, view.ActiveRequestID, view.QueueLength,
 		fcm.ReplyAction{URL: replyURL, FallbackURL: fallbackURL, Capability: capability, ExpiresAt: expiresAt})
+	if h.fcm != nil {
+		h.fcm.NotifyLiveActivity(h.cfg.InstanceID, view.SessionID, view.ActiveRequestID, liveactivity.State{Phase: view.Phase, Stage: view.Stage,
+			Revision: view.Revision, UpdatedAt: view.UpdatedAt, StartedAt: view.ActiveStartedAt, ResultPending: view.HistoryReconcile})
+	}
 }
 
 func (h *Hub) projectWorkRun(sessionID, requestID, phase, reason string) {
@@ -175,7 +182,7 @@ func (h *Hub) broadcastRuntime(view runtimejournal.View) {
 	}
 	h.mu.RUnlock()
 	for _, c := range clients {
-		deviceView := h.runtimes.Snapshot(c.deviceID, []string{view.SessionID})
+		deviceView := h.runtimeViewsForClient(c, []string{view.SessionID})
 		if len(deviceView) == 1 {
 			c.enqueueEvent(runtimeEvent(deviceView[0]))
 		}
@@ -201,11 +208,17 @@ func (h *Hub) driveRuntimeState(event any) {
 		// ordering boundary before the next queued turn is released.
 		return
 	case protocol.UserInputRequestEvent:
-		h.updateRuntime(e.SessionID, "waiting", e.RequestID, 0, "", "")
+		// Async questions require an eventual answer, not a blocked model turn.
+		// They remain deliverable interaction events without changing runtime.
+		if e.IsBlocking != nil && !*e.IsBlocking {
+			return
+		}
+		if view, changed := h.runtimes.WaitForInteraction(e.SessionID, e.RequestID); changed {
+			h.publishRuntime(view)
+		}
 	case protocol.InteractionResolved:
-		if e.SessionID != "" {
-			h.updateRuntime(e.SessionID, "running", "", 0, "", "")
-			h.updateRuntimeProgress(e.SessionID, "", "thinking", "")
+		if view, changed := h.runtimes.ResolveInteraction(e.SessionID, e.RequestID); changed {
+			h.publishRuntime(view)
 		}
 	}
 }

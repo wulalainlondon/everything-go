@@ -62,6 +62,7 @@ func main() {
 	permissionCheck := flag.Bool("permission-check", false, "check filesystem permissions needed by the resident bridge and exit")
 	permissionCheckPaths := flag.String("permission-check-paths", "", "additional filesystem paths to check, separated by ':' on Unix or ';' on Windows")
 	serviceAccount := flag.String("service-account", os.Getenv("EVERYTHING_GO_FCM_SERVICE_ACCOUNT"), "private runtime Firebase service account JSON path (default = DATA_DIR/fcm_service_account.json; absent = push disabled)")
+	pushRelayURL := flag.String("push-relay-url", os.Getenv("EVERYTHING_GO_PUSH_RELAY_URL"), "managed push relay HTTPS URL (no Google key required; enroll phones at local /push/setup)")
 	discovery := flag.Bool("discovery", false, "enable the LAN UDP discovery beacon")
 	noDiscovery := flag.Bool("no-discovery", false, "deprecated: discovery is disabled by default")
 	discoveryPort := flag.Int("discovery-port", 8767, "UDP port the app's discovery listener binds")
@@ -283,11 +284,16 @@ func main() {
 	}
 
 	// Credentials are operator-provisioned runtime state, never release input.
-	if notifier, err := loadRuntimeFCM(*serviceAccount, *dataDir); err != nil {
+	if notifier, err := loadConfiguredPush(*pushRelayURL, *serviceAccount, *dataDir, instanceID); err != nil {
 		log.Printf("FCM disabled: %v", err)
 	} else {
 		hub.SetFCM(notifier)
-		log.Printf("FCM push enabled (private runtime credentials)")
+		defer notifier.Close()
+		if notifier.RelayEnabled() {
+			log.Printf("FCM relay configured; verify paired phones at http://127.0.0.1:%d/push/setup", *port)
+		} else {
+			log.Printf("FCM push enabled (private runtime credentials)")
+		}
 	}
 
 	// Network presence services (P3 discovery + P4 tunnel). They are opt-in so
@@ -335,6 +341,9 @@ func main() {
 	mux.HandleFunc("/api/relay/v1/", hub.ServeRelayAPI)
 	mux.HandleFunc("/api/notification/v1/replies", hub.ServeNotificationReplyAPI)
 	mux.HandleFunc("/api/widgets/v1/", hub.ServeWidgetAPI)
+	mux.HandleFunc("/api/live-activities/v1/", hub.ServeLiveActivityAPI)
+	mux.HandleFunc("/push/setup", hub.ServePushSetup)
+	mux.HandleFunc("/push/setup/api", hub.ServePushSetup)
 	mux.HandleFunc("/hooks/github", hub.ServeGitHubWebhook)
 	mux.HandleFunc("/hooks/apple-app-store", hub.ServeAppStoreWebhook)
 	mux.HandleFunc("/hooks/apple-app-store/", hub.ServeAppStoreWebhook)

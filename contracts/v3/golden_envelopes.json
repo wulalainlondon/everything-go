@@ -245,6 +245,12 @@
       "type": "session_meta_updated"
     },
     {
+      "type": "session_read_rejected"
+    },
+    {
+      "type": "session_read_state"
+    },
+    {
       "type": "session_recap"
     },
     {
@@ -596,6 +602,9 @@
     },
     {
       "type": "scan_markdown_files"
+    },
+    {
+      "type": "session_mark_read"
     },
     {
       "type": "session_runtime_ack"

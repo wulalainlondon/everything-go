@@ -18,6 +18,15 @@ func runtimeServiceAccountPath(configured, dataDir string) string {
 	return filepath.Join(dataDir, "fcm_service_account.json")
 }
 
+func loadConfiguredPush(relayURL, configured, dataDir, authority string) (*fcm.Notifier, error) {
+	if strings.TrimSpace(relayURL) != "" {
+		// Explicit relay mode never falls back to a project-wide Google key.
+		return fcm.NewRelay(strings.TrimSpace(relayURL), authority,
+			filepath.Join(dataDir, "push_relay_client.json"), filepath.Join(dataDir, "fcm_tokens.json"))
+	}
+	return loadRuntimeFCM(configured, dataDir)
+}
+
 func loadRuntimeFCM(configured, dataDir string) (*fcm.Notifier, error) {
 	f, err := os.Open(runtimeServiceAccountPath(configured, dataDir))
 	if err != nil {

@@ -141,6 +141,8 @@ type Client struct {
 	// receive bounded offline_replay_batch frames; legacy clients use a throttled
 	// per-event fallback so they remain compatible without overflowing send.
 	supportsReplayAck       bool
+	supportsSessionReadSync atomic.Bool
+	readIdentity            atomic.Pointer[pairedReadIdentity]
 	supportsCollaborationV2 atomic.Bool
 
 	// rtc holds the answering peer connection negotiated over this client's
@@ -387,6 +389,9 @@ func (c *Client) handshake(ctx context.Context) (clientproto.Command, bool) {
 		return clientproto.Command{}, false
 	}
 	c.inventoryName, c.inventoryProbe = in.DeviceName, in.ConnectionProbe
+	if !c.enrollmentOnly && c.hub.pairing.MatchesDevice(provided, in.DeviceID) {
+		c.readIdentity.Store(&pairedReadIdentity{token: provided, deviceID: in.DeviceID})
+	}
 	c.hub.bindDeviceInventory(c, provided, in.DeviceID, in.DeviceName, in.ClientSurface, in.ConnectionProbe)
 	logInbound(in.Type, in.SessionID)
 	return c.hub.client.ParseCommand(in), true

@@ -54,7 +54,8 @@ type claudeRow struct {
 	Timestamp                 string `json:"timestamp"`
 	Cwd                       string `json:"cwd"`
 	Message                   struct {
-		Content json.RawMessage `json:"content"`
+		Content    json.RawMessage `json:"content"`
+		StopReason string          `json:"stop_reason"`
 	} `json:"message"`
 }
 
@@ -173,14 +174,20 @@ func loadClaudeHistoryMessages(path, resumeID string, fileMtimeMs int64) ([]map[
 			blocks = []map[string]any{{"type": "text", "text": text}}
 		}
 		tsMs := parseISOms(d.Timestamp)
+		verifiedTimestamp := tsMs > 0
 		if tsMs == 0 {
 			tsMs = fileMtimeMs
 		}
-		messages = append(messages, history.CompleteMsg(
+		message := history.CompleteMsg(
 			"claude", resumeID,
 			"claude:"+resumeID+":line:"+itoa(rc.lineNo),
 			d.Type, text, tsMs, blocks,
-		))
+		)
+		message["history_timestamp_verified"] = verifiedTimestamp
+		// A fresh thinking/tool/progress row from the same API request is not
+		// proof that the completed answer has reached native history.
+		message["history_read_result_verified"] = d.Type == "assistant" && d.Message.StopReason == "end_turn" && strings.TrimSpace(text) != ""
+		messages = append(messages, message)
 	}
 
 	return messages, truncated

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 	"time"
 
@@ -79,6 +80,7 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		c.clientSurface = strings.ToLower(strings.TrimSpace(cmd.ClientSurface))
 		c.protocolVersion = cmd.ProtocolVersion
 		c.supportsReplayAck = cmd.ReplayAck
+		c.supportsSessionReadSync.Store(cmd.SessionReadSync && !cmd.ConnectionProbe && !c.inventoryProbe)
 		if b := c.inventoryBinding.Load(); b != nil && b.deviceID == cmd.DeviceID && !cmd.ConnectionProbe && !c.inventoryProbe {
 			promoted := *b
 			promoted.probe = false
@@ -100,6 +102,9 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 			LockedToMe:   h.pairing.LockedTo(cmd.AuthToken),
 			PairingOpen:  h.pairing.EnrollmentOpen(),
 			InstanceName: h.cfg.InstanceName,
+		}
+		if h.sharedReadAuthorized(c) {
+			helloInput.Capabilities = append(helloInput.Capabilities, "session_read_sync_v1")
 		}
 		if !c.enrollmentOnly && h.pmEnabled {
 			helloInput.Capabilities = append(helloInput.Capabilities, "pm_collaboration_v1", "human_ai_collaboration_v2")
@@ -161,7 +166,7 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		// while this (or the previous) client was offline — same ordering as the
 		// Python bridge so the app reconciles before replayed events arrive.
 		c.enqueueEvent(h.client.SessionsList(h.sessionSummaries()))
-		c.enqueueEvent(h.runtimeSnapshot(c.deviceID))
+		c.enqueueEvent(h.runtimeSnapshotForClient(c))
 		if h.events != nil {
 			if snapshot, err := h.events.Snapshot(ctx, c.deviceID, 0); err == nil {
 				c.enqueueEvent(h.client.ExternalEventSnapshot(snapshot))
@@ -230,6 +235,7 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		}
 		wasEnrollment := c.enrollmentOnly
 		c.enrollmentOnly = false
+		c.readIdentity.Store(&pairedReadIdentity{token: cmd.AuthToken, deviceID: cmd.DeviceID})
 		h.syncDeviceInventory()
 		h.bindDeviceInventory(c, cmd.AuthToken, cmd.DeviceID, c.inventoryName, c.clientSurface, c.inventoryProbe)
 		if wasEnrollment && !c.inventoryProbe {
@@ -242,11 +248,19 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		c.enqueueEvent(h.client.PairingWindowAck(expiresAt.Unix()))
 
 	case "unclaim_bridge":
+		removedDeviceID := ""
+		for _, binding := range h.pairing.DeviceBindings() {
+			if binding.Token == cmd.AuthToken {
+				removedDeviceID = binding.DeviceID
+				break
+			}
+		}
 		if err := h.pairing.Unclaim(cmd.AuthToken); err != nil {
 			c.enqueueEvent(h.client.Error("", "", err.Error()))
 			return
 		}
 		c.enqueueEvent(h.client.UnclaimAck(h.pairing.IsLocked()))
+		h.removeUnpairedPushDevice(removedDeviceID)
 		h.syncDeviceInventory()
 
 	case "request_sessions_list":
@@ -268,8 +282,11 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		// change or requested snapshot carries the device-specific read state.
 		_, _ = h.runtimes.Ack(c.deviceID, cmd.SessionID, cmd.Revision, cmd.Read)
 
+	case "session_mark_read":
+		h.handleSharedRead(c, cmd)
+
 	case "request_runtime_snapshot":
-		c.enqueueEvent(h.runtimeSnapshot(c.deviceID))
+		c.enqueueEvent(h.runtimeSnapshotForClient(c))
 
 	case "work_sync_request":
 		h.sendWorkSync(c, cmd.Revision)
@@ -430,12 +447,27 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 	case "stop":
 		if s, ok := h.registry.Get(cmd.SessionID); ok {
 			releaseQueue := s.HoldQueue()
+			requestID := s.ActiveQueuedID()
+			previousPhase := "running"
+			if views := h.runtimes.Snapshot("", []string{cmd.SessionID}); len(views) == 1 {
+				previousPhase = views[0].Phase
+				if requestID == "" {
+					requestID = views[0].ActiveRequestID
+				}
+			}
 			s.MarkStopping()
-			h.updateRuntime(cmd.SessionID, "stopping", "", s.QueueLen(), "", "")
+			h.updateRuntime(cmd.SessionID, "stopping", requestID, s.QueueLen(), "", "")
 			go func() {
 				defer releaseQueue()
-				_ = h.exec.Stop(context.Background(), s)
-				s.EndTurn() // release the queue even if the backend emits no terminal event
+				if err := h.exec.Stop(context.Background(), s); err != nil {
+					// RPC failure is not proof of termination. Keep ownership;
+					// only a correlated backend terminal can release this turn.
+					s.RestoreStreamingAfterUnconfirmedStop(requestID)
+					if view, changed := h.runtimes.RestoreUnconfirmedStop(cmd.SessionID, requestID, previousPhase); changed {
+						h.publishRuntime(view)
+					}
+					h.Emit(backend.NewSessionWarning(cmd.SessionID, "停止指令尚未獲得執行端確認，工作仍保持鎖定。可以稍後再次按停止；未重送工作或啟動下一個排隊工作。"))
+				}
 			}()
 		}
 
@@ -465,6 +497,7 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 			c.enqueueEvent(h.client.HistorySnapshot(cmd.SessionID, []map[string]any{}, 0, false, true, ""))
 			return
 		}
+		cmd = h.captureHistoryReadBoundary(c, cmd)
 		go h.sendHistory(c, s, cmd)
 
 	case "request_session_recap":
@@ -866,20 +899,44 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 
 	case "user_input_response":
 		cancelled := cmd.Cancelled != nil && *cmd.Cancelled
+		if native, ok := h.exec.(backend.NativeAsyncInteractions); ok {
+			sid, content, handled, err := native.PrepareAsyncReply(cmd.RequestID, cmd.Answers, cancelled)
+			if handled {
+				cmd.SessionID = sid
+				if err != nil {
+					h.queueError(c, cmd, "interaction_reply_rejected", err.Error())
+					return
+				}
+				cmd.Content = content
+				cmd.Images, cmd.Files = nil, nil // A question answer is text only.
+				admission := cmd
+				admission.Kind = "message"
+				if h.rejectToolMaintenanceWrite(c, admission) || h.rejectPMCommand(c, admission) {
+					return
+				}
+				if !h.enqueueChatMessage(c, cmd) {
+					return
+				}
+				// Promotion uses the same persisted entry and expected-turn guard;
+				// rejection leaves it in FIFO rather than silently starting a turn.
+				if s, found := h.registry.Get(sid); found && s.IsStreaming() {
+					admission.Kind = "promote_queued_message"
+					if !h.rejectPMCommand(c, admission) {
+						h.promoteQueuedMessage(c, cmd)
+					}
+				}
+				return
+			}
+		}
 		if ir, ok := h.exec.(interactionResponder); ok {
 			if !ir.RespondUserInput(cmd.RequestID, cmd.Answers, cancelled) {
 				log.Printf("client %s: user_input_response for unknown request %q", c.clientID, cmd.RequestID)
+				h.queueError(c, cmd, "interaction_reply_rejected", "Question was not found or the reply could not be delivered; refresh pending questions")
 			}
 		}
 
 	case "pending_interactions_list":
-		var items []backend.UserInputPayload
-		if ir, ok := h.exec.(interactionResponder); ok {
-			items = ir.PendingInteractions(cmd.SessionID)
-		}
-		snapshot := h.client.PendingInteractionsList(items)
-		snapshot.ScopeSessionID, snapshot.SnapshotAll = cmd.SessionID, cmd.SessionID == ""
-		c.enqueueEvent(snapshot)
+		go h.sendPendingInteractions(c, cmd)
 
 	// --- Search (FTS5) ----------------------------------------------------
 
@@ -931,6 +988,31 @@ type interactionResponder interface {
 	PendingInteractions(sessionID string) []backend.UserInputPayload
 }
 
+func (h *Hub) sendPendingInteractions(c *Client, cmd clientproto.Command) {
+	// At most one expensive canonical scan runs. A reconnect burst gets the
+	// current scoped snapshot; the finishing scan publishes an updated snapshot.
+	if h.interactionSnapshotMu.TryLock() {
+		if native, ok := h.exec.(backend.NativeAsyncInteractions); ok {
+			for _, s := range h.registry.List() {
+				if !c.live() {
+					break
+				}
+				if cmd.SessionID == "" || s.ID == cmd.SessionID {
+					native.ReconcileAsyncQuestions(s)
+				}
+			}
+		}
+		h.interactionSnapshotMu.Unlock()
+	}
+	var items []backend.UserInputPayload
+	if ir, ok := h.exec.(interactionResponder); ok {
+		items = ir.PendingInteractions(cmd.SessionID)
+	}
+	snapshot := h.client.PendingInteractionsList(items)
+	snapshot.ScopeSessionID, snapshot.SnapshotAll = cmd.SessionID, cmd.SessionID == ""
+	c.enqueueEvent(snapshot)
+}
+
 func (h *Hub) sendHistory(c *Client, s *session.Session, cmd clientproto.Command) {
 	if !c.live() {
 		return
@@ -952,7 +1034,7 @@ func (h *Hub) sendHistory(c *Client, s *session.Session, cmd clientproto.Command
 	if cmd.IncludeThinking {
 		thinkFlag = "1"
 	}
-	key := c.deviceID + "|" + s.ID + "|" + strings.Join(resumeIDs, ",") + "|" + cmd.Mode + "|" + cmd.Before + "|" + cmd.KnownLast + "|" + itoa(cmd.Limit) + "|" + thinkFlag
+	key := c.deviceID + "|" + s.ID + "|" + strings.Join(resumeIDs, ",") + "|" + cmd.Mode + "|" + cmd.Before + "|" + cmd.KnownLast + "|" + itoa(cmd.Limit) + "|" + thinkFlag + "|" + cmd.ReadEpoch + "|" + strconv.FormatUint(cmd.Revision, 10)
 	v := h.coalesce(&h.storm.histSF, h.storm.histCache, key, historyCacheTTL, func() any {
 		res, err := loadLogicalSessionHistory(provider, resumeIDs, history.Opts{
 			Limit: cmd.Limit, KnownLast: cmd.KnownLast, Mode: cmd.Mode, Before: cmd.Before,
@@ -1030,13 +1112,21 @@ func (h *Hub) sendHistory(c *Client, s *session.Session, cmd clientproto.Command
 		}
 	}
 	if res.Kind == "delta" {
-		c.enqueueEvent(h.client.HistoryDelta(s.ID, cmd.KnownLast, msgs, res.SourceCount))
+		event := h.client.HistoryDelta(s.ID, cmd.KnownLast, msgs, res.SourceCount)
+		if h.runtimes.HistoryMatchesReadBoundary(s.ID, cmd.ReadEpoch, cmd.Revision, msgs) {
+			event.HistoryReadEpoch, event.HistoryReadRevision, event.HistoryReadToken = h.confirmHistoryReadBoundary(c, cmd)
+		}
+		c.enqueueEvent(event)
 		if previewProjectionChanged {
 			h.BroadcastSessionSummaries()
 		}
 		return
 	}
-	c.enqueueEvent(h.client.HistorySnapshot(s.ID, msgs, res.SourceCount, res.HasMoreBefore, res.KnownIDFound, res.SnapshotReason))
+	event := h.client.HistorySnapshot(s.ID, msgs, res.SourceCount, res.HasMoreBefore, res.KnownIDFound, res.SnapshotReason)
+	if res.SnapshotReason != "before_page" && h.runtimes.HistoryMatchesReadBoundary(s.ID, cmd.ReadEpoch, cmd.Revision, msgs) {
+		event.HistoryReadEpoch, event.HistoryReadRevision, event.HistoryReadToken = h.confirmHistoryReadBoundary(c, cmd)
+	}
+	c.enqueueEvent(event)
 	if previewProjectionChanged {
 		h.BroadcastSessionSummaries()
 	}
