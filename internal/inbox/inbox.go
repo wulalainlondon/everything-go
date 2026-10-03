@@ -2,10 +2,10 @@
 // small store for files pushed from the desktop to the mobile app (e.g. an APK
 // built locally → delivered to the phone). The registry is persisted to
 // inbox.json so a file survives a bridge restart until every target device has
-// acked it. Mirrors the *inline* path only: files are base64-encoded into the
-// frame (and the inbox entry). The Python large-file path uploads to Firebase
-// Storage and hands back a signed URL; Go has no Storage binding, so files over
-// the inline cap are rejected with a clear error rather than silently dropped.
+// acked it. Legacy-compatible entries retain the base64 body on disk; client
+// events use DownloadItem to expose a file-specific HTTP capability instead of
+// sending file content during connection bootstrap. Files over the existing
+// 50 MiB storage cap are rejected explicitly.
 package inbox
 
 import (
@@ -79,16 +79,18 @@ func (e *Entry) item() Item {
 
 // Store holds the push registry and persists it. Safe for concurrent use.
 type Store struct {
-	dir string // <data_dir>
-	mu  sync.Mutex
-	reg map[string]*Entry
+	dir       string // <data_dir>
+	mu        sync.Mutex
+	reg       map[string]*Entry
+	downloads map[string]downloadRecord
 }
 
 // New opens (or creates) the inbox rooted at dataDir, loading inbox.json and
 // dropping any entries already past their TTL.
 func New(dataDir string) *Store {
-	s := &Store{dir: dataDir, reg: map[string]*Entry{}}
+	s := &Store{dir: dataDir, reg: map[string]*Entry{}, downloads: map[string]downloadRecord{}}
 	s.load()
+	s.loadDownloads()
 	return s
 }
 

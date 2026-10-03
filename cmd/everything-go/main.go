@@ -336,6 +336,7 @@ func main() {
 	mux.Handle("/api/drop/v1/uploads", transfers.DropHandler())
 	mux.Handle("/api/drop/v1/uploads/", transfers.DropHandler())
 	mux.HandleFunc("/api/work/v1/items/", hub.ServeWorkAPI)
+	mux.HandleFunc("/api/inbox/v1/files/", hub.ServeInboxDownload)
 	mux.HandleFunc("/api/events/v1/events", hub.ServeEventAPI)
 	mux.HandleFunc("/api/automation/v1/", hub.ServeAutomationAPI)
 	mux.HandleFunc("/api/relay/v1/", hub.ServeRelayAPI)

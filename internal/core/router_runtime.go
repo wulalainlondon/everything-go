@@ -2,7 +2,11 @@ package core
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"log"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -12,6 +16,7 @@ import (
 
 	"everything-go/internal/clientproto"
 	"everything-go/internal/executor"
+	"everything-go/internal/inbox"
 	"everything-go/internal/protocol"
 	rt "everything-go/internal/runtime"
 	"everything-go/internal/search"
@@ -306,12 +311,9 @@ func (h *Hub) resumableForPath(path string) []protocol.DirSession {
 
 // --- file push inbox (push_file / file_push_ack / get_inbox) ----------------
 
-// handlePushFile inlines a local file and broadcasts it to every connected
-// device but the sender, persisting it to the inbox so an offline device can
-// recover it on its next hello. Mirrors push_registry.handle_push_file (inline
-// path). Path is expanded like the other Go file handlers (no jail, matching
-// browse_dir/open_file). The push_ack goes only to the sender; the file_push
-// broadcast (with the base64 body) goes to everyone via the hub.
+// handlePushFile stores a local file and broadcasts its download metadata to every connected
+// device, persisting it for recovery on hello. The sender receives push_ack;
+// file_push carries a file-specific download URL, never the base64 body.
 func (h *Hub) handlePushFile(c *Client, reqPath string) {
 	if h.inbox == nil {
 		return
@@ -324,7 +326,21 @@ func (h *Hub) handlePushFile(c *Client, reqPath string) {
 	}
 	log.Printf("[push] file=%s id=%s size=%d → %d device(s)", item.Filename, item.FileID, item.Size, len(h.connectedDeviceIDs(c.deviceID)))
 	c.enqueueEvent(protocol.NewPushAck(item.FileID, item.Filename, item.Size))
-	h.Emit(protocol.NewFilePush(item.FileID, item.Filename, item.URL, item.Data, item.Size, item.MimeType))
+	prepared, err := h.inbox.DownloadItem(item)
+	if err != nil {
+		c.enqueueEvent(protocol.NewError("", "", "File download unavailable: "+err.Error()))
+		return
+	}
+	h.mu.RLock()
+	clients := make([]*Client, 0, len(h.clients))
+	for client := range h.clients {
+		clients = append(clients, client)
+	}
+	h.mu.RUnlock()
+	for _, client := range clients {
+		wire := h.inboxWireItem(client, prepared)
+		client.enqueueEvent(protocol.NewFilePush(wire.FileID, wire.Filename, wire.URL, "", wire.Size, wire.MimeType))
+	}
 	if h.fcm != nil {
 		go h.fcm.NotifyFilePush(item.FileID, item.Filename)
 	}
@@ -352,25 +368,85 @@ func (h *Hub) sendPendingPushes(c *Client) {
 		if !c.live() {
 			return
 		}
-		c.enqueueEvent(protocol.NewFilePush(it.FileID, it.Filename, it.URL, it.Data, it.Size, it.MimeType))
+		prepared, err := h.inbox.DownloadItem(it)
+		if err != nil {
+			c.enqueueEvent(protocol.NewError("", "", "File download unavailable: "+err.Error()))
+			continue
+		}
+		wire := h.inboxWireItem(c, prepared)
+		c.enqueueEvent(protocol.NewFilePush(wire.FileID, wire.Filename, wire.URL, "", wire.Size, wire.MimeType))
 	}
 }
 
 // inboxItems builds the inbox_list reply (get_inbox), which—unlike the hello
 // replay—includes pushed_at on each item.
-func (h *Hub) inboxItems(deviceID string) []protocol.InboxItem {
+func (h *Hub) inboxItems(c *Client) []protocol.InboxItem {
 	if h.inbox == nil {
 		return nil
 	}
-	pending := h.inbox.Pending(deviceID)
+	pending := h.inbox.Pending(c.deviceID)
 	out := make([]protocol.InboxItem, 0, len(pending))
 	for _, it := range pending {
-		out = append(out, protocol.InboxItem{
-			FileID: it.FileID, Filename: it.Filename, URL: it.URL,
-			Data: it.Data, Size: it.Size, MimeType: it.MimeType, PushedAt: it.PushedAt,
-		})
+		prepared, err := h.inbox.DownloadItem(it)
+		if err != nil {
+			c.enqueueEvent(protocol.NewError("", "", "File download unavailable: "+err.Error()))
+			continue
+		}
+		out = append(out, h.inboxWireItem(c, prepared))
 	}
 	return out
+}
+
+func (h *Hub) inboxWireItem(c *Client, item inbox.Item) protocol.InboxItem {
+	remote := item.URL
+	if strings.HasPrefix(remote, inbox.DownloadPrefix) {
+		origin := c.downloadOrigin
+		if origin == "" {
+			host := h.cfg.LanIP
+			if host == "" {
+				host = "127.0.0.1"
+			}
+			origin = "http://" + net.JoinHostPort(host, fmt.Sprint(h.cfg.Port))
+		}
+		remote = strings.TrimRight(origin, "/") + remote
+	}
+	return protocol.InboxItem{FileID: item.FileID, Filename: item.Filename, URL: remote,
+		Size: item.Size, MimeType: item.MimeType, PushedAt: item.PushedAt}
+}
+
+// Metadata can still accumulate for a long-lived desktop inbox. Keep every
+// list message bounded; existing clients merge inbox_list items by file ID.
+const inboxListMaxBytes = 48 * 1024 // also fits the WebRTC DataChannel message limit
+
+func (h *Hub) sendInbox(c *Client) {
+	items := h.inboxItems(c)
+	batch := []protocol.InboxItem{}
+	size := 64 // envelope, brackets and separators
+	for _, item := range items {
+		raw, err := json.Marshal(item)
+		if err != nil || len(raw)+64 > inboxListMaxBytes {
+			c.enqueueEvent(protocol.NewError("", "", "File metadata exceeds inbox message limit"))
+			continue
+		}
+		if size+len(raw)+1 > inboxListMaxBytes {
+			c.enqueueEvent(h.client.InboxListItems(batch))
+			batch = []protocol.InboxItem{}
+			size = 64
+		}
+		batch = append(batch, item)
+		size += len(raw) + 1
+	}
+	if len(batch) > 0 || len(items) == 0 {
+		c.enqueueEvent(h.client.InboxListItems(batch))
+	}
+}
+
+func (h *Hub) ServeInboxDownload(w http.ResponseWriter, r *http.Request) {
+	if h.inbox == nil {
+		http.NotFound(w, r)
+		return
+	}
+	h.inbox.DownloadHandler().ServeHTTP(w, r)
 }
 
 // realpath resolves symlinks like os.path.realpath; falls back to the absolute

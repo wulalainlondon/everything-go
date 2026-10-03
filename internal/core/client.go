@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -66,11 +67,14 @@ type enrollmentEligible interface {
 // wsConn adapts coder/websocket to wireConn. Frames are always text (the wire
 // protocol is JSON); the read/write message type is fixed.
 type wsConn struct {
-	c         *websocket.Conn
-	addr      string // r.RemoteAddr captured at accept time, for logging
-	canEnroll bool
-	progress  *atomic.Int64 // bytes read within a data message, not merely its header
+	c          *websocket.Conn
+	addr       string // r.RemoteAddr captured at accept time, for logging
+	canEnroll  bool
+	progress   *atomic.Int64 // bytes read within a data message, not merely its header
+	httpOrigin string        // actual client-facing WS origin, including reverse proxy TLS
 }
+
+func (w wsConn) HTTPOrigin() string { return w.httpOrigin }
 
 func (w wsConn) Read(ctx context.Context) ([]byte, error) {
 	_, reader, err := w.c.Reader(ctx)
@@ -126,6 +130,7 @@ type Client struct {
 	cancel context.CancelFunc
 
 	clientID         string
+	downloadOrigin   string
 	deviceID         string
 	clientSurface    string
 	protocolVersion  int
@@ -278,7 +283,7 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 	}
 	conn.SetReadLimit(32 * 1024 * 1024)
 	h.serveConn(context.Background(), wsConn{
-		c: conn, addr: r.RemoteAddr, canEnroll: directPrivateRequest(r), progress: &atomic.Int64{},
+		c: conn, addr: r.RemoteAddr, canEnroll: directPrivateRequest(r), progress: &atomic.Int64{}, httpOrigin: requestHTTPOrigin(r),
 	})
 }
 
@@ -292,6 +297,21 @@ func webSocketCompressionMode(userAgent string) websocket.CompressionMode {
 		return websocket.CompressionDisabled
 	}
 	return websocket.CompressionNoContextTakeover
+}
+
+func requestHTTPOrigin(r *http.Request) string {
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	// cloudflared connects to the local bridge over HTTP but preserves the
+	// public Host and X-Forwarded-Proto. Trust that scheme only from loopback.
+	host, _, _ := net.SplitHostPort(r.RemoteAddr)
+	if ip := net.ParseIP(strings.Trim(host, "[]")); ip != nil && ip.IsLoopback() &&
+		strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")), "https") {
+		scheme = "https"
+	}
+	return (&url.URL{Scheme: scheme, Host: r.Host}).String()
 }
 
 func directPrivateRequest(r *http.Request) bool {
@@ -332,6 +352,9 @@ func (h *Hub) serveConn(ctx context.Context, conn wireConn) {
 		clientID: randomID(),
 	}
 	c.uploads = newAttachmentUploads(c, h.cfg.DataDir)
+	if origin, ok := conn.(interface{ HTTPOrigin() string }); ok {
+		c.downloadOrigin = origin.HTTPOrigin()
+	}
 
 	// Governance boundary: the first frame MUST be a valid hello carrying an
 	// accepted auth token (when the bridge is locked or BRIDGE_AUTH_TOKEN is

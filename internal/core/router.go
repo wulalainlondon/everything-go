@@ -801,7 +801,7 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		h.handleFilePushAck(cmd.FileID, c.deviceID)
 
 	case "get_inbox":
-		c.enqueueEvent(h.client.InboxListItems(h.inboxItems(c.deviceID)))
+		h.sendInbox(c)
 
 	case "feed_list_request":
 		if h.feed == nil {
