@@ -1271,6 +1271,10 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 		}
 
 	case "item/started":
+		if isRootThread && p.Item.Type == "contextCompaction" {
+			c.sink.Emit(backend.NewTurnProgress(s.ID, reqID, "composing", "正在整理上下文；後續訊息會依序處理"))
+			return
+		}
 		if p.Item.Type == "collabAgentToolCall" {
 			c.updateCodexCollabItem(s, st, p.Item.Tool, p.Item.SenderThreadID, p.Item.ReceiverThreadIDs, p.Item.Prompt, p.Item.Model, p.Item.AgentsStates, time.Now().UnixMilli())
 			return
@@ -1287,6 +1291,17 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 		c.tools.Start(s.ID, reqID, tool.ID, tool.Name, tool.Command)
 
 	case "item/completed":
+		if isRootThread && p.Item.Type == "contextCompaction" {
+			st.mu.Lock()
+			managedCompact := st.compactActive
+			st.mu.Unlock()
+			// Native automatic compaction continues the same model turn. Managed
+			// /compact instead clears through its durable maintenance terminal.
+			if !managedCompact {
+				c.sink.Emit(backend.NewTurnProgress(s.ID, reqID, "thinking", ""))
+			}
+			return
+		}
 		if p.Item.Type == "collabAgentToolCall" {
 			c.updateCodexCollabItem(s, st, p.Item.Tool, p.Item.SenderThreadID, p.Item.ReceiverThreadIDs, p.Item.Prompt, p.Item.Model, p.Item.AgentsStates, time.Now().UnixMilli())
 			return
