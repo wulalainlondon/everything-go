@@ -269,7 +269,7 @@ func (c *Client) pingLoopEvery(ctx context.Context, interval, timeout time.Durat
 func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		InsecureSkipVerify:   true, // app connects from arbitrary LAN origins
-		CompressionMode:      websocket.CompressionNoContextTakeover,
+		CompressionMode:      webSocketCompressionMode(r.UserAgent()),
 		CompressionThreshold: 1024,
 	})
 	if err != nil {
@@ -280,6 +280,18 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 	h.serveConn(context.Background(), wsConn{
 		c: conn, addr: r.RemoteAddr, canEnroll: directPrivateRequest(r), progress: &atomic.Int64{},
 	})
+}
+
+// Apple NSURLSession/WebKit transports advertise permessage-deflate but can
+// fail while receiving the first compressed bootstrap message (POSIX protocol
+// error). Native Swift already opts out; handle Safari and iOS WebViews here,
+// where browser WebSocket APIs cannot override the upgrade headers.
+func webSocketCompressionMode(userAgent string) websocket.CompressionMode {
+	if strings.Contains(userAgent, "CFNetwork/") ||
+		(strings.Contains(userAgent, "AppleWebKit/") && !strings.Contains(userAgent, "Chrome/") && !strings.Contains(userAgent, "Android")) {
+		return websocket.CompressionDisabled
+	}
+	return websocket.CompressionNoContextTakeover
 }
 
 func directPrivateRequest(r *http.Request) bool {

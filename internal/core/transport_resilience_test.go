@@ -176,3 +176,56 @@ func TestBootstrapNegotiatesCompressionAndReducesWireBytes(t *testing.T) {
 		}
 	}
 }
+
+func TestAppleBootstrapDoesNotNegotiateCompression(t *testing.T) {
+	t.Setenv("BRIDGE_AUTH_TOKEN", "transport-test-token")
+	h, _ := newTestHub(t)
+	h.registry.Create("apple-session", strings.Repeat("bootstrap snapshot ", 100), "/qa", "codex", "", "", "")
+	server := httptest.NewServer(http.HandlerFunc(h.ServeWS))
+	defer server.Close()
+	for _, ua := range []string{
+		"BridgeDesktopNative/28 CFNetwork/3860 Darwin/25.6.0",
+		"Mozilla/5.0 (iPad; CPU OS 26_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
+		"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Version/26.0 Safari/605.1.15",
+		"Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15 CriOS/140.0 Mobile/15E148 Safari/604.1",
+	} {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		conn, response, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http"), &websocket.DialOptions{
+			HTTPHeader: http.Header{"User-Agent": []string{ua}}, CompressionMode: websocket.CompressionNoContextTakeover,
+		})
+		if err != nil {
+			cancel()
+			t.Fatal(err)
+		}
+		if response.Header.Get("Sec-WebSocket-Extensions") != "" {
+			t.Fatal("Apple client still negotiated compression")
+		}
+		if err = conn.Write(ctx, websocket.MessageText, []byte(`{"type":"hello","auth_token":"transport-test-token","device_id":"apple-test","protocol_version":3}`)); err != nil {
+			t.Fatal(err)
+		}
+		for {
+			_, raw, err := conn.Read(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var event struct {
+				Type string `json:"type"`
+			}
+			_ = json.Unmarshal(raw, &event)
+			if event.Type == "sessions_list" {
+				break
+			}
+		}
+		conn.CloseNow()
+		cancel()
+	}
+	for _, ua := range []string{
+		"Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/140.0 Mobile Safari/537.36",
+		"Mozilla/5.0 (Macintosh) AppleWebKit/537.36 Chrome/140.0 Safari/537.36",
+		"Go-http-client/1.1",
+	} {
+		if webSocketCompressionMode(ua) != websocket.CompressionNoContextTakeover {
+			t.Fatal("compatible transport lost compression")
+		}
+	}
+}
