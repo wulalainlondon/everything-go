@@ -153,7 +153,7 @@ func TestCodexStartResponseTerminalAndEarlyFailurePreserveStatus(t *testing.T) {
 						t.Fatal(st.turnErr)
 					}
 				case "failed":
-					if st.turnErr != "model unavailable" || st.turnErrorCode != backend.ErrTurn {
+					if st.turnErr != "model unavailable" || st.turnErrorCode != "model_capacity" {
 						t.Fatalf("lost failure %s/%s", st.turnErr, st.turnErrorCode)
 					}
 				case "interrupted":

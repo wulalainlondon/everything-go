@@ -31,6 +31,7 @@ import (
 	"everything-go/internal/executor"
 	"everything-go/internal/protocol"
 	"everything-go/internal/recap"
+	"everything-go/internal/recovery"
 	"everything-go/internal/runtime"
 	"everything-go/internal/session"
 	"everything-go/internal/sourcepolicy"
@@ -72,6 +73,8 @@ type codexState struct {
 	turnActive        bool
 	turnErr           string
 	turnErrorCode     string
+	turnFailure       *codexFailureDetail
+	failureNoticeKey  string
 	turnDone          chan struct{}
 	stopping          bool
 	reqID             string
@@ -211,6 +214,8 @@ type Codex struct {
 	stallAbortAfter    time.Duration
 	stallCheckEvery    time.Duration
 	dataDir            string
+	failureJournalMu   sync.Mutex
+	failureJournal     *recovery.Journal
 	historyRequestMu   sync.Mutex
 	maintenanceMu      sync.Mutex
 	maintenance        map[string]backend.Maintenance
@@ -1127,7 +1132,7 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 			AgentNickname  *string `json:"agentNickname"`
 			AgentRole      *string `json:"agentRole"`
 		} `json:"thread"`
-		WillRetry bool `json:"willRetry"`
+		WillRetry *bool `json:"willRetry"`
 		Error     struct {
 			Message string          `json:"message"`
 			Info    json.RawMessage `json:"codexErrorInfo"`
@@ -1136,7 +1141,9 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 		Usage      codexTokenUsage `json:"usage"`
 		Goal       backend.Goal    `json:"goal"`
 	}
-	_ = json.Unmarshal(m.Params, &p)
+	if json.Unmarshal(m.Params, &p) != nil {
+		return
+	}
 	if p.ThreadID == "" {
 		p.ThreadID = p.Thread.ID
 	}
@@ -1175,7 +1182,6 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 		c.observeAsyncItem(s, p.ThreadID, m.Params)
 	}
 	st := c.state(s.ID)
-	st.touch(time.Now())
 	st.mu.Lock()
 	reqID := st.reqID
 	rootThreadID := st.threadID
@@ -1183,12 +1189,16 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 	isRootThread := p.ThreadID == rootThreadID
 	if isRootThread {
 		turnID := firstNonEmpty(p.TurnID, p.Turn.ID)
+		if m.Method == "error" && turnID == "" {
+			return
+		}
 		var accept bool
 		reqID, accept = c.observeNativeTurn(s, st, m.Method, turnID)
 		if !accept {
 			return
 		}
 	}
+	st.touch(time.Now())
 
 	switch m.Method {
 	case "mcpServer/startupStatus/updated":
@@ -1376,7 +1386,11 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 			phase = "failed"
 			message = firstNonEmpty(message, "turn failed")
 		}
-		if c.finishObservedTurn(s, st, p.Turn.ID, phase, codexErrorCode(p.Turn.Error.Info, message), message) {
+		failure := recovery.ClassifyCodex(p.Turn.Error.Info, message)
+		if c.finishObservedTurn(s, st, p.Turn.ID, phase, failure.ErrorCode(), failure.PublicMessage(message)) {
+			if phase == "failed" {
+				c.recordCodexFailure(s.ID, reqID, p.ThreadID, p.Turn.ID, failure, recovery.Context{Acceptance: recovery.Accepted, Terminal: true})
+			}
 			return
 		}
 		st.mu.Lock()
@@ -1390,7 +1404,8 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 			return
 		}
 		st.completeOwnedTurn(codexTurnTerminal{ID: p.Turn.ID, Status: p.Turn.Status,
-			Message: p.Turn.Error.Message, ErrorCode: codexErrorCode(p.Turn.Error.Info, p.Turn.Error.Message)})
+			Message: p.Turn.Error.Message, ErrorCode: codexErrorCode(p.Turn.Error.Info, p.Turn.Error.Message),
+			Failure: recovery.ClassifyCodex(p.Turn.Error.Info, p.Turn.Error.Message)})
 
 	case "thread/compacted":
 		// Modern daemons report a correlated turn/completed as well. Wait for
@@ -1421,33 +1436,42 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 		st.mu.Unlock()
 
 	case "error":
+		failure := recovery.ClassifyCodex(p.Error.Info, p.Error.Message)
 		if !isRootThread {
-			c.finishCodexAgent(st, p.ThreadID, time.Now().UnixMilli())
-			c.emitCodexAgentTree(s)
+			// A child retry is not a parent terminal, nor a completed child.
+			if p.WillRetry != nil && !*p.WillRetry {
+				c.finishCodexAgent(st, p.ThreadID, time.Now().UnixMilli())
+				c.emitCodexAgentTree(s)
+			}
 			return
 		}
-		if !p.WillRetry || codexErrorCode(p.Error.Info, p.Error.Message) == "misalignment_policy_violation" {
+		if p.WillRetry != nil && !*p.WillRetry {
 			msg := p.Error.Message
 			if msg == "" {
 				msg = "unknown codex error"
 			}
-			if c.finishObservedTurn(s, st, p.TurnID, "failed", codexErrorCode(p.Error.Info, msg), msg) {
+			// An uncorrelated error cannot end a newer operation on this thread.
+			if p.TurnID == "" {
+				return
+			}
+			if c.finishObservedTurn(s, st, p.TurnID, "failed", failure.ErrorCode(), failure.PublicMessage(msg)) {
+				c.recordCodexFailure(s.ID, reqID, p.ThreadID, p.TurnID, failure, recovery.Context{Acceptance: recovery.Accepted, Terminal: true, NativeWillRetry: p.WillRetry})
 				return
 			}
 			st.mu.Lock()
 			compacting := st.compactActive
+			compactTurnID := st.compactTurnID
 			st.mu.Unlock()
 			if compacting {
-				st.finishCompact(msg)
+				if p.TurnID == compactTurnID {
+					st.finishCompact(msg)
+				}
 			} else if p.TurnID != "" {
 				st.completeOwnedTurn(codexTurnTerminal{ID: p.TurnID, Status: "failed",
-					Message: msg, ErrorCode: codexErrorCode(p.Error.Info, msg)})
-			} else {
-				st.mu.Lock()
-				st.turnErrorCode = codexErrorCode(p.Error.Info, msg)
-				st.mu.Unlock()
-				st.finish(msg)
+					Message: msg, ErrorCode: failure.ErrorCode(), Failure: failure, NativeWillRetry: p.WillRetry})
 			}
+		} else {
+			c.observeCodexRetryHint(s, st, p.ThreadID, p.TurnID, failure, p.WillRetry)
 		}
 	}
 }
@@ -2086,6 +2110,8 @@ func (c *Codex) Send(ctx context.Context, s *session.Session, reqID, content str
 	st.stopping = false
 	st.turnErr = ""
 	st.turnErrorCode = ""
+	st.turnFailure = nil
+	st.failureNoticeKey = ""
 	st.turnActive = true
 	st.turnDone = make(chan struct{})
 	st.accumulatedText = ""
@@ -2180,7 +2206,18 @@ func (c *Codex) runTurn(s *session.Session, st *codexState, threadID string, inp
 	defer c.cleanupTempImages(st, requestID)
 	c.sink.Emit(backend.NewTurnProgress(s.ID, requestID, "waiting_model", "Waiting for Codex to accept the turn"))
 	if err := c.startTurnWithStaleRetry(s, st, threadID, input, sandboxOverride); err != nil {
-		st.finish("turn/start failed: " + err.Error())
+		st.mu.Lock()
+		if st.turnActive && st.reqID == requestID {
+			st.turnFailure = codexSubmissionFailure(err)
+			// Contradictory live/terminal notifications defeat rejection proof.
+			if st.currentTurnID != "" || len(st.pendingTerminals) > 0 {
+				st.turnFailure.Acceptance = recovery.AcceptanceUnknown
+				st.turnFailure.IngressRejected = false
+			}
+			st.turnErrorCode = st.turnFailure.Failure.ErrorCode()
+			st.finishTurnLocked("turn/start failed: " + err.Error())
+		}
+		st.mu.Unlock()
 	}
 
 	stallTicker := time.NewTicker(c.stallCheckEvery)
@@ -2209,10 +2246,20 @@ func (c *Codex) runTurn(s *session.Session, st *codexState, threadID string, inp
 	case turnErr != "":
 		st.mu.Lock()
 		code := st.turnErrorCode
+		detail := st.turnFailure
 		st.mu.Unlock()
 		if code == "" {
 			code = codexErrorCode(nil, turnErr)
 		}
+		if detail == nil {
+			detail = &codexFailureDetail{Failure: recovery.ClassifyCodex(nil, turnErr), Acceptance: recovery.AcceptanceUnknown}
+		}
+		c.recordCodexFailure(s.ID, requestID, completedThreadID, detail.TurnID, detail.Failure, recovery.Context{
+			Owned: true, OrdinaryChat: !strings.HasPrefix(requestID, "ui_async_"), Acceptance: detail.Acceptance,
+			IngressRejected: detail.IngressRejected, Terminal: detail.Terminal,
+			NativeWillRetry: detail.NativeWillRetry,
+		})
+		turnErr = detail.Failure.PublicMessage(turnErr)
 		c.releaseActiveThreads(s)
 		c.sink.Emit(backend.NewError(s.ID, requestID, code, turnErr))
 	default:

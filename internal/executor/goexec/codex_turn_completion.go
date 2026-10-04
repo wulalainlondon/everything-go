@@ -3,6 +3,8 @@ package goexec
 import (
 	"encoding/json"
 	"log"
+
+	"everything-go/internal/recovery"
 )
 
 type codexTurnResponse struct {
@@ -16,6 +18,8 @@ type codexTurnResponse struct {
 
 type codexTurnTerminal struct {
 	ID, Status, Message, ErrorCode string
+	Failure                        recovery.Failure
+	NativeWillRetry                *bool
 }
 
 func codexTerminalStatus(status string) bool {
@@ -61,7 +65,11 @@ func (st *codexState) applyTurnTerminalLocked(terminal codexTurnTerminal) {
 			st.finishTurnLocked("stopped")
 		}
 	case "failed":
-		st.turnErrorCode = terminal.ErrorCode
+		if terminal.Failure.Category == "" {
+			terminal.Failure = recovery.ClassifyCodex(nil, terminal.Message)
+		}
+		st.turnErrorCode = firstNonEmpty(terminal.ErrorCode, terminal.Failure.ErrorCode())
+		st.turnFailure = &codexFailureDetail{Failure: terminal.Failure, Acceptance: recovery.Accepted, TurnID: terminal.ID, Terminal: true, NativeWillRetry: terminal.NativeWillRetry}
 		st.finishTurnLocked(firstNonEmpty(terminal.Message, "turn failed"))
 	case "completed":
 		st.finishTurnLocked("")
@@ -96,7 +104,7 @@ func (c *Codex) confirmOwnedTurnSubmission(st *codexState, threadID, requestID s
 	if codexTerminalStatus(turn.Status) {
 		// The response itself may contain the already-terminal accepted turn.
 		terminal = codexTurnTerminal{ID: turn.ID, Status: turn.Status, Message: turn.Error.Message,
-			ErrorCode: codexErrorCode(turn.Error.Info, turn.Error.Message)}
+			ErrorCode: codexErrorCode(turn.Error.Info, turn.Error.Message), Failure: recovery.ClassifyCodex(turn.Error.Info, turn.Error.Message)}
 		exists = true
 	}
 	if exists {

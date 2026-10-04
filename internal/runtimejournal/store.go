@@ -220,6 +220,12 @@ func (s *Store) Progress(sessionID, requestID, stage, message string) (View, boo
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	r := s.ensureLocked(sessionID)
+	// Lifecycle admission owns request changes. Delayed executor progress (for
+	// example a retry notice persisted just before a terminal) cannot rebind a
+	// runtime already occupied by the next request.
+	if requestID != "" && r.ActiveRequestID != "" && requestID != r.ActiveRequestID {
+		return viewLocked(r, ""), false
+	}
 	sameRequest := requestID == "" || r.ActiveRequestID == "" || r.ActiveRequestID == requestID
 	if sameRequest && stageRank(stage) < stageRank(r.Stage) {
 		return viewLocked(r, ""), false

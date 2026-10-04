@@ -14,6 +14,7 @@ import (
 
 	"everything-go/internal/history"
 	"everything-go/internal/recap"
+	"everything-go/internal/recovery"
 	"everything-go/internal/session"
 	"github.com/coder/websocket"
 )
@@ -88,16 +89,13 @@ func recapFailureCode(e *recapUpstreamError) string {
 	if e == nil {
 		return ""
 	}
-	var code string
-	_ = json.Unmarshal(e.Info, &code)
-	switch code {
-	case "server_overloaded", "serverOverloaded":
+	switch recovery.ClassifyCodex(e.Info, e.Message).Category {
+	case recovery.ModelCapacity:
 		return "recap_model_busy"
-	case "rate_limit_exceeded", "rateLimitExceeded", "usage_limit_exceeded", "usageLimitExceeded":
+	case recovery.TemporaryRateLimit, recovery.UsageExhausted:
+		// Retain the existing recap UI vocabulary; recovery policy keeps the
+		// categories separate and never retries exhausted account budgets.
 		return "recap_model_rate_limited"
-	}
-	if strings.Contains(strings.ToLower(e.Message), "selected model is at capacity") {
-		return "recap_model_busy"
 	}
 	return "recap_generation_failed"
 }
@@ -140,7 +138,7 @@ func (p *recapConnection) consume(ctx context.Context, raw []byte) error {
 			ThreadID  string              `json:"threadId"`
 			TurnID    string              `json:"turnId"`
 			Delta     string              `json:"delta"`
-			WillRetry bool                `json:"willRetry"`
+			WillRetry *bool               `json:"willRetry"`
 			Error     *recapUpstreamError `json:"error"`
 			Turn      struct {
 				ID, Status string
@@ -185,7 +183,7 @@ func (p *recapConnection) consume(ctx context.Context, raw []byte) error {
 			p.final = m.Params.Item.Text
 		}
 	case "error":
-		if !m.Params.WillRetry {
+		if m.Params.WillRetry != nil && !*m.Params.WillRetry {
 			p.failed = true
 			p.failureCode = recapFailureCode(m.Params.Error)
 		}
