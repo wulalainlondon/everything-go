@@ -343,3 +343,22 @@ func TestControllerCannotEscapeConfiguredBridgeRoot(t *testing.T) {
 		t.Fatal(value)
 	}
 }
+
+func TestControllerDiscoversOnlyGrantedInstancesWithoutSecretsOrEndpoints(t *testing.T) {
+	h, _, caller, _ := controllerFixture(t)
+	ctx := context.Background()
+	h.relayPeers = relay.Peers{"granted": {InstanceID: "granted", InstanceName: "Morrie", BaseURL: "http://100.64.0.1", SecretRef: "env:SECRET"}, "private": {InstanceID: "private", BaseURL: "http://100.64.0.2", SecretRef: "env:PRIVATE"}}
+	h.dispatches.SetGrant(ctx, caller.Parent.ID, sessiondispatch.Grant{Enabled: true, Instances: []string{"granted"}}, 0)
+	value, e := h.ControlSession(ctx, caller, backend.SessionControlRequest{Action: "list_instances"})
+	if e != nil {
+		t.Fatal(e)
+	}
+	rows := value.([]map[string]any)
+	if len(rows) != 1 || rows[0]["instance_id"] != "granted" || rows[0]["instance_name"] != "Morrie" {
+		t.Fatal(value)
+	}
+	raw, _ := json.Marshal(value)
+	if strings.Contains(string(raw), "100.64") || strings.Contains(string(raw), "SECRET") || strings.Contains(string(raw), "private") {
+		t.Fatal("peer connection material leaked")
+	}
+}

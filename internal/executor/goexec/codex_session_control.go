@@ -31,6 +31,7 @@ func (c *Codex) applySessionControlThreadTools(s *session.Session, params map[st
 		name, description string
 		fields, required  []string
 	}{
+		{"list_instances", "Discover exact Bridge instance IDs explicitly granted by the human, including this computer and configured peers. Display names are not routing keys; never infer credentials or guess IDs.", nil, nil},
 		{"list_sessions", "Read sessions allowed by the human-enabled controller grant. Names are display-only; use returned instance/session/thread IDs. Page with offset/limit until has_more is false.", []string{"instance_id", "query", "offset", "limit"}, nil},
 		{"get_session_status", "Read exact current runtime and pending queue; this creates no AI turn.", []string{"instance_id", "session_id", "expected_thread_id"}, []string{"session_id"}},
 		{"dispatch_to_session", "Send a USER-AUTHORIZED instruction to an existing session under its own permissions. Default queue; steer requires explicit intent to supplement active work. Do not dispatch to yourself, hidden, desktop-controlled or PM-managed sessions. Persisted receipt is acceptance, not completion.", []string{"instance_id", "session_id", "expected_thread_id", "expected_config_revision", "content", "mode"}, []string{"session_id", "expected_thread_id", "expected_config_revision", "content"}},

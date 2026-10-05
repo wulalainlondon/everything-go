@@ -57,6 +57,17 @@ func (h *Hub) ControlSession(ctx context.Context, c backend.SessionControlCaller
 		input.InstanceID = h.cfg.InstanceID
 	}
 	switch input.Action {
+	case "list_instances":
+		instances := []map[string]any{}
+		if g.AllowsInstance(h.cfg.InstanceID, h.cfg.InstanceID) {
+			instances = append(instances, map[string]any{"instance_id": h.cfg.InstanceID, "instance_name": h.cfg.InstanceName, "local": true})
+		}
+		for id, peer := range h.relayPeers {
+			if g.AllowsInstance(h.cfg.InstanceID, id) {
+				instances = append(instances, map[string]any{"instance_id": id, "instance_name": peer.InstanceName, "local": false})
+			}
+		}
+		return instances, nil
 	case "list_dispatches":
 		records, e := h.dispatches.List(ctx, c.Parent.ID)
 		return briefDispatches(records), e

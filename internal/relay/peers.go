@@ -17,9 +17,10 @@ import (
 )
 
 type Peer struct {
-	InstanceID string `json:"instance_id"`
-	BaseURL    string `json:"base_url"`
-	SecretRef  string `json:"secret_ref"`
+	InstanceID   string `json:"instance_id"`
+	InstanceName string `json:"instance_name,omitempty"`
+	BaseURL      string `json:"base_url"`
+	SecretRef    string `json:"secret_ref"`
 }
 
 type Peers map[string]Peer
