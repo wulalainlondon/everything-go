@@ -130,3 +130,10 @@ func (c *Codex) handleSessionControlServerRequest(id any, method string, raw jso
 	}()
 	return true
 }
+
+func controllerBoundRequest(id string) bool {
+	return strings.HasPrefix(id, "scjob_") || strings.HasPrefix(id, "screturn_")
+}
+func codexPinnedRequest(id string) bool {
+	return controllerBoundRequest(id) || strings.HasPrefix(id, "ui_async_")
+}

@@ -3,6 +3,7 @@ package goexec
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"everything-go/internal/backend"
 	"everything-go/internal/session"
 	"os"
@@ -140,5 +141,62 @@ func TestCodexControllerToolCatalogIntegration(t *testing.T) {
 
 	if _, e := c.rpcCall("thread/archive", map[string]any{"threadId": s.ResumeID()}, 15*time.Second); e != nil {
 		t.Fatal(e)
+	}
+}
+
+func TestControllerPinnedNativeResumeAndStartNeverFork(t *testing.T) {
+	for _, request := range []string{"scjob_fixture", "screturn_fixture"} {
+		t.Run(request, func(t *testing.T) {
+			c := NewCodex(&capSink{}, "codex")
+			s := session.NewRegistry().Create("target", "Target", t.TempDir(), backend.Codex, "", "read-only", "native-thread")
+			w := &toolTestWriter{c: c}
+			w.reply = func(method string, params json.RawMessage) (any, error) {
+				if method != "thread/resume" {
+					t.Fatalf("unexpected fallback %s", method)
+				}
+				var data map[string]any
+				json.Unmarshal(params, &data)
+				if data["approvalPolicy"] != nil || data["sandboxPolicy"] != nil {
+					t.Fatal("permission override")
+				}
+				return nil, errors.New("thread not found")
+			}
+			c.rpc.setWriter(w)
+			if _, e := c.resumeExactControllerThread(s); e == nil {
+				t.Fatal("missing native thread accepted")
+			}
+			if len(w.methods) != 1 || s.ResumeID() != "native-thread" {
+				t.Fatal("resume silently forked")
+			}
+			st := c.state(s.ID)
+			st.reqID = request
+			st.threadID = "native-thread"
+			w.methods = nil
+			w.reply = func(method string, _ json.RawMessage) (any, error) {
+				if method != "turn/start" {
+					t.Fatalf("unexpected stale retry %s", method)
+				}
+				return nil, errors.New("thread not found")
+			}
+			if e := c.startTurnWithStaleRetry(s, st, "native-thread", nil, ""); e == nil {
+				t.Fatal("stale pinned turn accepted")
+			}
+			if len(w.methods) != 1 || s.ResumeID() != "native-thread" {
+				t.Fatal("turn silently forked")
+			}
+			w.methods = nil
+			w.reply = func(method string, _ json.RawMessage) (any, error) {
+				if method != "turn/start" {
+					t.Fatalf("unexpected malformed ACK retry %s", method)
+				}
+				return map[string]any{}, nil
+			}
+			if e := c.startTurnWithStaleRetry(s, st, "native-thread", nil, ""); e == nil || len(w.methods) != 1 {
+				t.Fatal("missing turn identity treated as success or retried")
+			}
+			if !codexPinnedRequest(request) {
+				t.Fatal("pinned task eligible for ordinary automatic recovery")
+			}
+		})
 	}
 }

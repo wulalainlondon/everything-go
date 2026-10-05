@@ -9,6 +9,7 @@ import (
 	"everything-go/internal/relay"
 	"everything-go/internal/session"
 	"everything-go/internal/sessiondispatch"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -375,5 +376,31 @@ func TestControllerResultDoesNotEnterAChangedParentThread(t *testing.T) {
 	fresh, _, e := h.dispatches.Get(ctx, r.ID)
 	if e != nil || fresh.DeliveryState != "failed" || fresh.Result != "sealed result" || caller.Parent.QueueLen() != 0 {
 		t.Fatal(fresh, e)
+	}
+}
+
+func TestControllerReceiptDoesNotUploadCachedLargeResult(t *testing.T) {
+	h, _, _, _ := controllerFixture(t)
+	t.Setenv("CTRL_SMALL_SECRET", "shared")
+	t.Setenv("BRIDGE_RELAY_ALLOW_LOOPBACK", "1")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		if len(raw) > 2048 {
+			t.Error("large receipt request", len(raw))
+		}
+		var input controllerEnvelope
+		json.Unmarshal(raw, &input)
+		if input.Record.ID != "receipt" || input.Record.Result != "" || input.Record.Content != "" {
+			t.Error("receipt uploaded cached content")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{}`))
+	}))
+	defer server.Close()
+	h.relayPeers = relay.Peers{"remote": {InstanceID: "remote", BaseURL: server.URL, SecretRef: "env:CTRL_SMALL_SECRET"}}
+	var result sessiondispatch.Record
+	e := h.controllerRemoteRequest(context.Background(), "remote", "receipt", controllerEnvelope{ParentID: "parent", Record: sessiondispatch.Record{ID: "receipt", Content: "cached instruction", Result: strings.Repeat("large result", 20000)}}, &result)
+	if e != nil {
+		t.Fatal(e)
 	}
 }

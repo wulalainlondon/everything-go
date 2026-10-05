@@ -138,6 +138,9 @@ func (h *Hub) ServeSessionControlAPI(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(result)
 }
 func (h *Hub) controllerRemoteRequest(ctx context.Context, instance, path string, envelope controllerEnvelope, result any) error {
+	if path == "receipt" || path == "cancel" {
+		envelope.Record = sessiondispatch.Record{ID: envelope.Record.ID}
+	}
 	peer, ok := h.relayPeers[instance]
 	if !ok {
 		return errors.New("controller_peer_unconfigured")

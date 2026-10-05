@@ -39,6 +39,15 @@ func (c *Codex) voiceThread(s *session.Session) (string, error) {
 	if version, _ := diagnostics["running_version"].(string); version != "0.160.0" {
 		return "", fmt.Errorf("共享 Codex app-server 為 %s；雙向語音需要已驗證的 0.160.0", version)
 	}
+	return c.resumeExactControllerThread(s)
+}
+
+// Exact restoration shared by voice and pinned dispatches. Never rebuild a
+// missing native conversation, override its permissions, or accept a new ID.
+func (c *Codex) resumeExactControllerThread(s *session.Session) (string, error) {
+	if s.Backend() != backend.Codex || s.ResumeID() == "" {
+		return "", errors.New("controller_native_thread_missing")
+	}
 	if c.pmProvider != nil {
 		policy, err := c.pmProvider.PMConfiguration(s.ID)
 		if err != nil {

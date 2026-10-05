@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"everything-go/internal/backend"
@@ -95,7 +94,7 @@ func (c *Codex) observeCodexRetryHint(s *session.Session, st *codexState, thread
 	}
 	st.failureNoticeKey = key
 	st.mu.Unlock()
-	context := recovery.Context{Owned: owned, OrdinaryChat: owned && !strings.HasPrefix(requestID, "ui_async_"),
+	context := recovery.Context{Owned: owned, OrdinaryChat: owned && !codexPinnedRequest(requestID),
 		Acceptance: recovery.Accepted, NativeWillRetry: willRetry}
 	c.recordCodexFailure(s.ID, requestID, threadID, turnID, failure, context)
 	message := "收到上游錯誤，正在等待原工作狀態確認；不會另行重送。"

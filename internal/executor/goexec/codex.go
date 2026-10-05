@@ -172,7 +172,7 @@ type Codex struct {
 	recapSlots         chan struct{}
 	pmProvider         backend.PMProvider
 	delegationProvider backend.DelegationProvider
-	controlProvider backend.SessionControlProvider
+	controlProvider    backend.SessionControlProvider
 	toolEnvironment    toolEnvironmentState
 	toolRPCGate        sync.RWMutex
 	sink               executor.Sink
@@ -1671,7 +1671,9 @@ func (c *Codex) BuildAgentTree(resumeID string) (int, []*protocol.AgentNode) {
 }
 
 func (c *Codex) handleServerRequest(id any, method string, raw json.RawMessage) {
-	if c.handleSessionControlServerRequest(id, method, raw) { return }
+	if c.handleSessionControlServerRequest(id, method, raw) {
+		return
+	}
 	if c.handlePMServerRequest(id, method, raw) {
 		return
 	}
@@ -2070,6 +2072,8 @@ func (c *Codex) Send(ctx context.Context, s *session.Session, reqID, content str
 	var threadErr error
 	if asyncThread != "" {
 		threadErr = c.ensureExactAsyncThread(s, st, asyncThread)
+	} else if controllerBoundRequest(reqID) {
+		_, threadErr = c.resumeExactControllerThread(s)
 	} else {
 		threadErr = c.ensureThread(s, st)
 	}
@@ -2263,7 +2267,7 @@ func (c *Codex) runTurn(s *session.Session, st *codexState, threadID string, inp
 			detail = &codexFailureDetail{Failure: recovery.ClassifyCodex(nil, turnErr), Acceptance: recovery.AcceptanceUnknown}
 		}
 		c.recordCodexFailure(s.ID, requestID, completedThreadID, detail.TurnID, detail.Failure, recovery.Context{
-			Owned: true, OrdinaryChat: !strings.HasPrefix(requestID, "ui_async_"), Acceptance: detail.Acceptance,
+			Owned: true, OrdinaryChat: !codexPinnedRequest(requestID), Acceptance: detail.Acceptance,
 			IngressRejected: detail.IngressRejected, Terminal: detail.Terminal,
 			NativeWillRetry: detail.NativeWillRetry,
 		})
@@ -2614,7 +2618,7 @@ func (c *Codex) startTurnWithStaleRetry(s *session.Session, st *codexState, thre
 		c.finalizePendingRecovery(s, st, threadID)
 		return nil
 	}
-	if !isStaleThreadError(err) || strings.HasPrefix(requestID, "ui_async_") {
+	if !isStaleThreadError(err) || codexPinnedRequest(requestID) {
 		return err
 	}
 
@@ -2772,7 +2776,7 @@ func (c *Codex) startTurn(threadID string, input []map[string]any, snap session.
 			Turn codexTurnResponse `json:"turn"`
 		}
 		decodeErr := json.Unmarshal(raw, &response)
-		if strings.HasPrefix(requestID, "ui_async_") && (decodeErr != nil || response.Turn.ID == "") {
+		if codexPinnedRequest(requestID) && (decodeErr != nil || response.Turn.ID == "") {
 			return fmt.Errorf("native async reply acceptance did not contain a turn identity")
 		}
 		if decodeErr == nil && response.Turn.ID != "" {
