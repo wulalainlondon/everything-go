@@ -71,6 +71,12 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		return
 	}
 	switch cmd.Kind {
+	case "codex_voice_start":
+		h.handleVoiceStart(c, cmd)
+	case "codex_voice_stop":
+		h.handleVoiceStop(c, cmd)
+	case "codex_voice_text":
+		h.handleVoiceText(c, cmd)
 	case "human_ai_collaboration":
 		h.handleCollaboration(c, cmd)
 	case "pm_collaboration":
@@ -110,6 +116,9 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 			helloInput.Capabilities = append(helloInput.Capabilities, "pm_collaboration_v1", "human_ai_collaboration_v2")
 		}
 		if !c.enrollmentOnly {
+			if _, ok := h.exec.(backend.RealtimeVoiceExecutor); ok && h.cfg.CodexRemote != "" {
+				helloInput.Capabilities = append(helloInput.Capabilities, "codex_realtime_voice_v1")
+			}
 			if _, ok := h.exec.(backend.RecapExecutor); ok {
 				helloInput.Capabilities = append(helloInput.Capabilities, "session_recap_v1")
 			}

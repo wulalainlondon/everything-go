@@ -68,6 +68,8 @@ type Config struct {
 // the executor.Sink (Emit broadcasts an event to connected clients, or buffers
 // it when none are connected so a reconnecting client can recover it).
 type Hub struct {
+	voiceMu             sync.Mutex
+	voiceClients        map[*Client]*clientVoiceCall
 	pushSetupMu         sync.Mutex
 	pushSetupCSRF       string
 	pushSetupChallenges map[string]pushSetupPending
@@ -786,6 +788,7 @@ func (h *Hub) addClient(c *Client) {
 }
 
 func (h *Hub) removeClient(c *Client) {
+	h.cleanupClientVoice(c)
 	h.mu.Lock()
 	delete(h.clients, c)
 	h.mu.Unlock()

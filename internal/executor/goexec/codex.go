@@ -165,6 +165,8 @@ func (st *codexState) touch(now time.Time) {
 
 // Codex implements executor.Executor over the codex app-server.
 type Codex struct {
+	voiceMu            sync.Mutex
+	voiceCalls         map[string]*codexVoiceCall
 	recapStoreMu       sync.Mutex
 	recapStore         *recap.Store
 	recapSlots         chan struct{}
@@ -602,6 +604,7 @@ func (c *Codex) readRemoteLoop(ctx context.Context, conn *websocket.Conn, done c
 			log.Printf("[codex] remote read loop error: %v", readErr)
 		}
 		c.rpc.failAll(failure)
+		c.failVoiceCalls()
 		if unexpected {
 			c.failLiveOperations(failure.Error())
 			c.expireDisconnectedInteractions()
@@ -1082,6 +1085,9 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 		// Keep the request ID as raw JSON so app-server string IDs and numeric
 		// IDs are echoed with their original type and value.
 		c.handleServerRequest(m.ID, m.Method, m.Params)
+		return
+	}
+	if c.dispatchVoice(m.Method, m.Params) {
 		return
 	}
 

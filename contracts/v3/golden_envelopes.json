@@ -41,6 +41,9 @@
       "type": "codex_live_diff"
     },
     {
+      "type": "codex_voice_event"
+    },
+    {
       "type": "dir_listing"
     },
     {
@@ -422,6 +425,15 @@
     },
     {
       "type": "codex_goal_set"
+    },
+    {
+      "type": "codex_voice_start"
+    },
+    {
+      "type": "codex_voice_stop"
+    },
+    {
+      "type": "codex_voice_text"
     },
     {
       "type": "external_event_dismiss"

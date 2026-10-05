@@ -2,6 +2,7 @@ package core
 
 import (
 	"encoding/json"
+	"everything-go/internal/protocol"
 	"log"
 	"os"
 )
@@ -32,6 +33,10 @@ func logInbound(typ, sessionID string) {
 // when EG_FRAME_LOG is on.
 func logOutbound(event any) {
 	if !frameLog {
+		return
+	}
+	if voice, ok := event.(protocol.RealtimeVoiceEvent); ok {
+		log.Printf(">> codex_voice_event session=%s state=%s signaling=[redacted]", voice.SessionID, voice.State)
 		return
 	}
 	data, err := json.Marshal(event)

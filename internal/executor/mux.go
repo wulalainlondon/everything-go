@@ -82,7 +82,28 @@ func (m *Mux) Send(ctx context.Context, s *session.Session, reqID, content strin
 	}
 	return sendReliable(ctx, e, m.terminal, s, reqID, content, images, files)
 }
-func (m *Mux) Stop(ctx context.Context, s *session.Session) error  { return m.pick(s).Stop(ctx, s) }
+func (m *Mux) Stop(ctx context.Context, s *session.Session) error { return m.pick(s).Stop(ctx, s) }
+func (m *Mux) StartRealtimeVoice(ctx context.Context, s *session.Session, input backend.RealtimeVoiceStart) (backend.RealtimeVoiceAnswer, error) {
+	voice, ok := m.pick(s).(backend.RealtimeVoiceExecutor)
+	if !ok {
+		return backend.RealtimeVoiceAnswer{}, fmt.Errorf("此後端不支援雙向語音")
+	}
+	return voice.StartRealtimeVoice(ctx, s, input)
+}
+func (m *Mux) StopRealtimeVoice(ctx context.Context, s *session.Session, id string) error {
+	voice, ok := m.pick(s).(backend.RealtimeVoiceExecutor)
+	if !ok {
+		return fmt.Errorf("此後端不支援雙向語音")
+	}
+	return voice.StopRealtimeVoice(ctx, s, id)
+}
+func (m *Mux) AppendRealtimeVoiceText(ctx context.Context, s *session.Session, id, text string) error {
+	voice, ok := m.pick(s).(backend.RealtimeVoiceExecutor)
+	if !ok {
+		return fmt.Errorf("此後端不支援雙向語音")
+	}
+	return voice.AppendRealtimeVoiceText(ctx, s, id, text)
+}
 func (m *Mux) Clear(ctx context.Context, s *session.Session) error { return m.pick(s).Clear(ctx, s) }
 func (m *Mux) Close(ctx context.Context, s *session.Session) error { return m.pick(s).Close(ctx, s) }
 
