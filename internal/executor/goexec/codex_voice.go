@@ -64,7 +64,10 @@ func (c *Codex) voiceThread(s *session.Session) (string, error) {
 	if err := c.claimActiveThread(id, s); err != nil {
 		return "", err
 	}
-	raw, err := c.rpcCall("thread/resume", map[string]any{"threadId": id, "excludeTurns": true}, 15*time.Second)
+	params := map[string]any{"threadId": id, "excludeTurns": true}
+	c.applyDelegationThreadTools(s, params)
+	c.applySessionControlThreadTools(s, params)
+	raw, err := c.rpcCall("thread/resume", params, 15*time.Second)
 	if err != nil {
 		c.releaseActiveThreads(s)
 		return "", err

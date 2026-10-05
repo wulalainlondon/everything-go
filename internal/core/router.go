@@ -149,6 +149,9 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		if !c.enrollmentOnly && h.messageQueue != nil {
 			helloInput.Capabilities = append(helloInput.Capabilities, "message_queue_v1", "queue_message_detail_v1")
 		}
+		if !c.enrollmentOnly && h.dispatches != nil {
+			helloInput.Capabilities = append(helloInput.Capabilities, "session_controller_v1")
+		}
 		if !c.enrollmentOnly && h.deviceInventory != nil {
 			helloInput.Capabilities = append(helloInput.Capabilities, "device_inventory_v1")
 		}
@@ -337,6 +340,10 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 
 	case "get_all_sessions":
 		go h.handleGetAllSessions(c)
+	case "request_session_controller":
+		h.sendControllerStatus(c, cmd)
+	case "set_session_controller":
+		h.setControllerGrant(c, cmd)
 
 	case "restart_bridge":
 		h.handleRestart(c)

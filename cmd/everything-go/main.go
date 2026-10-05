@@ -156,6 +156,7 @@ func main() {
 	}
 	hub := core.NewHub(reg, cfg, pairing, *port)
 	defer hub.CloseDelegations()
+	defer hub.CloseSessionDispatches()
 	remoteDesktopListener := startRemoteDesktop(cfg.TailscaleIP, cfg.DataDir, hub.HTTPAuthorized)
 	if remoteDesktopListener != nil {
 		defer remoteDesktopListener.Close()
@@ -202,6 +203,7 @@ func main() {
 		codex := goexec.NewCodex(terminal, *codexBin)
 		codex.SetPMProvider(hub)
 		codex.SetDelegationProvider(hub)
+		codex.SetSessionControlProvider(hub)
 		codex.SetDataDir(*dataDir)
 		ollama := goexec.NewOllama(terminal, *ollamaHost, "")
 		backends := map[string]executor.Executor{
@@ -238,6 +240,7 @@ func main() {
 	delegationCtx, stopDelegations := context.WithCancel(ctx)
 	defer stopDelegations()
 	hub.StartDelegationScheduler(delegationCtx)
+	hub.StartSessionDispatchScheduler(delegationCtx)
 	searchDirty := newDirtyPathQueue(defaultDirtyPathLimit)
 	nativeWatcherActive := !*disableNativeWatcher && strings.TrimSpace(os.Getenv("EVERYTHING_GO_NATIVE_WATCH")) != "0"
 	if !*disableSearch {
@@ -340,6 +343,7 @@ func main() {
 	mux.HandleFunc("/api/events/v1/events", hub.ServeEventAPI)
 	mux.HandleFunc("/api/automation/v1/", hub.ServeAutomationAPI)
 	mux.HandleFunc("/api/relay/v1/", hub.ServeRelayAPI)
+	mux.HandleFunc("/api/session-control/v1/", hub.ServeSessionControlAPI)
 	mux.HandleFunc("/api/notification/v1/replies", hub.ServeNotificationReplyAPI)
 	mux.HandleFunc("/api/widgets/v1/", hub.ServeWidgetAPI)
 	mux.HandleFunc("/api/live-activities/v1/", hub.ServeLiveActivityAPI)

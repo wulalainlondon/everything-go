@@ -661,6 +661,9 @@ func (c *Claude) readStdout(s *session.Session, p *proc, stdout interface{ Read(
 			if doneReqID != "" {
 				reqID = doneReqID
 			}
+			if final := claudeRawToString(evt.Result); final != "" {
+				c.sink.Emit(backend.CompletedAnswer{SessionID: s.ID, RequestID: reqID, Text: final})
+			}
 			c.sink.Emit(backend.NewDone(s.ID, reqID))
 			if wasCompact {
 				c.sink.Emit(backend.NewSessionCommandDone(s.ID, reqID, 0))

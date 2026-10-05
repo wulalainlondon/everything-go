@@ -75,6 +75,18 @@ func (h *Hub) ReadDelegationResult(parent *session.Session, delegationID string,
 // DelegateSession is called with a Bridge-bound parent identity by the Codex
 // dynamic tool. Child conversations are fresh, not forks of parent history.
 func (h *Hub) DelegateSession(parent *session.Session, parentRequestID, toolCallID string, spec backend.DelegationSpec) (backend.DelegationReceipt, error) {
+	return h.delegateSession(parent, parentRequestID, toolCallID, spec, false)
+}
+func (h *Hub) DelegateVoiceSession(caller backend.SessionControlCaller, spec backend.DelegationSpec) (backend.DelegationReceipt, error) {
+	if caller.VoiceID == "" {
+		return backend.DelegationReceipt{}, errors.New("delegation_voice_required")
+	}
+	if err := h.controllerCaller(caller); err != nil {
+		return backend.DelegationReceipt{}, err
+	}
+	return h.delegateSession(caller.Parent, caller.RequestID, caller.ToolCallID, spec, true)
+}
+func (h *Hub) delegateSession(parent *session.Session, parentRequestID, toolCallID string, spec backend.DelegationSpec, voice bool) (backend.DelegationReceipt, error) {
 	if h.delegations == nil || h.messageQueue == nil {
 		return backend.DelegationReceipt{}, errors.New("delegation_unavailable")
 	}
@@ -137,7 +149,7 @@ func (h *Hub) DelegateSession(parent *session.Session, parentRequestID, toolCall
 		}
 		return backend.DelegationReceipt{ID: previous.ID, ChildSessionID: previous.ChildSessionID, ChildRequestID: previous.ChildRequestID}, nil
 	}
-	if parent.ActiveQueuedID() != parentRequestID {
+	if !voice && parent.ActiveQueuedID() != parentRequestID {
 		return backend.DelegationReceipt{}, errors.New("delegation_parent_not_active")
 	}
 	id := "dg_" + randomID()
@@ -299,6 +311,9 @@ func (h *Hub) reconcileDelegation(ctx context.Context, r delegation.Record) erro
 	if r.DeliveryState == "pending" {
 		parent, ok := h.registry.Get(r.ParentSessionID)
 		if !ok || !h.controls.MobileMayWrite(r.ParentSessionID) || parent.IsStreaming() || parent.QueueLen() > 0 {
+			return nil
+		}
+		if views := h.runtimes.Snapshot("", []string{r.ParentSessionID}); len(views) == 1 && runtimePhaseActive(views[0].Phase) {
 			return nil
 		}
 		content := delegationReturnText(r)

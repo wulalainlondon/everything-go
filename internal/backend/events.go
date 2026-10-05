@@ -2,6 +2,9 @@ package backend
 
 import "everything-go/internal/protocol"
 
+// CompletedAnswer is internal, exact-request terminal model text. Never broadcast as a user message.
+type CompletedAnswer struct{ SessionID, RequestID, Text string }
+
 // Event type aliases keep the current app-v1 wire structs as the concrete
 // runtime representation while giving backend adapters a protocol-neutral
 // package to depend on. The clientproto layer remains responsible for future

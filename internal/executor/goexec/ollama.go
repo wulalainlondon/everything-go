@@ -104,6 +104,7 @@ func (o *Ollama) runTurn(ctx context.Context, s *session.Session, reqID string, 
 	full := ""
 	sc := bufio.NewScanner(resp.Body)
 	sc.Buffer(make([]byte, 0, 64*1024), maxLine)
+	completed := false
 	for sc.Scan() {
 		if ctx.Err() != nil {
 			return
@@ -122,6 +123,7 @@ func (o *Ollama) runTurn(ctx context.Context, s *session.Session, reqID string, 
 			o.sink.Emit(backend.NewTextChunk(s.ID, reqID, d.Message.Content))
 		}
 		if d.Done {
+			completed = true
 			break
 		}
 	}
@@ -134,6 +136,9 @@ func (o *Ollama) runTurn(ctx context.Context, s *session.Session, reqID string, 
 	o.histories[s.ID] = capHistory(append(o.histories[s.ID], ollamaMsg{Role: "assistant", Content: full}))
 	o.mu.Unlock()
 
+	if completed {
+		o.sink.Emit(backend.CompletedAnswer{SessionID: s.ID, RequestID: reqID, Text: full})
+	}
 	o.sink.Emit(backend.NewDone(s.ID, reqID))
 }
 

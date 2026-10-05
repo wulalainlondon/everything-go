@@ -79,7 +79,17 @@ func (c *Codex) handleDelegationServerRequest(id any, method string, raw json.Ra
 		st.mu.Lock()
 		requestID, turnID, active := st.reqID, st.currentTurnID, st.turnActive
 		st.mu.Unlock()
-		if call.CallID == "" || !active || requestID == "" || turnID == "" || call.TurnID != turnID || strings.HasPrefix(s.ID, "s_dg_") {
+		owned := active && requestID != "" && turnID != "" && call.TurnID == turnID
+		var voiceCaller backend.SessionControlCaller
+		if !owned {
+			voiceCaller, err = c.sessionControlCaller(s, call.TurnID, call.CallID)
+			if err == nil && voiceCaller.VoiceID != "" {
+				requestID = voiceCaller.RequestID
+			} else {
+				err = errors.New("delegation_tool_forbidden")
+			}
+		}
+		if call.CallID == "" || (!owned && err != nil) || strings.HasPrefix(s.ID, "s_dg_") {
 			err = errors.New("delegation_tool_forbidden")
 		} else {
 			switch call.Tool {
@@ -88,7 +98,13 @@ func (c *Codex) handleDelegationServerRequest(id any, method string, raw json.Ra
 				decoder := json.NewDecoder(bytes.NewReader(call.Arguments))
 				decoder.DisallowUnknownFields()
 				if err = decoder.Decode(&spec); err == nil {
-					result, err = c.delegationProvider.DelegateSession(s, requestID, call.CallID, spec)
+					if owned {
+						result, err = c.delegationProvider.DelegateSession(s, requestID, call.CallID, spec)
+					} else if provider, ok := c.delegationProvider.(backend.VoiceDelegationProvider); ok {
+						result, err = provider.DelegateVoiceSession(voiceCaller, spec)
+					} else {
+						err = errors.New("delegation_voice_unsupported")
+					}
 				}
 			case "read_result":
 				var args struct {

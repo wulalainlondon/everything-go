@@ -227,6 +227,12 @@
       "type": "session_control"
     },
     {
+      "type": "session_controller_result"
+    },
+    {
+      "type": "session_controller_status"
+    },
+    {
       "type": "session_created"
     },
     {
@@ -586,6 +592,9 @@
       "type": "request_session_control"
     },
     {
+      "type": "request_session_controller"
+    },
+    {
       "type": "request_session_list"
     },
     {
@@ -623,6 +632,9 @@
     },
     {
       "type": "set_effort"
+    },
+    {
+      "type": "set_session_controller"
     },
     {
       "type": "set_session_meta"

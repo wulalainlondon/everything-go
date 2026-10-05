@@ -42,6 +42,7 @@ import (
 	"everything-go/internal/runtimejournal"
 	"everything-go/internal/search"
 	"everything-go/internal/session"
+	"everything-go/internal/sessiondispatch"
 	"everything-go/internal/toolenv"
 	"everything-go/internal/widgetaccess"
 	"everything-go/internal/workitems"
@@ -68,6 +69,9 @@ type Config struct {
 // the executor.Sink (Emit broadcasts an event to connected clients, or buffers
 // it when none are connected so a reconnecting client can recover it).
 type Hub struct {
+	dispatchMu          sync.Mutex
+	dispatches          *sessiondispatch.Store
+	dispatchScheduler   atomic.Bool
 	voiceMu             sync.Mutex
 	voiceClients        map[*Client]*clientVoiceCall
 	pushSetupMu         sync.Mutex
@@ -223,6 +227,11 @@ func NewHub(reg *session.Registry, cfg Config, pairing *governance.Pairing, port
 		log.Printf("[delegation] storage unavailable: %v", err)
 	} else {
 		h.delegations = store
+	}
+	if store, err := sessiondispatch.Open(cfg.DataDir); err != nil {
+		log.Printf("[session-dispatch] unavailable")
+	} else {
+		h.dispatches = store
 	}
 	if cfg.DataDir != "" {
 		if inventory, err := deviceinventory.Open(cfg.DataDir); err != nil {
@@ -491,6 +500,12 @@ func (h *Hub) connectedDeviceIDs(exclude string) []string {
 // event for replay on the next reconnect (the offline-recovery path). Safe for
 // concurrent use.
 func (h *Hub) Emit(event any) {
+	if answer, ok := event.(backend.CompletedAnswer); ok {
+		if h.dispatches != nil {
+			_ = h.dispatches.SealResult(context.Background(), answer.SessionID, answer.RequestID, answer.Text)
+		}
+		return
+	}
 	observedTerminal := false
 	if observed, ok := event.(backend.ObservedTurn); ok {
 		event, observedTerminal = h.observedTurnEvent(observed)

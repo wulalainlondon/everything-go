@@ -172,6 +172,7 @@ type Codex struct {
 	recapSlots         chan struct{}
 	pmProvider         backend.PMProvider
 	delegationProvider backend.DelegationProvider
+	controlProvider backend.SessionControlProvider
 	toolEnvironment    toolEnvironmentState
 	toolRPCGate        sync.RWMutex
 	sink               executor.Sink
@@ -1670,6 +1671,7 @@ func (c *Codex) BuildAgentTree(resumeID string) (int, []*protocol.AgentNode) {
 }
 
 func (c *Codex) handleServerRequest(id any, method string, raw json.RawMessage) {
+	if c.handleSessionControlServerRequest(id, method, raw) { return }
 	if c.handlePMServerRequest(id, method, raw) {
 		return
 	}
@@ -2917,6 +2919,7 @@ func (c *Codex) ensureThread(s *session.Session, st *codexState) error {
 				resumeParams["excludeTurns"] = true
 			}
 			c.applyDelegationThreadTools(s, resumeParams)
+			c.applySessionControlThreadTools(s, resumeParams)
 			if err := c.applyPMThreadPolicy(s, resumeParams); err != nil {
 				return err
 			}
@@ -2965,6 +2968,7 @@ func (c *Codex) ensureThread(s *session.Session, st *codexState) error {
 			}(),
 		}
 		c.applyDelegationThreadTools(s, startParams)
+		c.applySessionControlThreadTools(s, startParams)
 		if err := c.applyPMThreadPolicy(s, startParams); err != nil {
 			return err
 		}

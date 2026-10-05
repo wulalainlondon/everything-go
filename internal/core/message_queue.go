@@ -20,10 +20,11 @@ import (
 )
 
 type queuedPayload struct {
-	Configuration *session.Configuration    `json:"configuration,omitempty"`
-	Content       string                    `json:"content"`
-	Images        []backend.ImageAttachment `json:"images,omitempty"`
-	Files         []backend.FileAttachment  `json:"files,omitempty"`
+	ExpectedTarget *dispatchTargetExpectation `json:"expected_target,omitempty"`
+	Configuration  *session.Configuration     `json:"configuration,omitempty"`
+	Content        string                     `json:"content"`
+	Images         []backend.ImageAttachment  `json:"images,omitempty"`
+	Files          []backend.FileAttachment   `json:"files,omitempty"`
 }
 
 func (h *Hub) queueError(c *Client, cmd clientproto.Command, code, message string) {
@@ -32,6 +33,19 @@ func (h *Hub) queueError(c *Client, cmd clientproto.Command, code, message strin
 }
 
 func (h *Hub) enqueueChatMessage(c *Client, cmd clientproto.Command) bool {
+	return h.enqueueChatMessageExpected(c, cmd, nil)
+}
+
+type dispatchTargetExpectation struct {
+	ThreadID string `json:"thread_id"`
+	Revision uint64 `json:"revision"`
+}
+
+func (e *dispatchTargetExpectation) matches(s *session.Session) bool {
+	return e == nil || (s.ResumeID() == e.ThreadID && s.SettingsSnapshot().ConfigRevision == e.Revision && s.State() != session.Closed && !s.Snapshot().Hidden)
+}
+
+func (h *Hub) enqueueChatMessageExpected(c *Client, cmd clientproto.Command, expected *dispatchTargetExpectation) bool {
 	if h.messageQueue == nil {
 		h.queueError(c, cmd, "queue_unavailable", "Message queue storage is unavailable")
 		return false
@@ -56,13 +70,17 @@ func (h *Hub) enqueueChatMessage(c *Client, cmd clientproto.Command) bool {
 	h.messageQueueMu.Lock()
 	defer h.messageQueueMu.Unlock()
 	config := session.ConfigurationFrom(s.SettingsSnapshot())
-	intent, err := json.Marshal(queuedPayload{Content: content, Images: cmd.Images, Files: files})
+	if expected != nil && (s.ResumeID() != expected.ThreadID || config.Revision != expected.Revision || s.State() == session.Closed || s.Snapshot().Hidden) {
+		h.queueError(c, cmd, "dispatch_target_changed", "Target thread or configuration changed; refresh before dispatching")
+		return false
+	}
+	intent, err := json.Marshal(queuedPayload{Content: content, Images: cmd.Images, Files: files, ExpectedTarget: expected})
 	if err != nil {
 		h.queueError(c, cmd, "invalid_message", err.Error())
 		return false
 	}
 	intentHash := sha256.Sum256(intent)
-	payload, err := json.Marshal(queuedPayload{Content: content, Images: cmd.Images, Files: files, Configuration: &config})
+	payload, err := json.Marshal(queuedPayload{Content: content, Images: cmd.Images, Files: files, Configuration: &config, ExpectedTarget: expected})
 	if err != nil {
 		h.queueError(c, cmd, "invalid_message", err.Error())
 		return false
@@ -126,6 +144,10 @@ func (h *Hub) runQueuedMessage(s *session.Session, requestID string) {
 	var payload queuedPayload
 	if err = json.Unmarshal(e.Payload, &payload); err != nil {
 		h.Emit(backend.NewError(s.ID, requestID, "invalid_queued_message", "Queued message could not be decoded"))
+		return
+	}
+	if !payload.ExpectedTarget.matches(s) {
+		h.Emit(backend.NewError(s.ID, requestID, "dispatch_target_changed", "Target thread or configuration changed while waiting; this instruction was not sent"))
 		return
 	}
 	if payload.Configuration != nil {
@@ -346,7 +368,7 @@ func (h *Hub) promoteQueuedMessage(c *Client, cmd clientproto.Command) {
 		return
 	}
 	var intended queuedPayload
-	if json.Unmarshal(e.Payload, &intended) != nil || (intended.Configuration != nil && *intended.Configuration != session.ConfigurationFrom(s.Snapshot())) {
+	if json.Unmarshal(e.Payload, &intended) != nil || !intended.ExpectedTarget.matches(s) || (intended.Configuration != nil && *intended.Configuration != session.ConfigurationFrom(s.Snapshot())) {
 		h.messageQueueMu.Unlock()
 		h.queueResult(c, cmd, "promote", "retained", "此訊息的設定與本輪不同，保留原本的排隊位置。", e)
 		return
