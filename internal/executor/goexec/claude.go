@@ -508,6 +508,7 @@ func claudeSpawnArgs(snap session.Snapshot, mcpURL string) []string {
 type ndLine struct {
 	IsAPIErrorMessage bool   `json:"isApiErrorMessage"`
 	APIError          string `json:"error"`
+	IsError           bool   `json:"is_error"`
 	Type              string `json:"type"`
 	Subtype           string `json:"subtype"`
 	Message           struct {
@@ -573,10 +574,14 @@ func (c *Claude) readStdout(s *session.Session, p *proc, stdout interface{ Read(
 			continue // Task-subagent internal event — keep it out of the main stream
 		}
 		reqID := p.currentReqID()
-		if evt.IsAPIErrorMessage {
+		if evt.IsAPIErrorMessage || (evt.Type == "assistant" && evt.APIError != "") {
 			p.finishTurn()
 			p.cancel()
-			c.sink.Emit(backend.NewError(s.ID, reqID, "pm_provider_"+evt.APIError, "PM model authentication or API request failed; check the provider login before continuing."))
+			prefix, message := "claude_provider_", "Claude authentication or API request failed; check the provider login before continuing."
+			if p.pmSession {
+				prefix, message = "pm_provider_", "PM model authentication or API request failed; check the provider login before continuing."
+			}
+			c.sink.Emit(backend.NewError(s.ID, reqID, prefix+evt.APIError, message))
 			return
 		}
 		switch evt.Type {
@@ -632,7 +637,7 @@ func (c *Claude) readStdout(s *session.Session, p *proc, stdout interface{ Read(
 			}
 			c.tools.ResultEnd(s.ID, reqID, evt.ToolUseID, output)
 		case "result":
-			if evt.Subtype != "" && evt.Subtype != "success" {
+			if evt.IsError || (evt.Subtype != "" && evt.Subtype != "success") {
 				msg := claudeRawToString(evt.Result)
 				if msg == "" {
 					msg = "Claude result failed"

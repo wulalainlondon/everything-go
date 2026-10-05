@@ -349,6 +349,10 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		h.handleRestart(c)
 
 	case "new_session":
+		if strings.TrimSpace(cmd.SessionID) == "" {
+			c.enqueueEvent(protocol.Error{Type: "error", RequestID: cmd.RequestID, Code: "invalid_session_id", Message: "Session ID is required for new_session"})
+			return
+		}
 		// Expand "~"/"~/..." at creation time, mirroring Python's
 		// os.path.expanduser(msg["cwd"] or default_cwd) in session_routes.py.
 		// Storing the resolved path keeps get_git_diff / get_tasks / spawn all
