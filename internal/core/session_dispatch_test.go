@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -403,4 +404,37 @@ func TestControllerReceiptDoesNotUploadCachedLargeResult(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
+}
+
+func TestControllerActualTailscaleTransportIntegration(t *testing.T) {
+	url := os.Getenv("BRIDGE_CONTROLLER_TEST_PEER_URL")
+	if url == "" {
+		t.Skip("explicit isolated peer required")
+	}
+	h, _, caller, _ := controllerFixture(t)
+	h.cfg.InstanceID = "lab-source"
+	h.relayPeers = relay.Peers{"lab-receiver": {InstanceID: "lab-receiver", BaseURL: url, SecretRef: "env:BRIDGE_CONTROLLER_TRANSPORT_TEST_SECRET"}}
+	h.dispatches.SetGrant(context.Background(), caller.Parent.ID, sessiondispatch.Grant{Enabled: true, Instances: []string{"lab-receiver"}}, 0)
+	req := backend.SessionControlRequest{Action: "dispatch_to_session", InstanceID: "lab-receiver", SessionID: "lab-target", ExpectedThreadID: "lab-thread", Content: "isolated transport fixture"}
+	value, e := h.ControlSession(context.Background(), caller, req)
+	if e != nil {
+		t.Fatal(e)
+	}
+	receipt := value.(sessiondispatch.Record)
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		receipt = h.refreshSessionDispatch(context.Background(), receipt)
+		if receipt.State == "completed" {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if receipt.State != "completed" || receipt.Result != `{"executions":1,"fixture":"transport_only_no_model"}` {
+		t.Fatal(receipt.State, receipt.Error)
+	}
+	again, e := h.ControlSession(context.Background(), caller, req)
+	if e != nil || again.(sessiondispatch.Record).ID != receipt.ID || again.(sessiondispatch.Record).Result != receipt.Result {
+		t.Fatal("duplicate transport operation")
+	}
+	t.Log("actual Tailscale HMAC dispatch and sealed result passed; executor is a fixture, not Codex voice")
 }
