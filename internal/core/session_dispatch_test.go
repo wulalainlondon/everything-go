@@ -362,3 +362,18 @@ func TestControllerDiscoversOnlyGrantedInstancesWithoutSecretsOrEndpoints(t *tes
 		t.Fatal("peer connection material leaked")
 	}
 }
+
+func TestControllerResultDoesNotEnterAChangedParentThread(t *testing.T) {
+	h, _, caller, target := controllerFixture(t)
+	ctx := context.Background()
+	r := sessiondispatch.Record{ID: "sealed", ParentID: caller.Parent.ID, ParentThreadID: caller.Parent.ResumeID(), InstanceID: h.cfg.InstanceID, SessionID: target.ID, ThreadID: target.ResumeID(), RequestID: "job", IntentHash: "intent", State: "completed", Result: "sealed result", DeliveryState: "pending"}
+	if _, e := h.dispatches.Create(ctx, r); e != nil {
+		t.Fatal(e)
+	}
+	caller.Parent.SetResumeID("new-parent-thread")
+	h.reconcileSessionDispatches(ctx)
+	fresh, _, e := h.dispatches.Get(ctx, r.ID)
+	if e != nil || fresh.DeliveryState != "failed" || fresh.Result != "sealed result" || caller.Parent.QueueLen() != 0 {
+		t.Fatal(fresh, e)
+	}
+}

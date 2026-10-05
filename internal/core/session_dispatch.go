@@ -282,6 +282,7 @@ func (h *Hub) refreshSessionDispatch(ctx context.Context, r sessiondispatch.Reco
 	}
 	e, ok, err := h.messageQueue.Get(r.SessionID, r.RequestID)
 	if err != nil || !ok {
+		_ = h.dispatches.Put(ctx, r)
 		return r
 	}
 	r.State = string(e.State)
@@ -393,7 +394,13 @@ func (h *Hub) reconcileSessionDispatches(ctx context.Context) {
 			continue
 		}
 		parent, ok := h.registry.Get(r.ParentID)
-		if !ok || (r.ParentThreadID != "" && parent.ResumeID() != r.ParentThreadID) || !h.controls.MobileMayWrite(r.ParentID) || parent.IsStreaming() || parent.QueueLen() > 0 {
+		if !ok || parent.State() == session.Closed || (r.ParentThreadID != "" && parent.ResumeID() != r.ParentThreadID) {
+			r.DeliveryState = "failed"
+			r.DeliveryError = "controller_return_parent_changed_or_closed"
+			_ = h.dispatches.Put(ctx, r)
+			continue
+		}
+		if !h.controls.MobileMayWrite(r.ParentID) || parent.IsStreaming() || parent.QueueLen() > 0 {
 			continue
 		}
 		runtime := h.runtimes.Snapshot("", []string{r.ParentID})

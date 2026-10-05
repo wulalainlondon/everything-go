@@ -83,6 +83,7 @@ type Record struct {
 	Error              string `json:"error,omitempty"`
 	Result             string `json:"result,omitempty"`
 	DeliveryState      string `json:"delivery_state"`
+	DeliveryError      string `json:"delivery_error,omitempty"`
 	CreatedAt          int64  `json:"created_at"`
 	UpdatedAt          int64  `json:"updated_at"`
 	TerminalAt         int64  `json:"terminal_at,omitempty"`
