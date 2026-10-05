@@ -19,6 +19,12 @@ type controllerEnvelope struct {
 	Input    backend.SessionControlRequest `json:"input"`
 	Record   sessiondispatch.Record        `json:"dispatch"`
 }
+type controllerRemoteFailure struct {
+	Status  int
+	Message string
+}
+
+func (e controllerRemoteFailure) Error() string { return e.Message }
 
 func remoteControllerID(origin, id string) string {
 	sum := sha256.Sum256([]byte(origin + "\x00" + id))
@@ -151,9 +157,9 @@ func (h *Hub) controllerRemoteRequest(ctx context.Context, instance, path string
 		}
 		_ = json.NewDecoder(io.LimitReader(response.Body, 4096)).Decode(&failure)
 		if failure.Error != "" {
-			return errors.New(failure.Error)
+			return controllerRemoteFailure{response.StatusCode, failure.Error}
 		}
-		return errors.New("controller_remote_not_authorized_or_unsupported")
+		return controllerRemoteFailure{response.StatusCode, "controller_remote_not_authorized_or_unsupported"}
 	}
 	return json.NewDecoder(io.LimitReader(response.Body, 2*1024*1024)).Decode(result)
 }
@@ -177,12 +183,22 @@ func (h *Hub) submitRemoteSessionDispatch(ctx context.Context, r sessiondispatch
 			r.ExecutionRequestID, r.ExecutionTurnID = previous.ExecutionRequestID, previous.ExecutionTurnID
 			_ = h.dispatches.Put(ctx, r)
 			return r
+		} else if e.Error() != "remote_dispatch_not_found" {
+			// Loss of access is not proof that an earlier write did not execute.
+			r.Error = e.Error()
+			_ = h.dispatches.Put(ctx, r)
+			return r
 		}
 	}
 	var remote sessiondispatch.Record
 	e = h.controllerRemoteRequest(ctx, r.InstanceID, "dispatch", controllerEnvelope{ParentID: r.ParentID, Record: r}, &remote)
 	if e != nil {
-		r.State = "uncertain"
+		var refused controllerRemoteFailure
+		if r.State != "uncertain" && errors.As(e, &refused) && refused.Status >= 400 && refused.Status < 500 {
+			r.State = "rejected"
+		} else {
+			r.State = "uncertain"
+		}
 		r.Error = e.Error()
 	} else {
 		r.State, r.Result, r.Error = remote.State, remote.Result, remote.Error
