@@ -103,6 +103,9 @@ func (c *Codex) StartRealtimeVoice(ctx context.Context, s *session.Session, inpu
 	if err := ctx.Err(); err != nil {
 		return backend.RealtimeVoiceAnswer{}, err
 	}
+	if !backend.ValidRealtimeVoiceName(input.VoiceName) {
+		return backend.RealtimeVoiceAnswer{}, errors.New("unsupported v3 voice")
+	}
 	if len(input.SDP) > 64*1024 || !strings.HasPrefix(input.SDP, "v=0") || input.VoiceID == "" {
 		return backend.RealtimeVoiceAnswer{}, errors.New("無效的語音協商資料")
 	}
@@ -124,11 +127,9 @@ func (c *Codex) StartRealtimeVoice(ctx context.Context, s *session.Session, inpu
 	}
 	c.voiceCalls[id] = call
 	c.voiceMu.Unlock()
-	_, err = c.rpcCall("thread/realtime/start", map[string]any{
-		"threadId": id, "outputModality": "audio", "transport": map[string]any{"type": "webrtc", "sdp": input.SDP},
-		"version": "v3", "realtimeSessionId": input.VoiceID, "clientManagedHandoffs": false,
-		"includeStartupContext": true, "flushTranscriptTailOnSessionEnd": false,
-	}, 30*time.Second)
+	params := realtimeVoiceStartParams(id, input)
+	_, err = c.rpcCall("thread/realtime/start", params, 30*time.Second)
+
 	if err == nil && ctx.Err() != nil {
 		err = ctx.Err()
 	}
@@ -274,4 +275,12 @@ func (c *Codex) failVoiceCalls() {
 			call.callback(backend.RealtimeVoiceEvent{State: "error", Message: "Codex 已重新連線，請重新開始語音"})
 		}
 	}
+}
+
+func realtimeVoiceStartParams(thread string, input backend.RealtimeVoiceStart) map[string]any {
+	params := map[string]any{"threadId": thread, "outputModality": "audio", "transport": map[string]any{"type": "webrtc", "sdp": input.SDP}, "version": "v3", "realtimeSessionId": input.VoiceID, "clientManagedHandoffs": false, "includeStartupContext": true, "flushTranscriptTailOnSessionEnd": false}
+	if input.VoiceName != "" {
+		params["voice"] = input.VoiceName
+	}
+	return params
 }

@@ -103,6 +103,7 @@ type Command struct {
 
 	SDP           string
 	VoiceID       string
+	VoiceName     string
 	Candidate     string
 	SDPMid        string
 	SDPMLineIndex *int
@@ -259,6 +260,7 @@ func (AppV1) ParseCommand(in protocol.Inbound) Command {
 
 		SDP:           in.SDP,
 		VoiceID:       in.VoiceID,
+		VoiceName:     in.VoiceName,
 		Candidate:     in.Candidate,
 		SDPMid:        in.SDPMid,
 		SDPMLineIndex: in.SDPMLineIndex,

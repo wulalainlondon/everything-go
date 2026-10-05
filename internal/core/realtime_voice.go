@@ -30,6 +30,10 @@ func (h *Hub) ownsVoice(c *Client, call *clientVoiceCall) bool {
 }
 
 func (h *Hub) handleVoiceStart(c *Client, cmd clientproto.Command) {
+	if !backend.ValidRealtimeVoiceName(cmd.VoiceName) {
+		c.enqueueEvent(voiceEvent(cmd, "error", "此音色不支援目前的語音版本"))
+		return
+	}
 	if !voiceIdentifier.MatchString(cmd.VoiceID) || !voiceIdentifier.MatchString(cmd.RequestID) || len(cmd.SDP) > 64*1024 {
 		c.enqueueEvent(voiceEvent(cmd, "error", "語音請求格式無效"))
 		return
@@ -73,7 +77,7 @@ func (h *Hub) handleVoiceStart(c *Client, cmd clientproto.Command) {
 	c.enqueueEvent(voiceEvent(cmd, "starting", ""))
 	go func() {
 		defer cancel()
-		answer, err := exec.StartRealtimeVoice(ctx, s, backend.RealtimeVoiceStart{VoiceID: cmd.VoiceID, SDP: cmd.SDP, OnEvent: func(event backend.RealtimeVoiceEvent) {
+		answer, err := exec.StartRealtimeVoice(ctx, s, backend.RealtimeVoiceStart{VoiceID: cmd.VoiceID, VoiceName: cmd.VoiceName, SDP: cmd.SDP, OnEvent: func(event backend.RealtimeVoiceEvent) {
 			if !c.live() || !h.ownsVoice(c, call) {
 				return
 			}

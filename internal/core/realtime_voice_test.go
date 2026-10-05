@@ -17,12 +17,14 @@ type voiceExec struct {
 	*fakeExec
 	starts, stops, cancels atomic.Int32
 	threadID               string
+	selectedVoice          string
 	callback               func(backend.RealtimeVoiceEvent)
 }
 
 func (f *voiceExec) StartRealtimeVoice(_ context.Context, s *session.Session, input backend.RealtimeVoiceStart) (backend.RealtimeVoiceAnswer, error) {
 	f.starts.Add(1)
 	f.threadID = s.ResumeID()
+	f.selectedVoice = input.VoiceName
 	f.callback = input.OnEvent
 	return backend.RealtimeVoiceAnswer{ThreadID: s.ResumeID(), VoiceID: input.VoiceID, SDP: "v=0\r\nprivate-answer"}, nil
 }
@@ -110,4 +112,23 @@ func TestVoiceSDPAndTranscriptNeverAppearInFrameLog(t *testing.T) {
 	if bytes.Contains(buffer.Bytes(), []byte("PRIVATE")) {
 		t.Fatal("voice signaling or transcript leaked into frame log")
 	}
+}
+
+func TestVoiceToneIsDecodedAndValidatedBeforeStarting(t *testing.T) {
+	h, base := newControlTestHub(t, t.TempDir())
+	f := &voiceExec{fakeExec: base}
+	h.SetExecutor(f)
+	h.registry.Create("one", "one", t.TempDir(), backend.Codex, "", "", "native-one")
+	c := newTestClient(h)
+	route(h, c, `{"type":"codex_voice_start","session_id":"one","request_id":"request-bad","voice_id":"voice-bad","voice_name":"marin","sdp":"v=0"}`)
+	nextVoiceState(t, c, "error")
+	if f.starts.Load() != 0 {
+		t.Fatal("unsupported tone started")
+	}
+	route(h, c, `{"type":"codex_voice_start","session_id":"one","request_id":"request-good","voice_id":"voice-good","voice_name":"maple","sdp":"v=0"}`)
+	nextVoiceState(t, c, "answer")
+	if f.selectedVoice != "maple" {
+		t.Fatal(f.selectedVoice)
+	}
+	h.cleanupClientVoice(c)
 }

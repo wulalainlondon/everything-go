@@ -117,7 +117,7 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		}
 		if !c.enrollmentOnly {
 			if _, ok := h.exec.(backend.RealtimeVoiceExecutor); ok && h.cfg.CodexRemote != "" {
-				helloInput.Capabilities = append(helloInput.Capabilities, "codex_realtime_voice_v1")
+				helloInput.Capabilities = append(helloInput.Capabilities, "codex_realtime_voice_v1", "codex_voice_selection_v1")
 			}
 			if _, ok := h.exec.(backend.RecapExecutor); ok {
 				helloInput.Capabilities = append(helloInput.Capabilities, "session_recap_v1")

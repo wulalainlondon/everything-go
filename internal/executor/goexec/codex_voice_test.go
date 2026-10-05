@@ -51,3 +51,24 @@ func TestVoiceStopOwnershipSurvivesNativeIDChangeButTextCannotSteerOldThread(t *
 		t.Fatal("accepted another session")
 	}
 }
+
+func TestVoiceSelectionUsesV3ToneWithoutChangingThreadOrCallIdentity(t *testing.T) {
+	p := realtimeVoiceStartParams("native-thread", backend.RealtimeVoiceStart{VoiceID: "call-identity", VoiceName: "juniper", SDP: "v=0"})
+	if p["voice"] != "juniper" || p["threadId"] != "native-thread" || p["realtimeSessionId"] != "call-identity" || p["version"] != "v3" {
+		t.Fatal(p)
+	}
+	legacy := realtimeVoiceStartParams("native-thread", backend.RealtimeVoiceStart{VoiceID: "call-identity"})
+	if _, ok := legacy["voice"]; ok {
+		t.Fatal("legacy default overridden")
+	}
+	for _, voice := range []string{"juniper", "maple", "spruce", "ember", "vale", "breeze", "arbor", "sol", "cove"} {
+		if !backend.ValidRealtimeVoiceName(voice) {
+			t.Fatal(voice)
+		}
+	}
+	for _, voice := range []string{"marin", "cedar", "Juniper", "unknown", "voice_credential"} {
+		if backend.ValidRealtimeVoiceName(voice) {
+			t.Fatal("unsupported v3 voice accepted", voice)
+		}
+	}
+}
