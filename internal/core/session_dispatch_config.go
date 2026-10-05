@@ -39,9 +39,9 @@ func (h *Hub) sendControllerStatus(c *Client, cmd clientproto.Command) {
 	records, _ := h.dispatches.List(controllerClientContext(c), parent.ID)
 	records = briefDispatches(records)
 	peers := []map[string]any{}
-	for id := range h.relayPeers {
+	for id, peer := range h.relayPeers {
 		inbound, _ := h.dispatches.Grant(controllerClientContext(c), "peer:"+id)
-		peers = append(peers, map[string]any{"instance_id": id, "incoming": inbound})
+		peers = append(peers, map[string]any{"instance_id": id, "instance_name": peer.InstanceName, "incoming": inbound})
 	}
 	c.enqueueEvent(map[string]any{"type": "session_controller_status", "session_id": parent.ID, "request_id": cmd.RequestID, "grant": g, "dispatches": records, "peers": peers, "instance_id": h.cfg.InstanceID})
 }

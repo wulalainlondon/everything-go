@@ -2,9 +2,11 @@ package goexec
 
 import (
 	"context"
+	"encoding/json"
 	"everything-go/internal/backend"
 	"everything-go/internal/session"
 	"os"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -59,7 +61,7 @@ func TestControllerCatalogExcludedFromDelegatedChild(t *testing.T) {
 }
 
 func TestCodexControllerToolCatalogIntegration(t *testing.T) {
-	if os.Getenv("EVERYTHING_GO_RUN_CONTROLLER_INTEGRATION") != "1" {
+	if os.Getenv("EVERYTHING_GO_RUN_CONTROLLER_INTEGRATION") != "1" && os.Getenv("EVERYTHING_GO_RUN_CONTROLLER_COLD_INTEGRATION") != "1" {
 		t.Skip("opt-in fresh thread only")
 	}
 	c := NewCodex(&capSink{}, "codex")
@@ -79,6 +81,63 @@ func TestCodexControllerToolCatalogIntegration(t *testing.T) {
 		t.Fatal("missing thread")
 	}
 	t.Logf("fresh isolated thread accepted controller catalog: %s", s.ResumeID())
+	defer c.rpcCall("thread/archive", map[string]any{"threadId": s.ResumeID()}, 15*time.Second)
+	// The optional cold-resume probe needs a real persisted first turn. Keep it
+	// separate from catalog acceptance so account/model availability is visible.
+	if os.Getenv("EVERYTHING_GO_RUN_CONTROLLER_COLD_INTEGRATION") != "1" {
+		if _, e := c.rpcCall("thread/archive", map[string]any{"threadId": s.ResumeID()}, 15*time.Second); e != nil {
+			t.Fatal(e)
+		}
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if e := c.Send(ctx, s, "controller-probe-turn", "Reply only with controller-probe. Do not use tools or modify files.", nil, nil); e != nil {
+		t.Fatal(e)
+	}
+	st := c.state(s.ID)
+	st.mu.Lock()
+	done := st.turnDone
+	st.mu.Unlock()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		_ = c.Stop(context.Background(), s)
+		t.Fatal("isolated text turn timed out")
+	}
+	st.mu.Lock()
+	turnErr := st.turnErr
+	st.mu.Unlock()
+	if turnErr != "" {
+		t.Fatal("isolated text turn failed", turnErr)
+	}
+	before, e := c.rpcCall("thread/resume", map[string]any{"threadId": s.ResumeID(), "excludeTurns": true}, 15*time.Second)
+	if e != nil {
+		t.Fatal(e)
+	}
+	st.mu.Lock()
+	st.threadID = ""
+	st.mu.Unlock()
+	if id, e := c.voiceThread(s); e != nil || id != s.ResumeID() {
+		t.Fatal("cold voice tool resume failed", id, e)
+	}
+	after, e := c.rpcCall("thread/resume", map[string]any{"threadId": s.ResumeID(), "excludeTurns": true}, 15*time.Second)
+	if e != nil {
+		t.Fatal(e)
+	}
+	var b, a map[string]any
+	json.Unmarshal(before, &b)
+	json.Unmarshal(after, &a)
+	if b["sandbox"] == nil || b["approvalPolicy"] == nil {
+		t.Fatal("native permission evidence missing")
+	}
+	for _, key := range []string{"sandbox", "approvalPolicy", "approvalsReviewer"} {
+		if !reflect.DeepEqual(b[key], a[key]) {
+			t.Fatalf("voice resume changed %s", key)
+		}
+	}
+	t.Log("cold voice resume accepted namespaces and preserved native permissions")
+
 	if _, e := c.rpcCall("thread/archive", map[string]any{"threadId": s.ResumeID()}, 15*time.Second); e != nil {
 		t.Fatal(e)
 	}
