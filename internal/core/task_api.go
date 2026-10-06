@@ -556,22 +556,29 @@ func (h *Hub) Mutate(ctx context.Context, c taskapi.AuthorizedCommand) (any, err
 	json.Unmarshal(c.Request.Input, &in)
 	canonicalRoots := []string{}
 	rootIdentities := map[string]string{}
-	for _, root := range in.Scope.Roots {
-		resolved, e := filepath.EvalSymlinks(root)
-		if e != nil {
-			return nil, taskapi.Failure("permission", "known_none", "request_scope_change")
-		}
-		identity, e := taskRootIdentity(resolved)
-		if e != nil {
-			return nil, taskapi.Failure("unsupported", "known_none", "read_capabilities")
-		}
-		rootIdentities[resolved] = identity
-		canonicalRoots = append(canonicalRoots, resolved)
-	}
 	canonicalCwd := ""
-	if in.Workspace.Cwd != "" {
-		canonicalCwd, _ = filepath.EvalSymlinks(in.Workspace.Cwd)
+	if c.Request.Operation == "create_dispatch" {
+		parentPath := ""
+		if in.New != nil {
+			parent, ok := h.registry.Get(c.Caller.SourceSessionID)
+			if !ok {
+				return nil, taskapi.Failure("caller_unbound", "known_none", "refresh_identity")
+			}
+			parentPath = parent.Snapshot().Cwd
+		} else if in.Existing != nil {
+			target, ok := h.registry.Get(in.Existing.SessionID)
+			if !ok {
+				return nil, taskapi.Failure("permission", "known_none", "request_scope_change")
+			}
+			parentPath = target.Snapshot().Cwd
+		}
+		var captureErr error
+		canonicalRoots, rootIdentities, canonicalCwd, captureErr = captureTaskWorkspace(h.cfg.RootDir, parentPath, in.Workspace.Cwd, in.Scope.Roots)
+		if captureErr != nil {
+			return nil, captureErr
+		}
 	}
+
 	metadata, _ := json.Marshal(apiMetadata{Request: c.Request, Caller: c.Caller, SourceThread: c.Caller.SourceResumeID, SourceRevision: c.Caller.SourceConfigRevision, Transport: c.Caller.Transport, CanonicalRoots: canonicalRoots, CanonicalCwd: canonicalCwd, RootIdentities: rootIdentities})
 	id := randomID()
 	record := taskapi.IntentRecord{ReceiptID: "tr_" + id, NativeID: id, Metadata: metadata}

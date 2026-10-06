@@ -3,7 +3,9 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -146,5 +148,94 @@ func TestTaskAPIExistingScopeUnsupportedHasZeroEffect(t *testing.T) {
 	snap, _ := h.messageQueue.Snapshot(target.ID)
 	if len(snap.Items) != 0 {
 		t.Fatal("unsupported scope created an effect")
+	}
+}
+
+type admissionRaceFixtureExecutor struct {
+	*fakeExec
+	calls atomic.Int32
+	flip  func()
+}
+
+func (e *admissionRaceFixtureExecutor) TaskAPICapabilities() []taskapi.ProviderCapability {
+	if e.calls.Add(1) == 2 {
+		e.flip()
+	}
+	capability := taskapi.UnloadedCapability("codex", "0.160.0", "isolated fixture; no provider invocation")
+	capability.Lifecycle = "registered"
+	capability.Models = []any{map[string]any{"model": "gpt-6.1-sol", "efforts": []string{"high"}}}
+	return []taskapi.ProviderCapability{capability}
+}
+func TestTaskAPIAdmissionRetargetAfterAuthorizeHasZeroEffect(t *testing.T) {
+	parentDir := t.TempDir()
+	allowed := filepath.Join(parentDir, "allowed")
+	alias := filepath.Join(parentDir, "alias")
+	outside := t.TempDir()
+	if err := os.Mkdir(allowed, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(allowed, alias); err != nil {
+		t.Fatal(err)
+	}
+	h := NewHub(session.NewRegistry(), Config{InstanceID: "i1", RootDir: parentDir, DataDir: parentDir}, governance.NewPairing(filepath.Join(parentDir, "pair.json")), 0)
+	defer h.messageQueue.Close()
+	defer h.delegations.Close()
+	defer h.dispatches.Close()
+	parent := h.registry.Create("s_fixtureparent", "Fixture", parentDir, backend.Codex, "gpt-6.1-sol", "read-only", "")
+	parent.SetResumeID("fixture-thread")
+	executor := &admissionRaceFixtureExecutor{fakeExec: &fakeExec{sink: h}, flip: func() {
+		if err := os.Remove(alias); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, alias); err != nil {
+			t.Fatal(err)
+		}
+	}}
+	h.SetExecutor(executor)
+	input := map[string]any{"goal": "fixture", "instruction": "fixture", "scope": map[string]any{"workspace_roots": []string{alias}, "allowed_operations": []string{"read"}, "sandbox": "read-only", "network": "deny", "max_children": 0}, "acceptance": []any{}, "dependencies": []any{}, "workspace": map[string]any{"cwd": parentDir, "input_artifact_ids": []any{}}, "new_worker": map[string]any{"name": "fixture", "profile": map[string]string{"backend": "codex", "model": "gpt-6.1-sol", "effort": "high"}}}
+	raw, _ := json.Marshal(input)
+	request := taskapi.Request{Version: contract.Version, Operation: "create_dispatch", IdempotencyKey: "admission-race-fixture", Input: raw}
+	caller := taskapi.VerifiedContext{Authority: "i1", StableScopeID: "session:" + parent.ID, SourceSessionID: parent.ID, SourceResumeID: parent.ResumeID(), BindingKind: "native_tool"}
+	locator, err := h.Authorize(context.Background(), caller, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	namespace, _ := taskapi.MakeNamespace(caller, locator, request)
+	hash, _ := taskapi.IntentHash(request)
+	_, err = h.Mutate(context.Background(), taskapi.AuthorizedCommand{Caller: caller, Request: request, Locator: locator, Namespace: namespace, IntentHash: hash, Revalidate: func(context.Context) error { return nil }})
+	if failure, ok := err.(*taskapi.APIError); !ok || failure.Code != "permission" {
+		t.Fatalf("retarget admitted: %v", err)
+	}
+	intents, _ := h.delegations.TaskJournal().List(context.Background(), caller.StableScopeID, 0)
+	if len(intents) != 0 {
+		t.Fatal("retarget saved an intent")
+	}
+	if len(h.registry.List()) != 1 {
+		t.Fatal("retarget provisioned a worker")
+	}
+}
+func TestTaskAPICaptureWorkspaceUsesConfinedOpenedDirectory(t *testing.T) {
+	parent := t.TempDir()
+	allowed := filepath.Join(parent, "allowed")
+	alias := filepath.Join(parent, "alias")
+	outside := t.TempDir()
+	os.Mkdir(allowed, 0700)
+	os.Symlink(allowed, alias)
+	roots, identities, cwd, err := captureTaskWorkspace(parent, parent, parent, []string{alias})
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, _ := taskRootIdentity(allowed)
+	if len(roots) != 1 || identities[alias] != original || cwd != parent {
+		t.Fatal("identity did not come from allowed directory")
+	}
+	os.Remove(alias)
+	os.Symlink(outside, alias)
+	changed, _ := taskRootIdentity(alias)
+	if changed == identities[alias] {
+		t.Fatal("different directory retained approved identity")
+	}
+	if _, _, _, err = captureTaskWorkspace(parent, parent, parent, []string{alias}); err == nil {
+		t.Fatal("outside root admitted")
 	}
 }
