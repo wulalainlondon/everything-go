@@ -183,6 +183,9 @@ func legacyWSFixture(t *testing.T) (*Hub, *session.Session, *session.Session, fu
 	target := h.registry.Create("target", "Target", root, backend.Codex, "", "", "target-thread")
 	conn, ctx, cleanup := dialWS(t, h)
 	conn.SetReadLimit(contract.MaxBytes)
+	extended, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx = extended
+	t.Cleanup(cancel)
 	t.Cleanup(cleanup)
 	send := func(value any) {
 		data, _ := json.Marshal(value)
