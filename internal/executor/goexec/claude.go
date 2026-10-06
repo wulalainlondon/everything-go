@@ -469,18 +469,17 @@ func claudeSpawnArgs(snap session.Snapshot, mcpURL string) []string {
 		args = append(args, "--model", "claude-fable-5")
 	} else {
 		switch snap.Sandbox {
-		case "read-only":
-			args = append(args,
-				"--dangerously-skip-permissions",
-				"--allowedTools", "Read,Glob,Grep,WebSearch,WebFetch",
-			)
-		case "workspace-write":
-			args = append(args,
-				"--dangerously-skip-permissions",
-				"--disallowedTools", "Bash",
-			)
-		default:
+		case "danger-full-access":
 			args = append(args, "--dangerously-skip-permissions")
+		case "workspace-write":
+			args = append(args, "--permission-mode", "acceptEdits", "--disallowedTools", "Bash")
+		default:
+			args = append(args,
+				"--permission-mode", "dontAsk",
+				"--tools", "Read,Glob,Grep,WebSearch,WebFetch",
+				"--allowedTools", "Read,Glob,Grep,WebSearch,WebFetch",
+				"--strict-mcp-config",
+			)
 		}
 		if model != "" {
 			args = append(args, "--model", model)
@@ -498,6 +497,9 @@ func claudeSpawnArgs(snap session.Snapshot, mcpURL string) []string {
 	if snap.ResumeID != "" {
 		args = append(args, "--resume", snap.ResumeID)
 	}
+	if snap.Name != "" {
+		args = append(args, "--name", snap.Name)
+	}
 	if snap.Effort != "" && snap.Effort != "auto" {
 		args = append(args, "--effort", snap.Effort)
 	}
@@ -505,6 +507,12 @@ func claudeSpawnArgs(snap session.Snapshot, mcpURL string) []string {
 }
 
 // ndLine is the union of stdout line shapes we care about.
+type claudeInputUsage struct {
+	InputTokens              int `json:"input_tokens"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+}
+
 type ndLine struct {
 	IsAPIErrorMessage bool   `json:"isApiErrorMessage"`
 	APIError          string `json:"error"`
@@ -513,6 +521,7 @@ type ndLine struct {
 	Subtype           string `json:"subtype"`
 	Message           struct {
 		Content []json.RawMessage `json:"content"`
+		Usage   *claudeInputUsage `json:"usage"`
 	} `json:"message"`
 	ToolUseID string          `json:"tool_use_id"`
 	Content   json.RawMessage `json:"content"`    // tool_result payload
@@ -522,7 +531,11 @@ type ndLine struct {
 	Usage     struct {
 		InputTokens              int `json:"input_tokens"`
 		CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+		CacheReadInputTokens     int `json:"cache_read_input_tokens"`
 	} `json:"usage"`
+	ModelUsage map[string]struct {
+		ContextWindow int `json:"contextWindow"`
+	} `json:"modelUsage"`
 	// Non-empty on events produced inside a Task subagent. Those are internal
 	// to the subagent and must not pollute the main-chain stream.
 	ParentToolUseID string `json:"parent_tool_use_id"`
@@ -560,6 +573,7 @@ func (c *Claude) readStdout(s *session.Session, p *proc, stdout interface{ Read(
 	// avoid double emission. Old CLIs without stream_event keep the aggregate
 	// path. readStdout is the proc's only reader, so a local is race-free.
 	sawStreamEvent := false
+	var lastInputUsage *claudeInputUsage
 	for sc.Scan() {
 		line := sc.Bytes()
 		if len(line) == 0 {
@@ -601,6 +615,9 @@ func (c *Claude) readStdout(s *session.Session, p *proc, stdout interface{ Read(
 				}
 			}
 		case "assistant":
+			if evt.Message.Usage != nil {
+				lastInputUsage = evt.Message.Usage
+			}
 			var askWaits []<-chan struct{}
 			for _, raw := range evt.Message.Content {
 				var b block
@@ -636,7 +653,23 @@ func (c *Claude) readStdout(s *session.Session, p *proc, stdout interface{ Read(
 				continue
 			}
 			c.tools.ResultEnd(s.ID, reqID, evt.ToolUseID, output)
+		case "user":
+			// Public stream-json tool replies are user message content blocks.
+			// A replayed user prompt is an acknowledgement, not assistant output.
+			for _, raw := range evt.Message.Content {
+				var b claudeBlock
+				if json.Unmarshal(raw, &b) != nil || b.Type != "tool_result" || b.ToolUseID == "" {
+					continue
+				}
+				output := flattenToolOutput(b.Content)
+				if p.tools.HandleClaudeToolResult(s.ID, reqID, b.ToolUseID, output) {
+					continue
+				}
+				c.tools.ResultEnd(s.ID, reqID, b.ToolUseID, output)
+			}
 		case "result":
+			inputUsage := lastInputUsage
+			lastInputUsage = nil
 			if evt.IsError || (evt.Subtype != "" && evt.Subtype != "success") {
 				msg := claudeRawToString(evt.Result)
 				if msg == "" {
@@ -653,8 +686,16 @@ func (c *Claude) readStdout(s *session.Session, p *proc, stdout interface{ Read(
 			st.mu.Lock()
 			st.restartCount = 0
 			st.mu.Unlock()
-			contextUsed := evt.Usage.InputTokens + evt.Usage.CacheCreationInputTokens
+			contextUsed := evt.Usage.InputTokens + evt.Usage.CacheCreationInputTokens + evt.Usage.CacheReadInputTokens
+			// result.usage is accumulated across tool steps in a turn. The latest
+			// assistant request describes the current context window, not their sum.
+			if inputUsage != nil {
+				contextUsed = inputUsage.InputTokens + inputUsage.CacheCreationInputTokens + inputUsage.CacheReadInputTokens
+			}
 			contextLimit := claudeContextLimit(p.currentModel())
+			if usage, ok := evt.ModelUsage[p.currentModel()]; ok && usage.ContextWindow > 0 {
+				contextLimit = usage.ContextWindow
+			}
 			if contextLimit > 0 || contextUsed > 0 {
 				s.SetContext(contextUsed, contextLimit)
 			}

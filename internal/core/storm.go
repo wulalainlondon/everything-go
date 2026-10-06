@@ -52,7 +52,7 @@ func newStormGuards() *stormGuards {
 // registerLatest marks c as the newest client for its device and evicts the
 // previous one. Called once, right after the hello sets c.deviceID.
 func (h *Hub) registerLatest(c *Client) {
-	if c.deviceID == "" {
+	if c.deviceID == "" || c.offlineDeviceGuard {
 		return
 	}
 	h.latestMu.Lock()

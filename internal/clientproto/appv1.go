@@ -398,7 +398,7 @@ func (AppV1) HelloAck(in HelloInput) protocol.HelloAck {
 		LanIP:           in.LanIP,
 		TunnelURL:       in.TunnelURL,
 		Backends:        backendDefinitionsToWire(in.Backends),
-		Capabilities:    append([]string(nil), in.Capabilities...),
+		Capabilities:    append(append([]string(nil), in.Capabilities...), "offline_device_guard_v1"),
 	}
 }
 

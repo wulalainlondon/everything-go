@@ -29,20 +29,21 @@ type Inbound struct {
 	RequestID       string                             `json:"request_id"`
 
 	// hello / pairing
-	DeviceID        string      `json:"device_id"`
-	DeviceName      string      `json:"device_name"`
-	ClientSurface   string      `json:"client_surface"`
-	AuthToken       string      `json:"auth_token"`
-	ReplayAck       bool        `json:"replay_ack"`
-	SessionReadSync bool        `json:"session_read_sync,omitempty"`
-	ProtocolVersion int         `json:"protocol_version"`
-	ClientInfo      *ClientInfo `json:"client_info,omitempty"`
-	ConnectionProbe bool        `json:"connection_probe,omitempty"`
-	BatchID         string      `json:"batch_id"`
-	Revision        uint64      `json:"revision"`
-	Read            bool        `json:"read"`
-	ReadEpoch       string      `json:"read_epoch,omitempty"`
-	ReadToken       string      `json:"read_token,omitempty"`
+	DeviceID             string      `json:"device_id"`
+	DeviceName           string      `json:"device_name"`
+	ClientSurface        string      `json:"client_surface"`
+	AuthToken            string      `json:"auth_token"`
+	ReplayAck            bool        `json:"replay_ack"`
+	SessionReadSync      bool        `json:"session_read_sync,omitempty"`
+	ProtocolVersion      int         `json:"protocol_version"`
+	ClientInfo           *ClientInfo `json:"client_info,omitempty"`
+	ConnectionProbe      bool        `json:"connection_probe,omitempty"`
+	RequireOfflineDevice bool        `json:"require_offline_device,omitempty"`
+	BatchID              string      `json:"batch_id"`
+	Revision             uint64      `json:"revision"`
+	Read                 bool        `json:"read"`
+	ReadEpoch            string      `json:"read_epoch,omitempty"`
+	ReadToken            string      `json:"read_token,omitempty"`
 
 	// new_session
 	Name           string `json:"name"`

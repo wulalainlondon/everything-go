@@ -44,6 +44,17 @@ func validPMTools(tools []string) bool {
 
 func claudeReadOnlyWorkerArgs(s session.Snapshot, mcpURL string) []string {
 	args := claudeSpawnArgs(s, mcpURL)
+	// Narrow the ordinary read-only preset rather than sending duplicate --tools
+	// options (consumers and CLI versions must see one unambiguous policy).
+	narrowed := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--tools" && i+1 < len(args) {
+			i++
+			continue
+		}
+		narrowed = append(narrowed, args[i])
+	}
+	args = narrowed
 	args = append(args, "--tools", "Read,Glob,Grep", "--strict-mcp-config", "--disable-slash-commands", "--setting-sources", "", "--settings", `{"disableAllHooks":true,"autoMemoryEnabled":false,"enabledPlugins":{}}`)
 	return args
 }

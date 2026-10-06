@@ -129,14 +129,15 @@ type Client struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	clientID         string
-	downloadOrigin   string
-	deviceID         string
-	clientSurface    string
-	protocolVersion  int
-	inventoryBinding atomic.Pointer[clientInventoryBinding]
-	inventoryName    string
-	inventoryProbe   bool
+	clientID           string
+	downloadOrigin     string
+	deviceID           string
+	clientSurface      string
+	protocolVersion    int
+	inventoryBinding   atomic.Pointer[clientInventoryBinding]
+	inventoryName      string
+	inventoryProbe     bool
+	offlineDeviceGuard bool
 	// enrollmentOnly is true when the handshake was admitted solely through a
 	// short-lived LAN pairing window. Such a client may only complete claim_bridge
 	// (or ping) until its credential is persisted.
@@ -372,6 +373,14 @@ func (h *Hub) serveConn(ctx context.Context, conn wireConn) {
 		conn.Close("handshake rejected")
 		return
 	}
+	if c.offlineDeviceGuard {
+		c.deviceID = hello.DeviceID
+		if !h.reserveOfflineDevice(c) {
+			c.writeNow(ctx, protocol.Error{Type: "error", Code: "device_identity_in_use", Message: "This paired identity already has an active connection; select an offline QA identity."})
+			conn.Close("device_identity_in_use")
+			return
+		}
+	}
 
 	// Authenticated probes are not application clients: no broadcasts,
 	// offline replay lease, or replacement of the device's active transport.
@@ -422,6 +431,13 @@ func (c *Client) handshake(ctx context.Context) (clientproto.Command, bool) {
 	if !authorized {
 		c.writeNow(ctx, protocol.NewError("", "", "Unauthorized: invalid auth token"))
 		return clientproto.Command{}, false
+	}
+	if in.RequireOfflineDevice {
+		if c.enrollmentOnly || in.ConnectionProbe || !c.hub.pairing.MatchesDevice(provided, in.DeviceID) {
+			c.writeNow(ctx, protocol.Error{Type: "error", Code: "offline_device_guard_requires_pair", Message: "An offline QA connection requires its exact existing paired identity."})
+			return clientproto.Command{}, false
+		}
+		c.offlineDeviceGuard = true
 	}
 	c.inventoryName, c.inventoryProbe = in.DeviceName, in.ConnectionProbe
 	if !c.enrollmentOnly && c.hub.pairing.MatchesDevice(provided, in.DeviceID) {

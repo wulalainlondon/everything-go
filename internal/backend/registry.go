@@ -11,6 +11,7 @@ func DefaultRegistry(includeRemoteWS bool) []Definition {
 			DefaultModel: "opus",
 			Models: []Model{
 				{ID: "sonnet", Label: "sonnet"},
+				{ID: "haiku", Label: "haiku"},
 				{ID: "opus", Label: "opus"},
 				{ID: "opusplan", Label: "opus · plan"},
 				{ID: "fable", Label: "fable"},
