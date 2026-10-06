@@ -233,9 +233,6 @@ func (h *Hub) Authorize(ctx context.Context, c taskapi.VerifiedContext, r taskap
 	if c.Authority != h.cfg.InstanceID {
 		return l, taskapi.Failure("wrong_authority", "known_none", "refresh_identity")
 	}
-	if !apiOwnedAdmissionEnabled && (r.Operation == "create_dispatch" || r.Operation == "append") {
-		return l, taskapi.Failure("busy", "known_none", "read_capabilities")
-	}
 	if r.Operation == "legacy_source" {
 		return h.authorizeLegacySource(ctx, c, r, l)
 	}
@@ -285,6 +282,9 @@ func (h *Hub) Authorize(ctx context.Context, c taskapi.VerifiedContext, r taskap
 				return l, nil
 			}
 
+			if !apiOwnedAdmissionEnabled && r.Operation == "append" {
+				return l, taskapi.Failure("busy", "known_none", "read_capabilities")
+			}
 			if !h.controls.MobileMayWrite(target.ID) {
 				return l, taskapi.Failure("permission", "known_none", "request_scope_change")
 			}
@@ -357,6 +357,9 @@ func (h *Hub) Authorize(ctx context.Context, c taskapi.VerifiedContext, r taskap
 			} else if failure, ok := e.(*taskapi.APIError); ok && failure.Code == "key_expired" {
 				return l, e
 			}
+		}
+		if !apiOwnedAdmissionEnabled {
+			return l, taskapi.Failure("busy", "known_none", "read_capabilities")
 		}
 		if len(in.ApprovedPM) > 0 {
 			var ref struct {
