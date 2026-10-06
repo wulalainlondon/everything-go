@@ -239,3 +239,22 @@ func TestClaudeStopUnknownGroupExitRetainsBindingOnEveryRetry(t *testing.T) {
 		t.Fatal("unknown exit discarded original binding or emitted stopped")
 	}
 }
+
+func TestClaudeStopRevokesFormalLeaseBeforeUnconfirmedProcessExit(t *testing.T) {
+	sink := &capSink{}
+	backend := NewClaude(sink, "unused")
+	current := session.NewRegistry().Create("stop-lease-fixture", "Fixture", t.TempDir(), "claude", "", "read-only", "")
+	lease := &claudeTaskLease{generation: "fixture-generation", secret: "fixture-secret", s: current}
+	cancelled := false
+	process := &proc{reqID: "r_original_stop", cancel: func() { cancelled = true }, exited: make(chan struct{}), taskLease: lease}
+	lease.p = process
+	backend.procs[current.ID] = process
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := backend.Stop(ctx, current); err == nil {
+		t.Fatal("unknown process exit reported success")
+	}
+	if !cancelled || !lease.revoked || backend.procs[current.ID] != process {
+		t.Fatal("stopping formal lease still authorized a native call or lost binding")
+	}
+}

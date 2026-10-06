@@ -326,6 +326,9 @@ func (c *Claude) Stop(ctx context.Context, s *session.Session) error {
 			p.manualStopRequestID = p.reqID
 		}
 		p.mu.Unlock()
+		if p.taskLease != nil {
+			p.taskLease.revoke()
+		}
 		p.cancel() // Request process termination; do not claim it has exited yet.
 		if p.exited == nil {
 			return fmt.Errorf("Claude process exit is not yet observable")
@@ -362,6 +365,9 @@ func (c *Claude) Clear(ctx context.Context, s *session.Session) error {
 	delete(c.procs, s.ID)
 	c.mu.Unlock()
 	if p != nil {
+		if p.taskLease != nil {
+			p.taskLease.revoke()
+		}
 		p.cancel()
 	}
 	c.cancelInteractionsFor(s.ID)
@@ -395,6 +401,9 @@ func (c *Claude) KillProc(s *session.Session) bool {
 	if p == nil {
 		return false
 	}
+	if p.taskLease != nil {
+		p.taskLease.revoke()
+	}
 	p.cancel()
 	c.cancelInteractionsFor(s.ID)
 	return true
@@ -406,6 +415,9 @@ func (c *Claude) Close(ctx context.Context, s *session.Session) error {
 	delete(c.procs, s.ID)
 	c.mu.Unlock()
 	if p != nil {
+		if p.taskLease != nil {
+			p.taskLease.revoke()
+		}
 		p.cancel()
 	}
 	c.cancelInteractionsFor(s.ID)
@@ -944,6 +956,9 @@ func (c *Claude) waitForClaudeAskUser(s *session.Session, waits []<-chan struct{
 }
 
 func (c *Claude) watchProc(s *session.Session, p *proc) {
+	if p.taskLease != nil {
+		defer p.taskLease.revoke()
+	}
 	if p.exited != nil {
 		defer close(p.exited)
 	}

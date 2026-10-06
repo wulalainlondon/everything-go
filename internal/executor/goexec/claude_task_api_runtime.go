@@ -204,7 +204,10 @@ func (m *claudeTaskMCP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			lease.mu.Lock()
 			defer lease.mu.Unlock()
-			return !lease.revoked && lease.requestID == request && lease.threadID == threadID && process.currentReqID() == request && process.taskLease == lease
+			process.mu.Lock()
+			stopping := process.manualStop
+			process.mu.Unlock()
+			return !stopping && !lease.revoked && lease.requestID == request && lease.threadID == threadID && process.currentReqID() == request && process.taskLease == lease
 		}}
 		var header struct{ Operation string }
 		if json.Unmarshal(call.Arguments, &header) != nil || call.Name != "task_"+header.Operation {
