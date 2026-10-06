@@ -594,8 +594,8 @@ type RecentMessage struct {
 
 // SessionSummary mirrors SessionSummarySchema.
 type SessionSummary struct {
-	ContextUsed          int             `json:"context_used,omitempty"`
-	ContextMax           int             `json:"context_max,omitempty"`
+	ContextUsed          *int            `json:"context_used,omitempty"`
+	ContextMax           *int            `json:"context_max,omitempty"`
 	ActiveModel          string          `json:"active_model,omitempty"`
 	ActiveEffort         string          `json:"active_effort,omitempty"`
 	ActiveServiceTier    string          `json:"active_service_tier,omitempty"`

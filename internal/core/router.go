@@ -1260,7 +1260,7 @@ func (h *Hub) sessionSummaries() []protocol.SessionSummary {
 			lastActivity = float64(previewAt) / 1000
 		}
 		out = append(out, protocol.SessionSummary{
-			ContextUsed: snap.ContextUsed, ContextMax: snap.ContextMax,
+			ContextUsed: knownContextUsed(snap), ContextMax: knownContextMax(snap),
 			ActiveModel: active.Model, ActiveEffort: active.Effort, ActiveServiceTier: active.ServiceTier, ActiveConfigRevision: active.ConfigRevision,
 			ConfigRevision: snap.ConfigRevision,
 			ID:             snap.ID, Name: snap.Name, IsStreaming: snap.Streaming || runtimePhaseActive(runtimePhase[snap.ID]),

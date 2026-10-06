@@ -61,6 +61,7 @@ type Session struct {
 	previewRevision  uint64
 	contextUsed      int
 	contextMax       int
+	contextUsedKnown bool
 
 	state State
 
@@ -103,6 +104,7 @@ type Snapshot struct {
 	PreviewRevision     uint64
 	ContextUsed         int
 	ContextMax          int
+	ContextUsedKnown    bool
 	Pinned              bool
 	Hidden              bool
 	Streaming           bool
@@ -131,7 +133,8 @@ func (s *Session) snapshotLocked() Snapshot {
 		PreviewText: s.previewText, PreviewRole: s.previewRole,
 		PreviewUpdatedAt: s.previewUpdatedAt, PreviewRevision: s.previewRevision,
 		ContextUsed: s.contextUsed, ContextMax: s.contextMax,
-		Pinned: s.pinned, Hidden: s.hidden,
+		ContextUsedKnown: s.contextUsedKnown,
+		Pinned:           s.pinned, Hidden: s.hidden,
 		Streaming: s.state == Streaming || s.state == Stopping,
 		State:     s.state,
 	}
@@ -297,6 +300,7 @@ func (s *Session) SetContext(used, max int) {
 	s.mu.Lock()
 	if used >= 0 {
 		s.contextUsed = used
+		s.contextUsedKnown = true
 	}
 	if max >= 0 {
 		s.contextMax = max

@@ -158,3 +158,14 @@ func TestClaudeOversizedStreamFrameFailsExactRequestWithoutDoneOrReplay(t *testi
 		t.Fatal("missing exact correlated stream failure")
 	}
 }
+
+func TestClaudeMissingUsageDoesNotPublishGuessedZero(t *testing.T) {
+	sink := &capSink{}
+	c := NewClaude(sink, "claude")
+	s := session.NewRegistry().Create("qa", "QA", t.TempDir(), "claude", "sonnet", "read-only", "")
+	p := &proc{reqID: "r_exact", model: "sonnet", tools: newToolNormalizer(sink, c)}
+	c.readStdout(s, p, strings.NewReader(`{"type":"result","subtype":"success","result":"done"}`+"\n"))
+	if s.Snapshot().ContextUsedKnown {
+		t.Fatal("missing provider usage became known zero")
+	}
+}

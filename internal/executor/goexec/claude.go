@@ -538,16 +538,12 @@ type ndLine struct {
 		Content []json.RawMessage `json:"content"`
 		Usage   *claudeInputUsage `json:"usage"`
 	} `json:"message"`
-	ToolUseID string          `json:"tool_use_id"`
-	Content   json.RawMessage `json:"content"`    // tool_result payload
-	SessionID string          `json:"session_id"` // result → new resume uuid
-	Model     string          `json:"model"`      // system/init
-	Result    json.RawMessage `json:"result"`     // result error payload
-	Usage     struct {
-		InputTokens              int `json:"input_tokens"`
-		CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
-		CacheReadInputTokens     int `json:"cache_read_input_tokens"`
-	} `json:"usage"`
+	ToolUseID  string            `json:"tool_use_id"`
+	Content    json.RawMessage   `json:"content"`    // tool_result payload
+	SessionID  string            `json:"session_id"` // result → new resume uuid
+	Model      string            `json:"model"`      // system/init
+	Result     json.RawMessage   `json:"result"`     // result error payload
+	Usage      *claudeInputUsage `json:"usage"`
 	ModelUsage map[string]struct {
 		ContextWindow int `json:"contextWindow"`
 	} `json:"modelUsage"`
@@ -701,7 +697,10 @@ func (c *Claude) readStdout(s *session.Session, p *proc, stdout interface{ Read(
 			st.mu.Lock()
 			st.restartCount = 0
 			st.mu.Unlock()
-			contextUsed := evt.Usage.InputTokens + evt.Usage.CacheCreationInputTokens + evt.Usage.CacheReadInputTokens
+			contextUsed := -1 // no usage report is unknown, not an inferred zero
+			if evt.Usage != nil {
+				contextUsed = evt.Usage.InputTokens + evt.Usage.CacheCreationInputTokens + evt.Usage.CacheReadInputTokens
+			}
 			// result.usage is accumulated across tool steps in a turn. The latest
 			// assistant request describes the current context window, not their sum.
 			if inputUsage != nil {
@@ -711,7 +710,7 @@ func (c *Claude) readStdout(s *session.Session, p *proc, stdout interface{ Read(
 			if usage, ok := evt.ModelUsage[p.currentModel()]; ok && usage.ContextWindow > 0 {
 				contextLimit = usage.ContextWindow
 			}
-			if contextLimit > 0 || contextUsed > 0 {
+			if contextLimit > 0 || contextUsed >= 0 {
 				s.SetContext(contextUsed, contextLimit)
 			}
 			if evt.SessionID != "" && evt.SessionID != s.ResumeID() {
