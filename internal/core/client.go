@@ -524,6 +524,11 @@ func (c *Client) readLoop(ctx context.Context) error {
 			log.Printf("client %s: bad frame: %v", c.clientID, err)
 			continue
 		}
+		if c.offlineDeviceGuard && in.Type == "hello" &&
+			(in.DeviceID != c.deviceID || in.ConnectionProbe || (in.AuthToken != "" && !c.hub.pairing.MatchesDevice(in.AuthToken, c.deviceID))) {
+			c.enqueueEvent(protocol.Error{Type: "error", Code: "offline_device_guard_identity_changed", Message: "The guarded QA connection must retain its original paired identity."})
+			continue
+		}
 		logInbound(in.Type, in.SessionID)
 		c.hub.touchDeviceInventory(c)
 		c.hub.route(ctx, c, c.hub.client.ParseCommand(in))
