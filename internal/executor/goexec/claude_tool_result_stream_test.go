@@ -119,3 +119,16 @@ func TestClaudeSpawnRequiresExplicitFullAccessAndCarriesNativeName(t *testing.T)
 		t.Fatal("explicit full access policy lost")
 	}
 }
+
+func TestClaudeReadOnlyFableKeepsPolicyAndAllowsOnlyBridgeQuestionBroker(t *testing.T) {
+	args := claudeSpawnArgs(session.Snapshot{Sandbox: "read-only", Model: "fable"}, "http://127.0.0.1/mcp/qa")
+	joined := strings.Join(args, " ")
+	for _, want := range []string{"--model claude-fable-5", "--permission-mode dontAsk", "--strict-mcp-config", "--tools Read,Glob,Grep,WebSearch,WebFetch", "--allowedTools Read,Glob,Grep,WebSearch,WebFetch,mcp__ask_user__ask_question"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("model alias dropped read-only/question policy: missing %s", want)
+		}
+	}
+	if strings.Contains(joined, "--dangerously-skip-permissions") {
+		t.Fatal("Fable alias bypassed the sandbox policy")
+	}
+}

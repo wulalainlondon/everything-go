@@ -465,19 +465,24 @@ func claudeSpawnArgs(snap session.Snapshot, mcpURL string) []string {
 	model := snap.Model
 	if model == "opusplan" {
 		args = append(args, "--model", "opus", "--permission-mode", "plan")
-	} else if model == "fable" {
-		args = append(args, "--model", "claude-fable-5")
 	} else {
+		if model == "fable" {
+			model = "claude-fable-5"
+		}
 		switch snap.Sandbox {
 		case "danger-full-access":
 			args = append(args, "--dangerously-skip-permissions")
 		case "workspace-write":
 			args = append(args, "--permission-mode", "acceptEdits", "--disallowedTools", "Bash")
 		default:
+			approvedTools := "Read,Glob,Grep,WebSearch,WebFetch"
+			if mcpURL != "" {
+				approvedTools += ",mcp__ask_user__ask_question"
+			}
 			args = append(args,
 				"--permission-mode", "dontAsk",
 				"--tools", "Read,Glob,Grep,WebSearch,WebFetch",
-				"--allowedTools", "Read,Glob,Grep,WebSearch,WebFetch",
+				"--allowedTools", approvedTools,
 				"--strict-mcp-config",
 			)
 		}
