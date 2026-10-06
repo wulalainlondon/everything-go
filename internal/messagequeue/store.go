@@ -92,9 +92,13 @@ func Open(dataDir string) (*Store, error) {
  CREATE TABLE IF NOT EXISTS task_api_provider_evidence(session_id TEXT NOT NULL,request_id TEXT NOT NULL,backend TEXT NOT NULL,conversation_id TEXT NOT NULL,token TEXT NOT NULL,token_kind TEXT NOT NULL,message_id TEXT NOT NULL,text TEXT NOT NULL,status TEXT NOT NULL,PRIMARY KEY(session_id,request_id));
  CREATE TABLE IF NOT EXISTS task_cancel_origins(session_id TEXT NOT NULL,request_id TEXT NOT NULL,from_state TEXT NOT NULL,PRIMARY KEY(session_id,request_id));
  CREATE TABLE IF NOT EXISTS task_provider_conflicts(session_id TEXT NOT NULL,request_id TEXT NOT NULL,PRIMARY KEY(session_id,request_id));
- CREATE TABLE IF NOT EXISTS task_native_conflicts (session_id TEXT NOT NULL,request_id TEXT NOT NULL,thread_id TEXT NOT NULL,turn_id TEXT NOT NULL,PRIMARY KEY(session_id,request_id));
+ CREATE TABLE IF NOT EXISTS task_native_conflicts (session_id TEXT NOT NULL,request_id TEXT NOT NULL,thread_id TEXT NOT NULL DEFAULT '',turn_id TEXT NOT NULL DEFAULT '',PRIMARY KEY(session_id,request_id));
  CREATE TABLE IF NOT EXISTS task_native_acceptance (session_id TEXT NOT NULL, request_id TEXT NOT NULL, thread_id TEXT NOT NULL, turn_id TEXT NOT NULL, PRIMARY KEY(session_id,request_id));
  CREATE TABLE IF NOT EXISTS queue_rejections (session_id TEXT NOT NULL, request_id TEXT NOT NULL, reason TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(session_id,request_id));`); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err = migrateNativeConflictSchema(db); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -386,4 +390,38 @@ func (s *Store) Recover() error {
 		}
 	}
 	return tx.Commit()
+}
+
+// CancelWaiting is an atomic CAS in the canonical receipt store. Native proof
+// arriving before this transaction wins; arriving later remains independently
+// readable and never implies native interruption or receipt completion.
+func (s *Store) CancelWaiting(sessionID, requestID, payloadHash string) (Entry, bool, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return Entry{}, false, err
+	}
+	defer tx.Rollback()
+	result, err := tx.Exec(`UPDATE queue_commands SET state='cancelled',updated_at=?,payload=X'' WHERE session_id=? AND request_id=? AND state='queued' AND payload_hash=? AND NOT EXISTS(SELECT 1 FROM task_native_acceptance n WHERE n.session_id=queue_commands.session_id AND n.request_id=queue_commands.request_id) AND NOT EXISTS(SELECT 1 FROM task_native_conflicts n WHERE n.session_id=queue_commands.session_id AND n.request_id=queue_commands.request_id)`, time.Now().UnixMilli(), sessionID, requestID, payloadHash)
+	if err != nil {
+		return Entry{}, false, err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return Entry{}, false, err
+	}
+	if count == 0 {
+		e, _, err := lookup(tx, sessionID, requestID)
+		return e, false, err
+	}
+	if err = bump(tx, sessionID); err != nil {
+		return Entry{}, false, err
+	}
+	e, _, err := lookup(tx, sessionID, requestID)
+	if err != nil {
+		return Entry{}, false, err
+	}
+	if err = tx.Commit(); err != nil {
+		return Entry{}, false, err
+	}
+	return e, true, nil
 }

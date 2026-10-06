@@ -316,7 +316,7 @@ func TestWorkHelloAdvertisesCapabilityAndReconcilesFromClientCursor(t *testing.T
 	route(h, c, `{"type":"hello","device_id":"phone"}`)
 	hello := waitForType(t, c, "hello_ack")
 	capabilities, ok := hello["capabilities"].([]any)
-	if !ok || len(capabilities) != 12 || capabilities[4] != "message_queue_v1" || capabilities[0] != "work_coordination_v1" || capabilities[1] != "work_items_v1" || capabilities[2] != "project_bootstrap_v1" || capabilities[3] != "work_review_feedback_v1" || capabilities[5] != "queue_message_detail_v1" || capabilities[6] != "session_tasks_v1" || capabilities[7] != "session_config_revision_v1" || capabilities[8] != "file_attachments_v1" || capabilities[9] != "next_message_config_v1" || capabilities[10] != "bootstrap_snapshot_v1" || capabilities[11] != "offline_device_guard_v1" {
+	if !ok || len(capabilities) != 13 || capabilities[4] != "message_queue_v1" || capabilities[0] != "work_coordination_v1" || capabilities[1] != "work_items_v1" || capabilities[2] != "project_bootstrap_v1" || capabilities[3] != "work_review_feedback_v1" || capabilities[5] != "queue_message_detail_v1" || capabilities[6] != "session_tasks_v1" || capabilities[7] != "queue_receipt_reconciliation_v1" || capabilities[8] != "session_config_revision_v1" || capabilities[9] != "file_attachments_v1" || capabilities[10] != "next_message_config_v1" || capabilities[11] != "bootstrap_snapshot_v1" || capabilities[12] != "offline_device_guard_v1" {
 		t.Fatalf("hello capabilities=%v", hello["capabilities"])
 	}
 	assertNoTypeWithin(t, c, "work_snapshot", 50*time.Millisecond)

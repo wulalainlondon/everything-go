@@ -14,7 +14,13 @@ import (
 // request. Streaming text_chunk also contains commentary and is not a safe
 // delegation result, especially after a Bridge restart.
 func (c *Codex) FinalAnswerForRequest(s *session.Session, requestID string) (string, bool, error) {
-	threadID := s.ResumeID()
+	return c.finalForExactRequest(s.ResumeID(), requestID, "")
+}
+func (c *Codex) ExactQueueFinal(thread, request, turn string) (bool, error) {
+	_, found, err := c.finalForExactRequest(thread, request, turn)
+	return found, err
+}
+func (c *Codex) finalForExactRequest(threadID, requestID, expectedTurn string) (string, bool, error) {
 	if threadID == "" || requestID == "" {
 		return "", false, nil
 	}
@@ -27,14 +33,33 @@ func (c *Codex) FinalAnswerForRequest(s *session.Session, requestID string) (str
 	turnID := ""
 	for nativeID, bridgeID := range requests.Requests {
 		if bridgeID == requestID {
+			if turnID != "" && turnID != nativeID {
+				return "", false, errors.New("ambiguous native request mapping")
+			}
 			turnID = nativeID
-			break
 		}
 	}
 	if turnID == "" {
 		return "", false, nil
 	}
-	path := c.findCodexSessionFile(threadID)
+	if expectedTurn != "" && expectedTurn != turnID {
+		return "", false, errors.New("native request mapping mismatch")
+	}
+	path := ""
+	if expectedTurn != "" {
+		// Reconciliation never discovers runtime files. Only the provider-owned,
+		// previously indexed exact thread can be read; legacy history stays separate.
+		c.rolloutMu.Lock()
+		if c.rolloutRoot == c.sessionsRoot {
+			path = c.rolloutByID[threadID]
+		}
+		c.rolloutMu.Unlock()
+		if path == "" {
+			return "", false, errors.New("exact native final index unavailable")
+		}
+	} else {
+		path = c.findCodexSessionFile(threadID)
+	}
 	if path == "" {
 		return "", false, nil
 	}
@@ -43,11 +68,29 @@ func (c *Codex) FinalAnswerForRequest(s *session.Session, requestID string) (str
 		return "", false, err
 	}
 	defer closeFn()
-	reader := bufio.NewReaderSize(r, 1<<20)
+	var input io.Reader = r
+	if expectedTurn != "" {
+		input = io.LimitReader(r, 64<<20)
+	}
+	reader := bufio.NewReaderSize(input, 1<<20)
+	total := 0
 	currentTurn := ""
 	var answers []string
 	for {
-		line, readErr := reader.ReadBytes('\n')
+		var line []byte
+		var readErr error
+		if expectedTurn != "" {
+			line, readErr = reader.ReadSlice('\n')
+			if errors.Is(readErr, bufio.ErrBufferFull) {
+				return "", false, errors.New("exact final line exceeds bound")
+			}
+		} else {
+			line, readErr = reader.ReadBytes('\n')
+		}
+		total += len(line)
+		if expectedTurn != "" && total >= 64<<20 {
+			return "", false, errors.New("exact final read exceeds bound")
+		}
 		if len(line) > 0 {
 			var row codexHistoryRow
 			if json.Unmarshal(line, &row) == nil {
@@ -70,6 +113,9 @@ func (c *Codex) FinalAnswerForRequest(s *session.Session, requestID string) (str
 					payload := parseCodexHistoryPayload(row.Payload)
 					if payload.Type == "message" && payload.Role == "assistant" && payload.Phase == "final_answer" {
 						if answer := strings.TrimSpace(extractCodexText(payload.Content)); answer != "" {
+							if expectedTurn != "" {
+								return answer, true, nil
+							}
 							answers = append(answers, answer)
 						}
 					}

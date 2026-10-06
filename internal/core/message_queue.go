@@ -228,7 +228,7 @@ func (h *Hub) messageQueueSnapshot(sessionID string) (protocol.MessageQueueSnaps
 		event.Diagnostics = p.RuntimeDiagnostics()
 	}
 	for _, e := range snapshot.Items {
-		event.Items = append(event.Items, protocol.MessageQueueItem{RequestID: e.RequestID, State: string(e.State), Content: e.Content, Sequence: e.Sequence, ImageCount: e.ImageCount, FileNames: e.FileNames, CreatedAt: e.CreatedAt, UpdatedAt: e.UpdatedAt, Message: e.Message, ActiveRequestID: e.ActiveRequestID, TurnID: e.TurnID})
+		event.Items = append(event.Items, protocol.MessageQueueItem{PayloadHash: e.PayloadHash, RequestID: e.RequestID, State: string(e.State), Content: e.Content, Sequence: e.Sequence, ImageCount: e.ImageCount, FileNames: e.FileNames, CreatedAt: e.CreatedAt, UpdatedAt: e.UpdatedAt, Message: e.Message, ActiveRequestID: e.ActiveRequestID, TurnID: e.TurnID})
 	}
 	return event, nil
 }
@@ -306,9 +306,15 @@ func (h *Hub) cancelQueuedMessage(c *Client, cmd clientproto.Command) {
 		h.queueResult(c, cmd, "cancel", "rejected", "Message not found", e)
 		return
 	}
-	payload := h.taskAdmission(e)
-	if payload.OwnerDevice != "" && (h.pairedTaskDevice(c) != payload.OwnerDevice || (e.State != messagequeue.Queued && e.State != messagequeue.Cancelled) || h.queueNativeAcceptance(cmd.SessionID, cmd.RequestID) != "") {
-		h.queueResult(c, cmd, "cancel", "rejected", "Only the original paired device can cancel a confirmed waiting request", e)
+	if cmd.ExpectedRevision != nil {
+		snap, err := h.messageQueue.Snapshot(e.SessionID)
+		if err != nil || snap.Revision != *cmd.ExpectedRevision {
+			h.queueResult(c, cmd, "cancel", "rejected", "Queue revision changed; refresh the original receipt", e)
+			return
+		}
+	}
+	if !h.queueInputCancellable(c, e) {
+		h.queueResult(c, cmd, "cancel", "rejected", "Only a confirmed waiting input owned by this paired device can be cancelled", e)
 		return
 	}
 	if e.State == messagequeue.Cancelled {
@@ -316,32 +322,61 @@ func (h *Hub) cancelQueuedMessage(c *Client, cmd clientproto.Command) {
 		h.publishMessageQueue(cmd.SessionID)
 		return
 	}
-	if e.State != messagequeue.Queued && e.State != messagequeue.Uncertain {
+	if e.State != messagequeue.Queued {
 		h.queueResult(c, cmd, "cancel", "rejected", "Message has already started or is being steered", e)
 		return
 	}
-	finish := func(bool) {}
-	if e.State == messagequeue.Queued {
-		s, ok := h.registry.Get(cmd.SessionID)
-		if !ok {
-			h.queueResult(c, cmd, "cancel", "rejected", "Session not found", e)
-			return
-		}
-		if finish, err = s.ReserveWaiting(cmd.RequestID); err != nil {
-			h.queueResult(c, cmd, "cancel", "rejected", err.Error(), e)
-			return
-		}
-	}
-	e, _, err = h.messageQueue.Transition(cmd.SessionID, cmd.RequestID, []messagequeue.State{messagequeue.Queued, messagequeue.Uncertain}, messagequeue.Cancelled, "", "", "")
-	if err != nil {
-		finish(false)
-		h.queueResult(c, cmd, "cancel", "rejected", "Cancellation could not be saved", e)
+	if err = h.cancelWaitingInput(e, func() bool { return h.queueInputCancellable(c, e) }); err != nil {
+		h.queueResult(c, cmd, "cancel", "rejected", err.Error(), e)
 		return
 	}
-	finish(true)
-	h.updateRuntimeQueueLength(cmd.SessionID, h.sessionQueueLength(cmd.SessionID))
 	h.publishMessageQueue(cmd.SessionID)
 	h.queueResult(c, cmd, "cancel", "accepted", "", e)
+}
+
+// Caller holds messageQueueMu and has passed its own transport-specific policy.
+// This common barrier cannot cancel uncertain, started, steered or consumed work.
+func (h *Hub) cancelWaitingInput(e messagequeue.Entry, canCommit func() bool) error {
+	if e.State != messagequeue.Queued {
+		return errors.New("input is not waiting")
+	}
+	_, accepted, err := h.messageQueue.ExactNativeAcceptance(e.SessionID, e.RequestID)
+	if err != nil || accepted {
+		return errors.New("native acceptance is present or unverified")
+	}
+	s, ok := h.registry.Get(e.SessionID)
+	if !ok {
+		return errors.New("session not found")
+	}
+	if hr, ok := h.exec.(historyRouter); ok {
+		if provider, ok := hr.ProviderFor(s); ok {
+			if reader, ok := provider.(interface {
+				NativeTurnForRequest(*session.Session, string) (string, error)
+			}); ok {
+				turn, err := reader.NativeTurnForRequest(s, e.RequestID)
+				if err != nil || turn != "" {
+					return errors.New("provider native acceptance is present or unavailable")
+				}
+			}
+		}
+	}
+
+	finish, err := s.ReserveWaiting(e.RequestID)
+	if err != nil {
+		return err
+	}
+	if canCommit != nil && !canCommit() {
+		finish(false)
+		return errors.New("input ownership changed")
+	}
+	_, changed, err := h.messageQueue.CancelWaiting(e.SessionID, e.RequestID, e.PayloadHash)
+	if err != nil || !changed {
+		finish(false)
+		return errors.New("waiting cancellation could not be saved")
+	}
+	finish(true)
+	h.updateRuntimeQueueLength(e.SessionID, h.sessionQueueLength(e.SessionID))
+	return nil
 }
 
 func (h *Hub) promoteQueuedMessage(c *Client, cmd clientproto.Command) {

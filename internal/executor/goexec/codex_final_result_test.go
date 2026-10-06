@@ -43,3 +43,40 @@ func TestFinalAnswerForRequestExcludesCommentaryAndOtherTurns(t *testing.T) {
 		t.Fatalf("second answer=%q found=%v err=%v", got, found, err)
 	}
 }
+
+func TestExactQueueFinalPinsOriginalThreadRejectsAmbiguousMappingAndNeverDiscoversFiles(t *testing.T) {
+	c := NewCodex(&capSink{}, "codex")
+	c.dataDir = t.TempDir()
+	c.sessionsRoot = t.TempDir()
+	thread := "01a0ec71-65c0-7c71-aad2-1336d7251333"
+	if err := c.rememberTurnRequest(thread, "exact-turn", "original-request"); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(c.sessionsRoot, "rollout-2026-09-29T17-14-09-"+thread+".jsonl")
+	data := `{"type":"event_msg","payload":{"type":"task_started","turn_id":"exact-turn"}}` + "\n" + `{"type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"Exact original final"}]}}` + "\n"
+	if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if found, err := c.ExactQueueFinal(thread, "original-request", "exact-turn"); found || err == nil {
+		t.Fatal("unindexed runtime file discovered")
+	}
+	// Test-only provider index fixture; no public/runtime discovery operation.
+	c.rolloutRoot = c.sessionsRoot
+	c.rolloutByID = map[string]string{thread: path}
+	if found, err := c.ExactQueueFinal(thread, "original-request", "exact-turn"); !found || err != nil {
+		t.Fatal(found, err)
+	}
+	if found, err := c.ExactQueueFinal(thread, "original-request", "wrong-turn"); found || err == nil {
+		t.Fatal("wrong original native turn accepted")
+	}
+	if err := c.rememberTurnRequest(thread, "duplicate-turn", "original-request"); err != nil {
+		t.Fatal(err)
+	}
+	if found, err := c.ExactQueueFinal(thread, "original-request", "exact-turn"); found || err == nil {
+		t.Fatal("ambiguous map accepted")
+	}
+	s := session.NewRegistry().Create("s", "Task", t.TempDir(), backend.Codex, "", "", thread)
+	if turn, err := c.NativeTurnForRequest(s, "original-request"); turn != "" || err == nil {
+		t.Fatal("ambiguous native consumption accepted")
+	}
+}

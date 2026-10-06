@@ -8,6 +8,7 @@ import (
 	"errors"
 	"everything-go/internal/backend"
 	"everything-go/internal/clientproto"
+	"everything-go/internal/messagequeue"
 	"everything-go/internal/runtime"
 	"everything-go/internal/session"
 	"everything-go/internal/sessiondispatch"
@@ -317,12 +318,31 @@ func (h *Hub) cancelSessionDispatch(ctx context.Context, c backend.SessionContro
 	if r.InstanceID != h.cfg.InstanceID {
 		return h.remoteControllerCancel(ctx, c, r)
 	}
-	e, ok, err := h.messageQueue.Get(r.SessionID, r.RequestID)
-	if err != nil || !ok || string(e.State) != "queued" {
+	// Retain the controller's original caller/grant/thread/revision authority;
+	// never synthesize a paired device to reuse mobile cancellation permissions.
+	g, err := h.dispatches.Grant(ctx, c.Parent.ID)
+	target, ok := h.registry.Get(r.SessionID)
+	if err != nil || !g.Allows(h.cfg.InstanceID, r.InstanceID, r.SessionID) || !ok || !h.controllerInScope(target) || target.Snapshot().Hidden || target.State() == session.Closed || target.ResumeID() != r.ThreadID || target.SettingsSnapshot().ConfigRevision != r.ConfigRevision || !h.controls.MobileMayWrite(target.ID) {
+		return nil, errors.New("controller_target_changed_or_forbidden")
+	}
+	if policy, err := h.PMConfiguration(target.ID); err != nil || policy != nil {
+		return nil, errors.New("controller_managed_target_forbidden")
+	}
+	h.messageQueueMu.Lock()
+	e, found, err := h.messageQueue.Get(r.SessionID, r.RequestID)
+	if err != nil || !found || e.State != messagequeue.Queued {
+		h.messageQueueMu.Unlock()
 		return nil, errors.New("dispatch_not_waiting_cannot_cancel")
 	}
-	client := &Client{hub: h, deviceID: "session-controller", send: make(chan []byte, 64), quit: make(chan struct{}), ctx: ctx}
-	h.cancelQueuedMessage(client, clientproto.Command{Kind: "cancel_queued_message", SessionID: r.SessionID, RequestID: r.RequestID})
+	err = h.cancelWaitingInput(e, func() bool {
+		grant, err := h.dispatches.Grant(ctx, c.Parent.ID)
+		return err == nil && grant.Allows(h.cfg.InstanceID, r.InstanceID, r.SessionID) && h.controllerCaller(c) == nil && h.controls.MobileMayWrite(target.ID) && target.ResumeID() == r.ThreadID && target.SettingsSnapshot().ConfigRevision == r.ConfigRevision && !target.Snapshot().Hidden && target.State() != session.Closed
+	})
+	h.messageQueueMu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	h.publishMessageQueue(r.SessionID)
 	return h.refreshSessionDispatch(ctx, r), nil
 }
 func (h *Hub) StartSessionDispatchScheduler(ctx context.Context) {

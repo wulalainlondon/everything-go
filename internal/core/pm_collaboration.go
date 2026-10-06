@@ -388,7 +388,7 @@ func (h *Hub) rejectPMCommand(c *Client, cmd clientproto.Command) bool {
 	case "new_session", "clear_session", "close_session", "fork_session", "handoff_to_desktop", "codex_goal_set", "codex_goal_clear":
 		c.enqueueEvent(h.client.Error(cmd.SessionID, "pm_managed_session", "Managed project conversations retain their role, policy and history"))
 		return true
-	case "steer_message", "promote_queued_message":
+	case "steer_message", "promote_queued_message", "cancel_queued_message":
 		if task == nil || task.Owner != "human" {
 			h.queueError(c, cmd, "pm_takeover_required", "請先接管工作對話，再修改執行方向。")
 			return true

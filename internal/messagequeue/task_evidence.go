@@ -9,45 +9,79 @@ import (
 	"strings"
 )
 
+var ErrNativeConflict = errors.New("native_acceptance_conflict")
+
+type NativeReceipt struct{ ThreadID, TurnID string }
+
 func (s *Store) RecordNativeAcceptance(session, request, thread, turn string) error {
 	if session == "" || request == "" || thread == "" || turn == "" {
 		return errors.New("invalid native acceptance")
 	}
-	conflicted := false
-	result := s.TaskJournal().Transaction(context.Background(), func(tx *sql.Tx) error {
-		var previousThread, previousTurn string
-		err := tx.QueryRow("SELECT thread_id,turn_id FROM task_native_acceptance WHERE session_id=? AND request_id=?", session, request).Scan(&previousThread, &previousTurn)
+	conflict := false
+	err := s.TaskJournal().Transaction(context.Background(), func(tx *sql.Tx) error {
+		var oldThread, oldTurn string
+		err := tx.QueryRow(`SELECT thread_id,turn_id FROM task_native_acceptance WHERE session_id=? AND request_id=?`, session, request).Scan(&oldThread, &oldTurn)
 		if err == nil {
-			if previousThread != thread || previousTurn != turn {
-				conflicted = true
-				if _, err := tx.Exec("INSERT OR REPLACE INTO task_native_conflicts VALUES(?,?,?,?)", session, request, thread, turn); err != nil {
-					return err
-				}
-				return taskapi.ChangeTx(tx, session, request, "native_conflict")
+			if oldThread == thread && oldTurn == turn {
+				return nil
 			}
-			return nil
+			conflict = true
+			if _, err = tx.Exec(`INSERT OR IGNORE INTO task_native_conflicts(session_id,request_id,thread_id,turn_id) VALUES(?,?,?,?)`, session, request, thread, turn); err != nil {
+				return err
+			}
+			result, err := tx.Exec(`INSERT OR IGNORE INTO task_native_conflict_evidence(session_id,request_id,thread_id,turn_id) VALUES(?,?,?,?)`, session, request, thread, turn)
+			if err != nil {
+				return err
+			}
+			count, err := result.RowsAffected()
+			if err != nil {
+				return err
+			}
+			if count == 0 {
+				return nil
+			}
+			return taskapi.ChangeTx(tx, session, request, "native_conflict")
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
-		if _, err = tx.Exec("INSERT INTO task_native_acceptance VALUES(?,?,?,?)", session, request, thread, turn); err != nil {
+		if _, err = tx.Exec(`INSERT INTO task_native_acceptance(session_id,request_id,thread_id,turn_id) VALUES(?,?,?,?)`, session, request, thread, turn); err != nil {
 			return err
 		}
 		return taskapi.ChangeTx(tx, session, request, "native_acceptance")
 	})
-	if result == nil && conflicted {
-		return errors.New("native_acceptance_conflict")
+	if err == nil && conflict {
+		return ErrNativeConflict
 	}
-	return result
+	return err
+}
+
+// The one-statement view includes native and provider conflicts even if the
+// acceptance tuple is absent. Absence, unavailable and conflict never alias.
+func (s *Store) ExactNativeAcceptance(session, request string) (NativeReceipt, bool, error) {
+	var thread, turn sql.NullString
+	var found, conflict bool
+	err := s.db.QueryRow(`SELECT (SELECT thread_id FROM task_native_acceptance WHERE session_id=?1 AND request_id=?2),(SELECT turn_id FROM task_native_acceptance WHERE session_id=?1 AND request_id=?2),EXISTS(SELECT 1 FROM task_native_acceptance WHERE session_id=?1 AND request_id=?2),EXISTS(SELECT 1 FROM task_native_conflicts WHERE session_id=?1 AND request_id=?2) OR EXISTS(SELECT 1 FROM task_provider_conflicts WHERE session_id=?1 AND request_id=?2)`, session, request).Scan(&thread, &turn, &found, &conflict)
+	if err != nil {
+		return NativeReceipt{}, false, err
+	}
+	if conflict {
+		return NativeReceipt{}, false, ErrNativeConflict
+	}
+	if !found {
+		return NativeReceipt{}, false, nil
+	}
+	if !thread.Valid || !turn.Valid || thread.String == "" || turn.String == "" {
+		return NativeReceipt{}, false, errors.New("invalid canonical native tuple")
+	}
+	return NativeReceipt{thread.String, turn.String}, true, nil
 }
 func (s *Store) NativeAcceptance(session, request, thread string) string {
-	var conflict int
-	if err := s.db.QueryRow("SELECT (SELECT COUNT(*) FROM task_native_conflicts WHERE session_id=?1 AND request_id=?2)+(SELECT COUNT(*) FROM task_provider_conflicts WHERE session_id=?1 AND request_id=?2)", session, request).Scan(&conflict); err != nil || conflict != 0 {
-		return ""
+	out, found, err := s.ExactNativeAcceptance(session, request)
+	if err == nil && found && out.ThreadID == thread {
+		return out.TurnID
 	}
-	var turn string
-	_ = s.db.QueryRow(`SELECT turn_id FROM task_native_acceptance WHERE session_id=? AND request_id=? AND thread_id=?`, session, request, thread).Scan(&turn)
-	return turn
+	return ""
 }
 
 // OriginEntries queries typed admission payloads only, never runtime directories.

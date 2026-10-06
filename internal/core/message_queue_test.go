@@ -41,7 +41,7 @@ func TestConfirmedTerminalReconcilesUncertainQueueItem(t *testing.T) {
 
 func enqueueTestMessage(t *testing.T, h *Hub, c *Client, id string) {
 	t.Helper()
-	route(h, c, `{"type":"message","session_id":"s1","request_id":"`+id+`","content":"`+id+`"}`)
+	route(h, c, `{"type":"message","session_id":"s1","request_id":"`+id+`","message_purpose":"instruction","content":"`+id+`"}`)
 	waitForType(t, c, "message_ack")
 }
 func expectState(t *testing.T, h *Hub, id string, want messagequeue.State) {
@@ -53,7 +53,7 @@ func expectState(t *testing.T, h *Hub, id string, want messagequeue.State) {
 }
 func TestQueuedPromotionIsAtomicAndDeduplicatedAcrossLateAck(t *testing.T) {
 	h, fe := newTestHub(t)
-	c := newTestClient(h)
+	c := sharedReadClient(t, h, "queue-owner")
 	s := h.registry.Create("s1", "test", t.TempDir(), backend.Codex, "", "", "")
 	starts := make(chan string, 4)
 	release := make(chan struct{})
@@ -205,14 +205,14 @@ func TestUncertainPromotionDoesNotAutomaticallyResend(t *testing.T) {
 	}
 	expectState(t, h, "b", messagequeue.Uncertain)
 	route(h, c, `{"type":"cancel_queued_message","session_id":"s1","request_id":"b"}`)
-	if result := waitForType(t, c, "queue_action_result"); result["status"] != "accepted" {
+	if result := waitForType(t, c, "queue_action_result"); result["status"] != "rejected" {
 		t.Fatal(result)
 	}
-	expectState(t, h, "b", messagequeue.Cancelled)
+	expectState(t, h, "b", messagequeue.Uncertain)
 }
 func TestCancelQueuedMessageRemovesOnlyWaitingItem(t *testing.T) {
 	h, fe := newTestHub(t)
-	c := newTestClient(h)
+	c := sharedReadClient(t, h, "queue-owner")
 	s := h.registry.Create("s1", "test", t.TempDir(), backend.Codex, "", "", "")
 	starts := make(chan string, 3)
 	release := make(chan struct{})

@@ -191,6 +191,9 @@
       "type": "queue_action_result"
     },
     {
+      "type": "queue_receipts_reconciled"
+    },
+    {
       "type": "resumable_sessions"
     },
     {
@@ -562,7 +565,13 @@
       "type": "push_file"
     },
     {
+      "type": "read_message_queue"
+    },
+    {
       "type": "reclaim_from_desktop"
+    },
+    {
+      "type": "reconcile_queue_receipts"
     },
     {
       "type": "rename_session"

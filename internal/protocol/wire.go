@@ -1805,6 +1805,7 @@ func NewPermissionResult(requestID, sessionID, action, decision, message string)
 // MessageQueueSnapshot is authoritative for one Session. Revision survives
 // reconnect/restart; attachment bodies stay on the server.
 type MessageQueueItem struct {
+	PayloadHash      string   `json:"payload_hash,omitempty"`
 	FullContent      string   `json:"full_content,omitempty"`
 	ContentTruncated bool     `json:"content_truncated,omitempty"`
 	RequestID        string   `json:"request_id"`
@@ -1818,6 +1819,27 @@ type MessageQueueItem struct {
 	Message          string   `json:"message,omitempty"`
 	ActiveRequestID  string   `json:"active_request_id,omitempty"`
 	TurnID           string   `json:"turn_id,omitempty"`
+}
+type QueueReceiptEvidence struct {
+	RequestID      string `json:"request_id"`
+	PayloadHash    string `json:"payload_hash"`
+	Admission      string `json:"admission"`
+	Delivery       string `json:"delivery"`
+	Execution      string `json:"execution"`
+	Final          string `json:"final"`
+	NativeThreadID string `json:"native_thread_id,omitempty"`
+	NativeTurnID   string `json:"native_turn_id,omitempty"`
+	Reason         string `json:"reason,omitempty"`
+	CanCancel      bool   `json:"can_cancel"`
+}
+type QueueReceiptsReconciled struct {
+	Type       string                 `json:"type"`
+	SessionID  string                 `json:"session_id"`
+	RequestID  string                 `json:"request_id"`
+	InstanceID string                 `json:"instance_id"`
+	Revision   uint64                 `json:"revision"`
+	Status     string                 `json:"status"`
+	Receipts   []QueueReceiptEvidence `json:"receipts"`
 }
 type MessageQueueSnapshot struct {
 	DetailRequestID string             `json:"detail_request_id,omitempty"`

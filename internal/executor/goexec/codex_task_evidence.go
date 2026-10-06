@@ -1,6 +1,9 @@
 package goexec
 
-import "everything-go/internal/session"
+import (
+	"errors"
+	"everything-go/internal/session"
+)
 
 func (c *Codex) NativeTurnForRequest(s *session.Session, request string) (string, error) {
 	c.historyRequestMu.Lock()
@@ -9,10 +12,14 @@ func (c *Codex) NativeTurnForRequest(s *session.Session, request string) (string
 	if err != nil {
 		return "", err
 	}
+	found := ""
 	for turn, id := range r.Requests {
 		if id == request {
-			return turn, nil
+			if found != "" && found != turn {
+				return "", errors.New("ambiguous native request mapping")
+			}
+			found = turn
 		}
 	}
-	return "", nil
+	return found, nil
 }
