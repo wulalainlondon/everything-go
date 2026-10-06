@@ -331,3 +331,31 @@ func TestTaskLegacyAndReturnFinalsAreNotIndependentUserResults(t *testing.T) {
 		}
 	}
 }
+
+func TestTaskTypedPhotoAndFloatingReceiptsTrackWithoutChangingOriginalIDs(t *testing.T) {
+	for _, id := range []string{"photo_original123", "floating_original123"} {
+		t.Run(id, func(t *testing.T) {
+			h, _ := newTestHub(t)
+			s := h.registry.Create("s1", "same", t.TempDir(), backend.Codex, "", "", "")
+			s.SetResumeID("thread")
+			owner := sharedReadClient(t, h, "owner")
+			entry := taskEntry(t, h, s.ID, id, "owner", messagequeue.Queued)
+			h.sendSessionTasks(owner, clientproto.Command{SessionID: s.ID, RequestID: "queued-read"})
+			snapshot := waitForType(t, owner, "session_tasks_snapshot")
+			if len(snapshot["items"].([]any)) != 1 || snapshot["items"].([]any)[0].(map[string]any)["request_id"] != id {
+				t.Fatal(snapshot)
+			}
+			h.messageQueue.Transition(s.ID, id, []messagequeue.State{messagequeue.Queued}, messagequeue.Running, "", "", "")
+			h.Emit(backend.NativeTaskAccepted{SessionID: s.ID, RequestID: id, ThreadID: "thread", TurnID: "native-photo"})
+			entry, _, _ = h.messageQueue.Get(s.ID, id)
+			if got := h.projectSessionTask(s, entry, "owner", nil); got.State != "consumed" {
+				t.Fatal(got)
+			}
+			entry, _, _ = h.messageQueue.Transition(s.ID, id, []messagequeue.State{messagequeue.Running}, messagequeue.Completed, "", "", "")
+			final := map[string]map[string]any{id: {"source_message_id": "native-final", "source_turn_id": "native-photo", "content": "Actual final"}}
+			if got := h.projectSessionTask(s, entry, "owner", final); got.State != "completed" || got.RequestID != id {
+				t.Fatal(got)
+			}
+		})
+	}
+}

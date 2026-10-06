@@ -68,7 +68,7 @@ func (h *Hub) nativeTaskTurn(s *session.Session, request string) string {
 	return ""
 }
 func taskRequest(request string) bool {
-	return strings.HasPrefix(request, "r_") || strings.HasPrefix(request, "scjob_")
+	return strings.HasPrefix(request, "r_") || strings.HasPrefix(request, "scjob_") || strings.HasPrefix(request, "photo_") || strings.HasPrefix(request, "floating_")
 }
 func (h *Hub) projectSessionTask(s *session.Session, e messagequeue.Entry, owner string, finals map[string]map[string]any) protocol.SessionTask {
 	payload := h.taskAdmission(e)
