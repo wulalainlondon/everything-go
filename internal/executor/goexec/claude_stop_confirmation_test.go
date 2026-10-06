@@ -2,13 +2,65 @@ package goexec
 
 import (
 	"context"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"everything-go/internal/protocol"
 	"everything-go/internal/session"
 )
+
+func TestClaudeStopLetsWrapperReapItsOwnedChild(t *testing.T) {
+	dir := t.TempDir()
+	childFile := filepath.Join(dir, "child.pid")
+	wrapper := filepath.Join(dir, "claude-wrapper")
+	script := "#!/bin/bash\ncleanup() { kill \"$CHILD\" 2>/dev/null || true; wait \"$CHILD\" 2>/dev/null || true; exit 0; }\ntrap cleanup INT TERM EXIT\nsleep 60 &\nCHILD=$!\necho \"$CHILD\" > \"" + childFile + "\"\nwait \"$CHILD\"\n"
+	if err := os.WriteFile(wrapper, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	sink := &capSink{}
+	c := NewClaude(sink, wrapper)
+	s := session.NewRegistry().Create("qa-wrapper", "QA", dir, "claude", "sonnet", "read-only", "")
+	c.mu.Lock()
+	p, err := c.spawn(s)
+	if err == nil {
+		c.procs[s.ID] = p
+		p.beginTurn("r_wrapper_stop", false)
+	}
+	c.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.cancel()
+	var pid int
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(childFile)
+		if err == nil {
+			pid, _ = strconv.Atoi(strings.TrimSpace(string(data)))
+			if pid > 0 {
+				break
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if pid <= 0 {
+		t.Fatal("wrapper child did not start")
+	}
+	child, _ := os.FindProcess(pid)
+	defer child.Kill() // only this test's isolated child if the regression occurs
+	if err := c.Stop(context.Background(), s); err != nil {
+		t.Fatal(err)
+	}
+	if err := child.Signal(syscall.Signal(0)); err == nil {
+		t.Fatal("wrapper exited but its owned child still runs; cleanup trap was bypassed")
+	}
+}
 
 func TestClaudeStopFailureKeepsProcessBindingAndEmitsNoTerminal(t *testing.T) {
 	sink := &capSink{}

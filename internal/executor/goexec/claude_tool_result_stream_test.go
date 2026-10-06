@@ -132,3 +132,29 @@ func TestClaudeReadOnlyFableKeepsPolicyAndAllowsOnlyBridgeQuestionBroker(t *test
 		t.Fatal("Fable alias bypassed the sandbox policy")
 	}
 }
+
+func TestClaudeOversizedStreamFrameFailsExactRequestWithoutDoneOrReplay(t *testing.T) {
+	sink := &capSink{}
+	c := NewClaude(sink, "claude")
+	s := session.NewRegistry().Create("qa", "QA", t.TempDir(), "claude", "sonnet", "read-only", "")
+	cancelled := false
+	p := &proc{reqID: "r_oversize", tools: newToolNormalizer(sink, c), cancel: func() { cancelled = true }}
+	c.readStdout(s, p, strings.NewReader(strings.Repeat("x", maxLine+1)+"\n"))
+	if !cancelled || p.currentReqID() != "" {
+		t.Fatal("unreadable stream left request/process active")
+	}
+	var failures int
+	for _, event := range sink.events {
+		switch e := event.(type) {
+		case backend.Error:
+			if e.RequestID == "r_oversize" && e.Code == "claude_stream_read_failed" {
+				failures++
+			}
+		case backend.Done, backend.CompletedAnswer:
+			t.Fatal("unreadable stream was reported as complete")
+		}
+	}
+	if failures != 1 {
+		t.Fatal("missing exact correlated stream failure")
+	}
+}

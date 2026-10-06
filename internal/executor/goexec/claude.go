@@ -399,6 +399,16 @@ func (c *Claude) spawn(s *session.Session) (*proc, error) {
 	}
 
 	cmd := exec.CommandContext(ctx, c.claudeBin, args...)
+	// Give a CLI wrapper its normal signal/cleanup path before escalating.
+	// CommandContext's default SIGKILL skips shell traps and can orphan tools.
+	cmd.Cancel = func() error {
+		if err := cmd.Process.Signal(os.Interrupt); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			return cmd.Process.Kill()
+		} else {
+			return err
+		}
+	}
+	cmd.WaitDelay = 3 * time.Second
 	if snap.Cwd != "" {
 		// Expand "~"/"~/..." like Python's os.path.expanduser before chdir;
 		// the app sends "~" as the default cwd and exec won't expand it.
@@ -758,6 +768,16 @@ func (c *Claude) readStdout(s *session.Session, p *proc, stdout interface{ Read(
 				}
 				c.sink.Emit(backend.NewSessionInitInfo(s.ID, evt.Model, evt.PermissionMd, evt.Tools, evt.SlashCmds, servers))
 			}
+		}
+	}
+	if err := sc.Err(); err != nil {
+		reqID, wasCompact := p.finishTurn()
+		p.cancel()
+		if wasCompact {
+			c.sink.Emit(backend.NewSessionCommandFailed(s.ID, reqID, "Claude output stream could not be read", 0))
+		}
+		if reqID != "" {
+			c.sink.Emit(backend.NewError(s.ID, reqID, "claude_stream_read_failed", "Claude output stream exceeded the supported frame size or could not be read; the request was stopped without replay."))
 		}
 	}
 	// stdout closed → process gone
