@@ -147,7 +147,7 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 			}
 		}
 		if !c.enrollmentOnly && h.messageQueue != nil {
-			helloInput.Capabilities = append(helloInput.Capabilities, "message_queue_v1", "queue_message_detail_v1")
+			helloInput.Capabilities = append(helloInput.Capabilities, "message_queue_v1", "queue_message_detail_v1", "session_tasks_v1")
 		}
 		if !c.enrollmentOnly && h.dispatches != nil {
 			helloInput.Capabilities = append(helloInput.Capabilities, "session_controller_v1")
@@ -389,6 +389,8 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 
 	case "message":
 		h.enqueueChatMessage(c, cmd)
+	case "request_session_tasks":
+		go h.sendSessionTasks(c, cmd)
 	case "request_message_queue":
 		go h.reconcileMaintenance(cmd.SessionID, false)
 		h.sendMessageQueue(c, cmd)

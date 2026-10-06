@@ -22,6 +22,8 @@ import (
 type queuedPayload struct {
 	ExpectedTarget *dispatchTargetExpectation `json:"expected_target,omitempty"`
 	Configuration  *session.Configuration     `json:"configuration,omitempty"`
+	OwnerDevice    string                     `json:"owner_device,omitempty"`
+	Origin         *protocol.TaskOrigin       `json:"task_origin,omitempty"`
 	Content        string                     `json:"content"`
 	Images         []backend.ImageAttachment  `json:"images,omitempty"`
 	Files          []backend.FileAttachment   `json:"files,omitempty"`
@@ -33,6 +35,13 @@ func (h *Hub) queueError(c *Client, cmd clientproto.Command, code, message strin
 }
 
 func (h *Hub) enqueueChatMessage(c *Client, cmd clientproto.Command) bool {
+	if cmd.TaskOrigin != nil {
+		if cmd.TaskTarget == nil || cmd.TaskTarget.ThreadID == "" {
+			h.queueError(c, cmd, "task_target_required", "A typed origin requires the frozen target thread and configuration")
+			return false
+		}
+		return h.enqueueChatMessageExpected(c, cmd, &dispatchTargetExpectation{ThreadID: cmd.TaskTarget.ThreadID, Revision: cmd.TaskTarget.ConfigRevision})
+	}
 	return h.enqueueChatMessageExpected(c, cmd, nil)
 }
 
@@ -74,13 +83,18 @@ func (h *Hub) enqueueChatMessageExpected(c *Client, cmd clientproto.Command, exp
 		h.queueError(c, cmd, "dispatch_target_changed", "Target thread or configuration changed; refresh before dispatching")
 		return false
 	}
-	intent, err := json.Marshal(queuedPayload{Content: content, Images: cmd.Images, Files: files, ExpectedTarget: expected})
+	owner, admissionErr := h.admitTaskOrigin(c, cmd)
+	if admissionErr != nil {
+		h.queueError(c, cmd, "task_origin_rejected", admissionErr.Error())
+		return false
+	}
+	intent, err := json.Marshal(queuedPayload{Origin: cmd.TaskOrigin, Content: content, Images: cmd.Images, Files: files, ExpectedTarget: expected})
 	if err != nil {
 		h.queueError(c, cmd, "invalid_message", err.Error())
 		return false
 	}
 	intentHash := sha256.Sum256(intent)
-	payload, err := json.Marshal(queuedPayload{Content: content, Images: cmd.Images, Files: files, Configuration: &config, ExpectedTarget: expected})
+	payload, err := json.Marshal(queuedPayload{OwnerDevice: owner, Origin: cmd.TaskOrigin, Content: content, Images: cmd.Images, Files: files, Configuration: &config, ExpectedTarget: expected})
 	if err != nil {
 		h.queueError(c, cmd, "invalid_message", err.Error())
 		return false
@@ -283,6 +297,11 @@ func (h *Hub) cancelQueuedMessage(c *Client, cmd clientproto.Command) {
 	e, found, err := h.messageQueue.Get(cmd.SessionID, cmd.RequestID)
 	if err != nil || !found {
 		h.queueResult(c, cmd, "cancel", "rejected", "Message not found", e)
+		return
+	}
+	payload := h.taskAdmission(e)
+	if payload.OwnerDevice != "" && (h.pairedTaskDevice(c) != payload.OwnerDevice || (e.State != messagequeue.Queued && e.State != messagequeue.Cancelled) || h.queueNativeAcceptance(cmd.SessionID, cmd.RequestID) != "") {
+		h.queueResult(c, cmd, "cancel", "rejected", "Only the original paired device can cancel a confirmed waiting request", e)
 		return
 	}
 	if e.State == messagequeue.Cancelled {

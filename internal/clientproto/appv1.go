@@ -51,6 +51,9 @@ type Command struct {
 	ModelSet        bool
 	Sandbox         string
 	ResumeClaudeID  string
+	TaskRequestIDs  []string
+	TaskTarget      *protocol.TaskTarget
+	TaskOrigin      *protocol.TaskOrigin
 	Content         string
 	UploadRequestID string
 	UploadID        string
@@ -203,6 +206,9 @@ func (AppV1) ParseCommand(in protocol.Inbound) Command {
 		ModelSet:        in.ModelSet,
 		Sandbox:         in.Sandbox,
 		ResumeClaudeID:  in.ResumeClaudeID,
+		TaskRequestIDs:  in.TaskRequestIDs,
+		TaskTarget:      in.TaskTarget,
+		TaskOrigin:      in.TaskOrigin,
 		Content:         in.Content,
 		UploadRequestID: in.UploadRequestID,
 		UploadID:        in.UploadID,

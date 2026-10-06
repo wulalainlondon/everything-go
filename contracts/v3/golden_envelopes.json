@@ -278,6 +278,9 @@
       "type": "session_switched"
     },
     {
+      "type": "session_tasks_snapshot"
+    },
+    {
       "type": "session_unread"
     },
     {
@@ -599,6 +602,9 @@
     },
     {
       "type": "request_session_recap"
+    },
+    {
+      "type": "request_session_tasks"
     },
     {
       "type": "request_sessions_list"

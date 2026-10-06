@@ -2781,6 +2781,7 @@ func (c *Codex) startTurn(threadID string, input []map[string]any, snap session.
 		}
 		if decodeErr == nil && response.Turn.ID != "" {
 			c.confirmOwnedTurnSubmission(st, threadID, requestID, response.Turn)
+			c.sink.Emit(backend.NativeTaskAccepted{SessionID: snap.ID, RequestID: requestID, ThreadID: threadID, TurnID: response.Turn.ID})
 		}
 	}
 	return err

@@ -1,0 +1,210 @@
+package core
+
+import (
+	"context"
+	"encoding/json"
+	"everything-go/internal/history"
+	"everything-go/internal/session"
+	"github.com/coder/websocket"
+	"testing"
+	"time"
+
+	"everything-go/internal/backend"
+	"everything-go/internal/clientproto"
+	"everything-go/internal/messagequeue"
+	"everything-go/internal/protocol"
+	"everything-go/internal/sessiondispatch"
+)
+
+func taskEntry(t *testing.T, h *Hub, session, request, owner string, state messagequeue.State) messagequeue.Entry {
+	t.Helper()
+	payload, _ := json.Marshal(queuedPayload{OwnerDevice: owner, Content: request})
+	e, _, err := h.messageQueue.Enqueue(messagequeue.Entry{SessionID: session, RequestID: request, Content: request, Payload: payload})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state != messagequeue.Queued {
+		e, _, err = h.messageQueue.Transition(session, request, []messagequeue.State{messagequeue.Queued}, state, "", "", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	return e
+}
+func TestTaskProjectionRequiresNativeConsumptionAndExactFinalAnchor(t *testing.T) {
+	h, _ := newTestHub(t)
+	s := h.registry.Create("s1", "same", t.TempDir(), backend.Codex, "", "", "")
+	s.SetResumeID("thread")
+	e := taskEntry(t, h, s.ID, "r_request1", "owner", messagequeue.Running)
+	if got := h.projectSessionTask(s, e, "owner", nil); got.State != "handoff_unknown" || got.CanCancel {
+		t.Fatalf("actor running became native acceptance: %+v", got)
+	}
+	h.Emit(backend.NativeTaskAccepted{SessionID: s.ID, RequestID: e.RequestID, ThreadID: "thread", TurnID: "native1"})
+	if got := h.projectSessionTask(s, e, "owner", nil); got.State != "consumed" || got.NativeTurnID != "native1" {
+		t.Fatalf("acceptance missing: %+v", got)
+	}
+	e, _, _ = h.messageQueue.Transition(s.ID, e.RequestID, []messagequeue.State{messagequeue.Running}, messagequeue.Completed, "", "", "")
+	if got := h.projectSessionTask(s, e, "owner", nil); got.State != "completed_unanchored" {
+		t.Fatal(got)
+	}
+	finals := map[string]map[string]any{"r_other": {"source_message_id": "wrong", "content": "DONE"}}
+	if got := h.projectSessionTask(s, e, "owner", finals); got.State != "completed_unanchored" {
+		t.Fatal("another turn substituted", got)
+	}
+	finals[e.RequestID] = map[string]any{"source_message_id": "native-final-1", "source_turn_id": "native1", "content": "Actual final"}
+	if got := h.projectSessionTask(s, e, "owner", finals); got.State != "completed" || got.SourceMessageID != "native-final-1" {
+		t.Fatal(got)
+	}
+}
+func TestTaskOriginRejectsFalseOwnerMissingGrantWrongSourceAndPeer(t *testing.T) {
+	h, _, caller, target := controllerFixture(t)
+	owner := sharedReadClient(t, h, "owner")
+	other := sharedReadClient(t, h, "other")
+	source := caller.Parent
+	taskEntry(t, h, source.ID, "r_parent123", "owner", messagequeue.Running)
+	h.Emit(backend.NativeTaskAccepted{SessionID: source.ID, RequestID: "r_parent123", ThreadID: source.ResumeID(), TurnID: "parent-native"})
+	origin := &protocol.TaskOrigin{InstanceID: h.cfg.InstanceID, SessionID: source.ID, ThreadID: source.ResumeID(), ConfigRevision: source.SettingsSnapshot().ConfigRevision, RequestID: "r_parent123"}
+	cmd := clientproto.Command{SessionID: target.ID, TaskOrigin: origin}
+	if _, err := h.admitTaskOrigin(owner, cmd); err == nil {
+		t.Fatal("missing grant admitted")
+	}
+	h.dispatches.SetGrant(context.Background(), source.ID, sessiondispatch.Grant{Enabled: true, Local: true}, 0)
+	if _, err := h.admitTaskOrigin(other, cmd); err == nil {
+		t.Fatal("false owner admitted")
+	}
+	if got, err := h.admitTaskOrigin(owner, cmd); err != nil || got != "owner" {
+		t.Fatal(got, err)
+	}
+	origin.InstanceID = "other-instance"
+	if _, err := h.admitTaskOrigin(owner, cmd); err == nil {
+		t.Fatal("foreign origin accepted")
+	}
+	origin.InstanceID = h.cfg.InstanceID
+	origin.ThreadID = "wrong"
+	if _, err := h.admitTaskOrigin(owner, cmd); err == nil {
+		t.Fatal("wrong thread accepted")
+	}
+}
+func TestTaskCancelRejectsAnotherDeviceUnknownAndLateNativeAcceptance(t *testing.T) {
+	h, _ := newTestHub(t)
+	s := h.registry.Create("s1", "same", t.TempDir(), backend.Codex, "", "", "")
+	s.SetResumeID("thread")
+	owner := sharedReadClient(t, h, "owner")
+	other := sharedReadClient(t, h, "other")
+	taskEntry(t, h, s.ID, "r_unknown1", "owner", messagequeue.Uncertain)
+	cmd := clientproto.Command{Kind: "cancel_queued_message", SessionID: s.ID, RequestID: "r_unknown1"}
+	h.cancelQueuedMessage(owner, cmd)
+	if waitForType(t, owner, "queue_action_result")["status"] != "rejected" {
+		t.Fatal("unknown cancelled")
+	}
+	taskEntry(t, h, s.ID, "r_waiting1", "owner", messagequeue.Queued)
+	cmd.RequestID = "r_waiting1"
+	h.cancelQueuedMessage(other, cmd)
+	if waitForType(t, other, "queue_action_result")["status"] != "rejected" {
+		t.Fatal("other device cancelled")
+	}
+	h.Emit(backend.NativeTaskAccepted{SessionID: s.ID, RequestID: cmd.RequestID, ThreadID: "thread", TurnID: "late-native"})
+	h.cancelQueuedMessage(owner, cmd)
+	if waitForType(t, owner, "queue_action_result")["status"] != "rejected" {
+		t.Fatal("late accepted cancelled")
+	}
+}
+func TestTaskReadEmptyUnsupportedForbiddenAndNoUnrelatedBusyChildren(t *testing.T) {
+	h, _ := newTestHub(t)
+	s := h.registry.Create("s1", "same", t.TempDir(), backend.Ollama, "", "", "")
+	owner := sharedReadClient(t, h, "owner")
+	h.registry.Create("other", "same", t.TempDir(), backend.Codex, "", "", "")
+	h.sendSessionTasks(owner, clientproto.Command{SessionID: s.ID, RequestID: "read1"})
+	event := waitForType(t, owner, "session_tasks_snapshot")
+	if event["status"] != "supported" || len(event["items"].([]any)) != 0 || len(event["children"].([]any)) != 0 || event["history_status"] != "unsupported" {
+		t.Fatal(event)
+	}
+	unknown := newTestClient(h)
+	h.sendSessionTasks(unknown, clientproto.Command{SessionID: s.ID, RequestID: "read2"})
+	if waitForType(t, unknown, "session_tasks_snapshot")["status"] != "forbidden" {
+		t.Fatal("unpaired read accepted")
+	}
+}
+func TestTaskScopePreservesPeerTargetAndOrigin(t *testing.T) {
+	raw := []byte(`{"type":"session_tasks_snapshot","session_id":"parent","children":[{"instance_id":"peer","session_id":"same","origin":{"instance_id":"local","session_id":"parent"}}]}`)
+	out, err := scopeSessionIDsJSON(raw, "local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var event map[string]any
+	json.Unmarshal(out, &event)
+	child := event["children"].([]any)[0].(map[string]any)
+	if child["session_id"] != "sk1:peer:same" || child["origin"].(map[string]any)["session_id"] != "sk1:local:parent" {
+		t.Fatal(string(out))
+	}
+}
+
+func TestTaskAuthenticatedWSQueuedConsumedAndCompletedAnchor(t *testing.T) {
+	h, fe := newTestHub(t)
+	if err := h.pairing.Claim("qa-read-ws-owner", "ws-owner"); err != nil {
+		t.Fatal(err)
+	}
+	s := h.registry.Create("s1", "Task", t.TempDir(), backend.Codex, "", "read-only", "")
+	s.SetResumeID("thread")
+	provider := &floatingHistoryProvider{byResume: map[string][]map[string]any{"thread": {}}}
+	h.SetExecutor(&floatingHistoryExec{fakeExec: fe, provider: provider})
+	started := make(chan struct{})
+	accept := make(chan struct{})
+	finish := make(chan struct{})
+	fe.onSend = func(s *session.Session, id, text string) {
+		close(started)
+		<-accept
+		h.Emit(backend.NativeTaskAccepted{SessionID: s.ID, RequestID: id, ThreadID: "thread", TurnID: "native-turn"})
+		<-finish
+		h.Emit(protocol.NewDone(s.ID, id))
+	}
+	conn, ctx, cleanup := dialWS(t, h)
+	defer cleanup()
+	write := func(raw string) {
+		if err := conn.Write(ctx, websocket.MessageText, []byte(raw)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	readType := func(kind string) map[string]any {
+		for {
+			e := readEvent(t, ctx, conn)
+			if e["type"] == kind {
+				return e
+			}
+		}
+	}
+	write(`{"type":"hello","device_id":"ws-owner","auth_token":"qa-read-ws-owner","protocol_version":3,"session_read_sync":true}`)
+	readType("hello_ack")
+	write(`{"type":"message","session_id":"s1","request_id":"r_wsoriginal123","content":"fixture task"}`)
+	readType("message_ack")
+	<-started
+	write(`{"type":"request_session_tasks","session_id":"s1","request_id":"read1"}`)
+	e := readType("session_tasks_snapshot")
+	item := e["items"].([]any)[0].(map[string]any)
+	if e["session_id"] != "sk1:i1:s1" || item["state"] != "handoff_unknown" {
+		t.Fatal(e)
+	}
+	close(accept)
+	for h.messageQueue.NativeAcceptance(s.ID, "r_wsoriginal123", "thread") == "" {
+		time.Sleep(time.Millisecond)
+	}
+	write(`{"type":"request_session_tasks","session_id":"s1","request_id":"read2"}`)
+	e = readType("session_tasks_snapshot")
+	if e["items"].([]any)[0].(map[string]any)["state"] != "consumed" {
+		t.Fatal(e)
+	}
+	// A fixture final enters through the real HistoryProvider, not a ledger edit.
+	m := history.CompleteMsg("codex", "thread", "final-source", "assistant", "Actual final", 1000, nil)
+	m["request_id"] = "r_wsoriginal123"
+	m["source_turn_id"] = "native-turn"
+	m["history_read_result_verified"] = true
+	provider.byResume["thread"] = []map[string]any{m}
+	close(finish)
+	readType("done")
+	write(`{"type":"request_session_tasks","session_id":"s1","request_id":"read3"}`)
+	e = readType("session_tasks_snapshot")
+	item = e["items"].([]any)[0].(map[string]any)
+	if item["state"] != "completed" || item["source_message_id"] != "final-source" {
+		t.Fatal(e)
+	}
+}

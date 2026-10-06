@@ -26,6 +26,11 @@ func scopeSessionValue(value any, authorityInstanceID, parentType string) bool {
 		}
 		return changed
 	case map[string]any:
+		if parentType == "session_task" || parentType == "task_origin" {
+			if instance, ok := typed["instance_id"].(string); ok && instance != "" {
+				authorityInstanceID = instance
+			}
+		}
 		typeName, _ := typed["type"].(string)
 		changed := false
 		if versionedPayload(typeName) {
@@ -75,6 +80,12 @@ func scopeSessionValue(value any, authorityInstanceID, parentType string) bool {
 				continue
 			}
 			childParent := ""
+			if typeName == "session_tasks_snapshot" && (key == "items" || key == "children") {
+				childParent = "session_task"
+			}
+			if parentType == "session_task" && key == "origin" {
+				childParent = "task_origin"
+			}
 			if key == "sessions" && (typeName == "sessions_list" || typeName == "sessions_list_append") {
 				childParent = typeName
 			}

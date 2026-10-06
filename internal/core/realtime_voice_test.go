@@ -81,6 +81,7 @@ func TestVoiceUsesRegistryNativeThreadAndOnlyOwningClientCanStop(t *testing.T) {
 	}
 	route(h, c, `{"type":"codex_voice_stop","session_id":"one","request_id":"request-stop","voice_id":"voice-one"}`)
 	nextVoiceState(t, c, "closed")
+	nextVoiceState(t, c, "closed") // Executor callback and gateway closure are distinct events.
 	if f.stops.Load() != 1 || f.cancels.Load() != 0 {
 		t.Fatal("voice stop cancelled development or repeated")
 	}
@@ -94,6 +95,8 @@ func TestDisconnectStopsOnlyOwnedVoice(t *testing.T) {
 	route(h, c, `{"type":"codex_voice_start","session_id":"one","request_id":"request-one","voice_id":"voice-one","sdp":"v=0\r\n"}`)
 	nextVoiceState(t, c, "answer")
 	h.cleanupClientVoice(c)
+	nextVoiceState(t, c, "closed") // Executor callback.
+	nextVoiceState(t, c, "closed") // Join the gateway stop goroutine before the following frame-log test.
 	deadline := time.Now().Add(time.Second)
 	for f.stops.Load() == 0 && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)

@@ -500,6 +500,15 @@ func (h *Hub) connectedDeviceIDs(exclude string) []string {
 // event for replay on the next reconnect (the offline-recovery path). Safe for
 // concurrent use.
 func (h *Hub) Emit(event any) {
+	if accepted, ok := event.(backend.NativeTaskAccepted); ok {
+		if h.messageQueue != nil {
+			if err := h.messageQueue.RecordNativeAcceptance(accepted.SessionID, accepted.RequestID, accepted.ThreadID, accepted.TurnID); err != nil {
+				log.Printf("[tasks] native acceptance persistence failed: %v", err)
+			}
+		}
+		return
+	}
+
 	if answer, ok := event.(backend.CompletedAnswer); ok {
 		if h.dispatches != nil {
 			_ = h.dispatches.SealResult(context.Background(), answer.SessionID, answer.RequestID, answer.Text)

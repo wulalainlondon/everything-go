@@ -79,6 +79,9 @@ func Open(dataDir string) (*Store, error) {
  active_request_id TEXT NOT NULL DEFAULT '', turn_id TEXT NOT NULL DEFAULT '',
  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, payload BLOB NOT NULL, UNIQUE(session_id, request_id));
  CREATE INDEX IF NOT EXISTS queue_pending ON queue_commands(session_id, state, seq);
+ CREATE TABLE IF NOT EXISTS task_admissions (session_id TEXT NOT NULL, request_id TEXT NOT NULL, origin_instance TEXT NOT NULL, origin_session TEXT NOT NULL, metadata BLOB NOT NULL, PRIMARY KEY(session_id,request_id));
+ CREATE INDEX IF NOT EXISTS task_origin ON task_admissions(origin_instance,origin_session);
+ CREATE TABLE IF NOT EXISTS task_native_acceptance (session_id TEXT NOT NULL, request_id TEXT NOT NULL, thread_id TEXT NOT NULL, turn_id TEXT NOT NULL, PRIMARY KEY(session_id,request_id));
  CREATE TABLE IF NOT EXISTS queue_rejections (session_id TEXT NOT NULL, request_id TEXT NOT NULL, reason TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(session_id,request_id));`); err != nil {
 		db.Close()
 		return nil, err
@@ -167,6 +170,9 @@ func (s *Store) Enqueue(e Entry) (Entry, bool, error) {
 	now := time.Now().UnixMilli()
 	_, err = tx.Exec(`INSERT INTO queue_commands(session_id,request_id,state,content,image_count,file_names,payload,payload_hash,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, e.SessionID, e.RequestID, Queued, e.Content, e.ImageCount, string(names), e.Payload, hashText, now, now)
 	if err != nil {
+		return Entry{}, false, err
+	}
+	if err = saveTaskAdmission(tx, e); err != nil {
 		return Entry{}, false, err
 	}
 	if err = bump(tx, e.SessionID); err != nil {
