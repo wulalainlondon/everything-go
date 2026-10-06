@@ -326,7 +326,7 @@ func (h *Hub) cancelQueuedMessage(c *Client, cmd clientproto.Command) {
 		h.queueResult(c, cmd, "cancel", "rejected", "Message has already started or is being steered", e)
 		return
 	}
-	if err = h.cancelWaitingInput(e, func() bool { return h.queueInputCancellable(c, e) }); err != nil {
+	if err = h.cancelWaitingInput(e, cmd.ExpectedRevision, func() bool { return h.queueInputCancellable(c, e) }); err != nil {
 		h.queueResult(c, cmd, "cancel", "rejected", err.Error(), e)
 		return
 	}
@@ -336,9 +336,16 @@ func (h *Hub) cancelQueuedMessage(c *Client, cmd clientproto.Command) {
 
 // Caller holds messageQueueMu and has passed its own transport-specific policy.
 // This common barrier cannot cancel uncertain, started, steered or consumed work.
-func (h *Hub) cancelWaitingInput(e messagequeue.Entry, canCommit func() bool) error {
+func (h *Hub) cancelWaitingInput(e messagequeue.Entry, expectedRevision *uint64, canCommit func() bool) error {
 	if e.State != messagequeue.Queued {
 		return errors.New("input is not waiting")
+	}
+	if expectedRevision == nil {
+		snap, err := h.messageQueue.Snapshot(e.SessionID)
+		if err != nil {
+			return err
+		}
+		expectedRevision = &snap.Revision
 	}
 	_, accepted, err := h.messageQueue.ExactNativeAcceptance(e.SessionID, e.RequestID)
 	if err != nil || accepted {
@@ -369,7 +376,7 @@ func (h *Hub) cancelWaitingInput(e messagequeue.Entry, canCommit func() bool) er
 		finish(false)
 		return errors.New("input ownership changed")
 	}
-	_, changed, err := h.messageQueue.CancelWaiting(e.SessionID, e.RequestID, e.PayloadHash)
+	_, changed, err := h.messageQueue.CancelWaiting(e.SessionID, e.RequestID, e.PayloadHash, expectedRevision)
 	if err != nil || !changed {
 		finish(false)
 		return errors.New("waiting cancellation could not be saved")

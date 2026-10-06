@@ -395,13 +395,17 @@ func (s *Store) Recover() error {
 // CancelWaiting is an atomic CAS in the canonical receipt store. Native proof
 // arriving before this transaction wins; arriving later remains independently
 // readable and never implies native interruption or receipt completion.
-func (s *Store) CancelWaiting(sessionID, requestID, payloadHash string) (Entry, bool, error) {
+func (s *Store) CancelWaiting(sessionID, requestID, payloadHash string, expectedRevision *uint64) (Entry, bool, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return Entry{}, false, err
 	}
 	defer tx.Rollback()
-	result, err := tx.Exec(`UPDATE queue_commands SET state='cancelled',updated_at=?,payload=X'' WHERE session_id=? AND request_id=? AND state='queued' AND payload_hash=? AND NOT EXISTS(SELECT 1 FROM task_native_acceptance n WHERE n.session_id=queue_commands.session_id AND n.request_id=queue_commands.request_id) AND NOT EXISTS(SELECT 1 FROM task_native_conflicts n WHERE n.session_id=queue_commands.session_id AND n.request_id=queue_commands.request_id)`, time.Now().UnixMilli(), sessionID, requestID, payloadHash)
+	var revision any
+	if expectedRevision != nil {
+		revision = *expectedRevision
+	}
+	result, err := tx.Exec(`UPDATE queue_commands SET state='cancelled',updated_at=?,payload=X'' WHERE session_id=? AND request_id=? AND state='queued' AND payload_hash=? AND (? IS NULL OR EXISTS(SELECT 1 FROM queue_sessions v WHERE v.session_id=queue_commands.session_id AND v.revision=?)) AND NOT EXISTS(SELECT 1 FROM task_native_acceptance n WHERE n.session_id=queue_commands.session_id AND n.request_id=queue_commands.request_id) AND NOT EXISTS(SELECT 1 FROM task_native_conflicts n WHERE n.session_id=queue_commands.session_id AND n.request_id=queue_commands.request_id)`, time.Now().UnixMilli(), sessionID, requestID, payloadHash, revision, revision)
 	if err != nil {
 		return Entry{}, false, err
 	}

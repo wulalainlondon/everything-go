@@ -1,11 +1,14 @@
 package core
 
 import (
+	"context"
 	"encoding/json"
 	"everything-go/internal/backend"
 	"everything-go/internal/clientproto"
+	"everything-go/internal/coordination"
 	"everything-go/internal/messagequeue"
 	"everything-go/internal/session"
+	"everything-go/internal/sessiondispatch"
 	"github.com/coder/websocket"
 	"testing"
 )
@@ -226,5 +229,41 @@ func TestQueueReconciliationAuthenticatedWSDecoderAndCapability(t *testing.T) {
 	after, _, _ := h.messageQueue.Get(s.ID, e.RequestID)
 	if after.State != messagequeue.Uncertain || after.PayloadHash != e.PayloadHash {
 		t.Fatal("wire read caused state effect")
+	}
+}
+
+func TestControllerQueueCancelRejectsPolicyTakeoverAfterProviderIO(t *testing.T) {
+	h, fe, caller, target := controllerFixture(t)
+	attachWorkService(t, h, t.TempDir())
+	ctx := context.Background()
+	h.dispatches.SetGrant(ctx, caller.Parent.ID, sessiondispatch.Grant{Enabled: true, Local: true}, 0)
+	started, release := make(chan struct{}), make(chan struct{})
+	target.SubmitNamed("hold", func() { close(started); <-release; target.EndTurn() })
+	<-started
+	defer close(release)
+	provider := &exactQueueProvider{floatingHistoryProvider: &floatingHistoryProvider{}}
+	h.SetExecutor(&exactQueueExec{fakeExec: fe, provider: provider})
+	value, err := h.ControlSession(ctx, caller, backend.SessionControlRequest{Action: "dispatch_to_session", SessionID: target.ID, ExpectedThreadID: target.ResumeID(), ExpectedConfigRevision: target.SettingsSnapshot().ConfigRevision, Content: "isolated waiting input"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt := value.(sessiondispatch.Record)
+	// Negative-only isolated typed policy-store fixture. No production ledger,
+	// caller identity or native/model request is fabricated or modified.
+	provider.onRead = func() {
+		_, err := h.work.UpdateCollaboration(ctx, func(state *coordination.State) error {
+			state.Projects["isolated-policy-takeover"] = coordination.Project{ID: "isolated-policy-takeover", PMSessionID: target.ID, ProfileID: coordination.ProfileID, ProfileVersion: 1, Cwd: target.SettingsSnapshot().Cwd}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err = h.ControlSession(ctx, caller, backend.SessionControlRequest{Action: "cancel_waiting_dispatch", DispatchID: receipt.ID}); err == nil {
+		t.Fatal("controller cancellation bypassed new policy ownership")
+	}
+	after, found, err := h.messageQueue.Get(target.ID, receipt.RequestID)
+	if err != nil || !found || after.State != messagequeue.Queued {
+		t.Fatal("policy takeover modified original receipt", after, err)
 	}
 }

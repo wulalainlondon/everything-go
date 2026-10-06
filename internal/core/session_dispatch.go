@@ -334,9 +334,11 @@ func (h *Hub) cancelSessionDispatch(ctx context.Context, c backend.SessionContro
 		h.messageQueueMu.Unlock()
 		return nil, errors.New("dispatch_not_waiting_cannot_cancel")
 	}
-	err = h.cancelWaitingInput(e, func() bool {
+	err = h.cancelWaitingInput(e, nil, func() bool {
 		grant, err := h.dispatches.Grant(ctx, c.Parent.ID)
-		return err == nil && grant.Allows(h.cfg.InstanceID, r.InstanceID, r.SessionID) && h.controllerCaller(c) == nil && h.controls.MobileMayWrite(target.ID) && target.ResumeID() == r.ThreadID && target.SettingsSnapshot().ConfigRevision == r.ConfigRevision && !target.Snapshot().Hidden && target.State() != session.Closed
+		current, found := h.registry.Get(target.ID)
+		policy, policyErr := h.PMConfiguration(target.ID)
+		return found && current == target && h.controllerInScope(target) && policyErr == nil && policy == nil && err == nil && grant.Allows(h.cfg.InstanceID, r.InstanceID, r.SessionID) && h.controllerCaller(c) == nil && h.controls.MobileMayWrite(target.ID) && target.ResumeID() == r.ThreadID && target.SettingsSnapshot().ConfigRevision == r.ConfigRevision && !target.Snapshot().Hidden && target.State() != session.Closed
 	})
 	h.messageQueueMu.Unlock()
 	if err != nil {
