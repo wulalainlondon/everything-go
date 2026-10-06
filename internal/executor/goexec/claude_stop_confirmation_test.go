@@ -2,6 +2,7 @@ package goexec
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -218,5 +219,23 @@ func TestClaudeFormalTaskProcessDeathNeverAutomaticallyReplays(t *testing.T) {
 	}
 	if sink.count(func(event any) bool { _, ok := event.(protocol.Stopped); return ok }) != 0 {
 		t.Fatal("process failure became stop success")
+	}
+}
+
+func TestClaudeStopUnknownGroupExitRetainsBindingOnEveryRetry(t *testing.T) {
+	sink := &capSink{}
+	backend := NewClaude(sink, "unused")
+	current := session.NewRegistry().Create("unknown-owned-group", "Fixture", t.TempDir(), "claude", "", "read-only", "")
+	ended := make(chan struct{})
+	close(ended)
+	process := &proc{reqID: "r_original_unknown", cancel: func() {}, exited: ended, stopErr: errors.New("owned group exit unconfirmed")}
+	backend.procs[current.ID] = process
+	for i := 0; i < 2; i++ {
+		if err := backend.Stop(context.Background(), current); err == nil {
+			t.Fatal("unknown group exit returned success")
+		}
+	}
+	if backend.procs[current.ID] != process || sink.count(func(event any) bool { _, ok := event.(protocol.Stopped); return ok }) != 0 {
+		t.Fatal("unknown exit discarded original binding or emitted stopped")
 	}
 }

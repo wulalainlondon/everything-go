@@ -334,6 +334,12 @@ func (c *Claude) Stop(ctx context.Context, s *session.Session) error {
 		defer timer.Stop()
 		select {
 		case <-p.exited:
+			p.mu.Lock()
+			stopErr := p.stopErr
+			p.mu.Unlock()
+			if stopErr != nil {
+				return stopErr
+			}
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-timer.C:
