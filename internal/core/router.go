@@ -70,6 +70,12 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 	if h.rejectPMCommand(c, cmd) {
 		return
 	}
+	if cmd.SessionID != "" {
+		if s, ok := h.registry.Get(cmd.SessionID); ok && !h.cwdInScope(s.Cwd()) {
+			c.enqueueEvent(h.client.Error(cmd.SessionID, "", "session is outside bridge root"))
+			return
+		}
+	}
 	switch cmd.Kind {
 	case "task_api_request":
 		return // Strict original frame handled by Client before legacy ParseCommand.
@@ -362,9 +368,17 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		// os.path.expanduser(msg["cwd"] or default_cwd) in session_routes.py.
 		// Storing the resolved path keeps get_git_diff / get_tasks / spawn all
 		// consistent — the app sends a literal "~" as the default cwd.
-		cwd := runtime.ExpandPath(cmd.Cwd)
+		cwd, scopeErr := h.scopedPath(cmd.Cwd)
+		if scopeErr != nil {
+			c.enqueueEvent(h.client.Error(cmd.SessionID, "", scopeErr.Error()))
+			return
+		}
 		if existing, ok := h.registry.FindByResumeID(cmd.ResumeClaudeID); ok && existing.ID != cmd.SessionID {
 			snap := existing.Snapshot()
+			if !h.cwdInScope(snap.Cwd) {
+				c.enqueueEvent(h.client.Error(cmd.SessionID, "", "session is outside bridge root"))
+				return
+			}
 			// Resuming an already-registered native thread is idempotent. Older
 			// clients may optimistically create a fresh local row first, so close
 			// that requested stub and return the canonical session plus a fresh
@@ -1249,6 +1263,9 @@ func (h *Hub) sessionSummaries() []protocol.SessionSummary {
 	for _, s := range sessions {
 		snap := s.SettingsSnapshot()
 		active := s.Snapshot()
+		if !h.cwdInScope(active.Cwd) {
+			continue
+		}
 		var recent []protocol.RecentMessage
 		// Preview text, role and timestamp are one server-authoritative projection.
 		// The search DB is only a fallback for native CLI activity that is newer

@@ -27,8 +27,8 @@ const (
 	attachmentMagicV2     = "CBV2"
 	attachmentIDBytes     = 34
 	attachmentOffsetBytes = 8
-	maxVideoUploadBytes   = int64(512 * 1024 * 1024)
-	maxFileUploadBytes    = int64(128 * 1024 * 1024)
+	maxVideoUploadBytes   = int64(2048 * 1024 * 1024)
+	maxFileUploadBytes    = int64(2048 * 1024 * 1024)
 	attachmentChunkBytes  = 512 * 1024
 	staleUploadMaxAge     = 24 * time.Hour
 )
@@ -147,12 +147,12 @@ func (u *attachmentUploads) initKind(sessionID, requestID, name, mediaType strin
 		u.sendError(requestID, "", "Video is empty")
 		return
 	}
-	if size > maxVideoUploadBytes {
-		u.sendError(requestID, "", "Video exceeds the 512 MB limit")
+	if kind == "video" && size > maxVideoUploadBytes {
+		u.sendError(requestID, "", "Video exceeds the 2048 MB limit")
 		return
 	}
 	if kind == "file" && size > maxFileUploadBytes {
-		u.sendError(requestID, "", "File exceeds the 128 MB limit")
+		u.sendError(requestID, "", "File exceeds the 2048 MB limit")
 		return
 	}
 	if kind == "video" && (!strings.HasPrefix(mediaType, "video/") || !isVideoExtension(ext)) {

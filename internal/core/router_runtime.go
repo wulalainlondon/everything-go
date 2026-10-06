@@ -110,8 +110,22 @@ func (h *Hub) sendDirListing(c *Client, cmd clientproto.Command) {
 	if !c.live() {
 		return
 	}
-	path := rt.ExpandPath(cmd.Path)
+	path, err := h.scopedPath(cmd.Path)
+	if err != nil {
+		// Parent/home navigation stays at the jail root, so older clients
+		// cannot navigate above it even if they show a parent button.
+		path = realpath(rt.ExpandPath(h.cfg.RootDir))
+	}
 	entries := rt.ListEntries(path)
+	if h.cfg.RootDir != "" {
+		visible := entries[:0]
+		for _, entry := range entries {
+			if h.cwdInScope(filepath.Join(path, entry.Name)) {
+				visible = append(visible, entry)
+			}
+		}
+		entries = visible
+	}
 	hash := rt.DirHash(entries)
 	unchanged := cmd.ClientHash != "" && cmd.ClientHash == hash
 
@@ -164,7 +178,11 @@ var previewURLTypes = map[string]string{
 }
 
 func (h *Hub) sendFileOpened(c *Client, cmd clientproto.Command) {
-	path := rt.ExpandPath(cmd.Path)
+	path, scopeErr := h.scopedPath(cmd.Path)
+	if scopeErr != nil {
+		c.enqueueEvent(protocol.NewFileOpened(cmd.Path, filepath.Base(cmd.Path), "", "", 0, "text/plain", scopeErr.Error()))
+		return
+	}
 	name := filepath.Base(path)
 	info, err := os.Stat(path)
 	if err != nil {
@@ -209,14 +227,22 @@ func (h *Hub) sendMarkdownFilesListing(c *Client, cmd clientproto.Command) {
 		if strings.TrimSpace(raw) == "" || len(files) >= limit {
 			continue
 		}
-		root := rt.ExpandPath(raw)
+		root, scopeErr := h.scopedPath(raw)
+		if scopeErr != nil {
+			errors = append(errors, protocol.MarkdownScanError{Path: raw, Error: scopeErr.Error()})
+			continue
+		}
 		roots = append(roots, root)
 		found, err := rt.ScanMarkdownFiles(root, limit-len(files))
 		if err != nil {
 			errors = append(errors, protocol.MarkdownScanError{Path: raw, Error: err.Error()})
 			continue
 		}
-		files = append(files, found...)
+		for _, file := range found {
+			if h.cwdInScope(file.Path) {
+				files = append(files, file)
+			}
+		}
 	}
 	sort.SliceStable(files, func(i, j int) bool {
 		if files[i].Modified != files[j].Modified {
@@ -228,7 +254,11 @@ func (h *Hub) sendMarkdownFilesListing(c *Client, cmd clientproto.Command) {
 }
 
 func (h *Hub) saveFile(c *Client, cmd clientproto.Command) {
-	path := rt.ExpandPath(cmd.Path)
+	path, scopeErr := h.scopedPath(cmd.Path)
+	if scopeErr != nil {
+		c.enqueueEvent(protocol.NewFileSaved(cmd.Path, filepath.Base(cmd.Path), "", 0, 0, "text/plain", scopeErr.Error()))
+		return
+	}
 	name := filepath.Base(path)
 	saveErr := func(content string, size, modified int64, msg string) {
 		c.enqueueEvent(protocol.NewFileSaved(path, name, content, size, modified, "text/plain; charset=utf-8", msg))

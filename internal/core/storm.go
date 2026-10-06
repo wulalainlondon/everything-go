@@ -112,10 +112,14 @@ func (h *Hub) coalescedResumable(limit int) []history.ResumableSession {
 	}
 	key := "resumable:" + itoa(limit)
 	v := h.coalesce(&h.storm.resumeSF, h.storm.resumeCache, key, resumableCacheTTL, func() any {
-		var all []history.ResumableSession
+		all := make([]history.ResumableSession, 0)
 		for _, p := range hr.AllProviders() {
 			if list, err := p.ResumableSessions(limit); err == nil {
-				all = append(all, list...)
+				for _, entry := range list {
+					if h.cwdInScope(entry.Cwd) {
+						all = append(all, entry)
+					}
+				}
 			}
 		}
 		return all
