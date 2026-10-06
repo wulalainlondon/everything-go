@@ -517,6 +517,11 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 			c.enqueueEvent(h.client.HistorySnapshot(cmd.SessionID, []map[string]any{}, 0, false, true, ""))
 			return
 		}
+		// A newly connected reader has not seen the original session_uuid event.
+		// Publish the existing identity without resuming or starting its work.
+		if resumeID := s.ResumeID(); s.Backend() == "codex" && resumeID != "" {
+			c.enqueueEvent(protocol.NewSessionUUID(s.ID, resumeID))
+		}
 		cmd = h.captureHistoryReadBoundary(c, cmd)
 		go h.sendHistory(c, s, cmd)
 
