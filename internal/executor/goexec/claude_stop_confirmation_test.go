@@ -116,3 +116,32 @@ func TestClaudeStopWaitsForActualChildExit(t *testing.T) {
 		t.Fatal("manually stopped process restarted")
 	}
 }
+
+func TestClaudeStopPrivateGroupLeavesUnrelatedProcessAlive(t *testing.T) {
+	// Only two test-owned processes; no real provider/daemon/device/workload.
+	sentinel := exec.Command("/bin/sh", "-c", "exec sleep 60")
+	if err := sentinel.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { sentinel.Process.Kill(); sentinel.Wait() }()
+	sink := &capSink{}
+	backend := NewClaude(sink, "/bin/sh")
+	current := session.NewRegistry().Create("private-group-fixture", "QA", t.TempDir(), "claude", "", "read-only", "")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	command := exec.CommandContext(ctx, "/bin/sh", "-c", "exec sleep 60")
+	configureOwnedProcessGroup(command)
+	command.Cancel = func() error { return signalOwnedProcessGroup(command) }
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	process := &proc{cmd: command, reqID: "r_private_stop", cancel: cancel, exited: make(chan struct{})}
+	backend.procs[current.ID] = process
+	go backend.watchProc(current, process)
+	if err := backend.Stop(context.Background(), current); err != nil {
+		t.Fatal(err)
+	}
+	if err := sentinel.Process.Signal(syscall.Signal(0)); err != nil {
+		t.Fatal("unrelated process was signalled", err)
+	}
+}

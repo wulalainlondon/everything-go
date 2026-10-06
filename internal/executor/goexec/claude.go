@@ -443,10 +443,11 @@ func (c *Claude) spawn(s *session.Session) (*proc, error) {
 		return nil, taskErr
 	}
 	cmd := exec.CommandContext(ctx, c.claudeBin, args...)
+	configureOwnedProcessGroup(cmd)
 	// Give a CLI wrapper its normal signal/cleanup path before escalating.
 	// CommandContext's default SIGKILL skips shell traps and can orphan tools.
 	cmd.Cancel = func() error {
-		if err := cmd.Process.Signal(ownedProcessTerminationSignal()); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		if err := signalOwnedProcessGroup(cmd); err != nil && !errors.Is(err, os.ErrProcessDone) {
 			return cmd.Process.Kill()
 		} else {
 			return err

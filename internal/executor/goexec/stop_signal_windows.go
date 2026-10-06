@@ -2,7 +2,11 @@
 
 package goexec
 
-import "os"
+import (
+	"os"
+	"os/exec"
+)
 
 // Preserve the existing Windows interruption/fallback behavior.
-func ownedProcessTerminationSignal() os.Signal { return os.Interrupt }
+func configureOwnedProcessGroup(*exec.Cmd)        {}
+func signalOwnedProcessGroup(cmd *exec.Cmd) error { return cmd.Process.Signal(os.Interrupt) }
