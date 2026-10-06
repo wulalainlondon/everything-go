@@ -157,13 +157,18 @@ func (m *claudeTaskMCP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "unsupported", 403)
 			return
 		}
+		catalog := []map[string]any{}
+		for _, tool := range tools {
+			schema, err := mcpTaskInputSchema(tool["inputSchema"])
+			if err != nil {
+				http.Error(w, "unsupported tool schema", 403)
+				return
+			}
+			catalog = append(catalog, map[string]any{"name": tool["name"], "description": tool["description"], "inputSchema": schema})
+		}
 		lease.mu.Lock()
 		lease.loaded = true
 		lease.mu.Unlock()
-		catalog := []map[string]any{}
-		for _, tool := range tools {
-			catalog = append(catalog, map[string]any{"name": tool["name"], "description": tool["description"], "inputSchema": tool["inputSchema"]})
-		}
 		respond(map[string]any{"tools": catalog})
 	case "tools/call":
 		var call struct {
@@ -382,4 +387,35 @@ func validTaskWorkerTools(tools []string) bool {
 		}
 	}
 	return found
+}
+
+// MCP requires inputSchema.type=object at the root. Codex accepts a standalone
+// $ref schema; that provider-specific shape must not hide MCP tool discovery.
+// Copy the referenced request's root fields while retaining its full 2020 refs.
+func mcpTaskInputSchema(value any) (map[string]any, error) {
+	original, ok := value.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("unsupported input schema")
+	}
+	schema := map[string]any{}
+	for key, v := range original {
+		schema[key] = v
+	}
+	if ref, ok := original["$ref"].(string); ok {
+		defs, ok := original["$defs"].(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("unsupported definitions")
+		}
+		definition, ok := defs[strings.TrimPrefix(ref, "#/$defs/")].(map[string]any)
+		if !ok || definition["type"] != "object" {
+			return nil, fmt.Errorf("unsupported request schema")
+		}
+		for key, v := range definition {
+			schema[key] = v
+		}
+	}
+	if schema["type"] != "object" {
+		return nil, fmt.Errorf("unsupported object schema")
+	}
+	return schema, nil
 }

@@ -120,3 +120,19 @@ func TestClaudeTaskPolicyNormalizationKeepsCallerAndNarrowsVerifiedWorker(t *tes
 		t.Fatal("worker init did not enforce exact gateway-only read catalog")
 	}
 }
+
+func TestClaudeMCPObjectRootPreservesFullRequestSchema(t *testing.T) {
+	defs, err := taskcontract.ToolInputs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, original := range defs {
+		schema, err := mcpTaskInputSchema(original)
+		if err != nil {
+			t.Fatal(name, err)
+		}
+		if schema["type"] != "object" || schema["properties"] == nil || schema["required"] == nil || schema["$defs"] == nil {
+			t.Fatal("MCP discovery lost request root", name)
+		}
+	}
+}

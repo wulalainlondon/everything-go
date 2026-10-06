@@ -856,6 +856,16 @@ func (c *Claude) readStdout(s *session.Session, p *proc, stdout interface{ Read(
 				c.startAutoCompact(s, p)
 			}
 		case "system":
+			if evt.Subtype == "init" && (len(evt.Tools) > 0 || len(evt.SlashCmds) > 0) {
+				var servers []backend.MCPServerStatus
+				for _, raw := range evt.MCPServers {
+					var srv backend.MCPServerStatus
+					if json.Unmarshal(raw, &srv) == nil && srv.Name != "" {
+						servers = append(servers, srv)
+					}
+				}
+				c.sink.Emit(backend.NewSessionInitInfo(s.ID, evt.Model, evt.PermissionMd, evt.Tools, evt.SlashCmds, servers))
+			}
 			if evt.Subtype == "init" && p.taskLease != nil {
 				if conversation, e := taskapi.ClaudeConversation(line); e == nil {
 					p.taskLease.mu.Lock()
@@ -872,6 +882,7 @@ func (c *Claude) readStdout(s *session.Session, p *proc, stdout interface{ Read(
 				}
 			}
 			if evt.Subtype == "init" && p.taskLease != nil && p.taskLease.worker && !validTaskWorkerTools(evt.Tools) {
+				p.taskLease.revoke()
 				p.cancel()
 				c.sink.Emit(backend.NewError(s.ID, p.currentReqID(), "unsupported_task_worker_toolset", "Bounded task worker did not expose the exact gateway toolset; stopped without replay."))
 				return
@@ -902,16 +913,7 @@ func (c *Claude) readStdout(s *session.Session, p *proc, stdout interface{ Read(
 					c.sink.Emit(backend.NewSessionUUID(s.ID, evt.SessionID))
 				}
 			}
-			if evt.Subtype == "init" && (len(evt.Tools) > 0 || len(evt.SlashCmds) > 0) {
-				var servers []backend.MCPServerStatus
-				for _, raw := range evt.MCPServers {
-					var srv backend.MCPServerStatus
-					if json.Unmarshal(raw, &srv) == nil && srv.Name != "" {
-						servers = append(servers, srv)
-					}
-				}
-				c.sink.Emit(backend.NewSessionInitInfo(s.ID, evt.Model, evt.PermissionMd, evt.Tools, evt.SlashCmds, servers))
-			}
+
 		}
 	}
 	if err := sc.Err(); err != nil {
