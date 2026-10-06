@@ -220,7 +220,7 @@ func TestTaskAPICaptureWorkspaceUsesConfinedOpenedDirectory(t *testing.T) {
 	alias := filepath.Join(parent, "alias")
 	outside := t.TempDir()
 	os.Mkdir(allowed, 0700)
-	os.Symlink(allowed, alias)
+	os.Symlink("allowed", alias)
 	roots, identities, cwd, err := captureTaskWorkspace(parent, parent, parent, []string{alias})
 	if err != nil {
 		t.Fatal(err)
