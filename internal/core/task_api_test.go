@@ -101,6 +101,46 @@ func TestTaskAPIAuthenticatedWSCanonicalStore(t *testing.T) {
 	if task["result"].(map[string]any)["axes"].(map[string]any)["execution"] != "handoff" {
 		t.Fatal(task)
 	}
+
+	// Exercise the public API cancellation route while its original actor is busy.
+	waiting := call("create_dispatch", input, "fixture-key-waiting")
+	if waiting["ok"] != true {
+		t.Fatal(waiting)
+	}
+	waitingReceipt := waiting["result"].(map[string]any)
+	waitingTask := call("get", map[string]any{"task_id": waitingReceipt["task_id"]}, "")["result"].(map[string]any)
+	cancelInput := map[string]any{"task_id": waitingReceipt["task_id"], "command_receipt_id": waitingReceipt["receipt_id"], "expected_revision": waitingTask["revision"], "target": map[string]any{"instance_id": "i1", "session_id": target.ID, "expected_native_thread_id": "fixture-thread", "expected_config_revision": target.SettingsSnapshot().ConfigRevision}, "mode": "queued"}
+	cancelled := call("cancel", cancelInput, "fixture-cancel-original")
+	if cancelled["ok"] != true {
+		t.Fatal("public cancellation failed", cancelled)
+	}
+	cancelReceipt := cancelled["result"].(map[string]any)
+	repeatedCancel := call("cancel", cancelInput, "fixture-cancel-original")
+	if repeatedCancel["ok"] != true || repeatedCancel["result"].(map[string]any)["receipt_id"] != cancelReceipt["receipt_id"] {
+		t.Fatal("cancellation replay changed receipt", repeatedCancel)
+	}
+	waitingTask = call("get", map[string]any{"task_id": waitingReceipt["task_id"]}, "")["result"].(map[string]any)
+	if waitingTask["axes"].(map[string]any)["cancellation"] != "confirmed" || waitingTask["axes"].(map[string]any)["execution"] != "not_started" {
+		t.Fatal("cancel axis/queued origin missing", waitingTask)
+	}
+	late := call("create_dispatch", input, "fixture-key-late-native")
+	if late["ok"] != true {
+		t.Fatal(late)
+	}
+	lateReceipt := late["result"].(map[string]any)
+	lateTask := call("get", map[string]any{"task_id": lateReceipt["task_id"]}, "")["result"].(map[string]any)
+	nativeRequest := lateTask["target"].(map[string]any)["request_id"].(string)
+	h.Emit(backend.NativeTaskAccepted{SessionID: target.ID, RequestID: nativeRequest, ThreadID: "fixture-thread", TurnID: "late-already-consumed"})
+	lateTask = call("get", map[string]any{"task_id": lateReceipt["task_id"]}, "")["result"].(map[string]any)
+	blockedInput := map[string]any{"task_id": lateReceipt["task_id"], "command_receipt_id": lateReceipt["receipt_id"], "expected_revision": lateTask["revision"], "target": cancelInput["target"], "mode": "queued"}
+	blocked := call("cancel", blockedInput, "fixture-cancel-late")
+	if blocked["ok"] == true {
+		t.Fatal("API cancelled exact accepted native turn", blocked)
+	}
+	afterBlocked := call("get", map[string]any{"task_id": lateReceipt["task_id"]}, "")["result"].(map[string]any)
+	if afterBlocked["axes"].(map[string]any)["cancellation"] == "confirmed" {
+		t.Fatal("late cancellation became confirmed", afterBlocked)
+	}
 	h.Emit(backend.NativeTaskAccepted{SessionID: target.ID, RequestID: req, ThreadID: "fixture-thread", TurnID: "native-fixture-turn"})
 	task = call("get", map[string]any{"task_id": receipt["task_id"]}, "")
 	if task["result"].(map[string]any)["axes"].(map[string]any)["execution"] != "native_consumed" {

@@ -259,7 +259,7 @@ func ToolInputs() (map[string]any, error) {
 			continue
 		}
 		op := strings.TrimPrefix(name, "Request_")
-		if op == "deliver_result" {
+		if op == "deliver_result" || op == "legacy_source" {
 			continue
 		}
 		tools["task_"+op] = map[string]any{"$schema": "https://json-schema.org/draft/2020-12/schema", "$defs": defs, "$ref": "#/$defs/" + name}

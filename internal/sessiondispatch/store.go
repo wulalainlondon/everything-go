@@ -295,3 +295,10 @@ func (s *Store) Pending(ctx context.Context) ([]Record, error) {
 	}
 	return out, rows.Err()
 }
+
+// HasTargetReceipt checks an exact canonical dispatch tuple without exposing history.
+func (s *Store) HasTargetReceipt(ctx context.Context, instance, session, request string) (bool, error) {
+	var found bool
+	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM session_dispatches WHERE json_extract(payload,'$.instance_id')=? AND json_extract(payload,'$.target_session_id')=? AND json_extract(payload,'$.request_id')=?)`, instance, session, request).Scan(&found)
+	return found, err
+}

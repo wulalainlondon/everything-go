@@ -14,6 +14,7 @@ type TaskOrigin struct {
 	RequestID      string `json:"request_id"`
 }
 type SessionTask struct {
+	HumanSourceLink    map[string]string `json:"human_source_link,omitempty"`
 	APIAxes            map[string]string `json:"api_axes,omitempty"`
 	ProviderExecution  map[string]string `json:"provider_execution,omitempty"`
 	MessagePurpose     string            `json:"message_purpose,omitempty"`

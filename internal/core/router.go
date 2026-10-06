@@ -151,7 +151,7 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		if !c.enrollmentOnly && h.messageQueue != nil {
 			helloInput.Capabilities = append(helloInput.Capabilities, "message_queue_v1", "queue_message_detail_v1", "session_tasks_v1", "queue_receipt_reconciliation_v1")
 			if h.taskService != nil && h.pairedTaskDevice(c) != "" {
-				helloInput.Capabilities = append(helloInput.Capabilities, "task_api_v1_rc1")
+				helloInput.Capabilities = append(helloInput.Capabilities, "task_api_v1_rc1", "task_legacy_source_v1")
 			}
 		}
 		if !c.enrollmentOnly && h.dispatches != nil {

@@ -26,7 +26,7 @@ func NewService(policy Authorizer, gateway Gateway) (*Service, error) {
 	return &Service{c, policy, gateway}, nil
 }
 
-var operations = map[string]bool{"capabilities": true, "create_dispatch": true, "list": true, "get": true, "read_result": true, "append": true, "cancel": true, "snapshot": true, "events": true, "deliver_result": true, "read_input": true}
+var operations = map[string]bool{"capabilities": true, "create_dispatch": true, "list": true, "get": true, "read_result": true, "append": true, "cancel": true, "snapshot": true, "events": true, "deliver_result": true, "read_input": true, "legacy_source": true}
 
 func isMutation(op string) bool {
 	return op == "create_dispatch" || op == "append" || op == "cancel" || op == "deliver_result"
@@ -114,7 +114,7 @@ func (s *Service) Execute(ctx context.Context, caller BoundCaller, raw []byte) R
 			command.Namespace = Namespace{binding.Authority, binding.StableScopeID, binding.NamespaceGeneration, locator.Path, locator.Operation, locator.TaskID}
 		}
 	}
-	if isMutation(request.Operation) {
+	if mutationRequest(request) {
 		namespace, err := MakeNamespace(binding, locator, request)
 		if err != nil {
 			return fail(err)
@@ -131,7 +131,7 @@ func (s *Service) Execute(ctx context.Context, caller BoundCaller, raw []byte) R
 		return fail(err)
 	}
 	var result any
-	if isMutation(request.Operation) {
+	if mutationRequest(request) {
 		result, err = s.gateway.Mutate(ctx, command)
 	} else {
 		result, err = s.gateway.Read(ctx, command)
@@ -139,7 +139,15 @@ func (s *Service) Execute(ctx context.Context, caller BoundCaller, raw []byte) R
 	if err != nil {
 		return fail(err)
 	}
-	if isMutation(request.Operation) {
+	// Gateway reads may perform slow canonical I/O. A revoked invocation never
+	// receives result contents through its previously valid transport binding.
+	if _, err = caller.Check(ctx); err != nil {
+		if mutationRequest(request) {
+			return fail(Failure("caller_unbound", "known_receipt", "lookup_original"))
+		}
+		return fail(Failure("caller_unbound", "known_none", "refresh_identity"))
+	}
+	if mutationRequest(request) {
 		encoded, marshalErr := json.Marshal(result)
 		if marshalErr != nil {
 			return fail(Failure("unknown_acceptance", "unknown", "lookup_original"))
@@ -183,7 +191,7 @@ func MakeNamespace(c VerifiedContext, l Locator, r Request) (Namespace, error) {
 	if err := json.Unmarshal(r.Input, &input); err != nil {
 		return Namespace{}, err
 	}
-	if r.Operation == "create_dispatch" {
+	if r.Operation == "create_dispatch" || r.Operation == "legacy_source" {
 		if l.TaskID != "" {
 			return Namespace{}, Failure("invalid_argument", "known_none", "correct_input")
 		}
@@ -265,4 +273,13 @@ func normalizeNumbers(value any) (any, error) {
 	default:
 		return value, nil
 	}
+}
+
+func mutationRequest(r Request) bool {
+	if r.Operation != "legacy_source" {
+		return isMutation(r.Operation)
+	}
+	var input struct{ Action string }
+	json.Unmarshal(r.Input, &input)
+	return input.Action == "confirm" || input.Action == "revoke"
 }

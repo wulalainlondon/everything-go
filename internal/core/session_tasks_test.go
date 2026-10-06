@@ -359,3 +359,77 @@ func TestTaskTypedPhotoAndFloatingReceiptsTrackWithoutChangingOriginalIDs(t *tes
 		})
 	}
 }
+
+// Controlled original-history delay: no real provider, task, cancellation or replay.
+type taskDelayedHistory struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (p *taskDelayedHistory) LoadHistory(string, history.Opts) (*history.Result, error) {
+	close(p.entered)
+	<-p.release
+	return &history.Result{Kind: "snapshot"}, nil
+}
+func (p *taskDelayedHistory) ResumableSessions(int) ([]history.ResumableSession, error) {
+	return nil, nil
+}
+
+type taskDelayedExec struct {
+	fakeExec
+	provider *taskDelayedHistory
+}
+
+func (e *taskDelayedExec) ProviderFor(*session.Session) (backend.HistoryProvider, bool) {
+	return e.provider, true
+}
+func (e *taskDelayedExec) AllProviders() []backend.HistoryProvider {
+	return []backend.HistoryProvider{e.provider}
+}
+func TestSessionTaskHistoryRevalidatesOriginalPairingAndSourceAfterDelay(t *testing.T) {
+	for _, change := range []string{"repaired-same-device", "source-thread", "source-hidden", "source-config"} {
+		t.Run(change, func(t *testing.T) {
+			h, _ := newTestHub(t)
+			s := h.registry.Create("parent", "Parent", t.TempDir(), backend.Codex, "", "", "original-thread")
+			reader := sharedReadClient(t, h, "human")
+			taskEntry(t, h, s.ID, "r_original", "human", messagequeue.Queued)
+			p := &taskDelayedHistory{make(chan struct{}), make(chan struct{})}
+			h.SetExecutor(&taskDelayedExec{fakeExec: fakeExec{sink: h}, provider: p})
+			done := make(chan struct{})
+			go func() {
+				h.sendSessionTasks(reader, clientproto.Command{SessionID: s.ID, RequestID: "delayed-read"})
+				close(done)
+			}()
+			select {
+			case <-p.entered:
+			case <-time.After(time.Second):
+				t.Fatal("history did not enter")
+			}
+			switch change {
+			case "repaired-same-device":
+				if err := h.pairing.Unclaim("qa-read-human"); err != nil {
+					t.Fatal(err)
+				}
+				if err := h.pairing.Claim("new-fixture-human-token", "human"); err != nil {
+					t.Fatal(err)
+				}
+			case "source-thread":
+				s.SetResumeID("replacement-thread")
+			case "source-hidden":
+				hidden := true
+				s.SetMeta(nil, &hidden)
+			case "source-config":
+				_, err := s.SetFutureConfiguration(session.ConfigurationFrom(s.SettingsSnapshot()), nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			close(p.release)
+			<-done
+			event := waitForType(t, reader, "session_tasks_snapshot")
+			if event["status"] != "forbidden" || len(event["items"].([]any)) != 0 || len(event["children"].([]any)) != 0 {
+				t.Fatalf("stale read disclosed content: %+v", event)
+			}
+		})
+	}
+}

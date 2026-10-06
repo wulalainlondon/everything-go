@@ -273,3 +273,10 @@ func (s *Store) ActiveCountForParent(ctx context.Context, sessionID string) (int
 	  AND (state!='terminal' OR delivery_state IN ('pending','queued'))`, sessionID).Scan(&count)
 	return count, err
 }
+
+// HasChildReceipt checks exact canonical delegation identity, not inferred history.
+func (s *Store) HasChildReceipt(ctx context.Context, session, request string) (bool, error) {
+	var found bool
+	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM session_delegations WHERE child_session_id=? AND child_request_id=?)`, session, request).Scan(&found)
+	return found, err
+}

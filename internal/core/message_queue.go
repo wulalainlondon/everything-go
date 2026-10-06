@@ -337,6 +337,9 @@ func (h *Hub) cancelQueuedMessage(c *Client, cmd clientproto.Command) {
 // Caller holds messageQueueMu and has passed its own transport-specific policy.
 // This common barrier cannot cancel uncertain, started, steered or consumed work.
 func (h *Hub) cancelWaitingInput(e messagequeue.Entry, expectedRevision *uint64, canCommit func() bool) error {
+	return h.cancelWaitingInputWithOutcome(e, expectedRevision, canCommit, "")
+}
+func (h *Hub) cancelWaitingInputWithOutcome(e messagequeue.Entry, expectedRevision *uint64, canCommit func() bool, outcomeKey string) error {
 	if e.State != messagequeue.Queued {
 		return errors.New("input is not waiting")
 	}
@@ -376,7 +379,7 @@ func (h *Hub) cancelWaitingInput(e messagequeue.Entry, expectedRevision *uint64,
 		finish(false)
 		return errors.New("input ownership changed")
 	}
-	_, changed, err := h.messageQueue.CancelWaiting(e.SessionID, e.RequestID, e.PayloadHash, expectedRevision)
+	_, changed, err := h.messageQueue.CancelWaitingAPI(e.SessionID, e.RequestID, e.PayloadHash, expectedRevision, outcomeKey)
 	if err != nil || !changed {
 		finish(false)
 		return errors.New("waiting cancellation could not be saved")

@@ -31,6 +31,10 @@ func TestTaskAPILiveNativeInvocation(t *testing.T) {
 	if json.Unmarshal(raw, &input) != nil || input.RequestID == "" || input.SessionID == "" || input.Workspace == "" {
 		t.Fatal("invalid persisted probe context")
 	}
+	// A persisted probe is single-use. Never reopen an uncertain/accepted DB.
+	if _, err := os.Stat(filepath.Join(input.Workspace, "message_queue.sqlite")); err == nil || !os.IsNotExist(err) {
+		t.Fatal("probe workspace already admitted or unavailable; inspect original receipt, no replay")
+	}
 	reg := session.NewRegistry()
 	reg.AttachStore(session.NewStore(filepath.Join(input.Workspace, "sessions.json")))
 	h := NewHub(reg, Config{InstanceID: "task-api-live", RootDir: input.Workspace, DataDir: input.Workspace}, governance.NewPairing(filepath.Join(input.Workspace, "pairing.json")), 0)

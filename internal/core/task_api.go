@@ -233,6 +233,12 @@ func (h *Hub) Authorize(ctx context.Context, c taskapi.VerifiedContext, r taskap
 	if c.Authority != h.cfg.InstanceID {
 		return l, taskapi.Failure("wrong_authority", "known_none", "refresh_identity")
 	}
+	if !apiOwnedAdmissionEnabled && (r.Operation == "create_dispatch" || r.Operation == "append") {
+		return l, taskapi.Failure("busy", "known_none", "read_capabilities")
+	}
+	if r.Operation == "legacy_source" {
+		return h.authorizeLegacySource(ctx, c, r, l)
+	}
 	if r.Operation == "get" && in.Original != nil {
 		l = *in.Original
 		if l.Authority != h.cfg.InstanceID {
@@ -254,6 +260,11 @@ func (h *Hub) Authorize(ctx context.Context, c taskapi.VerifiedContext, r taskap
 		l.Path = ref[1]
 		l.TaskID = in.TaskID
 		record, err := h.apiRecord(ctx, c, in.TaskID)
+		var legacy legacySourceMetadata
+		json.Unmarshal(record.Metadata, &legacy)
+		if legacy.LegacyLinkID != "" && (r.Operation == "append" || r.Operation == "cancel") {
+			return l, taskapi.Failure("unsupported", "known_none", "read_capabilities")
+		}
 		if err == nil && (r.Operation == "append" || r.Operation == "cancel") && (record.ScopeID != c.StableScopeID || record.Generation != c.NamespaceGeneration) {
 			return l, taskapi.Failure("permission", "known_none", "request_scope_change")
 		}
@@ -519,12 +530,29 @@ func (h *Hub) apiRecord(ctx context.Context, c taskapi.VerifiedContext, id strin
 	if j == nil {
 		return taskapi.IntentRecord{}, taskapi.Failure("unsupported", "known_none", "read_capabilities")
 	}
+	if ref[1] == "ordinary" {
+		links, e := h.messageQueue.LegacySourceLinks(ctx)
+		if e != nil {
+			return taskapi.IntentRecord{}, e
+		}
+		for _, link := range links {
+			record := h.legacyProjectionRecord(link)
+			if record.TaskID == id && h.legacyReadAllowed(c, link) {
+				return record, nil
+			}
+		}
+	}
 	record, err := j.Task(ctx, c.StableScopeID, c.NamespaceGeneration, id)
 	if err != nil && c.BindingKind == "paired_human" {
 		record, err = j.FindTask(ctx, id)
 	}
 	if err != nil {
 		return record, err
+	}
+	var legacy legacySourceMetadata
+	json.Unmarshal(record.Metadata, &legacy)
+	if legacy.LegacyLinkID != "" {
+		return taskapi.IntentRecord{}, taskapi.Failure("permission", "known_none", "request_scope_change")
 	}
 	if err = h.checkAPIRecord(ctx, c, record); err != nil {
 		return record, err
@@ -542,6 +570,9 @@ func (h *Hub) Mutate(ctx context.Context, c taskapi.AuthorizedCommand) (any, err
 	}
 	if _, err := h.Authorize(ctx, c.Caller, c.Request); err != nil {
 		return nil, err
+	}
+	if c.Request.Operation == "legacy_source" {
+		return h.mutateLegacySource(ctx, c)
 	}
 	if previous, err := h.apiJournals()[c.Locator.Path].Lookup(ctx, c.Namespace, c.Request.IdempotencyKey); err == nil {
 		failure, _, e := h.apiJournals()[c.Locator.Path].Outcome(ctx, previous.Key)
@@ -735,10 +766,57 @@ func (h *Hub) Mutate(ctx context.Context, c taskapi.AuthorizedCommand) (any, err
 				}
 				return nil, failure
 			}
-			target, _ := h.registry.Get(original.SessionID)
-			finish, reserveErr := target.ReserveWaiting(original.RequestID)
-			if reserveErr != nil {
+			target, ok := h.registry.Get(original.SessionID)
+			if !ok {
 				h.messageQueueMu.Unlock()
+				return nil, taskapi.Failure("permission", "known_receipt", "request_scope_change")
+			}
+			snapshot, loadErr := h.messageQueue.Snapshot(original.SessionID)
+			if loadErr != nil {
+				h.messageQueueMu.Unlock()
+				return nil, loadErr
+			}
+			outcomeKey := ""
+			if original.Path == "ordinary" {
+				outcomeKey = stored.Key
+			}
+			canCommit := func() bool {
+				if c.Revalidate(ctx) != nil {
+					return false
+				}
+				current, found := h.registry.Get(target.ID)
+				if !found || current != target || !h.controllerInScope(current) || current.Snapshot().Hidden || current.State() == session.Closed || !h.controls.MobileMayWrite(current.ID) {
+					return false
+				}
+				identity := in.Existing
+				if identity == nil {
+					var wrapper struct{ Target *taskapi.TargetIdentity }
+					json.Unmarshal(c.Request.Input, &wrapper)
+					identity = wrapper.Target
+				}
+				if identity == nil || identity.InstanceID != h.cfg.InstanceID || identity.SessionID != target.ID || identity.ResumeID != target.ResumeID() || identity.ConfigRevision != target.SettingsSnapshot().ConfigRevision {
+					return false
+				}
+				if policy, e := h.PMConfiguration(target.ID); e != nil || policy != nil {
+					return false
+				}
+				if c.Caller.SourceSessionID != "" {
+					source, found := h.registry.Get(c.Caller.SourceSessionID)
+					if !found || source.ResumeID() != c.Caller.SourceResumeID || source.SettingsSnapshot().ConfigRevision != c.Caller.SourceConfigRevision || !h.controllerInScope(source) || source.Snapshot().Hidden {
+						return false
+					}
+					if original.Path == "controller" {
+						grant, e := h.dispatches.Grant(ctx, source.ID)
+						if e != nil || !grant.Allows(h.cfg.InstanceID, h.cfg.InstanceID, target.ID) {
+							return false
+						}
+					}
+				}
+				return true
+			}
+			err = h.cancelWaitingInputWithOutcome(entry, &snapshot.Revision, canCommit, outcomeKey)
+			h.messageQueueMu.Unlock()
+			if err != nil {
 				failure := taskapi.Failure("busy", "known_receipt", "lookup_original")
 				failure.ReceiptID = stored.ReceiptID
 				if e := j.SaveOutcome(ctx, stored.Key, failure); e != nil {
@@ -746,12 +824,7 @@ func (h *Hub) Mutate(ctx context.Context, c taskapi.AuthorizedCommand) (any, err
 				}
 				return nil, failure
 			}
-			_, _, err = h.messageQueue.Transition(original.SessionID, original.RequestID, []messagequeue.State{messagequeue.Queued}, messagequeue.Cancelled, "", "", "")
-			finish(err == nil)
-			h.messageQueueMu.Unlock()
-			if err != nil {
-				return nil, err
-			}
+			h.publishMessageQueue(original.SessionID)
 			if err = j.SaveOutcome(ctx, stored.Key, nil); err != nil {
 				return nil, err
 			}
@@ -780,7 +853,7 @@ func (h *Hub) apiReceipt(ctx context.Context, c taskapi.AuthorizedCommand, r tas
 	}
 	var metadata apiMetadata
 	json.Unmarshal(r.Metadata, &metadata)
-	return map[string]any{"receipt_id": r.ReceiptID, "task_id": r.TaskID, "task_ref": task["task_ref"], "idempotency_key": c.Request.IdempotencyKey, "operation": c.Request.Operation, "intent_hash": r.Hash, "axes": task["axes"], "task_revision": task["revision"], "effect_request_ids": []string{r.RequestID}, "transport": metadata.Transport, "created_at_ms": r.CreatedAt, "reused": false, "locator": c.Locator}, nil
+	return map[string]any{"receipt_id": r.ReceiptID, "task_id": r.TaskID, "task_ref": task["task_ref"], "idempotency_key": c.Request.IdempotencyKey, "operation": c.Request.Operation, "intent_hash": r.Hash, "axes": task["axes"], "task_revision": task["revision"], "effect_request_ids": apiEffectRequests(c.Request.Operation, r.RequestID), "transport": metadata.Transport, "created_at_ms": r.CreatedAt, "reused": false, "locator": c.Locator}, nil
 }
 
 // TaskWorkerScope is a formal child-profile lookup, never a name/prefix guess.
@@ -945,4 +1018,11 @@ func taskRootIdentity(path string) (string, error) {
 		return "", err
 	}
 	return taskRootInfoIdentity(info)
+}
+
+func apiEffectRequests(operation, request string) []string {
+	if operation == "legacy_source" {
+		return []string{}
+	}
+	return []string{request}
 }

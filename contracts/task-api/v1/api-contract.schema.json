@@ -146,6 +146,9 @@
             "legacy",
             "unknown"
           ]
+        },
+        "human_assertion": {
+          "$ref": "#/$defs/HumanSourceAssertion"
         }
       },
       "required": [
@@ -153,7 +156,81 @@
         "binding_kind",
         "provenance"
       ],
-      "readOnly": true
+      "readOnly": true,
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "human_assertion"
+            ]
+          },
+          "then": {
+            "properties": {
+              "binding_kind": {
+                "const": "legacy_unknown"
+              },
+              "provenance": {
+                "const": "legacy"
+              },
+              "identity": {
+                "not": {
+                  "anyOf": [
+                    {
+                      "required": [
+                        "request_id"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "native_turn_id"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "origin_tool_call_id"
+                      ]
+                    }
+                  ]
+                }
+              }
+            },
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "authorization_ref"
+                  ]
+                },
+                {
+                  "required": [
+                    "origin_tool_call_id"
+                  ]
+                },
+                {
+                  "required": [
+                    "invocation_id"
+                  ]
+                },
+                {
+                  "required": [
+                    "run_id"
+                  ]
+                },
+                {
+                  "required": [
+                    "epoch"
+                  ]
+                },
+                {
+                  "required": [
+                    "grant_revision"
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      ]
     },
     "Target": {
       "type": "object",
@@ -488,7 +565,8 @@
             "create_dispatch",
             "append",
             "cancel",
-            "deliver_result"
+            "deliver_result",
+            "legacy_source"
           ]
         },
         "authority_instance_id": {
@@ -512,7 +590,10 @@
           "if": {
             "properties": {
               "operation": {
-                "const": "create_dispatch"
+                "enum": [
+                  "create_dispatch",
+                  "legacy_source"
+                ]
               }
             }
           },
@@ -767,6 +848,9 @@
         },
         "subscribe": {
           "type": "boolean"
+        },
+        "path": {
+          "$ref": "#/$defs/Path"
         }
       },
       "required": [
@@ -1075,7 +1159,8 @@
             "create_dispatch",
             "append",
             "cancel",
-            "deliver_result"
+            "deliver_result",
+            "legacy_source"
           ]
         },
         "intent_hash": {
@@ -2323,6 +2408,9 @@
         },
         {
           "$ref": "#/$defs/Request_read_input"
+        },
+        {
+          "$ref": "#/$defs/Request_legacy_source"
         }
       ]
     },
@@ -2736,6 +2824,9 @@
         },
         {
           "$ref": "#/$defs/Response_read_input"
+        },
+        {
+          "$ref": "#/$defs/Response_legacy_source"
         }
       ]
     },
@@ -2994,6 +3085,408 @@
             "text",
             "hash",
             "truncated"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "api_version",
+        "correlation_id",
+        "operation",
+        "ok",
+        "result"
+      ]
+    },
+    "HumanSourceAssertion": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "human_linked"
+        },
+        "record_id": {
+          "$ref": "#/$defs/ID"
+        },
+        "actor_scope_id": {
+          "$ref": "#/$defs/ID"
+        },
+        "original_receipt_hash": {
+          "$ref": "#/$defs/Hash"
+        },
+        "native_origin_status": {
+          "const": "unknown"
+        }
+      },
+      "required": [
+        "kind",
+        "record_id",
+        "actor_scope_id",
+        "original_receipt_hash",
+        "native_origin_status"
+      ]
+    },
+    "LegacySourceIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "instance_id": {
+          "$ref": "#/$defs/ID"
+        },
+        "session_id": {
+          "$ref": "#/$defs/ID"
+        },
+        "native_thread_id": {
+          "$ref": "#/$defs/ID"
+        },
+        "config_revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "instance_id",
+        "session_id",
+        "native_thread_id",
+        "config_revision"
+      ]
+    },
+    "LegacySourceInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "enum": [
+            "list",
+            "preview",
+            "confirm",
+            "revoke",
+            "inspect"
+          ]
+        },
+        "source": {
+          "$ref": "#/$defs/LegacySourceIdentity"
+        },
+        "target": {
+          "$ref": "#/$defs/LegacySourceIdentity"
+        },
+        "request_id": {
+          "$ref": "#/$defs/ID"
+        },
+        "receipt_hash": {
+          "$ref": "#/$defs/Hash"
+        },
+        "expected_queue_revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "relation_id": {
+          "$ref": "#/$defs/ID"
+        },
+        "session_id": {
+          "$ref": "#/$defs/ID"
+        },
+        "cursor": {
+          "$ref": "#/$defs/Cursor"
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "enum": [
+                  "preview",
+                  "confirm"
+                ]
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "source",
+              "target",
+              "request_id"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "confirm"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "receipt_hash",
+              "expected_queue_revision"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "revoke"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "relation_id"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "inspect"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "session_id"
+            ]
+          }
+        }
+      ]
+    },
+    "LegacySourceLink": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "relation_id": {
+          "$ref": "#/$defs/ID"
+        },
+        "source": {
+          "$ref": "#/$defs/LegacySourceIdentity"
+        },
+        "target": {
+          "$ref": "#/$defs/LegacySourceIdentity"
+        },
+        "request_id": {
+          "$ref": "#/$defs/ID"
+        },
+        "receipt_hash": {
+          "$ref": "#/$defs/Hash"
+        },
+        "actor_scope_id": {
+          "$ref": "#/$defs/ID"
+        },
+        "kind": {
+          "const": "human_linked"
+        },
+        "native_origin_status": {
+          "const": "unknown"
+        },
+        "revoked": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "relation_id",
+        "source",
+        "target",
+        "request_id",
+        "receipt_hash",
+        "actor_scope_id",
+        "kind",
+        "native_origin_status",
+        "revoked"
+      ]
+    },
+    "LegacySourcePage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "links": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LegacySourceLink"
+          },
+          "maxItems": 100
+        },
+        "preview": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "source": {
+              "$ref": "#/$defs/LegacySourceIdentity"
+            },
+            "target": {
+              "$ref": "#/$defs/LegacySourceIdentity"
+            },
+            "request_id": {
+              "$ref": "#/$defs/ID"
+            },
+            "receipt_hash": {
+              "$ref": "#/$defs/Hash"
+            },
+            "queue_revision": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "content": {
+              "type": "string",
+              "maxLength": 4000
+            },
+            "admission": {
+              "type": "string"
+            },
+            "native_origin_status": {
+              "const": "unknown"
+            }
+          },
+          "required": [
+            "source",
+            "target",
+            "request_id",
+            "receipt_hash",
+            "queue_revision",
+            "content",
+            "admission",
+            "native_origin_status"
+          ]
+        },
+        "identities": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LegacySourceIdentity"
+          },
+          "maxItems": 2
+        },
+        "receipts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "request_id": {
+                "$ref": "#/$defs/ID"
+              },
+              "content": {
+                "type": "string",
+                "maxLength": 4000
+              },
+              "state": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "request_id",
+              "content",
+              "state"
+            ]
+          },
+          "maxItems": 100
+        },
+        "has_more": {
+          "type": "boolean"
+        },
+        "next_cursor": {
+          "$ref": "#/$defs/Cursor"
+        }
+      },
+      "required": [
+        "links"
+      ]
+    },
+    "Request_legacy_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "task_api_request"
+        },
+        "api_version": {
+          "$ref": "#/$defs/Version"
+        },
+        "correlation_id": {
+          "$ref": "#/$defs/ID"
+        },
+        "operation": {
+          "const": "legacy_source"
+        },
+        "input": {
+          "$ref": "#/$defs/LegacySourceInput"
+        },
+        "idempotency_key": {
+          "$ref": "#/$defs/ID"
+        }
+      },
+      "required": [
+        "type",
+        "api_version",
+        "correlation_id",
+        "operation",
+        "input"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "input": {
+                "properties": {
+                  "action": {
+                    "enum": [
+                      "confirm",
+                      "revoke"
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "idempotency_key"
+            ]
+          },
+          "else": {
+            "not": {
+              "required": [
+                "idempotency_key"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "Response_legacy_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "task_api_response"
+        },
+        "api_version": {
+          "$ref": "#/$defs/Version"
+        },
+        "correlation_id": {
+          "$ref": "#/$defs/ID"
+        },
+        "operation": {
+          "const": "legacy_source"
+        },
+        "ok": {
+          "const": true
+        },
+        "result": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/LegacySourcePage"
+            },
+            {
+              "$ref": "#/$defs/Receipt"
+            }
           ]
         }
       },

@@ -2169,5 +2169,107 @@
     "name": "reject-numeric-exponent-lexeme",
     "valid": false,
     "raw": "{\"type\":\"task_api_request\",\"api_version\":\"1.0.0-rc.1\",\"correlation_id\":\"fixture-correlation\",\"operation\":\"cancel\",\"input\":{\"task_id\":\"task-fixture\",\"expected_revision\":1e3,\"target\":{\"instance_id\":\"instance-fixture\",\"session_id\":\"s_fixture12345678\",\"expected_native_thread_id\":\"resume-fixture\",\"expected_config_revision\":0},\"command_receipt_id\":\"receipt-fixture\",\"mode\":\"queued\"},\"idempotency_key\":\"key-fixture-12345678\"}"
+  },
+  {
+    "name": "human-source-conservative-positive",
+    "valid": true,
+    "definition": "SourceBinding",
+    "value": {
+      "identity": {
+        "instance_id": "instance-fixture",
+        "session_id": "parent"
+      },
+      "binding_kind": "legacy_unknown",
+      "provenance": "legacy",
+      "human_assertion": {
+        "kind": "human_linked",
+        "record_id": "hl_fixture",
+        "actor_scope_id": "device:human",
+        "original_receipt_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "native_origin_status": "unknown"
+      }
+    }
+  },
+  {
+    "name": "human-source-negative-binding_kind",
+    "valid": false,
+    "definition": "SourceBinding",
+    "value": {
+      "identity": {
+        "instance_id": "instance-fixture",
+        "session_id": "parent"
+      },
+      "binding_kind": "native_tool",
+      "provenance": "legacy",
+      "human_assertion": {
+        "kind": "human_linked",
+        "record_id": "hl_fixture",
+        "actor_scope_id": "device:human",
+        "original_receipt_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "native_origin_status": "unknown"
+      }
+    }
+  },
+  {
+    "name": "human-source-negative-provenance",
+    "valid": false,
+    "definition": "SourceBinding",
+    "value": {
+      "identity": {
+        "instance_id": "instance-fixture",
+        "session_id": "parent"
+      },
+      "binding_kind": "legacy_unknown",
+      "provenance": "verified",
+      "human_assertion": {
+        "kind": "human_linked",
+        "record_id": "hl_fixture",
+        "actor_scope_id": "device:human",
+        "original_receipt_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "native_origin_status": "unknown"
+      }
+    }
+  },
+  {
+    "name": "human-source-negative-invocation_id",
+    "valid": false,
+    "definition": "SourceBinding",
+    "value": {
+      "identity": {
+        "instance_id": "instance-fixture",
+        "session_id": "parent"
+      },
+      "binding_kind": "legacy_unknown",
+      "provenance": "legacy",
+      "human_assertion": {
+        "kind": "human_linked",
+        "record_id": "hl_fixture",
+        "actor_scope_id": "device:human",
+        "original_receipt_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "native_origin_status": "unknown"
+      },
+      "invocation_id": "fake-call"
+    }
+  },
+  {
+    "name": "human-source-negative-authorization_ref",
+    "valid": false,
+    "definition": "SourceBinding",
+    "value": {
+      "identity": {
+        "instance_id": "instance-fixture",
+        "session_id": "parent"
+      },
+      "binding_kind": "legacy_unknown",
+      "provenance": "legacy",
+      "human_assertion": {
+        "kind": "human_linked",
+        "record_id": "hl_fixture",
+        "actor_scope_id": "device:human",
+        "original_receipt_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "native_origin_status": "unknown"
+      },
+      "authorization_ref": "fake-grant"
+    }
   }
 ]

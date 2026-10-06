@@ -22,6 +22,11 @@ import (
 )
 
 func (h *Hub) apiTask(ctx context.Context, r taskapi.IntentRecord) (map[string]any, error) {
+	var legacy struct{ LegacyLinkID string }
+	json.Unmarshal(r.Metadata, &legacy)
+	if legacy.LegacyLinkID != "" {
+		return h.projectLegacyAPITask(ctx, r, legacy.LegacyLinkID)
+	}
 	var meta apiMetadata
 	if json.Unmarshal(r.Metadata, &meta) != nil {
 		return nil, taskapi.Failure("key_expired", "known_receipt", "lookup_original")
@@ -272,10 +277,15 @@ func (h *Hub) apiList(ctx context.Context, c taskapi.VerifiedContext, sessionID,
 		for _, record := range records {
 			var meta apiMetadata
 			json.Unmarshal(record.Metadata, &meta)
-			if seen[record.TaskID] || sessionID != "" && record.SessionID != sessionID && meta.Caller.SourceSessionID != sessionID {
+			var legacy legacySourceMetadata
+			json.Unmarshal(record.Metadata, &legacy)
+			if legacy.LegacyLinkID != "" {
+				continue
+			} // Read relations from durable adapter, independent of prunable intent metadata.
+			linkedSource := ""
+			if seen[record.TaskID] || sessionID != "" && record.SessionID != sessionID && meta.Caller.SourceSessionID != sessionID && linkedSource != sessionID {
 				continue
 			}
-			seen[record.TaskID] = true
 
 			if e := h.checkAPIRecord(ctx, c, record); e != nil {
 				continue
@@ -285,6 +295,28 @@ func (h *Hub) apiList(ctx context.Context, c taskapi.VerifiedContext, sessionID,
 				return nil, err
 			}
 			out = append(out, task)
+			seen[record.TaskID] = true
+		}
+	}
+	if pathFilter == "" || pathFilter == "ordinary" {
+		links, e := h.messageQueue.LegacySourceLinks(ctx)
+		if e != nil {
+			return nil, e
+		}
+		for _, link := range links {
+			if !h.legacyReadAllowed(c, link) || (sessionID != "" && link.Source.SessionID != sessionID && link.Target.SessionID != sessionID) {
+				continue
+			}
+			record := h.legacyProjectionRecord(link)
+			if seen[record.TaskID] {
+				continue
+			}
+			task, e := h.projectLegacyAPITask(ctx, record, link.ID)
+			if e != nil {
+				return nil, e
+			}
+			out = append(out, task)
+			seen[record.TaskID] = true
 		}
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -296,6 +328,8 @@ func (h *Hub) Read(ctx context.Context, c taskapi.AuthorizedCommand) (any, error
 	var in apiInput
 	json.Unmarshal(c.Request.Input, &in)
 	switch c.Request.Operation {
+	case "legacy_source":
+		return h.readLegacySource(ctx, c)
 	case "read_input":
 		source, ok := h.registry.Get(c.Caller.SourceSessionID)
 		if !ok {
@@ -381,6 +415,16 @@ func (h *Hub) Read(ctx context.Context, c taskapi.AuthorizedCommand) (any, error
 		if source, ok := h.exec.(backend.TaskCapabilitySource); ok {
 			providers = source.TaskAPICapabilities()
 		}
+		if c.Caller.BindingKind == "paired_human" {
+			ops = append(ops, "legacy_source")
+		}
+		if !apiOwnedAdmissionEnabled {
+			ops = []string{"capabilities", "list", "get", "read_result", "cancel", "snapshot", "events"}
+			if c.Caller.BindingKind == "paired_human" {
+				ops = append(ops, "legacy_source")
+			}
+			routes = map[string]string{}
+		}
 		return map[string]any{"api_versions": []string{contract.Version}, "schema_hash": contract.Hash(), "allowed_operations": ops, "paths": []string{"ordinary", "controller", "delegation"}, "providers": providers, "limits": map[string]int{"max_instruction_chars": 32000, "max_pending_children": 3, "event_retention_days": 30, "max_events_per_scope": 100000, "receipt_retention_days": 90}, "default_worker_profile": map[string]string{"backend": "codex", "model": "gpt-6.1-sol", "effort": "high"}, "mutation_authority_instance_id": h.cfg.InstanceID, "create_routes": routes}, nil
 	case "get":
 		if in.Original != nil {
@@ -429,7 +473,24 @@ func (h *Hub) Read(ctx context.Context, c taskapi.AuthorizedCommand) (any, error
 		}
 		source := apiSnapshotSource{h, c.Caller, in.SessionID, in.Views, in.Path}
 		engine := taskapi.SnapshotEngine{Codec: h.taskCursor, Source: source}
-		return engine.Page(ctx, scope, in.Views, in.Cursor, in.Limit)
+		page, err := engine.Page(ctx, scope, in.Views, in.Cursor, in.Limit)
+		if err != nil {
+			return nil, err
+		}
+		for _, raw := range page.Items {
+			task, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			id, _ := task["task_id"].(string)
+			if _, err := h.apiRecord(ctx, c.Caller, id); err != nil {
+				return nil, taskapi.Failure("cursor_expired", "known_none", "refresh_snapshot")
+			}
+		}
+		if c.Revalidate == nil || c.Revalidate(ctx) != nil {
+			return nil, taskapi.Failure("caller_unbound", "known_none", "refresh_identity")
+		}
+		return page, nil
 	case "events":
 		return h.apiEvents(ctx, c, in)
 
@@ -607,6 +668,21 @@ func (h *Hub) apiEvents(ctx context.Context, c taskapi.AuthorizedCommand, in api
 			index[r.SessionID+"/"+r.RequestID] = task
 		}
 	}
+	links, e := h.messageQueue.LegacySourceLinks(ctx)
+	if e != nil {
+		return nil, e
+	}
+	for _, link := range links {
+		if (in.Path != "" && in.Path != "ordinary") || !h.legacyHistoryReadAllowed(c.Caller, link) || (in.SessionID != "" && link.Source.SessionID != in.SessionID && link.Target.SessionID != in.SessionID) {
+			continue
+		}
+		record := h.legacyProjectionRecord(link)
+		task, e := h.projectLegacyAPITask(ctx, record, link.ID)
+		if e != nil {
+			return nil, e
+		}
+		index[link.Target.SessionID+"/"+link.RequestID] = task
+	}
 	paths := []string{}
 	for path := range h.apiJournals() {
 		if path != "pm_v1" {
@@ -638,10 +714,12 @@ func (h *Hub) apiEvents(ctx context.Context, c taskapi.AuthorizedCommand, in api
 			}
 			kind := "execution"
 			switch change.Kind {
-			case "admission", "intent_prepared":
+			case "admission", "intent_prepared", "human_source_linked":
 				kind = "admission"
 			case "final_sealed":
 				kind = "final"
+			case "human_source_revoked":
+				kind = "scope_revoked"
 			case "cancelled":
 				kind = "cancel"
 			}

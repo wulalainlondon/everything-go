@@ -2,8 +2,11 @@ package core
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"everything-go/internal/taskapi"
 	"strings"
 
 	"everything-go/internal/clientproto"
@@ -229,8 +232,58 @@ func (h *Hub) sessionTaskFinals(s *session.Session) (map[string]map[string]any, 
 }
 func (h *Hub) sendSessionTasks(c *Client, cmd clientproto.Command) {
 	event := protocol.SessionTasksSnapshot{Type: "session_tasks_snapshot", SessionID: cmd.SessionID, RequestID: cmd.RequestID, InstanceID: h.cfg.InstanceID, Status: "unknown", HistoryStatus: "unknown", ChildrenStatus: "unknown", Items: []protocol.SessionTask{}, Children: []protocol.SessionTask{}}
-	send := func() { c.enqueueEvent(event) }
+	proof := c.readIdentity.Load()
 	owner := h.pairedTaskDevice(c)
+	source, sourceFound := h.registry.Get(cmd.SessionID)
+	var thread string
+	var revision uint64
+	if sourceFound {
+		thread = source.ResumeID()
+		revision = source.SettingsSnapshot().ConfigRevision
+	}
+	// Capture the transport's original pairing, never a later same-device pairing.
+	reader := taskapi.VerifiedContext{Authority: h.cfg.InstanceID, StableScopeID: "device:" + owner, BindingKind: "paired_human", Transport: "authenticated_ws"}
+	if proof != nil {
+		digest := sha256.Sum256([]byte(proof.token))
+		reader.NamespaceGeneration = binary.BigEndian.Uint64(digest[:8]) & ((1 << 53) - 1)
+	}
+	send := func() {
+		current, found := h.registry.Get(cmd.SessionID)
+		allowed := proof != nil && c.readIdentity.Load() == proof && h.pairedTaskDevice(c) == owner && owner != "" && found && current == source && current.ResumeID() == thread && current.SettingsSnapshot().ConfigRevision == revision && h.controllerInScope(current) && !current.Snapshot().Hidden && current.State() != session.Closed
+		// History providers can block. Revalidate every disclosed target after I/O.
+		if allowed {
+			for _, child := range event.Children {
+				if child.InstanceID != h.cfg.InstanceID || !child.CanOpenTarget {
+					continue
+				}
+				target, exists := h.registry.Get(child.SessionID)
+				if !exists || !h.controllerInScope(target) || target.Snapshot().Hidden || target.State() == session.Closed || target.ResumeID() != child.ThreadID || target.SettingsSnapshot().ConfigRevision != child.ConfigRevision {
+					allowed = false
+					break
+				}
+				if child.Transport == "human_linked" {
+					link, err := h.messageQueue.LegacySourceLink(context.Background(), child.HumanSourceLink["relation_id"])
+					if err != nil || !h.legacyReadAllowed(reader, link) {
+						allowed = false
+						break
+					}
+				} else if h.dispatches != nil {
+					grant, err := h.dispatches.Grant(context.Background(), cmd.SessionID)
+					if err != nil || !grant.Allows(h.cfg.InstanceID, child.InstanceID, child.SessionID) {
+						allowed = false
+						break
+					}
+				}
+			}
+		}
+		if !allowed {
+			event.Status = "forbidden"
+			event.Items = []protocol.SessionTask{}
+			event.Children = []protocol.SessionTask{}
+			event.Message = "此配對或對話範圍已變更，請重新核對"
+		}
+		c.enqueueEvent(event)
+	}
 	s, ok := h.registry.Get(cmd.SessionID)
 	if owner == "" || !ok || !h.controllerInScope(s) || s.Snapshot().Hidden || s.State() == session.Closed {
 		event.Status = "forbidden"
@@ -386,6 +439,18 @@ func (h *Hub) sendSessionTasks(c *Client, cmd clientproto.Command) {
 	}
 	if h.dispatches == nil {
 		event.ChildrenStatus = "unsupported"
+	}
+	for _, legacy := range h.legacySessionChildren(context.Background(), s.ID, reader) {
+		duplicate := false
+		for _, child := range event.Children {
+			if child.SessionID == legacy.SessionID && child.RequestID == legacy.RequestID {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			event.Children = append(event.Children, legacy)
+		}
 	}
 	event.Status = "supported"
 	send()
