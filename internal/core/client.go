@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log"
 	"net"
@@ -517,6 +518,13 @@ func (c *Client) readLoop(ctx context.Context) error {
 			return err
 		}
 		if c.uploads.writeFrame(data) {
+			continue
+		}
+		var taskHeader struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(data, &taskHeader) == nil && taskHeader.Type == "task_api_request" {
+			c.hub.handleTaskAPI(ctx, c, data)
 			continue
 		}
 		in, err := protocol.ParseInbound(data)

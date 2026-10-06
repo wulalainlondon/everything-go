@@ -71,6 +71,8 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		return
 	}
 	switch cmd.Kind {
+	case "task_api_request":
+        return // Strict original frame handled by Client before legacy ParseCommand.
 	case "codex_voice_start":
 		h.handleVoiceStart(c, cmd)
 	case "codex_voice_stop":
@@ -148,6 +150,9 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		}
 		if !c.enrollmentOnly && h.messageQueue != nil {
 			helloInput.Capabilities = append(helloInput.Capabilities, "message_queue_v1", "queue_message_detail_v1", "session_tasks_v1")
+			if h.taskService != nil && h.pairedTaskDevice(c) != "" {
+				helloInput.Capabilities = append(helloInput.Capabilities, "task_api_v1_rc1")
+			}
 		}
 		if !c.enrollmentOnly && h.dispatches != nil {
 			helloInput.Capabilities = append(helloInput.Capabilities, "session_controller_v1")

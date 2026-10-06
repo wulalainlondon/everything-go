@@ -165,6 +165,7 @@ func (st *codexState) touch(now time.Time) {
 
 // Codex implements executor.Executor over the codex app-server.
 type Codex struct {
+	taskProvider       backend.TaskAPIProvider
 	voiceMu            sync.Mutex
 	voiceCalls         map[string]*codexVoiceCall
 	recapStoreMu       sync.Mutex
@@ -1671,6 +1672,9 @@ func (c *Codex) BuildAgentTree(resumeID string) (int, []*protocol.AgentNode) {
 }
 
 func (c *Codex) handleServerRequest(id any, method string, raw json.RawMessage) {
+	if c.handleTaskAPIServerRequest(id, method, raw) {
+		return
+	}
 	if c.handleSessionControlServerRequest(id, method, raw) {
 		return
 	}
@@ -2859,11 +2863,39 @@ func codexUsageValues(u codexTokenUsage) (int, int) {
 
 // ensureThread starts or resumes the codex thread for this session.
 func (c *Codex) ensureThread(s *session.Session, st *codexState) error {
+	if c.taskProvider != nil {
+		scope, err := c.taskProvider.TaskWorkerScope(s)
+		if err != nil {
+			return err
+		}
+		if scope != nil {
+			tools, err := c.taskProvider.TaskTools(s)
+			if err != nil || len(tools) == 0 {
+				return errors.New("unsupported: bounded task tools not loaded")
+			}
+		}
+	}
+
 	st.ensureMu.Lock()
 	defer st.ensureMu.Unlock()
 	st.mu.Lock()
 	have := st.threadID
 	st.mu.Unlock()
+	if have != "" && c.taskProvider != nil {
+		scope, err := c.taskProvider.TaskWorkerScope(s)
+		if err != nil {
+			return err
+		}
+		if scope != nil {
+			params := map[string]any{"threadId": have, "excludeTurns": true}
+			if err = c.applyTaskAPIThreadTools(s, params); err != nil {
+				return err
+			}
+			if _, err = c.rpcCall("thread/resume", params, 15*time.Second); err != nil {
+				return errors.New("unsupported: bounded task policy rebind failed")
+			}
+		}
+	}
 	if have != "" {
 		// Rebind managed tools on the SAME thread, including v1 -> v2 upgrades.
 		// No global daemon config or native history is reset.
@@ -2925,6 +2957,9 @@ func (c *Codex) ensureThread(s *session.Session, st *codexState) error {
 			}
 			c.applyDelegationThreadTools(s, resumeParams)
 			c.applySessionControlThreadTools(s, resumeParams)
+			if err := c.applyTaskAPIThreadTools(s, resumeParams); err != nil {
+				return err
+			}
 			if err := c.applyPMThreadPolicy(s, resumeParams); err != nil {
 				return err
 			}
@@ -2974,6 +3009,9 @@ func (c *Codex) ensureThread(s *session.Session, st *codexState) error {
 		}
 		c.applyDelegationThreadTools(s, startParams)
 		c.applySessionControlThreadTools(s, startParams)
+		if err := c.applyTaskAPIThreadTools(s, startParams); err != nil {
+			return err
+		}
 		if err := c.applyPMThreadPolicy(s, startParams); err != nil {
 			return err
 		}

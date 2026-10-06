@@ -2,7 +2,9 @@ package executor
 
 import (
 	"context"
+	"everything-go/internal/taskapi"
 	"fmt"
+	"sort"
 
 	"everything-go/internal/backend"
 	"everything-go/internal/session"
@@ -326,6 +328,23 @@ func (m *Mux) PendingInteractions(sessionID string) []backend.UserInputPayload {
 		seen[e] = true
 		if ir, ok := e.(InteractionResponder); ok {
 			out = append(out, ir.PendingInteractions(sessionID)...)
+		}
+	}
+	return out
+}
+
+func (m *Mux) TaskAPICapabilities() []taskapi.ProviderCapability {
+	out := []taskapi.ProviderCapability{}
+	names := []string{}
+	for name := range m.byBackend {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if source, ok := m.byBackend[name].(backend.TaskCapabilitySource); ok {
+			out = append(out, source.TaskAPICapabilities()...)
+		} else {
+			out = append(out, taskapi.UnloadedCapability(name, "unknown", "No authenticated Task API provider invocation adapter is registered."))
 		}
 	}
 	return out

@@ -2320,6 +2320,9 @@
         },
         {
           "$ref": "#/$defs/Request_deliver_result"
+        },
+        {
+          "$ref": "#/$defs/Request_read_input"
         }
       ]
     },
@@ -2730,6 +2733,9 @@
         },
         {
           "$ref": "#/$defs/ErrorResponse"
+        },
+        {
+          "$ref": "#/$defs/Response_read_input"
         }
       ]
     },
@@ -2903,6 +2909,102 @@
       "minLength": 1,
       "maxLength": 16000,
       "description": "Opaque integrity-protected scoped cursor; exact encoded byte cap enforced by codec."
+    },
+    "ReadInputFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "relative_path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        }
+      },
+      "required": [
+        "relative_path"
+      ]
+    },
+    "Request_read_input": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "task_api_request"
+        },
+        "api_version": {
+          "$ref": "#/$defs/Version"
+        },
+        "correlation_id": {
+          "$ref": "#/$defs/ID"
+        },
+        "operation": {
+          "const": "read_input"
+        },
+        "input": {
+          "$ref": "#/$defs/ReadInputFile"
+        }
+      },
+      "required": [
+        "type",
+        "api_version",
+        "correlation_id",
+        "operation",
+        "input"
+      ]
+    },
+    "Response_read_input": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "task_api_response"
+        },
+        "api_version": {
+          "$ref": "#/$defs/Version"
+        },
+        "correlation_id": {
+          "$ref": "#/$defs/ID"
+        },
+        "operation": {
+          "const": "read_input"
+        },
+        "ok": {
+          "const": true
+        },
+        "result": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "relative_path": {
+              "type": "string"
+            },
+            "text": {
+              "type": "string",
+              "maxLength": 64000
+            },
+            "hash": {
+              "$ref": "#/$defs/Hash"
+            },
+            "truncated": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "relative_path",
+            "text",
+            "hash",
+            "truncated"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "api_version",
+        "correlation_id",
+        "operation",
+        "ok",
+        "result"
+      ]
     }
   }
 }

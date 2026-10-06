@@ -56,7 +56,9 @@ func (c *Codex) ConnectExistingDaemon() error {
 	}
 	c.appServerMode = "daemon"
 	c.remoteReconnect = false
-	return c.startRemoteServerLocked(filepath.Dir(c.sessionsRoot))
+	home := filepath.Dir(c.sessionsRoot)
+	c.refreshRuntimeDiagnostics(home)
+	return c.startRemoteServerLocked(home)
 }
 
 // Each PM thread gets its own overrides. Never mutate the shared daemon's

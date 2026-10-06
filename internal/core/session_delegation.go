@@ -271,22 +271,48 @@ func (h *Hub) reconcileDelegation(ctx context.Context, r delegation.Record) erro
 				if !ok {
 					return errors.New("delegation_child_missing")
 				}
-				reader, ok := h.exec.(interface {
-					FinalAnswerForSession(*session.Session, string) (string, bool, error)
-				})
-				if !ok {
-					return errors.New("delegation_result_reader_unavailable")
-				}
-				var found bool
-				var err error
-				result, found, err = reader.FinalAnswerForSession(child, r.ChildRequestID)
-				if err != nil {
-					return err
-				}
-				// The app-server can report done just before the native JSONL is
-				// flushed. Retry asynchronously; never substitute commentary.
-				if !found && time.Since(time.UnixMilli(terminal.At)) < 30*time.Second {
-					return nil
+				if data, api, e := h.delegations.APIChildMetadata(ctx, r.ChildSessionID); e != nil {
+					return e
+				} else if api {
+					var metadata apiMetadata
+					if json.Unmarshal(data, &metadata) != nil {
+						return errors.New("api_child_metadata_invalid")
+					}
+					intent, e := h.delegations.TaskJournal().Task(ctx, metadata.Caller.StableScopeID, metadata.Caller.NamespaceGeneration, apiID(h.cfg.InstanceID, "delegation", r.ID))
+					if e != nil {
+						return e
+					}
+					task, e := h.apiTask(ctx, intent)
+					if e != nil {
+						return e
+					}
+					seal, ok := task["seal_id"].(string)
+					if !ok || seal == "" {
+						return nil
+					}
+					sealed, e := h.messageQueue.TaskSeal(ctx, r.ChildSessionID, r.ChildRequestID, seal)
+					if e != nil {
+						return e
+					}
+					result = sealed.Text
+				} else {
+					reader, ok := h.exec.(interface {
+						FinalAnswerForSession(*session.Session, string) (string, bool, error)
+					})
+					if !ok {
+						return errors.New("delegation_result_reader_unavailable")
+					}
+					var found bool
+					var err error
+					result, found, err = reader.FinalAnswerForSession(child, r.ChildRequestID)
+					if err != nil {
+						return err
+					}
+					// The app-server can report done just before the native JSONL is
+					// flushed. Retry asynchronously; never substitute commentary.
+					if !found && time.Since(time.UnixMilli(terminal.At)) < 30*time.Second {
+						return nil
+					}
 				}
 			}
 			artifacts := validatedDelegationArtifacts(result, r.Cwd)
@@ -316,9 +342,20 @@ func (h *Hub) reconcileDelegation(ctx context.Context, r delegation.Record) erro
 		if views := h.runtimes.Snapshot("", []string{r.ParentSessionID}); len(views) == 1 && runtimePhaseActive(views[0].Phase) {
 			return nil
 		}
+		var apiReturnTarget *dispatchTargetExpectation
+		if data, api, err := h.delegations.APIChildMetadata(ctx, r.ChildSessionID); err != nil {
+			return err
+		} else if api {
+			var metadata apiMetadata
+			if json.Unmarshal(data, &metadata) != nil || parent.ResumeID() != metadata.SourceThread || parent.SettingsSnapshot().ConfigRevision != metadata.SourceRevision || parent.State() == session.Closed {
+				_, e := h.delegations.MarkDeliveryFailed(ctx, r.ParentSessionID, r.ParentRequestID, "source_binding_changed")
+				return e
+			}
+			apiReturnTarget = &dispatchTargetExpectation{ThreadID: metadata.SourceThread, Revision: metadata.SourceRevision}
+		}
 		content := delegationReturnText(r)
 		client := &Client{hub: h, deviceID: "delegation-system", send: make(chan []byte, 64), quit: make(chan struct{}), ctx: context.Background()}
-		h.enqueueChatMessage(client, clientproto.Command{Kind: "message", SessionID: r.ParentSessionID, RequestID: r.ParentRequestID, Content: content})
+		h.enqueueChatMessageExpected(client, clientproto.Command{Kind: "message", SessionID: r.ParentSessionID, RequestID: r.ParentRequestID, Content: content, MessagePurpose: "result_return"}, apiReturnTarget)
 		if _, found, err := h.messageQueue.Get(r.ParentSessionID, r.ParentRequestID); err != nil {
 			return err
 		} else if !found {
@@ -363,7 +400,13 @@ func (h *Hub) provisionDelegation(ctx context.Context, r delegation.Record) erro
 	}
 	child, exists := h.registry.Get(r.ChildSessionID)
 	if !exists {
-		child = h.registry.Create(r.ChildSessionID, r.ChildName, r.Cwd, backend.Codex, r.Model, r.Sandbox, "")
+		provider := backend.Codex
+		if selected, api, err := h.delegations.APIBackend(ctx, r.ChildSessionID); err != nil {
+			return err
+		} else if api {
+			provider = selected
+		}
+		child = h.registry.Create(r.ChildSessionID, r.ChildName, r.Cwd, provider, r.Model, r.Sandbox, "")
 		child.SetEffort(r.Effort)
 		if err := h.registry.PersistDurably(); err != nil {
 			return err

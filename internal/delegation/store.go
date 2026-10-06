@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"everything-go/internal/taskapi"
 	"path/filepath"
 	"time"
 
@@ -29,6 +30,7 @@ type Store struct{ db *sql.DB }
 var ErrParentLimit = errors.New("delegation_parent_active_limit")
 
 const ddl = `
+CREATE TABLE IF NOT EXISTS task_api_child_profiles(session_id TEXT PRIMARY KEY,profile BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS session_delegations (
   id TEXT PRIMARY KEY,
   parent_session_id TEXT NOT NULL,
@@ -72,6 +74,10 @@ func Open(dataDir string) (*Store, error) {
 	}
 	db.SetMaxOpenConns(1)
 	if _, err = db.Exec(ddl); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err := taskapi.InstallJournal(db); err != nil {
 		db.Close()
 		return nil, err
 	}

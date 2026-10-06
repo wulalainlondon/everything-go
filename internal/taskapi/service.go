@@ -26,7 +26,7 @@ func NewService(policy Authorizer, gateway Gateway) (*Service, error) {
 	return &Service{c, policy, gateway}, nil
 }
 
-var operations = map[string]bool{"capabilities": true, "create_dispatch": true, "list": true, "get": true, "read_result": true, "append": true, "cancel": true, "snapshot": true, "events": true, "deliver_result": true}
+var operations = map[string]bool{"capabilities": true, "create_dispatch": true, "list": true, "get": true, "read_result": true, "append": true, "cancel": true, "snapshot": true, "events": true, "deliver_result": true, "read_input": true}
 
 func isMutation(op string) bool {
 	return op == "create_dispatch" || op == "append" || op == "cancel" || op == "deliver_result"
@@ -95,7 +95,7 @@ func (s *Service) Execute(ctx context.Context, caller BoundCaller, raw []byte) R
 	if err != nil {
 		return fail(err)
 	}
-	command := AuthorizedCommand{Caller: binding, Request: request, Locator: locator}
+	command := AuthorizedCommand{Caller: binding, Request: request, Locator: locator, Revalidate: func(ctx context.Context) error { _, err := caller.Check(ctx); return err }}
 	if request.Operation == "get" {
 		var input struct {
 			Original *Locator `json:"original_receipt"`

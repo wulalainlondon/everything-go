@@ -317,6 +317,9 @@
       "type": "stopped"
     },
     {
+      "type": "task_api_response"
+    },
+    {
       "type": "task_killed"
     },
     {
@@ -662,6 +665,9 @@
     },
     {
       "type": "switch_session_config"
+    },
+    {
+      "type": "task_api_request"
     },
     {
       "type": "tunnel_url_ack"

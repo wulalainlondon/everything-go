@@ -43,6 +43,7 @@ import (
 	"everything-go/internal/search"
 	"everything-go/internal/session"
 	"everything-go/internal/sessiondispatch"
+	"everything-go/internal/taskapi"
 	"everything-go/internal/toolenv"
 	"everything-go/internal/widgetaccess"
 	"everything-go/internal/workitems"
@@ -69,6 +70,10 @@ type Config struct {
 // the executor.Sink (Emit broadcasts an event to connected clients, or buffers
 // it when none are connected so a reconnecting client can recover it).
 type Hub struct {
+	taskService         *taskapi.Service
+	taskCursor          *taskapi.CursorCodec
+	taskMu              sync.Mutex
+	taskSeals           map[string]apiSeal
 	dispatchMu          sync.Mutex
 	dispatches          *sessiondispatch.Store
 	dispatchScheduler   atomic.Bool
@@ -261,6 +266,7 @@ func NewHub(reg *session.Registry, cfg Config, pairing *governance.Pairing, port
 	// permission_request/result via the hub. Mode from BRIDGE_PERMISSION_MODE
 	// (default enforce, mirroring Python prod).
 	h.perms = governance.NewPermissionManager(h.Emit, os.Getenv("BRIDGE_PERMISSION_MODE"))
+	h.initializeTaskAPI()
 	return h
 }
 
@@ -500,7 +506,17 @@ func (h *Hub) connectedDeviceIDs(exclude string) []string {
 // event for replay on the next reconnect (the offline-recovery path). Safe for
 // concurrent use.
 func (h *Hub) Emit(event any) {
+	if proof, ok := event.(backend.NativeProviderEvidence); ok {
+		h.messageQueueMu.Lock()
+		defer h.messageQueueMu.Unlock()
+		if h.messageQueue != nil {
+			_ = h.messageQueue.RecordProviderEvidence(messagequeue.ProviderEvidence{SessionID: proof.SessionID, RequestID: proof.RequestID, Backend: proof.Backend, ConversationID: proof.ConversationID, Token: proof.Token, TokenKind: proof.TokenKind, MessageID: proof.MessageID, Text: proof.Text, Status: proof.Status})
+		}
+		return
+	}
 	if accepted, ok := event.(backend.NativeTaskAccepted); ok {
+		h.messageQueueMu.Lock()
+		defer h.messageQueueMu.Unlock()
 		if h.messageQueue != nil {
 			if err := h.messageQueue.RecordNativeAcceptance(accepted.SessionID, accepted.RequestID, accepted.ThreadID, accepted.TurnID); err != nil {
 				log.Printf("[tasks] native acceptance persistence failed: %v", err)

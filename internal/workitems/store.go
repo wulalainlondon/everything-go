@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"everything-go/internal/taskapi"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -271,6 +272,10 @@ func Open(dataDir, instanceID string) (*Store, error) {
 		return nil, err
 	}
 	if err := store.migrate(context.Background()); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err := taskapi.InstallJournal(db); err != nil {
 		db.Close()
 		return nil, err
 	}

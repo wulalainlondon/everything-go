@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"everything-go/internal/taskapi"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -34,7 +35,13 @@ const (
 var ErrConflict = errors.New("request ID already belongs to different message content")
 var ErrRejected = errors.New("message request was permanently rejected")
 
+type APIAdmission struct {
+	Command taskapi.AuthorizedCommand
+	Record  taskapi.IntentRecord
+}
+
 type Entry struct {
+	API                              *APIAdmission
 	Sequence                         int64
 	SessionID, RequestID             string
 	State                            State
@@ -81,8 +88,17 @@ func Open(dataDir string) (*Store, error) {
  CREATE INDEX IF NOT EXISTS queue_pending ON queue_commands(session_id, state, seq);
  CREATE TABLE IF NOT EXISTS task_admissions (session_id TEXT NOT NULL, request_id TEXT NOT NULL, origin_instance TEXT NOT NULL, origin_session TEXT NOT NULL, metadata BLOB NOT NULL, PRIMARY KEY(session_id,request_id));
  CREATE INDEX IF NOT EXISTS task_origin ON task_admissions(origin_instance,origin_session);
+ CREATE TABLE IF NOT EXISTS task_api_seals(seal_id TEXT NOT NULL,session_id TEXT NOT NULL,request_id TEXT NOT NULL,hash TEXT NOT NULL,text TEXT NOT NULL,anchor BLOB NOT NULL,PRIMARY KEY(session_id,request_id));
+ CREATE TABLE IF NOT EXISTS task_api_provider_evidence(session_id TEXT NOT NULL,request_id TEXT NOT NULL,backend TEXT NOT NULL,conversation_id TEXT NOT NULL,token TEXT NOT NULL,token_kind TEXT NOT NULL,message_id TEXT NOT NULL,text TEXT NOT NULL,status TEXT NOT NULL,PRIMARY KEY(session_id,request_id));
+ CREATE TABLE IF NOT EXISTS task_cancel_origins(session_id TEXT NOT NULL,request_id TEXT NOT NULL,from_state TEXT NOT NULL,PRIMARY KEY(session_id,request_id));
+ CREATE TABLE IF NOT EXISTS task_provider_conflicts(session_id TEXT NOT NULL,request_id TEXT NOT NULL,PRIMARY KEY(session_id,request_id));
+ CREATE TABLE IF NOT EXISTS task_native_conflicts (session_id TEXT NOT NULL,request_id TEXT NOT NULL,thread_id TEXT NOT NULL,turn_id TEXT NOT NULL,PRIMARY KEY(session_id,request_id));
  CREATE TABLE IF NOT EXISTS task_native_acceptance (session_id TEXT NOT NULL, request_id TEXT NOT NULL, thread_id TEXT NOT NULL, turn_id TEXT NOT NULL, PRIMARY KEY(session_id,request_id));
  CREATE TABLE IF NOT EXISTS queue_rejections (session_id TEXT NOT NULL, request_id TEXT NOT NULL, reason TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(session_id,request_id));`); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err = taskapi.InstallJournal(db); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -126,6 +142,9 @@ func (s *Store) Get(sessionID, requestID string) (Entry, bool, error) {
 	return lookup(s.db, sessionID, requestID)
 }
 func bump(tx *sql.Tx, sessionID string) error {
+	if err := taskapi.ChangeTx(tx, sessionID, "", "snapshot"); err != nil {
+		return err
+	}
 	_, err := tx.Exec(`INSERT INTO queue_sessions(session_id,revision) VALUES(?,1) ON CONFLICT(session_id) DO UPDATE SET revision=revision+1`, sessionID)
 	return err
 }
@@ -146,6 +165,19 @@ func (s *Store) Enqueue(e Entry) (Entry, bool, error) {
 		return Entry{}, false, err
 	}
 	defer tx.Rollback()
+	if e.API != nil {
+		original, created, err := s.TaskJournal().ClaimTx(tx, e.API.Command, e.API.Record)
+		if err != nil {
+			return Entry{}, false, err
+		}
+		if !created {
+			prior, found, err := lookup(tx, original.SessionID, original.RequestID)
+			if err != nil || !found {
+				return Entry{}, false, err
+			}
+			return prior, false, nil
+		}
+	}
 	var rejection string
 	if err := tx.QueryRow(`SELECT reason FROM queue_rejections WHERE session_id=? AND request_id=?`, e.SessionID, e.RequestID).Scan(&rejection); err == nil {
 		return Entry{}, false, fmt.Errorf("%w: %s", ErrRejected, rejection)
@@ -170,6 +202,9 @@ func (s *Store) Enqueue(e Entry) (Entry, bool, error) {
 	now := time.Now().UnixMilli()
 	_, err = tx.Exec(`INSERT INTO queue_commands(session_id,request_id,state,content,image_count,file_names,payload,payload_hash,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, e.SessionID, e.RequestID, Queued, e.Content, e.ImageCount, string(names), e.Payload, hashText, now, now)
 	if err != nil {
+		return Entry{}, false, err
+	}
+	if err = taskapi.ChangeTx(tx, e.SessionID, e.RequestID, "admission"); err != nil {
 		return Entry{}, false, err
 	}
 	if err = saveTaskAdmission(tx, e); err != nil {
@@ -232,6 +267,11 @@ func (s *Store) Transition(sessionID, requestID string, from []State, to State, 
 	if !allowed {
 		return e, false, nil
 	}
+	if to == Cancelled {
+		if _, err = tx.Exec("INSERT OR IGNORE INTO task_cancel_origins VALUES(?,?,?)", sessionID, requestID, e.State); err != nil {
+			return Entry{}, false, err
+		}
+	}
 	payload := e.Payload
 	if to == Completed || to == Cancelled || to == Steered || to == Failed {
 		payload = []byte{}
@@ -241,6 +281,9 @@ func (s *Store) Transition(sessionID, requestID string, from []State, to State, 
 		return Entry{}, false, err
 	}
 	if err = bump(tx, sessionID); err != nil {
+		return Entry{}, false, err
+	}
+	if err = taskapi.ChangeTx(tx, sessionID, requestID, string(to)); err != nil {
 		return Entry{}, false, err
 	}
 	e, _, err = lookup(tx, sessionID, requestID)
@@ -309,18 +352,21 @@ func (s *Store) Recover() error {
 		return err
 	}
 	defer tx.Rollback()
-	rows, err := tx.Query(`SELECT DISTINCT session_id FROM queue_commands WHERE state IN ('running','steering')`)
+	rows, err := tx.Query(`SELECT session_id,request_id FROM queue_commands WHERE state IN ('running','steering')`)
 	if err != nil {
 		return err
 	}
 	var ids []string
+	var requests []string
 	for rows.Next() {
 		var id string
-		if err = rows.Scan(&id); err != nil {
+		var request string
+		if err = rows.Scan(&id, &request); err != nil {
 			rows.Close()
 			return err
 		}
 		ids = append(ids, id)
+		requests = append(requests, request)
 	}
 	err = rows.Err()
 	rows.Close()
@@ -331,7 +377,10 @@ func (s *Store) Recover() error {
 	if err != nil {
 		return err
 	}
-	for _, id := range ids {
+	for index, id := range ids {
+		if err = taskapi.ChangeTx(tx, id, requests[index], "uncertain"); err != nil {
+			return err
+		}
 		if err = bump(tx, id); err != nil {
 			return err
 		}

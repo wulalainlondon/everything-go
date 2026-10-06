@@ -64,6 +64,7 @@ func (r Response) MarshalJSON() ([]byte, error) {
 // VerifiedContext has no wire representation. Only a trusted server verifier
 // derives it from actual transport/provider invocation and original authority.
 type VerifiedContext struct {
+	NativeTurnID, ToolCallID, ProcessGeneration            string
 	Authority                                              string
 	StableScopeID                                          string
 	NamespaceGeneration                                    uint64
@@ -132,6 +133,7 @@ type Namespace struct {
 	Path, Operation, TaskID  string
 }
 type AuthorizedCommand struct {
+	Revalidate func(context.Context) error
 	Caller     VerifiedContext
 	Request    Request
 	Namespace  Namespace

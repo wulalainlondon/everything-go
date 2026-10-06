@@ -205,3 +205,6 @@ func (c *CursorCodec) EventWatermarks(token string, scope ReadScope) ([]Watermar
 	p, err := c.decode(token, scope, "events")
 	return p.Freeze.Watermarks, err
 }
+func (c *CursorCodec) EventsFromWatermarks(scope ReadScope, marks []Watermark, expires time.Time) (string, error) {
+	return c.encode(cursorPayload{Kind: "events", Schema: taskcontract.Hash(), Scope: scope, Freeze: Freeze{ID: "event-stream", ExpiresAt: expires.UnixMilli(), Watermarks: marks}})
+}

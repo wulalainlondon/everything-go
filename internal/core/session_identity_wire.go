@@ -26,6 +26,9 @@ func scopeSessionValue(value any, authorityInstanceID, parentType string) bool {
 		}
 		return changed
 	case map[string]any:
+		if typed["type"] == "task_api_response" {
+			return false
+		} // Closed standalone schema owns authority and provider identity.
 		if parentType == "session_task" || parentType == "task_origin" {
 			if instance, ok := typed["instance_id"].(string); ok && instance != "" {
 				authorityInstanceID = instance

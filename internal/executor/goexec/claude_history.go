@@ -47,6 +47,7 @@ func (c *Claude) findSessionFile(uuid string) string {
 }
 
 type claudeRow struct {
+	UUID                      string `json:"uuid"`
 	Type                      string `json:"type"`
 	IsSidechain               bool   `json:"isSidechain"`
 	IsCompactSummary          bool   `json:"isCompactSummary"`
@@ -388,4 +389,43 @@ func itoa(n int) string {
 		b[i] = '-'
 	}
 	return string(b[i:])
+}
+
+// NativeTaskFinalAnchor retains the existing line-based public anchor while
+// verifying the exact UUID in the provider's canonical native transcript.
+// Stream stdout alone is never the final anchor authority.
+func (c *Claude) NativeTaskFinalAnchor(conversation, uuid, text string) (string, bool) {
+	path := c.findSessionFile(conversation)
+	if path == "" || uuid == "" {
+		return "", false
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return "", false
+	}
+	defer f.Close()
+	lines, _, err := history.StreamTailLines(f, history.LoadMaxBytes())
+	if err != nil {
+		return "", false
+	}
+	match := ""
+	for _, ln := range lines {
+		var r claudeRow
+		if json.Unmarshal(ln.Data, &r) != nil || r.UUID != uuid {
+			continue
+		}
+		if r.Type != "assistant" || r.IsSidechain || r.IsCompactSummary || r.IsVisibleInTranscriptOnly || r.Message.StopReason != "end_turn" {
+			return "", false
+		}
+		content, _ := buildClaudeBlocks(r.Message.Content, "assistant", map[string]string{})
+		if content != text {
+			return "", false
+		}
+		id := "claude:" + conversation + ":line:" + itoa(ln.LineNo)
+		if match != "" && match != id {
+			return "", false
+		}
+		match = id
+	}
+	return match, match != ""
 }

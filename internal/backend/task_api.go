@@ -2,6 +2,7 @@ package backend
 
 import (
 	"context"
+	"everything-go/internal/session"
 	"everything-go/internal/taskapi"
 )
 
@@ -29,4 +30,25 @@ type TaskWorkerPlan struct {
 	Parameters              map[string]any
 	Scope                   taskapi.ChildScope
 	NativeConsumptionProven bool
+}
+
+type TaskCaller struct {
+	Session                                                                 *session.Session
+	RequestID, ThreadID, TurnID, CallID, ProcessGeneration, ProviderVersion string
+	Validate                                                                func() bool
+}
+type TaskAPIProvider interface {
+	TaskTools(*session.Session) ([]map[string]any, error)
+	ExecuteTask(context.Context, TaskCaller, []byte) taskapi.Response
+	TaskWorkerScope(*session.Session) (*taskapi.ChildScope, error)
+}
+
+// An executor must explicitly implement per-command enforcement for existing
+// native threads. Session sandbox equality alone does not enforce task roots,
+// tool/network policy or recursive delegation bounds.
+type ExistingTaskScopeEnforcer interface {
+	ValidateExistingTaskScope(*session.Session, taskapi.ChildScope, string) error
+}
+type TaskCapabilitySource interface {
+	TaskAPICapabilities() []taskapi.ProviderCapability
 }

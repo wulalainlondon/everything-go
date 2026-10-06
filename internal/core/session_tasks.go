@@ -49,6 +49,9 @@ func (h *Hub) admitTaskOrigin(c *Client, cmd clientproto.Command) (string, error
 }
 func (h *Hub) nativeTaskTurn(s *session.Session, request string) string {
 	if h.messageQueue != nil {
+		if conflict, e := h.messageQueue.NativeConflict(s.ID, request); e != nil || conflict {
+			return ""
+		}
 		if turn := h.messageQueue.NativeAcceptance(s.ID, request, s.ResumeID()); turn != "" {
 			return turn
 		}
@@ -161,7 +164,40 @@ func (h *Hub) projectSessionTask(s *session.Session, e messagequeue.Entry, owner
 	case messagequeue.Cancelled:
 		task.State = "cancelled"
 	}
-	task.CanCancel = e.State == messagequeue.Queued && owner != "" && payload.OwnerDevice == owner && task.NativeTurnID == "" && h.controls.MobileMayWrite(s.ID)
+	task.APIAxes = map[string]string{"admission": "queued", "execution": "unknown", "final": "unanchored", "qa": "not_requested", "delivery": "not_requested"}
+	if task.State == "accepted_queued" {
+		task.APIAxes["execution"] = "not_started"
+	}
+	if task.NativeTurnID != "" {
+		task.APIAxes["execution"] = "native_consumed"
+	}
+	if task.State == "completed" && task.SourceMessageID != "" {
+		task.APIAxes["execution"] = "succeeded"
+		task.APIAxes["final"] = "sealed"
+	}
+	if proof, found, err := h.messageQueue.ProviderEvidence(s.ID, e.RequestID); err == nil && found {
+		task.ProviderExecution = map[string]string{"backend": "claude", "provider_session_id": proof.ConversationID, "token_kind": proof.TokenKind, "provider_token": proof.Token}
+		task.APIAxes["execution"] = "native_consumed"
+		if e.State == messagequeue.Running {
+			task.State = "consumed"
+		}
+		if e.State == messagequeue.Completed && proof.Status == "succeeded" && proof.MessageID != "" && h.claudeAnchorID(s, proof) != "" {
+			task.State = "completed"
+			task.SourceMessageID = h.claudeAnchorID(s, proof)
+			task.Summary = truncateGraphemes(proof.Text, 800)
+			task.APIAxes["execution"] = "succeeded"
+			task.APIAxes["final"] = "sealed"
+		}
+	}
+	if conflict, err := h.messageQueue.NativeConflict(s.ID, e.RequestID); err != nil || conflict {
+		task.State = "legacy_unknown"
+		task.APIAxes["execution"] = "unknown"
+		task.APIAxes["final"] = "unknown"
+		task.SourceMessageID = ""
+		task.NativeTurnID = ""
+		task.ProviderExecution = nil
+	}
+	task.CanCancel = e.State == messagequeue.Queued && owner != "" && payload.OwnerDevice == owner && task.NativeTurnID == "" && task.ProviderExecution == nil && h.controls.MobileMayWrite(s.ID)
 	return task
 }
 

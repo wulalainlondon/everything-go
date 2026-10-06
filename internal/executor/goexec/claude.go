@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/google/uuid"
 	"log"
 	"os"
 	"os/exec"
@@ -25,6 +26,7 @@ import (
 	"everything-go/internal/protocol"
 	"everything-go/internal/runtime"
 	"everything-go/internal/session"
+	"everything-go/internal/taskapi"
 )
 
 const (
@@ -44,6 +46,12 @@ var todoTools = map[string]bool{
 }
 
 type proc struct {
+	inputUUID          string
+	acceptedUUID       string
+	finalMessageID     string
+	finalAssistantText string
+
+	taskLease      *claudeTaskLease
 	pmSession      bool
 	readOnlyWorker bool
 	cmd            *exec.Cmd
@@ -84,6 +92,10 @@ func (p *proc) currentReqID() string {
 }
 
 func (p *proc) finishTurn() (reqID string, wasCompact bool) {
+	if p.taskLease != nil {
+		p.taskLease.revoke()
+	}
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	reqID = p.reqID
@@ -120,11 +132,13 @@ type claudeState struct {
 
 // Claude implements executor.Executor over the local `claude` CLI.
 type Claude struct {
-	pmProvider  backend.PMProvider
-	sink        executor.Sink
-	tools       *toolEmitter
-	claudeBin   string
-	projectsDir string
+	taskProvider backend.TaskAPIProvider
+	taskMCP      *claudeTaskMCP
+	pmProvider   backend.PMProvider
+	sink         executor.Sink
+	tools        *toolEmitter
+	claudeBin    string
+	projectsDir  string
 
 	mu     sync.Mutex
 	procs  map[string]*proc // sessionID -> running subprocess
@@ -185,6 +199,11 @@ func (c *Claude) state(sessionID string) *claudeState {
 func (c *Claude) Send(ctx context.Context, s *session.Session, reqID, content string, images []backend.ImageAttachment, files []backend.FileAttachment) error {
 	c.mu.Lock()
 	p := c.procs[s.ID]
+	if p != nil && p.taskLease != nil && p.currentReqID() == "" {
+		p.cancel()
+		delete(c.procs, s.ID)
+		p = nil
+	}
 	if p == nil {
 		if s.ResumeID() != "" {
 			c.sink.Emit(backend.NewTurnProgress(s.ID, reqID, "resuming_thread", "Loading the existing Claude conversation"))
@@ -202,6 +221,13 @@ func (c *Claude) Send(ctx context.Context, s *session.Session, reqID, content st
 	}
 	isCompact := strings.TrimSpace(content) == "/compact"
 	p.beginTurn(reqID, isCompact)
+	if p.taskLease != nil {
+		p.taskLease.mu.Lock()
+		if p.taskLease.requestID == "" {
+			p.taskLease.requestID = reqID
+		}
+		p.taskLease.mu.Unlock()
+	}
 	c.mu.Unlock()
 	c.sink.Emit(backend.NewTurnProgress(s.ID, reqID, "submitting_turn", "Sending the turn to Claude"))
 	if isCompact {
@@ -209,6 +235,19 @@ func (c *Claude) Send(ctx context.Context, s *session.Session, reqID, content st
 	}
 
 	payload := userMessageJSON(content, images, files)
+	if p.taskLease != nil {
+		var frame map[string]any
+		json.Unmarshal(payload, &frame)
+		p.mu.Lock()
+		p.inputUUID = uuid.NewString()
+		p.acceptedUUID = ""
+		p.finalMessageID = ""
+		p.finalAssistantText = ""
+		frame["uuid"] = p.inputUUID
+		p.mu.Unlock()
+		payload, _ = json.Marshal(frame)
+		payload = append(payload, '\n')
+	}
 	if _, err := p.stdin.Write(payload); err != nil {
 		if isCompact {
 			c.sink.Emit(backend.NewSessionCommandFailed(s.ID, reqID, "stdin write failed: "+err.Error(), 0))
@@ -398,6 +437,11 @@ func (c *Claude) spawn(s *session.Session) (*proc, error) {
 		}
 	}
 
+	args, taskLease, taskErr := c.taskSpawn(s, args, pm)
+	if taskErr != nil {
+		cancel()
+		return nil, taskErr
+	}
 	cmd := exec.CommandContext(ctx, c.claudeBin, args...)
 	// Give a CLI wrapper its normal signal/cleanup path before escalating.
 	// CommandContext's default SIGKILL skips shell traps and can orphan tools.
@@ -426,6 +470,7 @@ func (c *Claude) spawn(s *session.Session) (*proc, error) {
 	if readOnlyWorker {
 		cmd.Env = append(os.Environ(), "MCP_TOOL_TIMEOUT=1800000", "ENABLE_CLAUDEAI_MCP_SERVERS=false")
 	}
+	cmd.Env = addTaskEnvironment(cmd.Env, taskLease)
 	stdinPipe, err := cmd.StdinPipe()
 	if err != nil {
 		cancel()
@@ -448,10 +493,16 @@ func (c *Claude) spawn(s *session.Session) (*proc, error) {
 
 	log.Printf("[%s] spawned claude pid=%d cwd=%s resume=%s", s.ID, cmd.Process.Pid, snap.Cwd, snap.ResumeID)
 	p := &proc{
+		taskLease:      taskLease,
 		pmSession:      pm != nil,
 		readOnlyWorker: readOnlyWorker,
 		cmd:            cmd, stdin: newBufWriteCloser(stdinPipe), cancel: cancel, exited: make(chan struct{}),
 		tools: newToolNormalizer(c.sink, c), model: snap.Model,
+	}
+	if taskLease != nil {
+		taskLease.mu.Lock()
+		taskLease.p = p
+		taskLease.mu.Unlock()
 	}
 	p.touch()
 
@@ -529,6 +580,7 @@ type claudeInputUsage struct {
 }
 
 type ndLine struct {
+	UUID              string `json:"uuid"`
 	IsAPIErrorMessage bool   `json:"isApiErrorMessage"`
 	APIError          string `json:"error"`
 	IsError           bool   `json:"is_error"`
@@ -626,6 +678,19 @@ func (c *Claude) readStdout(s *session.Session, p *proc, stdout interface{ Read(
 				}
 			}
 		case "assistant":
+			if p.taskLease != nil && evt.UUID != "" {
+				parts := []string{}
+				for _, raw := range evt.Message.Content {
+					var block struct{ Type, Text string }
+					if json.Unmarshal(raw, &block) == nil && block.Type == "text" {
+						parts = append(parts, block.Text)
+					}
+				}
+				p.mu.Lock()
+				p.finalMessageID = evt.UUID
+				p.finalAssistantText = strings.Join(parts, "")
+				p.mu.Unlock()
+			}
 			if evt.Message.Usage != nil {
 				lastInputUsage = evt.Message.Usage
 			}
@@ -665,6 +730,17 @@ func (c *Claude) readStdout(s *session.Session, p *proc, stdout interface{ Read(
 			}
 			c.tools.ResultEnd(s.ID, reqID, evt.ToolUseID, output)
 		case "user":
+			if p.taskLease != nil && evt.UUID != "" && evt.SessionID != "" {
+				p.mu.Lock()
+				matched := evt.UUID == p.inputUUID && reqID != ""
+				if matched {
+					p.acceptedUUID = evt.UUID
+				}
+				p.mu.Unlock()
+				if matched {
+					c.sink.Emit(backend.NativeProviderEvidence{SessionID: s.ID, RequestID: reqID, Backend: "claude", ConversationID: evt.SessionID, Token: evt.UUID, TokenKind: "message_uuid"})
+				}
+			}
 			// Public stream-json tool replies are user message content blocks.
 			// A replayed user prompt is an acknowledgement, not assistant output.
 			for _, raw := range evt.Message.Content {
@@ -717,6 +793,15 @@ func (c *Claude) readStdout(s *session.Session, p *proc, stdout interface{ Read(
 				s.SetResumeID(evt.SessionID)
 				c.sink.Emit(backend.NewSessionUUID(s.ID, evt.SessionID))
 			}
+			if p.taskLease != nil {
+				p.mu.Lock()
+				token, message, text := p.acceptedUUID, p.finalMessageID, p.finalAssistantText
+				p.mu.Unlock()
+				final := claudeRawToString(evt.Result)
+				if token != "" && message != "" && final == text {
+					c.sink.Emit(backend.NativeProviderEvidence{SessionID: s.ID, RequestID: reqID, Backend: "claude", ConversationID: s.ResumeID(), Token: token, TokenKind: "message_uuid", MessageID: message, Text: final, Status: "succeeded"})
+				}
+			}
 			doneReqID, wasCompact := p.finishTurn()
 			if doneReqID != "" {
 				reqID = doneReqID
@@ -732,6 +817,30 @@ func (c *Claude) readStdout(s *session.Session, p *proc, stdout interface{ Read(
 				c.startAutoCompact(s, p)
 			}
 		case "system":
+			if evt.Subtype == "init" && p.taskLease != nil {
+				if conversation, e := taskapi.ClaudeConversation(line); e == nil {
+					p.taskLease.mu.Lock()
+					prior := p.taskLease.threadID
+					if prior == "" {
+						p.taskLease.threadID = conversation.ResumeID
+					}
+					p.taskLease.mu.Unlock()
+					if prior != "" && prior != conversation.ResumeID {
+						p.cancel()
+						c.sink.Emit(protocol.NewError(s.ID, p.currentReqID(), "unsupported: native conversation changed"))
+						continue
+					}
+				}
+			}
+			if evt.Subtype == "init" && p.taskLease != nil && p.taskLease.worker {
+				for _, tool := range evt.Tools {
+					if !strings.HasPrefix(tool, "mcp__bridge_tasks__") && tool != "ToolSearch" && tool != "EndConversation" {
+						p.cancel()
+						c.sink.Emit(backend.NewError(s.ID, p.currentReqID(), "unsupported_task_worker_toolset", "Bounded task worker exposed unexpected tools; stopped."))
+						return
+					}
+				}
+			}
 			if evt.Subtype == "init" && p.readOnlyWorker && !validReadOnlyWorkerTools(evt.Tools) {
 				p.cancel()
 				c.sink.Emit(backend.NewError(s.ID, p.currentReqID(), "pm_worker_tool_policy_mismatch", "Read-only worker exposed unexpected tools; execution stopped."))

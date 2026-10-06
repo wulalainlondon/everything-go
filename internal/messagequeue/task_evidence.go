@@ -1,9 +1,11 @@
 package messagequeue
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"everything-go/internal/taskapi"
 	"strings"
 )
 
@@ -11,10 +13,38 @@ func (s *Store) RecordNativeAcceptance(session, request, thread, turn string) er
 	if session == "" || request == "" || thread == "" || turn == "" {
 		return errors.New("invalid native acceptance")
 	}
-	_, err := s.db.Exec(`INSERT INTO task_native_acceptance(session_id,request_id,thread_id,turn_id) VALUES(?,?,?,?) ON CONFLICT(session_id,request_id) DO NOTHING`, session, request, thread, turn)
-	return err
+	conflicted := false
+	result := s.TaskJournal().Transaction(context.Background(), func(tx *sql.Tx) error {
+		var previousThread, previousTurn string
+		err := tx.QueryRow("SELECT thread_id,turn_id FROM task_native_acceptance WHERE session_id=? AND request_id=?", session, request).Scan(&previousThread, &previousTurn)
+		if err == nil {
+			if previousThread != thread || previousTurn != turn {
+				conflicted = true
+				if _, err := tx.Exec("INSERT OR REPLACE INTO task_native_conflicts VALUES(?,?,?,?)", session, request, thread, turn); err != nil {
+					return err
+				}
+				return taskapi.ChangeTx(tx, session, request, "native_conflict")
+			}
+			return nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if _, err = tx.Exec("INSERT INTO task_native_acceptance VALUES(?,?,?,?)", session, request, thread, turn); err != nil {
+			return err
+		}
+		return taskapi.ChangeTx(tx, session, request, "native_acceptance")
+	})
+	if result == nil && conflicted {
+		return errors.New("native_acceptance_conflict")
+	}
+	return result
 }
 func (s *Store) NativeAcceptance(session, request, thread string) string {
+	var conflict int
+	if err := s.db.QueryRow("SELECT (SELECT COUNT(*) FROM task_native_conflicts WHERE session_id=?1 AND request_id=?2)+(SELECT COUNT(*) FROM task_provider_conflicts WHERE session_id=?1 AND request_id=?2)", session, request).Scan(&conflict); err != nil || conflict != 0 {
+		return ""
+	}
 	var turn string
 	_ = s.db.QueryRow(`SELECT turn_id FROM task_native_acceptance WHERE session_id=? AND request_id=? AND thread_id=?`, session, request, thread).Scan(&turn)
 	return turn
@@ -74,4 +104,20 @@ func (s *Store) TaskAdmission(session, request string) ([]byte, bool, error) {
 		return nil, false, nil
 	}
 	return data, err == nil, err
+}
+
+func (s *Store) NativeConflict(session, request string) (bool, error) {
+	var count int
+	err := s.db.QueryRow("SELECT (SELECT COUNT(*) FROM task_native_conflicts WHERE session_id=?1 AND request_id=?2)+(SELECT COUNT(*) FROM task_provider_conflicts WHERE session_id=?1 AND request_id=?2)", session, request).Scan(&count)
+	return count > 0, err
+}
+
+// Exact original acceptance tuple; never substitutes today's ResumeID.
+func (s *Store) NativeExecution(session, request string) (string, string, bool) {
+	if conflict, e := s.NativeConflict(session, request); e != nil || conflict {
+		return "", "", false
+	}
+	var thread, turn string
+	err := s.db.QueryRow("SELECT thread_id,turn_id FROM task_native_acceptance WHERE session_id=? AND request_id=?", session, request).Scan(&thread, &turn)
+	return thread, turn, err == nil && thread != "" && turn != ""
 }

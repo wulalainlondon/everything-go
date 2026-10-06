@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"everything-go/internal/taskapi"
 	_ "modernc.org/sqlite"
 	"os"
 	"path/filepath"
@@ -123,6 +124,10 @@ func Open(dir string) (*Store, error) {
 	if e != nil {
 		db.Close()
 		return nil, e
+	}
+	if err := taskapi.InstallJournal(db); err != nil {
+		db.Close()
+		return nil, err
 	}
 	return &Store{db}, nil
 }
