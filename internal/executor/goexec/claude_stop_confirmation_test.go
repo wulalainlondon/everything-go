@@ -145,3 +145,78 @@ func TestClaudeStopPrivateGroupLeavesUnrelatedProcessAlive(t *testing.T) {
 		t.Fatal("unrelated process was signalled", err)
 	}
 }
+
+func TestClaudeStopEscalatesOnlyOwnedResistantGroup(t *testing.T) {
+	dir := t.TempDir()
+	childFile := filepath.Join(dir, "resistant.pid")
+	wrapper := filepath.Join(dir, "wrapper")
+	// The child installs its disposition BEFORE the ready file is published.
+	script := "#!/bin/bash\ncleanup() { kill \"$CHILD\" 2>/dev/null || true; wait \"$CHILD\" 2>/dev/null || true; exit 0; }\ntrap cleanup TERM INT EXIT\n/bin/sh -c 'trap \"\" TERM; echo $$ > \"" + childFile + "\"; exec /bin/sleep 60' &\nCHILD=$!\nwait \"$CHILD\"\n"
+	if err := os.WriteFile(wrapper, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	sink := &capSink{}
+	backend := NewClaude(sink, wrapper)
+	current := session.NewRegistry().Create("resistant-group-fixture", "QA", dir, "claude", "sonnet", "read-only", "")
+	backend.mu.Lock()
+	process, err := backend.spawn(current)
+	if err == nil {
+		backend.procs[current.ID] = process
+		process.beginTurn("r_resistant_stop", false)
+	}
+	backend.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer process.cancel()
+	var pid int
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		raw, _ := os.ReadFile(childFile)
+		pid, _ = strconv.Atoi(strings.TrimSpace(string(raw)))
+		if pid > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if pid == 0 {
+		t.Fatal("owned child did not publish ready boundary")
+	}
+	child, _ := os.FindProcess(pid)
+	defer child.Kill()
+	stopErr := backend.Stop(context.Background(), current)
+	// Unconfirmed cleanup must retain the exact binding and emit no success.
+	if stopErr != nil {
+		if sink.count(func(event any) bool { _, ok := event.(protocol.Stopped); return ok }) != 0 {
+			t.Fatal("unconfirmed group emitted stopped")
+		}
+		return
+	}
+	if !waitOwnedProcessGroupExit(process.cmd, 100*time.Millisecond) {
+		t.Fatal("stopped success preceded owned group exit")
+	}
+}
+
+func TestClaudeFormalTaskProcessDeathNeverAutomaticallyReplays(t *testing.T) {
+	sink := &capSink{}
+	backend := NewClaude(sink, "/nonexistent/fixture-only")
+	current := session.NewRegistry().Create("formal-no-replay-fixture", "QA", t.TempDir(), "claude", "sonnet", "read-only", "")
+	command := exec.Command("/bin/sh", "-c", "exit 17")
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	lease := &claudeTaskLease{generation: "fixture-generation", secret: "fixture-secret", s: current}
+	process := &proc{cmd: command, reqID: "r_unknown_original", exited: make(chan struct{}), taskLease: lease}
+	lease.p = process
+	backend.procs[current.ID] = process
+	backend.watchProc(current, process)
+	if !lease.revoked {
+		t.Fatal("dead invocation lease remained active")
+	}
+	if backend.state(current.ID).restartCount != 0 {
+		t.Fatal("unknown original formal task was replayed")
+	}
+	if sink.count(func(event any) bool { _, ok := event.(protocol.Stopped); return ok }) != 0 {
+		t.Fatal("process failure became stop success")
+	}
+}

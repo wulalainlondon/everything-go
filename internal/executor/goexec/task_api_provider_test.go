@@ -4,7 +4,9 @@ import (
 	"context"
 	taskcontract "everything-go/contracts/task-api/v1"
 	"everything-go/internal/backend"
+	"everything-go/internal/session"
 	"everything-go/internal/taskapi"
+	"strings"
 	"testing"
 )
 
@@ -79,5 +81,42 @@ func TestTaskAPIWorkerPlansNoSpawnOrConsumption(t *testing.T) {
 	}
 	if _, err := PrepareCodexTaskWorker(backend.TaskWorkerProfile{Backend: "codex", Model: "gpt-6.1-sol", Effort: "high"}, scope, scope, taskapi.ScopeEnforcement{}); err == nil {
 		t.Fatal("unrepresentable scope prepared")
+	}
+}
+
+func TestClaudeTaskPolicyNormalizationKeepsCallerAndNarrowsVerifiedWorker(t *testing.T) {
+	args := claudeReadOnlyWorkerArgs(session.Snapshot{Model: "sonnet", Sandbox: "read-only"}, "http://127.0.0.1/fixture")
+	tools := []string{"mcp__bridge_tasks__task_capabilities", "mcp__bridge_tasks__task_read_input"}
+	worker := normalizeClaudeTaskArgs(args, true, tools)
+	count := func(values []string, key string) int {
+		n := 0
+		for _, value := range values {
+			if value == key {
+				n++
+			}
+		}
+		return n
+	}
+	for _, key := range []string{"--tools", "--allowedTools", "--settings", "--setting-sources", "--strict-mcp-config"} {
+		if count(worker, key) != 1 {
+			t.Fatal("ambiguous worker policy", key)
+		}
+	}
+	for i, value := range worker {
+		if value == "--tools" && worker[i+1] != "" {
+			t.Fatal("worker builtin scope widened")
+		}
+		if value == "--allowedTools" && worker[i+1] != strings.Join(tools, ",") {
+			t.Fatal("worker MCP scope widened")
+		}
+	}
+	caller := normalizeClaudeTaskArgs(claudeSpawnArgs(session.Snapshot{Sandbox: "read-only"}, "http://127.0.0.1/fixture"), false, []string{"mcp__bridge_tasks__task_create_dispatch"})
+	for i, value := range caller {
+		if value == "--allowedTools" && (!strings.Contains(caller[i+1], "Read") || !strings.Contains(caller[i+1], "mcp__bridge_tasks__task_create_dispatch")) {
+			t.Fatal("authenticated task tool not exposed under original caller policy")
+		}
+	}
+	if !validTaskWorkerTools(tools) || validTaskWorkerTools([]string{"Read", tools[1]}) || validTaskWorkerTools([]string{"mcp__bridge_tasks__task_create_dispatch", tools[1]}) || validTaskWorkerTools([]string{"ToolSearch"}) {
+		t.Fatal("worker init did not enforce exact gateway-only read catalog")
 	}
 }

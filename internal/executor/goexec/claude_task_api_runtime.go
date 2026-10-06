@@ -30,6 +30,8 @@ type claudeTaskLease struct {
 	p                  *proc
 	generation, secret string
 	loaded             bool
+	initialized        bool
+	protocolVersion    string
 	worker             bool
 	mu                 sync.Mutex
 }
@@ -52,11 +54,11 @@ func (c *Claude) SetTaskAPIProvider(p backend.TaskAPIProvider) {
 	go func() { _ = srv.Serve(ln) }()
 }
 func (m *claudeTaskMCP) newLease(s *session.Session, worker bool) *claudeTaskLease {
-	bytes := make([]byte, 32)
+	bytes := make([]byte, 48)
 	if _, err := rand.Read(bytes); err != nil {
 		return nil
 	}
-	lease := &claudeTaskLease{server: m, s: s, generation: hex.EncodeToString(bytes[:16]), secret: hex.EncodeToString(bytes), worker: worker}
+	lease := &claudeTaskLease{server: m, s: s, generation: hex.EncodeToString(bytes[:16]), secret: hex.EncodeToString(bytes[16:]), worker: worker}
 	m.mu.Lock()
 	m.leases[lease.generation] = lease
 	m.mu.Unlock()
@@ -65,7 +67,7 @@ func (m *claudeTaskMCP) newLease(s *session.Session, worker bool) *claudeTaskLea
 func (m *claudeTaskMCP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	host, _, _ := net.SplitHostPort(r.RemoteAddr)
-	if net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback() || r.Header.Get("Origin") != "" || r.Method != "POST" {
+	if net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback() || r.Header.Get("Origin") != "" {
 		http.Error(w, "forbidden", 403)
 		return
 	}
@@ -75,6 +77,29 @@ func (m *claudeTaskMCP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	m.mu.Unlock()
 	if lease == nil || subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")), []byte(lease.secret)) != 1 {
 		http.Error(w, "unauthorized", 401)
+		return
+	}
+	lease.mu.Lock()
+	revoked := lease.revoked
+	lease.mu.Unlock()
+	if revoked {
+		http.Error(w, "caller_unbound", 403)
+		return
+	}
+	// Authenticated Streamable HTTP may probe a server-initiated SSE stream.
+	// 405 describes the unsupported transport method, never an auth bypass.
+	if r.Method == http.MethodGet {
+		w.Header().Set("Allow", "POST, DELETE")
+		http.Error(w, "method not allowed", 405)
+		return
+	}
+	if r.Method == http.MethodDelete {
+		lease.revoke()
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", 405)
 		return
 	}
 	var rpc struct {
@@ -90,13 +115,42 @@ func (m *claudeTaskMCP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(202)
 		return
 	}
+	if rpc.Method != "initialize" {
+		lease.mu.Lock()
+		initialized, version := lease.initialized, lease.protocolVersion
+		lease.mu.Unlock()
+		if !initialized || r.Header.Get("Mcp-Session-Id") != lease.generation {
+			http.Error(w, "invalid session", 400)
+			return
+		}
+		if header := r.Header.Get("MCP-Protocol-Version"); header != "" && header != version {
+			http.Error(w, "unsupported protocol", 400)
+			return
+		}
+	}
 	respond := func(value any) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": rpc.ID, "result": value})
 	}
 	switch rpc.Method {
 	case "initialize":
-		respond(map[string]any{"protocolVersion": "2025-03-26", "serverInfo": map[string]string{"name": "bridge-tasks", "version": "1.0.0-rc.1"}, "capabilities": map[string]any{"tools": map[string]any{}}})
+		var init struct {
+			ProtocolVersion string `json:"protocolVersion"`
+		}
+		json.Unmarshal(rpc.Params, &init)
+		version := "2025-03-26"
+		switch init.ProtocolVersion {
+		case "2025-06-18", "2025-03-26", "2024-11-05":
+			version = init.ProtocolVersion
+		}
+		lease.mu.Lock()
+		lease.initialized = true
+		lease.protocolVersion = version
+		lease.mu.Unlock()
+		w.Header().Set("Mcp-Session-Id", lease.generation)
+		respond(map[string]any{"protocolVersion": version, "serverInfo": map[string]string{"name": "bridge-tasks", "version": "1.0.0-rc.1"}, "capabilities": map[string]any{"tools": map[string]any{}}})
+	case "ping":
+		respond(map[string]any{})
 	case "tools/list":
 		tools, err := m.c.taskProvider.TaskTools(lease.s)
 		if err != nil {
@@ -106,7 +160,11 @@ func (m *claudeTaskMCP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		lease.mu.Lock()
 		lease.loaded = true
 		lease.mu.Unlock()
-		respond(map[string]any{"tools": tools})
+		catalog := []map[string]any{}
+		for _, tool := range tools {
+			catalog = append(catalog, map[string]any{"name": tool["name"], "description": tool["description"], "inputSchema": tool["inputSchema"]})
+		}
+		respond(map[string]any{"tools": catalog})
 	case "tools/call":
 		var call struct {
 			Name      string
@@ -221,18 +279,20 @@ func (c *Claude) taskSpawn(s *session.Session, args []string, pm *backend.PMConf
 		servers["ask_user"] = map[string]any{"type": "http", "url": c.mcp.sessionURL(s.ID)}
 	}
 	config, _ := json.Marshal(map[string]any{"mcpServers": servers})
-	filtered := []string{}
-	for i := 0; i < len(args); i++ {
-		if args[i] == "--mcp-config" {
-			i++
-			continue
+	tools, err := c.taskProvider.TaskTools(s)
+	if err != nil {
+		lease.revoke()
+		return nil, nil, err
+	}
+	allowed := []string{}
+	for _, tool := range tools {
+		if name, ok := tool["name"].(string); ok {
+			allowed = append(allowed, "mcp__bridge_tasks__"+name)
 		}
-		filtered = append(filtered, args[i])
 	}
+	filtered := normalizeClaudeTaskArgs(args, scope != nil, allowed)
 	filtered = append(filtered, "--mcp-config", string(config), "--replay-user-messages")
-	if scope != nil {
-		filtered = append(filtered, "--tools", "", "--strict-mcp-config", "--disable-slash-commands", "--setting-sources", "", "--settings", `{"disableAllHooks":true,"autoMemoryEnabled":false,"enabledPlugins":{}}`)
-	}
+
 	return filtered, lease, nil
 }
 func addTaskEnvironment(current []string, lease *claudeTaskLease) []string {
@@ -271,4 +331,52 @@ func (lease *claudeTaskLease) revoke() {
 		}
 		lease.server.mu.Unlock()
 	}
+}
+
+// Preserve the original caller preset; only a verified bounded worker gets the
+// stricter gateway-only preset. One value per CLI policy option, no bypass.
+func normalizeClaudeTaskArgs(args []string, worker bool, taskTools []string) []string {
+	out := []string{}
+	allowed := []string{}
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--mcp-config":
+			i++
+			continue
+		case "--allowedTools":
+			if i+1 < len(args) && !worker {
+				allowed = append(allowed, strings.Split(args[i+1], ",")...)
+			}
+			i++
+			continue
+		case "--tools", "--setting-sources", "--settings":
+			if worker {
+				i++
+				continue
+			}
+		case "--strict-mcp-config", "--disable-slash-commands":
+			if worker {
+				continue
+			}
+		}
+		out = append(out, args[i])
+	}
+	allowed = append(allowed, taskTools...)
+	if worker {
+		out = append(out, "--tools", "", "--strict-mcp-config", "--disable-slash-commands", "--setting-sources", "", "--settings", `{"disableAllHooks":true,"autoMemoryEnabled":false,"enabledPlugins":{}}`)
+	}
+	return append(out, "--allowedTools", strings.Join(allowed, ","))
+}
+func validTaskWorkerTools(tools []string) bool {
+	found := false
+	for _, tool := range tools {
+		switch tool {
+		case "mcp__bridge_tasks__task_read_input":
+			found = true
+		case "mcp__bridge_tasks__task_capabilities", "ToolSearch", "EndConversation":
+		default:
+			return false
+		}
+	}
+	return found
 }

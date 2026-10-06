@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -41,7 +42,8 @@ func TestTaskAPILiveNativeInvocation(t *testing.T) {
 	defer h.messageQueue.Close()
 	defer h.delegations.Close()
 	defer h.dispatches.Close()
-	sink := executor.NewTerminalSink(h)
+	observed := &taskLiveEvidenceSink{hub: h, init: map[string]map[string]any{}}
+	sink := executor.NewTerminalSink(observed)
 	codex := goexec.NewCodex(sink, "codex")
 	codex.SetDataDir(input.Workspace)
 	codex.SetTaskAPIProvider(h)
@@ -171,6 +173,9 @@ complete:
 		}
 	}
 	evidence["bound_tool_refusals"] = refusals
+	observed.mu.Lock()
+	evidence["actual_provider_init_catalogs"] = observed.init
+	observed.mu.Unlock()
 	if proof, found, _ := h.messageQueue.ProviderEvidence(source.ID, input.RequestID); found {
 		evidence["native_provider_evidence"] = proof
 	}
@@ -184,4 +189,20 @@ complete:
 	if !invoked || terminal != "completed" || input.WorkerBackend != "" && (!workerPassed || !deliveryPassed) {
 		t.Fatalf("native invocation gate not passed: backend=%s invoked=%v terminal=%s (safe evidence report saved)", input.Backend, invoked, terminal)
 	}
+}
+
+// Public init metadata only, no argv, environment, URL, header or credential.
+type taskLiveEvidenceSink struct {
+	hub  *Hub
+	mu   sync.Mutex
+	init map[string]map[string]any
+}
+
+func (s *taskLiveEvidenceSink) Emit(event any) {
+	if value, ok := event.(backend.SessionInitInfo); ok {
+		s.mu.Lock()
+		s.init[value.SessionID] = map[string]any{"model": value.Model, "permission_mode": value.PermissionMode, "tools": value.Tools, "mcp_servers": value.MCPServers}
+		s.mu.Unlock()
+	}
+	s.hub.Emit(event)
 }

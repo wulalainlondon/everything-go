@@ -58,6 +58,7 @@ type proc struct {
 	stdin          *bufWriteCloser
 	cancel         context.CancelFunc
 	exited         chan struct{}
+	stopErr        error
 	reqID          string // request_id of the in-flight turn, stamped onto events
 	model          string
 
@@ -298,6 +299,12 @@ func (c *Claude) UpdateSessionSettings(ctx context.Context, s *session.Session) 
 	if p.exited != nil {
 		select {
 		case <-p.exited:
+			p.mu.Lock()
+			stopErr := p.stopErr
+			p.mu.Unlock()
+			if stopErr != nil {
+				return stopErr
+			}
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-time.After(15 * time.Second):
@@ -446,12 +453,25 @@ func (c *Claude) spawn(s *session.Session) (*proc, error) {
 	configureOwnedProcessGroup(cmd)
 	// Give a CLI wrapper its normal signal/cleanup path before escalating.
 	// CommandContext's default SIGKILL skips shell traps and can orphan tools.
+	exited := make(chan struct{})
 	cmd.Cancel = func() error {
-		if err := signalOwnedProcessGroup(cmd); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		err := signalOwnedProcessGroup(cmd)
+		if err != nil && !errors.Is(err, os.ErrProcessDone) {
 			return cmd.Process.Kill()
-		} else {
-			return err
 		}
+		// Escalate while the exact owned leader is still observable, before
+		// CommandContext's parent-only WaitDelay. Never guess a shared group.
+		go func() {
+			timer := time.NewTimer(2 * time.Second)
+			defer timer.Stop()
+			select {
+			case <-exited:
+				return
+			case <-timer.C:
+				forceOwnedProcessGroup(cmd)
+			}
+		}()
+		return err
 	}
 	cmd.WaitDelay = 3 * time.Second
 	if snap.Cwd != "" {
@@ -497,7 +517,7 @@ func (c *Claude) spawn(s *session.Session) (*proc, error) {
 		taskLease:      taskLease,
 		pmSession:      pm != nil,
 		readOnlyWorker: readOnlyWorker,
-		cmd:            cmd, stdin: newBufWriteCloser(stdinPipe), cancel: cancel, exited: make(chan struct{}),
+		cmd:            cmd, stdin: newBufWriteCloser(stdinPipe), cancel: cancel, exited: exited,
 		tools: newToolNormalizer(c.sink, c), model: snap.Model,
 	}
 	if taskLease != nil {
@@ -833,16 +853,13 @@ func (c *Claude) readStdout(s *session.Session, p *proc, stdout interface{ Read(
 					}
 				}
 			}
-			if evt.Subtype == "init" && p.taskLease != nil && p.taskLease.worker {
-				for _, tool := range evt.Tools {
-					if !strings.HasPrefix(tool, "mcp__bridge_tasks__") && tool != "ToolSearch" && tool != "EndConversation" {
-						p.cancel()
-						c.sink.Emit(backend.NewError(s.ID, p.currentReqID(), "unsupported_task_worker_toolset", "Bounded task worker exposed unexpected tools; stopped."))
-						return
-					}
-				}
+			if evt.Subtype == "init" && p.taskLease != nil && p.taskLease.worker && !validTaskWorkerTools(evt.Tools) {
+				p.cancel()
+				c.sink.Emit(backend.NewError(s.ID, p.currentReqID(), "unsupported_task_worker_toolset", "Bounded task worker did not expose the exact gateway toolset; stopped without replay."))
+				return
 			}
-			if evt.Subtype == "init" && p.readOnlyWorker && !validReadOnlyWorkerTools(evt.Tools) {
+
+			if evt.Subtype == "init" && p.readOnlyWorker && (p.taskLease == nil || !p.taskLease.worker) && !validReadOnlyWorkerTools(evt.Tools) {
 				p.cancel()
 				c.sink.Emit(backend.NewError(s.ID, p.currentReqID(), "pm_worker_tool_policy_mismatch", "Read-only worker exposed unexpected tools; execution stopped."))
 				return
@@ -925,6 +942,15 @@ func (c *Claude) watchProc(s *session.Session, p *proc) {
 		defer close(p.exited)
 	}
 	_ = p.cmd.Wait()
+	p.mu.Lock()
+	manualStopRequested := p.manualStop
+	p.mu.Unlock()
+	if manualStopRequested && !waitOwnedProcessGroupExit(p.cmd, 4*time.Second) {
+		p.mu.Lock()
+		p.stopErr = fmt.Errorf("Claude parent exited but owned process group exit is unconfirmed")
+		p.mu.Unlock()
+		return // Retain binding; no stopped terminal or implicit replay.
+	}
 	rc := 0
 	if p.cmd.ProcessState != nil {
 		rc = p.cmd.ProcessState.ExitCode()
@@ -964,6 +990,12 @@ func (c *Claude) watchProc(s *session.Session, p *proc) {
 		}
 	}
 
+	// A formal API invocation never restarts an uncertain native request.
+	// Its original receipt/evidence remains the recovery anchor.
+	if p.taskLease != nil {
+		p.taskLease.revoke()
+		return
+	}
 	st := c.state(s.ID)
 	st.mu.Lock()
 	badResume := st.badResume
