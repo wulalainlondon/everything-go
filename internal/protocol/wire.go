@@ -54,6 +54,7 @@ type Inbound struct {
 	Sandbox        string `json:"sandbox"`
 	ResumeClaudeID string `json:"resume_claude_id"`
 
+	MessagePurpose string      `json:"message_purpose,omitempty"`
 	TaskRequestIDs []string    `json:"task_request_ids,omitempty"`
 	TaskTarget     *TaskTarget `json:"task_target,omitempty"`
 	TaskOrigin     *TaskOrigin `json:"task_origin,omitempty"`

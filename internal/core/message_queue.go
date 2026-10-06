@@ -22,6 +22,7 @@ import (
 type queuedPayload struct {
 	ExpectedTarget *dispatchTargetExpectation `json:"expected_target,omitempty"`
 	Configuration  *session.Configuration     `json:"configuration,omitempty"`
+	MessagePurpose string                     `json:"message_purpose,omitempty"`
 	OwnerDevice    string                     `json:"owner_device,omitempty"`
 	Origin         *protocol.TaskOrigin       `json:"task_origin,omitempty"`
 	Content        string                     `json:"content"`
@@ -83,18 +84,24 @@ func (h *Hub) enqueueChatMessageExpected(c *Client, cmd clientproto.Command, exp
 		h.queueError(c, cmd, "dispatch_target_changed", "Target thread or configuration changed; refresh before dispatching")
 		return false
 	}
+	switch cmd.MessagePurpose {
+	case "", "instruction", "control", "result_return", "question_reply":
+	default:
+		h.queueError(c, cmd, "message_purpose_invalid", "Unknown message purpose")
+		return false
+	}
 	owner, admissionErr := h.admitTaskOrigin(c, cmd)
 	if admissionErr != nil {
 		h.queueError(c, cmd, "task_origin_rejected", admissionErr.Error())
 		return false
 	}
-	intent, err := json.Marshal(queuedPayload{Origin: cmd.TaskOrigin, Content: content, Images: cmd.Images, Files: files, ExpectedTarget: expected})
+	intent, err := json.Marshal(queuedPayload{MessagePurpose: cmd.MessagePurpose, Origin: cmd.TaskOrigin, Content: content, Images: cmd.Images, Files: files, ExpectedTarget: expected})
 	if err != nil {
 		h.queueError(c, cmd, "invalid_message", err.Error())
 		return false
 	}
 	intentHash := sha256.Sum256(intent)
-	payload, err := json.Marshal(queuedPayload{OwnerDevice: owner, Origin: cmd.TaskOrigin, Content: content, Images: cmd.Images, Files: files, Configuration: &config, ExpectedTarget: expected})
+	payload, err := json.Marshal(queuedPayload{MessagePurpose: cmd.MessagePurpose, OwnerDevice: owner, Origin: cmd.TaskOrigin, Content: content, Images: cmd.Images, Files: files, Configuration: &config, ExpectedTarget: expected})
 	if err != nil {
 		h.queueError(c, cmd, "invalid_message", err.Error())
 		return false

@@ -18,7 +18,7 @@ import (
 
 func taskEntry(t *testing.T, h *Hub, session, request, owner string, state messagequeue.State) messagequeue.Entry {
 	t.Helper()
-	payload, _ := json.Marshal(queuedPayload{OwnerDevice: owner, Content: request})
+	payload, _ := json.Marshal(queuedPayload{MessagePurpose: "instruction", OwnerDevice: owner, Content: request})
 	e, _, err := h.messageQueue.Enqueue(messagequeue.Entry{SessionID: session, RequestID: request, Content: request, Payload: payload})
 	if err != nil {
 		t.Fatal(err)
@@ -175,7 +175,7 @@ func TestTaskAuthenticatedWSQueuedConsumedAndCompletedAnchor(t *testing.T) {
 	}
 	write(`{"type":"hello","device_id":"ws-owner","auth_token":"qa-read-ws-owner","protocol_version":3,"session_read_sync":true}`)
 	readType("hello_ack")
-	write(`{"type":"message","session_id":"s1","request_id":"r_wsoriginal123","content":"fixture task"}`)
+	write(`{"type":"message","session_id":"s1","request_id":"r_wsoriginal123","message_purpose":"instruction","content":"fixture task"}`)
 	readType("message_ack")
 	<-started
 	write(`{"type":"request_session_tasks","session_id":"s1","request_id":"read1"}`)
@@ -206,5 +206,128 @@ func TestTaskAuthenticatedWSQueuedConsumedAndCompletedAnchor(t *testing.T) {
 	item = e["items"].([]any)[0].(map[string]any)
 	if item["state"] != "completed" || item["source_message_id"] != "final-source" {
 		t.Fatal(e)
+	}
+}
+
+func TestTaskSteeredSupplementFollowsOnlyMatchingExecutionTerminalAndFinal(t *testing.T) {
+	h, _ := newTestHub(t)
+	s := h.registry.Create("s1", "same", t.TempDir(), backend.Codex, "", "", "")
+	s.SetResumeID("thread")
+	active := taskEntry(t, h, s.ID, "r_active123", "owner", messagequeue.Running)
+	h.Emit(backend.NativeTaskAccepted{SessionID: s.ID, RequestID: active.RequestID, ThreadID: "thread", TurnID: "turn1"})
+	supplement := taskEntry(t, h, s.ID, "r_supplement123", "owner", messagequeue.Queued)
+	supplement, _, _ = h.messageQueue.Transition(s.ID, supplement.RequestID, []messagequeue.State{messagequeue.Queued}, messagequeue.Steered, "", active.RequestID, "turn1")
+	if got := h.projectSessionTask(s, supplement, "owner", nil); got.State != "consumed" || got.ExecutionRequestID != active.RequestID || got.RequestID != supplement.RequestID {
+		t.Fatal(got)
+	}
+	h.messageQueue.Transition(s.ID, active.RequestID, []messagequeue.State{messagequeue.Running}, messagequeue.Completed, "", "", "")
+	wrong := map[string]map[string]any{active.RequestID: {"source_message_id": "wrong", "source_turn_id": "other", "content": "DONE"}}
+	if got := h.projectSessionTask(s, supplement, "owner", wrong); got.State != "completed_unanchored" || got.SourceMessageID != "" {
+		t.Fatal("wrong turn became final", got)
+	}
+	finals := map[string]map[string]any{active.RequestID: {"source_message_id": "original-final", "source_turn_id": "turn1", "content": "Matching turn final"}}
+	got := h.projectSessionTask(s, supplement, "owner", finals)
+	if got.State != "completed" || got.SourceMessageID != "original-final" || got.ExecutionRequestID != active.RequestID || got.Transport != "ordinary_steer" {
+		t.Fatal(got)
+	}
+	// Another independently accepted execution may fail; it cannot settle this supplement.
+	other := taskEntry(t, h, s.ID, "r_other123", "owner", messagequeue.Failed)
+	_ = other
+	if got := h.projectSessionTask(s, supplement, "owner", finals); got.State != "completed" {
+		t.Fatal(got)
+	}
+}
+func TestTaskSteeredSupplementFollowsMatchingFailureAndRejectsForeignNativeTurn(t *testing.T) {
+	h, _ := newTestHub(t)
+	s := h.registry.Create("s1", "same", t.TempDir(), backend.Codex, "", "", "")
+	s.SetResumeID("thread")
+	active := taskEntry(t, h, s.ID, "r_failedactive123", "owner", messagequeue.Failed)
+	h.Emit(backend.NativeTaskAccepted{SessionID: s.ID, RequestID: active.RequestID, ThreadID: "thread", TurnID: "failed-turn"})
+	e := taskEntry(t, h, s.ID, "r_steerfailed123", "owner", messagequeue.Queued)
+	e, _, _ = h.messageQueue.Transition(s.ID, e.RequestID, []messagequeue.State{messagequeue.Queued}, messagequeue.Steered, "", active.RequestID, "failed-turn")
+	if got := h.projectSessionTask(s, e, "owner", nil); got.State != "failed" {
+		t.Fatal(got)
+	}
+	e.TurnID = "foreign-turn"
+	if got := h.projectSessionTask(s, e, "owner", nil); got.State != "consumed_unknown" {
+		t.Fatal("foreign turn settled", got)
+	}
+}
+
+func TestTaskControllerSteerProjectionUsesEffectiveNativeExecutionAnchor(t *testing.T) {
+	h, fe, caller, target := controllerFixture(t)
+	h.dispatches.SetGrant(context.Background(), caller.Parent.ID, sessiondispatch.Grant{Enabled: true, Local: true, Steer: true}, 0)
+	provider := &floatingHistoryProvider{byResume: map[string][]map[string]any{target.ResumeID(): {}}}
+	h.SetExecutor(&floatingHistoryExec{fakeExec: fe, provider: provider})
+	activeID := "r_controlleractive123"
+	turnID := "controller-native"
+	started, release := make(chan struct{}), make(chan struct{})
+	fe.onSend = func(s *session.Session, id, text string) {
+		h.Emit(backend.NativeTaskAccepted{SessionID: s.ID, RequestID: id, ThreadID: s.ResumeID(), TurnID: turnID})
+		close(started)
+		<-release
+		h.Emit(protocol.NewDone(s.ID, id))
+	}
+	fe.onSteer = func(s *session.Session, id, text string) (backend.SteerResult, error) {
+		return backend.SteerResult{RequestID: activeID, TurnID: turnID}, nil
+	}
+	client := sharedReadClient(t, h, "controller-viewer")
+	if !h.enqueueChatMessage(client, clientproto.Command{Kind: "message", SessionID: target.ID, RequestID: activeID, MessagePurpose: "instruction", Content: "fixture active"}) {
+		t.Fatal("active admission")
+	}
+	<-started
+	value, err := h.ControlSession(context.Background(), caller, backend.SessionControlRequest{Action: "dispatch_to_session", SessionID: target.ID, ExpectedThreadID: target.ResumeID(), ExpectedConfigRevision: target.SettingsSnapshot().ConfigRevision, Content: "explicit user supplement", Mode: "steer"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := value.(sessiondispatch.Record)
+	deadline := time.Now().Add(time.Second)
+	for {
+		e, found, _ := h.messageQueue.Get(target.ID, record.RequestID)
+		if found && e.State == messagequeue.Steered {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("steer not accepted")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	h.sendSessionTasks(client, clientproto.Command{SessionID: caller.Parent.ID, RequestID: "before"})
+	event := waitForType(t, client, "session_tasks_snapshot")
+	child := event["children"].([]any)[0].(map[string]any)
+	if child["state"] != "consumed" || child["transport"] != "controller_steer" || child["execution_request_id"] != activeID {
+		t.Fatal(event)
+	}
+	final := history.CompleteMsg("codex", target.ResumeID(), "controller-final-source", "assistant", "Final of the effective native turn", 1000, nil)
+	final["request_id"] = activeID
+	final["source_turn_id"] = turnID
+	final["history_read_result_verified"] = true
+	provider.byResume[target.ResumeID()] = []map[string]any{final}
+	close(release)
+	waitForType(t, client, "done")
+	h.sendSessionTasks(client, clientproto.Command{SessionID: caller.Parent.ID, RequestID: "after"})
+	event = waitForType(t, client, "session_tasks_snapshot")
+	child = event["children"].([]any)[0].(map[string]any)
+	if child["state"] != "completed" || child["source_message_id"] != "controller-final-source" || child["execution_request_id"] != activeID || child["request_id"] != record.RequestID {
+		t.Fatal(event)
+	}
+}
+
+func TestTaskLegacyAndReturnFinalsAreNotIndependentUserResults(t *testing.T) {
+	h, _ := newTestHub(t)
+	s := h.registry.Create("s1", "same", t.TempDir(), backend.Codex, "", "", "")
+	s.SetResumeID("thread")
+	for _, purpose := range []string{"", "result_return", "question_reply", "control"} {
+		id := "r_purpose_" + purpose
+		payload, _ := json.Marshal(queuedPayload{OwnerDevice: "owner", MessagePurpose: purpose, Content: "not inferred from DONE"})
+		e, _, err := h.messageQueue.Enqueue(messagequeue.Entry{SessionID: s.ID, RequestID: id, Payload: payload})
+		if err != nil {
+			t.Fatal(err)
+		}
+		e, _, _ = h.messageQueue.Transition(s.ID, id, []messagequeue.State{messagequeue.Queued}, messagequeue.Completed, "", "", "")
+		final := map[string]map[string]any{id: {"source_message_id": "final-" + purpose, "source_turn_id": "turn", "content": "DONE"}}
+		if got := h.projectSessionTask(s, e, "owner", final); got.State == "completed" {
+			t.Fatal("notice became independent result", got)
+		}
 	}
 }

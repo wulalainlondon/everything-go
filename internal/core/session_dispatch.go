@@ -260,7 +260,7 @@ func (h *Hub) submitLocalSessionDispatch(ctx context.Context, r sessiondispatch.
 		_ = h.dispatches.Put(ctx, r)
 		return r
 	}
-	cmd := clientproto.Command{Kind: "message", SessionID: r.SessionID, RequestID: r.RequestID, Content: r.Content}
+	cmd := clientproto.Command{MessagePurpose: "instruction", Kind: "message", SessionID: r.SessionID, RequestID: r.RequestID, Content: r.Content}
 	client := &Client{hub: h, deviceID: "session-controller", send: make(chan []byte, 64), quit: make(chan struct{}), ctx: ctx}
 	expected := &dispatchTargetExpectation{ThreadID: r.ThreadID, Revision: r.ConfigRevision}
 	if !h.enqueueChatMessageExpected(client, cmd, expected) {

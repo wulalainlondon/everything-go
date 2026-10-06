@@ -42,7 +42,7 @@ func (h *Hub) admitTaskOrigin(c *Client, cmd clientproto.Command) (string, error
 		return "", errors.New("source request unavailable")
 	}
 	payload := h.taskAdmission(e)
-	if payload.OwnerDevice != owner || h.nativeTaskTurn(source, origin.RequestID) == "" {
+	if payload.OwnerDevice != owner || payload.MessagePurpose != "instruction" || h.nativeTaskTurn(source, origin.RequestID) == "" {
 		return "", errors.New("source request ownership/native acceptance unconfirmed")
 	}
 	return owner, nil
@@ -72,16 +72,15 @@ func taskRequest(request string) bool {
 }
 func (h *Hub) projectSessionTask(s *session.Session, e messagequeue.Entry, owner string, finals map[string]map[string]any) protocol.SessionTask {
 	payload := h.taskAdmission(e)
-	task := protocol.SessionTask{RequestID: e.RequestID, State: string(e.State), Content: e.Content, CreatedAt: e.CreatedAt, UpdatedAt: e.UpdatedAt, Files: []string{}, Transport: "ordinary_queue", Origin: payload.Origin, InstanceID: h.cfg.InstanceID, SessionID: s.ID, ThreadID: s.ResumeID(), Error: e.Message}
-	if task.Files == nil {
-		task.Files = []string{}
+	if payload.MessagePurpose == "" && h.dispatches != nil && strings.HasPrefix(e.RequestID, "scjob_") {
+		if record, found, err := h.dispatches.Get(context.Background(), strings.TrimPrefix(e.RequestID, "scjob_")); err == nil && found && record.RequestID == e.RequestID && record.SessionID == s.ID && record.InstanceID == h.cfg.InstanceID {
+			payload.MessagePurpose = "instruction"
+		}
 	}
+	task := protocol.SessionTask{MessagePurpose: payload.MessagePurpose, ReceiptFound: true, RequestID: e.RequestID, ExecutionRequestID: e.RequestID, State: string(e.State), Content: e.Content, CreatedAt: e.CreatedAt, UpdatedAt: e.UpdatedAt, Files: []string{}, Transport: "ordinary_queue", Origin: payload.Origin, InstanceID: h.cfg.InstanceID, InstanceName: h.cfg.InstanceName, SessionID: s.ID, SessionName: s.SettingsSnapshot().Name, ThreadID: s.ResumeID(), ConfigRevision: s.SettingsSnapshot().ConfigRevision, Error: e.Message}
 	if e.State == messagequeue.Queued && payload.Content != "" {
 		task.Content = payload.Content
 	}
-	task.SessionName = s.SettingsSnapshot().Name
-	task.InstanceName = h.cfg.InstanceName
-	task.ConfigRevision = s.SettingsSnapshot().ConfigRevision
 	if payload.ExpectedTarget != nil {
 		task.ThreadID = payload.ExpectedTarget.ThreadID
 		task.ConfigRevision = payload.ExpectedTarget.Revision
@@ -90,13 +89,31 @@ func (h *Hub) projectSessionTask(s *session.Session, e messagequeue.Entry, owner
 		task.Content = truncateGraphemes(task.Content, 64000)
 		task.ContentTruncated = true
 	}
+	if task.MessagePurpose == "" {
+		task.MessagePurpose = "legacy_unknown"
+	}
 	task.NativeTurnID = h.nativeTaskTurn(s, e.RequestID)
+	effective := e
+	if e.State == messagequeue.Steered {
+		task.Transport = "ordinary_steer"
+		task.NativeTurnID = e.TurnID
+		task.ExecutionRequestID = e.ActiveRequestID
+		task.RelatedRequestIDs = []string{e.RequestID, e.ActiveRequestID}
+		task.State = "consumed_unknown"
+		active, found, err := h.messageQueue.Get(s.ID, e.ActiveRequestID)
+		// The accepted steering RPC pins both the original execution and native
+		// turn. An unrelated busy/terminal request never completes this supplement.
+		if err != nil || !found || e.TurnID == "" || (h.nativeTaskTurn(s, e.ActiveRequestID) != "" && h.nativeTaskTurn(s, e.ActiveRequestID) != e.TurnID) {
+			return task
+		}
+		effective = active
+	}
 	for _, view := range h.runtimes.Snapshot("", []string{s.ID}) {
-		if view.ActiveRequestID == e.RequestID && task.NativeTurnID != "" {
+		if view.ActiveRequestID == task.ExecutionRequestID && task.NativeTurnID != "" {
 			task.Stage = view.Stage
 		}
 	}
-	switch e.State {
+	switch effective.State {
 	case messagequeue.Queued:
 		task.State = "accepted_queued"
 	case messagequeue.Running:
@@ -105,9 +122,6 @@ func (h *Hub) projectSessionTask(s *session.Session, e messagequeue.Entry, owner
 		} else {
 			task.State = "handoff_unknown"
 		}
-	case messagequeue.Steered:
-		task.State = "consumed"
-		task.NativeTurnID = e.TurnID
 	case messagequeue.Steering, messagequeue.Uncertain:
 		task.State = "unknown"
 		if task.NativeTurnID != "" {
@@ -115,7 +129,12 @@ func (h *Hub) projectSessionTask(s *session.Session, e messagequeue.Entry, owner
 		}
 	case messagequeue.Completed:
 		task.State = "completed_unanchored"
-		if final := finals[e.RequestID]; final != nil {
+		final := finals[task.ExecutionRequestID]
+		if final != nil {
+			finalTurn, _ := final["source_turn_id"].(string)
+			if e.State == messagequeue.Steered && finalTurn != e.TurnID {
+				break
+			}
 			task.SourceMessageID, _ = final["source_message_id"].(string)
 			task.Summary, _ = final["content"].(string)
 			if task.Summary == "" {
@@ -128,15 +147,24 @@ func (h *Hub) projectSessionTask(s *session.Session, e messagequeue.Entry, owner
 				}
 			}
 			task.Summary = truncateGraphemes(task.Summary, 800)
-			task.NativeTurnID, _ = final["source_turn_id"].(string)
-			if task.SourceMessageID != "" {
+			task.NativeTurnID = finalTurn
+			if task.MessagePurpose == "legacy_unknown" {
+				task.State = "legacy_unknown"
+			}
+			if task.SourceMessageID != "" && task.MessagePurpose == "instruction" {
 				task.State = "completed"
 			}
 		}
+	case messagequeue.Failed:
+		task.State = "failed"
+		task.Error = effective.Message
+	case messagequeue.Cancelled:
+		task.State = "cancelled"
 	}
 	task.CanCancel = e.State == messagequeue.Queued && owner != "" && payload.OwnerDevice == owner && task.NativeTurnID == "" && h.controls.MobileMayWrite(s.ID)
 	return task
 }
+
 func (h *Hub) sessionTaskFinals(s *session.Session) (map[string]map[string]any, string) {
 	finals := map[string]map[string]any{}
 	hr, ok := h.exec.(historyRouter)
@@ -164,7 +192,7 @@ func (h *Hub) sessionTaskFinals(s *session.Session) (map[string]map[string]any, 
 	return finals, "supported"
 }
 func (h *Hub) sendSessionTasks(c *Client, cmd clientproto.Command) {
-	event := protocol.SessionTasksSnapshot{Type: "session_tasks_snapshot", SessionID: cmd.SessionID, RequestID: cmd.RequestID, InstanceID: h.cfg.InstanceID, Status: "unknown", HistoryStatus: "unknown", Items: []protocol.SessionTask{}, Children: []protocol.SessionTask{}}
+	event := protocol.SessionTasksSnapshot{Type: "session_tasks_snapshot", SessionID: cmd.SessionID, RequestID: cmd.RequestID, InstanceID: h.cfg.InstanceID, Status: "unknown", HistoryStatus: "unknown", ChildrenStatus: "unknown", Items: []protocol.SessionTask{}, Children: []protocol.SessionTask{}}
 	send := func() { c.enqueueEvent(event) }
 	owner := h.pairedTaskDevice(c)
 	s, ok := h.registry.Get(cmd.SessionID)
@@ -202,7 +230,7 @@ func (h *Hub) sendSessionTasks(c *Client, cmd clientproto.Command) {
 		if e, found, err := h.messageQueue.Get(s.ID, id); err == nil && found {
 			snapshot.Items = append(snapshot.Items, e)
 		} else {
-			event.Items = append(event.Items, protocol.SessionTask{RequestID: id, State: "unknown", Content: "尚未找到此原請求的正式受理記錄；不會重送", Files: []string{}, Transport: "ordinary_queue", InstanceID: h.cfg.InstanceID, SessionID: s.ID, ThreadID: s.ResumeID()})
+			event.Items = append(event.Items, protocol.SessionTask{RequestID: id, MessagePurpose: "legacy_unknown", State: "unknown", Content: "尚未找到此原請求的正式受理記錄；不會重送", Files: []string{}, Transport: "ordinary_queue", InstanceID: h.cfg.InstanceID, SessionID: s.ID, ThreadID: s.ResumeID()})
 		}
 	}
 	finals, status := h.sessionTaskFinals(s)
@@ -219,9 +247,28 @@ func (h *Hub) sendSessionTasks(c *Client, cmd clientproto.Command) {
 		}
 		event.Items = append(event.Items, h.projectSessionTask(s, full, owner, finals))
 	}
+	childFinalCache := map[string]map[string]map[string]any{}
+	childFinals := func(target *session.Session, entry messagequeue.Entry) map[string]map[string]any {
+		need := entry.State == messagequeue.Completed
+		if entry.State == messagequeue.Steered {
+			if active, found, err := h.messageQueue.Get(target.ID, entry.ActiveRequestID); err == nil && found && active.State == messagequeue.Completed {
+				need = true
+			}
+		}
+		if !need {
+			return nil
+		}
+		if cached, ok := childFinalCache[target.ID]; ok {
+			return cached
+		}
+		result, _ := h.sessionTaskFinals(target)
+		childFinalCache[target.ID] = result
+		return result
+	}
 	// A parent relation can be displayed without enabling a controller grant.
 	// Target details remain gated by the current grant and registered scope.
 	if h.dispatches != nil {
+		event.ChildrenStatus = "supported"
 		grant, err := h.dispatches.Grant(context.Background(), s.ID)
 		if err != nil {
 			event.Message = "下派範圍狀態無法確認"
@@ -235,17 +282,17 @@ func (h *Hub) sendSessionTasks(c *Client, cmd clientproto.Command) {
 			return
 		}
 		for _, r := range records {
-			if r.ParentThreadID != s.ResumeID() {
+			if !taskSourceThread(s, r.ParentThreadID) {
 				continue
 			}
-			task := protocol.SessionTask{RequestID: r.RequestID, State: "unknown", Content: truncateGraphemes(r.Content, 500), CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt, Files: []string{}, Transport: "controller_" + r.Mode, InstanceID: r.InstanceID, SessionID: r.SessionID, ThreadID: r.ThreadID, ConfigRevision: r.ConfigRevision, Origin: &protocol.TaskOrigin{InstanceID: h.cfg.InstanceID, SessionID: s.ID, ThreadID: r.ParentThreadID, RequestID: r.OriginRequestID}}
+			task := protocol.SessionTask{MessagePurpose: "instruction", ReceiptFound: true, ExecutionRequestID: r.ExecutionRequestID, RequestID: r.RequestID, State: "unknown", Content: truncateGraphemes(r.Content, 500), CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt, Files: []string{}, Transport: "controller_" + r.Mode, InstanceID: r.InstanceID, SessionID: r.SessionID, ThreadID: r.ThreadID, ConfigRevision: r.ConfigRevision, Origin: &protocol.TaskOrigin{InstanceID: h.cfg.InstanceID, SessionID: s.ID, ThreadID: r.ParentThreadID, RequestID: r.OriginRequestID}}
 			if !grant.Allows(h.cfg.InstanceID, r.InstanceID, r.SessionID) {
 				task.State = "forbidden"
 				task.Error = "目標目前未授權"
 			} else if r.InstanceID == h.cfg.InstanceID {
 				if target, ok := h.registry.Get(r.SessionID); ok && h.controllerInScope(target) && !target.Snapshot().Hidden && target.ResumeID() == r.ThreadID {
 					if e, found, err := h.messageQueue.Get(target.ID, r.RequestID); err == nil && found {
-						task = h.projectSessionTask(target, e, "", nil)
+						task = h.projectSessionTask(target, e, "", childFinals(target, e))
 						task.CanOpenTarget = target.SettingsSnapshot().ConfigRevision == r.ConfigRevision && target.State() != session.Closed
 						task.Transport = "controller_" + r.Mode
 						task.Origin = &protocol.TaskOrigin{InstanceID: h.cfg.InstanceID, SessionID: s.ID, ThreadID: r.ParentThreadID, RequestID: r.OriginRequestID}
@@ -272,20 +319,37 @@ func (h *Hub) sendSessionTasks(c *Client, cmd clientproto.Command) {
 		}
 		for _, e := range ordinary {
 			payload := h.taskAdmission(e)
-			if payload.Origin == nil || payload.Origin.ThreadID != s.ResumeID() {
+			if payload.Origin == nil || !taskSourceThread(s, payload.Origin.ThreadID) {
+				continue
+			}
+			if !grant.Allows(h.cfg.InstanceID, h.cfg.InstanceID, e.SessionID) {
+				thread := ""
+				var revision uint64
+				if payload.ExpectedTarget != nil {
+					thread = payload.ExpectedTarget.ThreadID
+					revision = payload.ExpectedTarget.Revision
+				}
+				event.Children = append(event.Children, protocol.SessionTask{ReceiptFound: true, RequestID: e.RequestID, State: "forbidden", Content: e.Content, CreatedAt: e.CreatedAt, UpdatedAt: e.UpdatedAt, Files: []string{}, Transport: "ordinary_queue", Origin: payload.Origin, InstanceID: h.cfg.InstanceID, SessionID: e.SessionID, ThreadID: thread, ConfigRevision: revision, Error: "目標目前未授權；來源關係已保留"})
 				continue
 			}
 			target, ok := h.registry.Get(e.SessionID)
 			if !ok || !h.controllerInScope(target) || target.Snapshot().Hidden {
+				thread := ""
+				var revision uint64
+				if payload.ExpectedTarget != nil {
+					thread = payload.ExpectedTarget.ThreadID
+					revision = payload.ExpectedTarget.Revision
+				}
+				event.Children = append(event.Children, protocol.SessionTask{ReceiptFound: true, RequestID: e.RequestID, State: "unknown", Content: e.Content, CreatedAt: e.CreatedAt, UpdatedAt: e.UpdatedAt, Files: []string{}, Transport: "ordinary_queue", Origin: payload.Origin, InstanceID: h.cfg.InstanceID, SessionID: e.SessionID, ThreadID: thread, ConfigRevision: revision, Error: "目標目前無法查看；來源關係已保留"})
 				continue
 			}
-			if !grant.Allows(h.cfg.InstanceID, h.cfg.InstanceID, target.ID) {
-				continue
-			}
-			child := h.projectSessionTask(target, e, "", nil)
+			child := h.projectSessionTask(target, e, "", childFinals(target, e))
 			child.CanOpenTarget = payload.ExpectedTarget != nil && payload.ExpectedTarget.matches(target)
 			event.Children = append(event.Children, child)
 		}
+	}
+	if h.dispatches == nil {
+		event.ChildrenStatus = "unsupported"
 	}
 	event.Status = "supported"
 	send()
@@ -306,4 +370,16 @@ func (h *Hub) taskAdmission(e messagequeue.Entry) queuedPayload {
 		_ = json.Unmarshal(e.Payload, &payload)
 	}
 	return payload
+}
+
+func taskSourceThread(s *session.Session, thread string) bool {
+	if thread == "" {
+		return false
+	}
+	for _, id := range s.ResumeIDs() {
+		if id == thread {
+			return true
+		}
+	}
+	return false
 }
