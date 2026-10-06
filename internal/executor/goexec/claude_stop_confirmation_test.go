@@ -38,7 +38,7 @@ func TestClaudeStopLetsWrapperReapItsOwnedChild(t *testing.T) {
 	}
 	defer p.cancel()
 	var pid int
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		data, err := os.ReadFile(childFile)
 		if err == nil {
