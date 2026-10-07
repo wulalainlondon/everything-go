@@ -23,7 +23,9 @@ REPO="${EVERYTHING_GO_REPO:-wulalainlondon/everything-go}"
 RELEASE_TAG="${EVERYTHING_GO_TAG:-v0.2.86}"
 PORT="${EVERYTHING_GO_PORT:-8766}"
 RUNTIME_DIR="${EVERYTHING_GO_HOME:-$HOME/.everything-go-runtime}"
-LABEL="com.everything-go.app"
+LABEL="${EVERYTHING_GO_LABEL:-com.everything-go.app}"
+[[ "$LABEL" =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "invalid launchd label" >&2; exit 1; }
+PREVIOUS_APP_REFERENCE=""
 BIN="$RUNTIME_DIR/everything-go"
 APP_DIR="$RUNTIME_DIR/Everything Go.app"
 APP_BIN="$APP_DIR/Contents/MacOS/everything-go"
@@ -164,6 +166,7 @@ install_bridge_binary() {
     xcrun stapler validate "$extracted" || die "notarization ticket validation failed"
 
     backup="$(mktemp -d "$RUNTIME_DIR/.previous-app.XXXXXX")/Everything Go.app"
+    PREVIOUS_APP_REFERENCE="$backup"
     if [ -d "$APP_DIR" ]; then mv "$APP_DIR" "$backup"; fi
     if ! mv "$extracted" "$APP_DIR"; then
       [ -d "$backup" ] && mv "$backup" "$APP_DIR"
@@ -317,25 +320,25 @@ EOF
 }
 
 verify_launchd_health_or_rollback() {
-  local target="gui/$(id -u)/$LABEL" attempt failed_app
+  local target="gui/$(id -u)/$LABEL" attempt service_pid listener_pid app_inode
   for attempt in $(seq 1 20); do
-    if nc -z 127.0.0.1 "$PORT" >/dev/null 2>&1; then
+    service_pid=$(launchctl print "$target" 2>/dev/null | awk '/^[[:space:]]*pid = [0-9]+/ { print $3; exit }' || true)
+    listener_pid=$(lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null | sort -u || true)
+    app_inode=$(stat -f '%i' "$APP_BIN" 2>/dev/null || true)
+    if [[ "$service_pid" =~ ^[0-9]+$ ]] && [ "$service_pid" = "$listener_pid" ] &&
+      lsof -a -p "$service_pid" -d txt -F in 2>/dev/null | awk -v path="$APP_BIN" -v wanted="$app_inode" '
+        /^i/ { inode=substr($0,2) }
+        /^n/ { if (substr($0,2)==path && inode==wanted) found=1 }
+        END { exit !found }'; then
       say "launchd health check passed on port $PORT"
       return 0
     fi
     sleep 1
   done
-
-  warn "new bridge failed its launch health check; restoring previous signed app"
-  if [ -d "$RUNTIME_DIR/Everything Go.previous.app" ]; then
-    failed_app="$RUNTIME_DIR/Everything Go.failed.app"
-    rm -rf "$failed_app"
-    [ -d "$APP_DIR" ] && mv "$APP_DIR" "$failed_app"
-    mv "$RUNTIME_DIR/Everything Go.previous.app" "$APP_DIR"
-    launchctl kickstart -k "$target" >/dev/null 2>&1 || true
-    die "update rolled back; inspect /tmp/$LABEL.stderr.log"
-  fi
-  die "bridge did not become healthy; inspect /tmp/$LABEL.stderr.log"
+  # Retain this operation's backup only as reference. An old executor cannot
+  # safely take over newly accepted scoped TaskAPI work. No restore/restart here.
+  warn "new bridge failed health validation; previous app retained: ${PREVIOUS_APP_REFERENCE:-none}"
+  die "signed same-source compatible-hold recovery required; no automatic old rollback"
 }
 
 install_systemd() {

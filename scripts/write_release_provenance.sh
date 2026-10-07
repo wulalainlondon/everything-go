@@ -21,7 +21,9 @@ SOURCE_SHA=$(
   } | shasum -a 256 | awk '{print $1}'
 )
 mkdir -p "$(dirname "$OUT")"
+TREE=$(git -C "$ROOT" rev-parse HEAD^{tree})
+ARCHIVE_SHA=$(git -C "$ROOT" archive HEAD | shasum -a 256 | awk '{print $1}')
 VERSION=$(cat "$ROOT/RELEASE_VERSION")
 MODE=${EVERYTHING_GO_RELEASE_MODE:-normal}
 case "$MODE" in normal|compatible-hold) ;; *) exit 1 ;; esac
-printf '{"canonical_repository":"wulalainlondon/everything-go","commit":"%s","dirty":%s,"source_sha256":"%s","version":"%s","tag":"v%s","release_mode":"%s"}\n' "$COMMIT" "$DIRTY" "$SOURCE_SHA" "$VERSION" "$VERSION" "$MODE" > "$OUT"
+printf '{"canonical_repository":"wulalainlondon/everything-go","commit":"%s","dirty":%s,"source_sha256":"%s","version":"%s","tag":"v%s","release_mode":"%s","source_tree":"%s","source_archive_sha256":"%s"}\n' "$COMMIT" "$DIRTY" "$SOURCE_SHA" "$VERSION" "$VERSION" "$MODE" "$TREE" "$ARCHIVE_SHA" > "$OUT"
