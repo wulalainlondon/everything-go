@@ -20,6 +20,7 @@
 set -euo pipefail
 
 REPO="${EVERYTHING_GO_REPO:-wulalainlondon/everything-go}"
+RELEASE_TAG="${EVERYTHING_GO_TAG:-v0.2.86}"
 PORT="${EVERYTHING_GO_PORT:-8766}"
 RUNTIME_DIR="${EVERYTHING_GO_HOME:-$HOME/.everything-go-runtime}"
 LABEL="com.everything-go.app"
@@ -125,22 +126,10 @@ ensure_macos_permissions() {
 install_bridge_binary() {
   mkdir -p "$RUNTIME_DIR"
 
-  # Resolve the latest tag via API to build a direct /releases/download/<tag>/
-  # URL, bypassing the /releases/latest/download/ redirect which returns 504
-  # for zip assets on some GitHub CDN nodes.
-  local latest_tag
-  latest_tag=$(curl -fsSL --proto '=https' --tlsv1.2 \
-    "https://api.github.com/repos/$REPO/releases/latest" \
-    | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
-  [ -n "$latest_tag" ] || latest_tag="latest"
-
-  base_url() { # $1 = asset filename
-    if [ "$latest_tag" = "latest" ]; then
-      echo "https://github.com/$REPO/releases/latest/download/$1"
-    else
-      echo "https://github.com/$REPO/releases/download/$latest_tag/$1"
-    fi
-  }
+  # This installer is bound to one reviewed release. No latest/CDN fallback.
+  [[ "$REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die "invalid release repository"
+  [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "invalid release tag"
+  base_url() { printf 'https://github.com/%s/releases/download/%s/%s\n' "$REPO" "$RELEASE_TAG" "$1"; }
 
   URL=$(base_url "$ASSET")
 
@@ -174,8 +163,7 @@ install_bridge_binary() {
     spctl -a -t exec -vv "$extracted" || die "Gatekeeper rejected the app"
     xcrun stapler validate "$extracted" || die "notarization ticket validation failed"
 
-    backup="$RUNTIME_DIR/Everything Go.previous.app"
-    rm -rf "$backup"
+    backup="$(mktemp -d "$RUNTIME_DIR/.previous-app.XXXXXX")/Everything Go.app"
     if [ -d "$APP_DIR" ]; then mv "$APP_DIR" "$backup"; fi
     if ! mv "$extracted" "$APP_DIR"; then
       [ -d "$backup" ] && mv "$backup" "$APP_DIR"

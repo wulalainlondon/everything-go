@@ -1,4 +1,12 @@
-# everything-go
+# Everything Go — canonical release source
+
+New macOS ARM64/Intel installation is pinned to the reviewed v0.2.86 release:
+
+```bash
+curl -fsSL https://github.com/wulalainlondon/everything-go/releases/download/v0.2.86/install.sh | bash
+```
+
+Until publication/readback, v0.2.86 is planned, not live. See [release gates and supported limits](docs/RELEASE.md). [Averything Bridge](https://github.com/wulalainlondon/averything-bridge) remains the support/compatibility entry; both paths use this canonical payload. Historical v0.2.77/v0.2.1 assets remain unchanged.
 
 Averything's production Bridge. This repository is the sole writable backend
 source; the workspace sibling `bridge/` is a generated public mirror.
