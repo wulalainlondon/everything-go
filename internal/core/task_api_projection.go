@@ -490,6 +490,9 @@ func (h *Hub) Read(ctx context.Context, c taskapi.AuthorizedCommand) (any, error
 		if c.Revalidate == nil || c.Revalidate(ctx) != nil {
 			return nil, taskapi.Failure("caller_unbound", "known_none", "refresh_identity")
 		}
+		if !in.IncludeRelationCoverage {
+			page.SourceRelationCoverage = ""
+		}
 		return page, nil
 	case "events":
 		return h.apiEvents(ctx, c, in)

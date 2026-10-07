@@ -29,6 +29,7 @@ import (
 )
 
 type apiInput struct {
+	IncludeRelationCoverage    bool   `json:"include_relation_coverage"`
 	TaskID                     string `json:"task_id"`
 	SessionID                  string `json:"session_id"`
 	Goal, Instruction, Content string

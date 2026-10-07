@@ -823,9 +823,6 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 100
-        },
-        "include_relation_coverage": {
-          "type": "boolean"
         }
       },
       "required": [
@@ -1701,12 +1698,6 @@
         },
         "page_order": {
           "const": "task_id"
-        },
-        "source_relation_coverage": {
-          "enum": [
-            "trusted_relations_only",
-            "not_requested"
-          ]
         }
       },
       "required": [
