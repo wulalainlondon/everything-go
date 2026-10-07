@@ -343,3 +343,69 @@ func TestNF01UnicodeDecoderAliasesCannotOverridePhaseAndLastMessage(t *testing.T
 		}
 	}
 }
+
+func TestCoordinatorNF01OversizedForeignBoundaryCannotAttachForeignFinal(t *testing.T) {
+	c, p := exactFixture(t)
+	data := fixtureHeader() + fixtureTurn("turn", "", "") + `{"type":"event_msg","payload":{"type":"task_started","turn_id":"foreign","opaque":"` + strings.Repeat("x", 2<<20) + `"}}` + "\n" + `{"type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"text":"foreign final"}]}}` + "\n" + `{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn"}}` + "\n"
+	if e := os.WriteFile(p, []byte(data), 0600); e != nil {
+		t.Fatal(e)
+	}
+	found, e := exactPoll(t, c)
+	if found {
+		t.Fatalf("foreign final was accepted as original target return: found=%v error=%v", found, e)
+	}
+}
+
+// Same exact request/map/payload identity throughout: only public control
+// ordering and target closure differ. No live provider or queue mutation.
+func TestNF02OversizedForeignControlBreaksUnfinishedTargetAssociation(t *testing.T) {
+	for _, kind := range []string{"task_started", "turn_context", "task_complete", "turn_aborted"} {
+		for _, order := range []string{"before", "between", "after"} {
+			for _, state := range []string{"unfinished", "has_final", "completed"} {
+				t.Run(kind+"/"+order+"/"+state, func(t *testing.T) {
+					c, p := exactFixture(t)
+					text, terminal := "", ""
+					if state != "unfinished" {
+						text = "target final"
+					}
+					if state == "completed" {
+						terminal = "task_complete"
+					}
+					row, kindField := "event_msg", fmt.Sprintf(`"type":%q,`, kind)
+					if kind == "turn_context" {
+						row, kindField = "turn_context", ""
+					}
+					opaque := `"opaque":"` + strings.Repeat("x", 2<<20) + `"`
+					fields := kindField + `"turn_id":"foreign",` + opaque
+					if order == "before" {
+						fields = opaque + `,` + kindField + `"turn_id":"foreign"`
+					}
+					if order == "between" {
+						fields = kindField + opaque + `,"turn_id":"foreign"`
+					}
+					foreign := fmt.Sprintf(`{"type":%q,"payload":{%s}}`, row, fields) + "\n"
+					final := `{"type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"text":"foreign final"}]}}` + "\n"
+					data := fixtureHeader() + fixtureTurn("turn", text, terminal) + foreign + final
+					if state != "completed" {
+						data += `{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn"}}` + "\n"
+					}
+					if e := os.WriteFile(p, []byte(data), 0600); e != nil {
+						t.Fatal(e)
+					}
+					found, e := exactPoll(t, c)
+					if state == "completed" {
+						if !found || e != nil {
+							t.Fatalf("closed exact target lost: %v %v", found, e)
+						}
+						// Cached proof must preserve the same result without active foreign turn.
+						if found, e = exactPoll(t, c); !found || e != nil {
+							t.Fatalf("cached closed target lost: %v %v", found, e)
+						}
+					} else if found {
+						t.Fatalf("foreign final attached to unfinished target: %v", e)
+					}
+				})
+			}
+		}
+	}
+}

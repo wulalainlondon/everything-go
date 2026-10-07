@@ -194,7 +194,17 @@ func (st *exactFinalScan) record(line []byte, at int64, target string) {
 			st.terminal = false
 			return
 		}
-		safe := known && (row == "compacted" || row == "response_item" && (kind != "message" || phase != "final_answer" || st.terminal && st.turn != target) || control && native != "" && native != target || row == "event_msg" && (kind == "item_completed" || kind == "token_count" || kind == "agent_message" || kind == "agent_reasoning" || kind == "agent_reasoning_raw_content" || kind == "user_message"))
+		if known && control && native != "" && native != target {
+			// Even a discarded foreign control is a turn boundary. Its full raw
+			// bytes cannot be pinned within the line budget, so relinquish the
+			// active association rather than let a later final inherit target.
+			// Already closed target start/final/complete pins remain historical
+			// proof; unfinished target cannot complete across this boundary.
+			st.turn = ""
+			st.boundary = nil
+			return
+		}
+		safe := known && (row == "compacted" || row == "response_item" && (kind != "message" || phase != "final_answer" || st.terminal && st.turn != target) || row == "event_msg" && (kind == "item_completed" || kind == "token_count" || kind == "agent_message" || kind == "agent_reasoning" || kind == "agent_reasoning_raw_content" || kind == "user_message"))
 		if !safe {
 			st.turn = ""
 			st.text = ""
