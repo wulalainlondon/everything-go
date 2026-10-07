@@ -56,7 +56,9 @@ func (c *Codex) observeNativeTurn(s *session.Session, st *codexState, method, tu
 	}
 	if st.turnActive || st.compactActive {
 		requestID := st.reqID
-		accept := st.turnStartPending || st.currentTurnID == "" || turnID == "" || st.currentTurnID == turnID || st.compactActive
+		// Pending starts have no proven stream owner. Terminals are buffered by
+		// dispatch; other payloads cannot be published under the new request.
+		accept := !st.turnStartPending && (st.currentTurnID == "" || turnID == "" || st.currentTurnID == turnID) || st.compactActive
 		st.mu.Unlock()
 		return requestID, accept
 	}

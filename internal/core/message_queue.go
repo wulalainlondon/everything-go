@@ -473,6 +473,9 @@ func (h *Hub) promoteQueuedMessage(c *Client, cmd clientproto.Command) {
 		steerErr := decodeErr
 		if decodeErr == nil {
 			result, steerErr = steerer.Steer(context.Background(), s, cmd.RequestID, payload.Content, payload.Images, payload.Files)
+			if steerErr == nil && !result.StrictACK {
+				steerErr = errors.New("native steer acceptance unverified")
+			}
 		}
 		h.messageQueueMu.Lock()
 		defer h.messageQueueMu.Unlock()
@@ -486,7 +489,7 @@ func (h *Hub) promoteQueuedMessage(c *Client, cmd clientproto.Command) {
 				message = "Steering result could not be confirmed; automatic resend is paused. Check the current reply before cancelling this item."
 			}
 		}
-		updated, _, persistErr := h.messageQueue.Transition(cmd.SessionID, cmd.RequestID, []messagequeue.State{messagequeue.Steering}, next, message, result.RequestID, result.TurnID)
+		updated, _, persistErr := h.messageQueue.Transition(cmd.SessionID, cmd.RequestID, []messagequeue.State{messagequeue.Steering}, next, message, result.RequestID, result.TurnID, next == messagequeue.Steered && result.StrictACK)
 		if persistErr != nil {
 			// The durable pre-RPC state is steering, which recovers as uncertain. Never
 			// restore the callback after a failed result write.

@@ -56,6 +56,10 @@ func (h *Hub) apiTask(ctx context.Context, r taskapi.IntentRecord) (map[string]a
 		}
 	}
 	nativeThread, nativeTurn, nativeKnown := h.messageQueue.NativeExecution(r.SessionID, r.RequestID)
+	nativeTupleObserved := nativeKnown
+	if exists && nativeKnown && !h.nativeCorrelationKnown(target, nativeThread, r.RequestID, nativeTurn) {
+		nativeKnown = false
+	}
 	if nativeKnown {
 		if expected, ok := identity["native_thread_id"].(string); ok && expected != "" && expected != nativeThread {
 			nativeKnown = false
@@ -127,10 +131,11 @@ func (h *Hub) apiTask(ctx context.Context, r taskapi.IntentRecord) (map[string]a
 			}
 		}
 	}
-	if found && entry.State == messagequeue.Completed {
+	canUseSeal := exists && (!nativeTupleObserved || nativeKnown) && (target.Backend() != backend.Codex || nativeKnown)
+	if found && entry.State == messagequeue.Completed && canUseSeal {
 		if stored, e := h.messageQueue.TaskSeal(ctx, r.SessionID, r.RequestID, ""); e == nil {
 			var saved map[string]any
-			if json.Unmarshal(stored.Anchor, &saved) == nil {
+			if json.Unmarshal(stored.Anchor, &saved) == nil && h.nativeSealKnown(target, saved, r.RequestID, nativeThread, nativeTurn) {
 				anchor = saved
 				sealID = stored.ID
 				finalHash = stored.Hash
@@ -234,7 +239,7 @@ func (h *Hub) apiTask(ctx context.Context, r taskapi.IntentRecord) (map[string]a
 	if meta.Caller.SourceSessionID != "" {
 		task["views"] = append(task["views"].([]string), "source_children")
 	}
-	if anchor != nil {
+	if anchor != nil && canUseSeal {
 		conflict, _ := h.messageQueue.NativeConflict(r.SessionID, r.RequestID)
 		encoded, _ := json.Marshal(anchor)
 		if conflict {
@@ -254,15 +259,24 @@ func (h *Hub) apiTask(ctx context.Context, r taskapi.IntentRecord) (map[string]a
 		delete(task, "result_anchor")
 		delete(task, "seal_id")
 		delete(task, "final_hash")
-	} else if found && entry.State == messagequeue.Completed && anchor == nil {
+	} else if found && entry.State == messagequeue.Completed && anchor == nil && canUseSeal {
 		if persisted, e := h.messageQueue.TaskSeal(ctx, r.SessionID, r.RequestID, ""); e == nil {
 			var saved map[string]any
-			if json.Unmarshal(persisted.Anchor, &saved) == nil {
+			if json.Unmarshal(persisted.Anchor, &saved) == nil && h.nativeSealKnown(target, saved, r.RequestID, nativeThread, nativeTurn) {
 				task["result_anchor"] = saved
 				task["seal_id"] = persisted.ID
 				task["final_hash"] = persisted.Hash
 				axes["final"] = "sealed"
 			}
+		}
+	}
+	if !canUseSeal {
+		delete(task, "result_anchor")
+		delete(task, "seal_id")
+		delete(task, "final_hash")
+		if found && entry.State == messagequeue.Completed {
+			axes["execution"] = "unknown"
+			axes["final"] = "unknown"
 		}
 	}
 	if r.Path == "delegation" || r.Path == "controller" {
@@ -479,6 +493,11 @@ func (h *Hub) Read(ctx context.Context, c taskapi.AuthorizedCommand) (any, error
 		if err != nil {
 			return nil, err
 		}
+		for _, raw := range page.Items {
+			if task, ok := raw.(map[string]any); ok && !h.frozenTaskNativeKnown(task) {
+				return nil, taskapi.Failure("cursor_expired", "known_none", "refresh_snapshot")
+			}
+		}
 		result := map[string]any{"items": page.Items, "has_more": page.HasMore, "partial": false, "history_status": "partial"}
 		if page.NextPageCursor != "" {
 			result["next_cursor"] = page.NextPageCursor
@@ -501,9 +520,25 @@ func (h *Hub) Read(ctx context.Context, c taskapi.AuthorizedCommand) (any, error
 			if !ok {
 				continue
 			}
+			if !h.frozenTaskNativeKnown(task) {
+				return nil, taskapi.Failure("cursor_expired", "known_none", "refresh_snapshot")
+			}
 			id, _ := task["task_id"].(string)
 			if _, err := h.apiRecord(ctx, c.Caller, id); err != nil {
 				return nil, taskapi.Failure("cursor_expired", "known_none", "refresh_snapshot")
+			}
+			// A pre-upgrade frozen positive cannot bypass the current provider
+			// ownership guard. Expire its cursor; leave stored history untouched.
+			if target, ok := task["target"].(map[string]any); ok {
+				if turn, ok := target["native_turn_id"].(string); ok && turn != "" {
+					sessionID, _ := target["session_id"].(string)
+					request, _ := target["request_id"].(string)
+					thread, _ := target["native_thread_id"].(string)
+					s, found := h.registry.Get(sessionID)
+					if !found || !h.nativeCorrelationKnown(s, thread, request, turn) {
+						return nil, taskapi.Failure("cursor_expired", "known_none", "refresh_snapshot")
+					}
+				}
 			}
 		}
 		if c.Revalidate == nil || c.Revalidate(ctx) != nil {

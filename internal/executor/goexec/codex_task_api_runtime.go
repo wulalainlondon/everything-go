@@ -98,7 +98,7 @@ func (c *Codex) handleTaskAPIServerRequest(id any, method string, raw json.RawMe
 		st := c.state(s.ID)
 		st.mu.Lock()
 		request := st.reqID
-		owned := st.turnActive && st.currentTurnID == call.TurnID && st.threadID == call.ThreadID
+		owned := st.turnActive && !st.turnStartPending && st.currentTurnID == call.TurnID && st.threadID == call.ThreadID
 		st.mu.Unlock()
 		if !owned || request == "" {
 			_ = c.rpc.write(map[string]any{"id": id, "result": map[string]any{"success": false, "contentItems": []map[string]any{{"type": "inputText", "text": "caller_unbound"}}}})
@@ -107,7 +107,7 @@ func (c *Codex) handleTaskAPIServerRequest(id any, method string, raw json.RawMe
 		caller := backend.TaskCaller{Session: s, RequestID: request, ThreadID: call.ThreadID, TurnID: call.TurnID, CallID: call.CallID, ProviderVersion: c.taskDaemonVersion(), Validate: func() bool {
 			st.mu.Lock()
 			defer st.mu.Unlock()
-			return st.turnActive && st.reqID == request && st.currentTurnID == call.TurnID && st.threadID == call.ThreadID
+			return st.turnActive && !st.turnStartPending && st.reqID == request && st.currentTurnID == call.TurnID && st.threadID == call.ThreadID
 		}}
 		response := c.taskProvider.ExecuteTask(context.Background(), caller, call.Arguments)
 		encoded, _ := json.Marshal(response)

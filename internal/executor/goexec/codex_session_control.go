@@ -61,7 +61,7 @@ func (c *Codex) sessionControlCaller(s *session.Session, turnID, callID string) 
 	}
 	st := c.state(s.ID)
 	st.mu.Lock()
-	owned := st.turnActive && st.currentTurnID == turnID && st.reqID != ""
+	owned := st.turnActive && !st.turnStartPending && st.currentTurnID == turnID && st.reqID != ""
 	request := st.reqID
 	observed := !st.turnActive && !st.compactActive && st.observedTurnID == turnID && st.observedRequestID != ""
 	if observed {

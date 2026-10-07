@@ -191,9 +191,9 @@ func (c *Codex) handlePMServerRequest(id any, method string, raw json.RawMessage
 			if p != nil && p.Worker {
 				st := c.state(s.ID)
 				st.mu.Lock()
-				reqID, turnID := st.reqID, st.currentTurnID
+				reqID, turnID, owned := st.reqID, st.currentTurnID, st.turnActive && !st.turnStartPending
 				st.mu.Unlock()
-				if p.RequestID == "" || p.RequestID != reqID || call.TurnID == "" || (turnID != "" && call.TurnID != turnID) {
+				if !owned || p.RequestID == "" || p.RequestID != reqID || call.TurnID == "" || turnID == "" || call.TurnID != turnID {
 					allowed = false
 				}
 			}

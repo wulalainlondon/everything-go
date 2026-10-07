@@ -81,7 +81,7 @@ func TestCodexAcceptedJoinPromotesOnlyExternalHistoryIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	w.reply = func(string, json.RawMessage) (any, error) {
-		return map[string]any{"turn": map[string]string{"id": "joined-turn"}}, nil
+		return map[string]any{"turn": map[string]string{"id": "joined-turn", "status": "inProgress"}}, nil
 	}
 	if err := c.startTurn("root", nil, s.Snapshot(), "", st.reqID); err != nil {
 		t.Fatal(err)
@@ -141,7 +141,14 @@ func TestCodexStartResponseTerminalAndEarlyFailurePreserveStatus(t *testing.T) {
 					}
 					return map[string]any{"turn": turn}, nil
 				}
-				if err := c.startTurn("root", nil, s.Snapshot(), "", st.reqID); err != nil {
+				err := c.startTurn("root", nil, s.Snapshot(), "", st.reqID)
+				if !early && status != "completed" {
+					if err == nil || st.currentTurnID != "" || !st.turnActive {
+						t.Fatal("unconfirmed failure became accepted", err)
+					}
+					return
+				}
+				if err != nil {
 					t.Fatal(err)
 				}
 				if st.turnActive {
@@ -175,7 +182,7 @@ func TestCodexNativeTerminalBeforeAckIsCorrelatedAfterAck(t *testing.T) {
 		if !st.turnActive {
 			t.Fatal("uncorrelated file completion released work")
 		}
-		return map[string]any{"turn": map[string]string{"id": "joined-turn"}}, nil
+		return map[string]any{"turn": map[string]string{"id": "joined-turn", "status": "inProgress"}}, nil
 	}
 	if err := c.startTurn("root", nil, s.Snapshot(), "", st.reqID); err != nil {
 		t.Fatal(err)
@@ -212,7 +219,7 @@ func TestCodexJoinedTurnRunEmitsOneOwnedDoneAfterFileFallback(t *testing.T) {
 		switch method {
 		case "turn/start":
 			c.ObserveNativeLifecycle(s, "joined-turn", "completed")
-			return map[string]any{"turn": map[string]string{"id": "joined-turn"}}, nil
+			return map[string]any{"turn": map[string]string{"id": "joined-turn", "status": "inProgress"}}, nil
 		case "thread/goal/get":
 			return map[string]any{}, nil
 		default:
@@ -244,7 +251,7 @@ func TestCodexCorrelatedErrorBeforeAckCannotFailDifferentAcceptedTurn(t *testing
 				if !st.turnActive {
 					t.Fatal("error ended work before accepted turn was confirmed")
 				}
-				return map[string]any{"turn": map[string]string{"id": "joined-turn"}}, nil
+				return map[string]any{"turn": map[string]string{"id": "joined-turn", "status": "inProgress"}}, nil
 			}
 			if err := c.startTurn("root", nil, s.Snapshot(), "", st.reqID); err != nil {
 				t.Fatal(err)

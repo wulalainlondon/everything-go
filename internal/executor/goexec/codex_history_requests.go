@@ -4,12 +4,15 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
 )
+
+var errCodexTurnOwnerConflict = errors.New("native_acceptance_conflict")
 
 // A transcript's native turn ID is not the Bridge command request ID. Persist
 // their exact association from turn/start's RPC response before it is lost on
@@ -76,7 +79,7 @@ func (c *Codex) saveTurnRequest(threadID, turnID, requestID string, accepted boo
 	if previous, exists := r.Requests[turnID]; exists {
 		if previous != requestID {
 			if !accepted || previous != "codex_external_"+turnID {
-				return fmt.Errorf("conflicting turn request association")
+				return errCodexTurnOwnerConflict
 			}
 		} else {
 			return nil

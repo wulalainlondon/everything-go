@@ -77,7 +77,7 @@ func (c *Codex) handleDelegationServerRequest(id any, method string, raw json.Ra
 		var result any
 		st := c.state(s.ID)
 		st.mu.Lock()
-		requestID, turnID, active := st.reqID, st.currentTurnID, st.turnActive
+		requestID, turnID, active := st.reqID, st.currentTurnID, st.turnActive && !st.turnStartPending
 		st.mu.Unlock()
 		owned := active && requestID != "" && turnID != "" && call.TurnID == turnID
 		var voiceCaller backend.SessionControlCaller

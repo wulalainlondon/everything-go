@@ -170,6 +170,9 @@ func TestControllerPinnedNativeResumeAndStartNeverFork(t *testing.T) {
 			}
 			st := c.state(s.ID)
 			st.reqID = request
+			st.turnActive = true
+			st.turnStartPending = true
+			st.turnDone = make(chan struct{})
 			st.threadID = "native-thread"
 			w.methods = nil
 			w.reply = func(method string, _ json.RawMessage) (any, error) {

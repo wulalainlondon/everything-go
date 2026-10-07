@@ -235,6 +235,9 @@ func TestNativeAsyncStartAcknowledgementAndStaleThreadNeverFork(t *testing.T) {
 	_, content, _, _ := c.PrepareAsyncReply(id, map[string]any{qid: "fixture"}, false)
 	st := c.state(s.ID)
 	st.reqID = id
+	st.turnActive = true
+	st.turnStartPending = true
+	st.turnDone = make(chan struct{})
 	w := &toolTestWriter{c: c}
 	w.reply = func(method string, _ json.RawMessage) (any, error) {
 		if method != "turn/start" {

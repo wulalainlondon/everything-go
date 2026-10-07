@@ -74,7 +74,7 @@ func TestQueuedPromotionIsAtomicAndDeduplicatedAcrossLateAck(t *testing.T) {
 		}
 		close(steerCalled)
 		<-steerRelease
-		return backend.SteerResult{TurnID: "t1", RequestID: "a"}, nil
+		return backend.SteerResult{StrictACK: true, TurnID: "t1", RequestID: "a"}, nil
 	}
 	enqueueTestMessage(t, h, c, "a")
 	if <-starts != "a" {

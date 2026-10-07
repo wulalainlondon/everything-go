@@ -95,6 +95,7 @@ func Open(dataDir string) (*Store, error) {
  CREATE TABLE IF NOT EXISTS task_provider_conflicts(session_id TEXT NOT NULL,request_id TEXT NOT NULL,PRIMARY KEY(session_id,request_id));
  CREATE TABLE IF NOT EXISTS task_native_conflicts (session_id TEXT NOT NULL,request_id TEXT NOT NULL,thread_id TEXT NOT NULL DEFAULT '',turn_id TEXT NOT NULL DEFAULT '',PRIMARY KEY(session_id,request_id));
  CREATE TABLE IF NOT EXISTS task_native_acceptance (session_id TEXT NOT NULL, request_id TEXT NOT NULL, thread_id TEXT NOT NULL, turn_id TEXT NOT NULL, PRIMARY KEY(session_id,request_id));
+ CREATE TABLE IF NOT EXISTS task_native_steer_proofs (session_id TEXT NOT NULL, request_id TEXT NOT NULL, payload_hash TEXT NOT NULL, active_request_id TEXT NOT NULL, turn_id TEXT NOT NULL, strict_ack_version INTEGER NOT NULL, PRIMARY KEY(session_id,request_id));
  CREATE TABLE IF NOT EXISTS queue_rejections (session_id TEXT NOT NULL, request_id TEXT NOT NULL, reason TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(session_id,request_id));`); err != nil {
 		db.Close()
 		return nil, err
@@ -265,7 +266,7 @@ func (s *Store) Reject(sessionID, requestID, reason string) error {
 	return tx.Commit()
 }
 
-func (s *Store) Transition(sessionID, requestID string, from []State, to State, message, activeRequestID, turnID string) (Entry, bool, error) {
+func (s *Store) Transition(sessionID, requestID string, from []State, to State, message, activeRequestID, turnID string, strictSteerACK ...bool) (Entry, bool, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return Entry{}, false, err
@@ -287,6 +288,14 @@ func (s *Store) Transition(sessionID, requestID string, from []State, to State, 
 	}
 	if to == Cancelled {
 		if _, err = tx.Exec("INSERT OR IGNORE INTO task_cancel_origins VALUES(?,?,?)", sessionID, requestID, e.State); err != nil {
+			return Entry{}, false, err
+		}
+	}
+	if to == Steered && len(strictSteerACK) == 1 && strictSteerACK[0] {
+		if activeRequestID == "" || activeRequestID == requestID || turnID == "" {
+			return Entry{}, false, errors.New("invalid strict steer tuple")
+		}
+		if _, err = tx.Exec(`INSERT INTO task_native_steer_proofs VALUES(?,?,?,?,?,1)`, sessionID, requestID, e.PayloadHash, activeRequestID, turnID); err != nil {
 			return Entry{}, false, err
 		}
 	}

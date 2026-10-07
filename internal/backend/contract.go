@@ -145,6 +145,7 @@ func SandboxOverride(ctx context.Context) (string, bool) {
 // message. RequestID is the original request that owns the turn; clients use it
 // to keep subsequent streaming events attached to the same lifecycle.
 type SteerResult struct {
+	StrictACK bool // server adapter only; not client supplied or a primary-owner rebind
 	TurnID    string
 	RequestID string
 }

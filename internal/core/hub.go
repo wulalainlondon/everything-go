@@ -506,6 +506,29 @@ func (h *Hub) connectedDeviceIDs(exclude string) []string {
 // event for replay on the next reconnect (the offline-recovery path). Safe for
 // concurrent use.
 func (h *Hub) Emit(event any) {
+	if unknown, ok := event.(backend.NativeSubmissionUncertain); ok {
+		persisted := false
+		h.messageQueueMu.Lock()
+		if h.messageQueue != nil {
+			_, _, err := h.messageQueue.Transition(unknown.SessionID, unknown.RequestID, []messagequeue.State{messagequeue.Running}, messagequeue.Uncertain, unknown.Reason, "", "")
+			if err != nil {
+				log.Printf("[tasks] uncertain submission persistence failed")
+			} else {
+				persisted = true
+			}
+		}
+		h.messageQueueMu.Unlock()
+		release := func() {}
+		if s, found := h.registry.Get(unknown.SessionID); persisted && found && s.ActiveQueuedID() == unknown.RequestID {
+			release = s.PrepareEndTurn()
+			if view, changed := h.runtimes.Update(s.ID, "idle", unknown.RequestID, s.QueueLen(), "", ""); changed {
+				h.broadcastRuntime(view)
+			}
+		}
+		h.publishMessageQueue(unknown.SessionID)
+		release()
+		return
+	}
 	if proof, ok := event.(backend.NativeProviderEvidence); ok {
 		h.messageQueueMu.Lock()
 		defer h.messageQueueMu.Unlock()

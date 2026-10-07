@@ -39,7 +39,7 @@ func TestTaskProjectionRequiresNativeConsumptionAndExactFinalAnchor(t *testing.T
 	if got := h.projectSessionTask(s, e, "owner", nil); got.State != "handoff_unknown" || got.CanCancel {
 		t.Fatalf("actor running became native acceptance: %+v", got)
 	}
-	h.Emit(backend.NativeTaskAccepted{SessionID: s.ID, RequestID: e.RequestID, ThreadID: "thread", TurnID: "native1"})
+	emitVerifiedNativeFixture(h, backend.NativeTaskAccepted{SessionID: s.ID, RequestID: e.RequestID, ThreadID: "thread", TurnID: "native1"})
 	if got := h.projectSessionTask(s, e, "owner", nil); got.State != "consumed" || got.NativeTurnID != "native1" {
 		t.Fatalf("acceptance missing: %+v", got)
 	}
@@ -62,7 +62,7 @@ func TestTaskOriginRejectsFalseOwnerMissingGrantWrongSourceAndPeer(t *testing.T)
 	other := sharedReadClient(t, h, "other")
 	source := caller.Parent
 	taskEntry(t, h, source.ID, "r_parent123", "owner", messagequeue.Running)
-	h.Emit(backend.NativeTaskAccepted{SessionID: source.ID, RequestID: "r_parent123", ThreadID: source.ResumeID(), TurnID: "parent-native"})
+	emitVerifiedNativeFixture(h, backend.NativeTaskAccepted{SessionID: source.ID, RequestID: "r_parent123", ThreadID: source.ResumeID(), TurnID: "parent-native"})
 	origin := &protocol.TaskOrigin{InstanceID: h.cfg.InstanceID, SessionID: source.ID, ThreadID: source.ResumeID(), ConfigRevision: source.SettingsSnapshot().ConfigRevision, RequestID: "r_parent123"}
 	cmd := clientproto.Command{SessionID: target.ID, TaskOrigin: origin}
 	if _, err := h.admitTaskOrigin(owner, cmd); err == nil {
@@ -103,7 +103,7 @@ func TestTaskCancelRejectsAnotherDeviceUnknownAndLateNativeAcceptance(t *testing
 	if waitForType(t, other, "queue_action_result")["status"] != "rejected" {
 		t.Fatal("other device cancelled")
 	}
-	h.Emit(backend.NativeTaskAccepted{SessionID: s.ID, RequestID: cmd.RequestID, ThreadID: "thread", TurnID: "late-native"})
+	emitVerifiedNativeFixture(h, backend.NativeTaskAccepted{SessionID: s.ID, RequestID: cmd.RequestID, ThreadID: "thread", TurnID: "late-native"})
 	h.cancelQueuedMessage(owner, cmd)
 	if waitForType(t, owner, "queue_action_result")["status"] != "rejected" {
 		t.Fatal("late accepted cancelled")
@@ -154,7 +154,7 @@ func TestTaskAuthenticatedWSQueuedConsumedAndCompletedAnchor(t *testing.T) {
 	fe.onSend = func(s *session.Session, id, text string) {
 		close(started)
 		<-accept
-		h.Emit(backend.NativeTaskAccepted{SessionID: s.ID, RequestID: id, ThreadID: "thread", TurnID: "native-turn"})
+		emitVerifiedNativeFixture(h, backend.NativeTaskAccepted{SessionID: s.ID, RequestID: id, ThreadID: "thread", TurnID: "native-turn"})
 		<-finish
 		h.Emit(protocol.NewDone(s.ID, id))
 	}
@@ -214,9 +214,9 @@ func TestTaskSteeredSupplementFollowsOnlyMatchingExecutionTerminalAndFinal(t *te
 	s := h.registry.Create("s1", "same", t.TempDir(), backend.Codex, "", "", "")
 	s.SetResumeID("thread")
 	active := taskEntry(t, h, s.ID, "r_active123", "owner", messagequeue.Running)
-	h.Emit(backend.NativeTaskAccepted{SessionID: s.ID, RequestID: active.RequestID, ThreadID: "thread", TurnID: "turn1"})
+	emitVerifiedNativeFixture(h, backend.NativeTaskAccepted{SessionID: s.ID, RequestID: active.RequestID, ThreadID: "thread", TurnID: "turn1"})
 	supplement := taskEntry(t, h, s.ID, "r_supplement123", "owner", messagequeue.Queued)
-	supplement, _, _ = h.messageQueue.Transition(s.ID, supplement.RequestID, []messagequeue.State{messagequeue.Queued}, messagequeue.Steered, "", active.RequestID, "turn1")
+	supplement, _, _ = h.messageQueue.Transition(s.ID, supplement.RequestID, []messagequeue.State{messagequeue.Queued}, messagequeue.Steered, "", active.RequestID, "turn1", true)
 	if got := h.projectSessionTask(s, supplement, "owner", nil); got.State != "consumed" || got.ExecutionRequestID != active.RequestID || got.RequestID != supplement.RequestID {
 		t.Fatal(got)
 	}
@@ -242,14 +242,14 @@ func TestTaskSteeredSupplementFollowsMatchingFailureAndRejectsForeignNativeTurn(
 	s := h.registry.Create("s1", "same", t.TempDir(), backend.Codex, "", "", "")
 	s.SetResumeID("thread")
 	active := taskEntry(t, h, s.ID, "r_failedactive123", "owner", messagequeue.Failed)
-	h.Emit(backend.NativeTaskAccepted{SessionID: s.ID, RequestID: active.RequestID, ThreadID: "thread", TurnID: "failed-turn"})
+	emitVerifiedNativeFixture(h, backend.NativeTaskAccepted{SessionID: s.ID, RequestID: active.RequestID, ThreadID: "thread", TurnID: "failed-turn"})
 	e := taskEntry(t, h, s.ID, "r_steerfailed123", "owner", messagequeue.Queued)
-	e, _, _ = h.messageQueue.Transition(s.ID, e.RequestID, []messagequeue.State{messagequeue.Queued}, messagequeue.Steered, "", active.RequestID, "failed-turn")
+	e, _, _ = h.messageQueue.Transition(s.ID, e.RequestID, []messagequeue.State{messagequeue.Queued}, messagequeue.Steered, "", active.RequestID, "failed-turn", true)
 	if got := h.projectSessionTask(s, e, "owner", nil); got.State != "failed" {
 		t.Fatal(got)
 	}
 	e.TurnID = "foreign-turn"
-	if got := h.projectSessionTask(s, e, "owner", nil); got.State != "consumed_unknown" {
+	if got := h.projectSessionTask(s, e, "owner", nil); got.State != "legacy_unknown" {
 		t.Fatal("foreign turn settled", got)
 	}
 }
@@ -263,13 +263,13 @@ func TestTaskControllerSteerProjectionUsesEffectiveNativeExecutionAnchor(t *test
 	turnID := "controller-native"
 	started, release := make(chan struct{}), make(chan struct{})
 	fe.onSend = func(s *session.Session, id, text string) {
-		h.Emit(backend.NativeTaskAccepted{SessionID: s.ID, RequestID: id, ThreadID: s.ResumeID(), TurnID: turnID})
+		emitVerifiedNativeFixture(h, backend.NativeTaskAccepted{SessionID: s.ID, RequestID: id, ThreadID: s.ResumeID(), TurnID: turnID})
 		close(started)
 		<-release
 		h.Emit(protocol.NewDone(s.ID, id))
 	}
 	fe.onSteer = func(s *session.Session, id, text string) (backend.SteerResult, error) {
-		return backend.SteerResult{RequestID: activeID, TurnID: turnID}, nil
+		return backend.SteerResult{StrictACK: true, RequestID: activeID, TurnID: turnID}, nil
 	}
 	client := sharedReadClient(t, h, "controller-viewer")
 	if !h.enqueueChatMessage(client, clientproto.Command{Kind: "message", SessionID: target.ID, RequestID: activeID, MessagePurpose: "instruction", Content: "fixture active"}) {
@@ -346,7 +346,7 @@ func TestTaskTypedPhotoAndFloatingReceiptsTrackWithoutChangingOriginalIDs(t *tes
 				t.Fatal(snapshot)
 			}
 			h.messageQueue.Transition(s.ID, id, []messagequeue.State{messagequeue.Queued}, messagequeue.Running, "", "", "")
-			h.Emit(backend.NativeTaskAccepted{SessionID: s.ID, RequestID: id, ThreadID: "thread", TurnID: "native-photo"})
+			emitVerifiedNativeFixture(h, backend.NativeTaskAccepted{SessionID: s.ID, RequestID: id, ThreadID: "thread", TurnID: "native-photo"})
 			entry, _, _ = h.messageQueue.Get(s.ID, id)
 			if got := h.projectSessionTask(s, entry, "owner", nil); got.State != "consumed" {
 				t.Fatal(got)

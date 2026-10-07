@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -15,8 +16,9 @@ import (
 type rpcPlumber struct {
 	name string
 
-	wmu sync.Mutex
-	w   io.Writer
+	wmu            sync.Mutex
+	w              io.Writer
+	transportEpoch atomic.Uint64
 
 	mu      sync.Mutex
 	nextID  int
@@ -50,6 +52,7 @@ func newRPCPlumber(name string) *rpcPlumber {
 func (p *rpcPlumber) setWriter(w io.Writer) {
 	p.wmu.Lock()
 	p.w = w
+	p.transportEpoch.Add(1)
 	p.wmu.Unlock()
 }
 
@@ -60,12 +63,21 @@ func (p *rpcPlumber) hasWriter() bool {
 }
 
 func (p *rpcPlumber) write(obj any) error {
+	return p.writeAtEpoch(obj, nil)
+}
+
+// The expected generation is checked under the same lock as the write. A
+// reconnected transport must not reuse a read admission from an older peer.
+func (p *rpcPlumber) writeAtEpoch(obj any, expected *uint64) error {
 	data, err := json.Marshal(obj)
 	if err != nil {
 		return err
 	}
 	p.wmu.Lock()
 	defer p.wmu.Unlock()
+	if expected != nil && p.transportEpoch.Load() != *expected {
+		return &codexAcceptanceError{Reason: "native_source_changed"}
+	}
 	if p.w == nil {
 		return fmt.Errorf("[%s] no writer", p.name)
 	}
@@ -76,6 +88,10 @@ func (p *rpcPlumber) write(obj any) error {
 // request sends a method call and blocks until the matching response arrives or
 // the timeout elapses.
 func (p *rpcPlumber) request(method string, params any, timeout time.Duration) (json.RawMessage, error) {
+	return p.requestAtEpoch(method, params, timeout, nil)
+}
+
+func (p *rpcPlumber) requestAtEpoch(method string, params any, timeout time.Duration, expected *uint64) (json.RawMessage, error) {
 	p.mu.Lock()
 	id := p.nextID
 	p.nextID++
@@ -87,7 +103,7 @@ func (p *rpcPlumber) request(method string, params any, timeout time.Duration) (
 	if params != nil {
 		req["params"] = params
 	}
-	if err := p.write(req); err != nil {
+	if err := p.writeAtEpoch(req, expected); err != nil {
 		p.mu.Lock()
 		delete(p.pending, id)
 		p.mu.Unlock()
@@ -144,6 +160,7 @@ func (p *rpcPlumber) dispatchResponse(raw json.RawMessage) bool {
 }
 
 func (p *rpcPlumber) failAll(err error) {
+	p.transportEpoch.Add(1)
 	p.mu.Lock()
 	for id, ch := range p.pending {
 		ch <- rpcReply{err: err}

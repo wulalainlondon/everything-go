@@ -2,6 +2,7 @@ package goexec
 
 import (
 	"encoding/json"
+	"everything-go/internal/backend"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -186,7 +187,7 @@ func TestCodexIngressRejectionIsObservedOnceAndNeverAutomaticallyResent(t *testi
 			if len(w.methods) != 1 || w.methods[0] != "turn/start" {
 				t.Fatal("replayed or probed model", w.methods)
 			}
-			if sink.count(func(e any) bool { err, ok := e.(protocol.Error); return ok && err.Code == "model_capacity" }) != 1 {
+			if (!contradiction && sink.count(func(e any) bool { err, ok := e.(protocol.Error); return ok && err.Code == "model_capacity" }) != 1) || (contradiction && sink.count(func(e any) bool { _, ok := e.(backend.NativeSubmissionUncertain); return ok }) != 1) {
 				t.Fatal("logical terminal missing/duplicated")
 			}
 			records := failureObservations(t, c)
@@ -216,7 +217,8 @@ func TestCodexAcceptedFailuresAreClassifiedWithoutReplayingInput(t *testing.T) {
 		t.Run(tc.code, func(t *testing.T) {
 			c, s, st, w, sink := livenessFixture(t)
 			w.reply = func(string, json.RawMessage) (any, error) {
-				return map[string]any{"turn": map[string]any{"id": "turn-1", "status": "failed", "error": map[string]any{"message": tc.message, "codexErrorInfo": tc.info}}}, nil
+				dispatchRecoveryError(c, "root", "turn-1", func() *bool { v := false; return &v }(), tc.info, tc.message)
+				return map[string]any{"turn": map[string]string{"id": "turn-1", "status": "inProgress"}}, nil
 			}
 			c.runTurn(s, st, "root", nil, st.turnDone, "")
 			if len(w.methods) != 1 {
@@ -267,7 +269,7 @@ func TestCodexObservationFailureDoesNotMaskTerminalOrTriggerReplay(t *testing.T)
 		return map[string]any{"turn": map[string]any{"id": "turn-1", "status": "failed", "error": map[string]any{"message": "busy", "codexErrorInfo": "serverOverloaded"}}}, nil
 	}
 	c.runTurn(s, st, "root", nil, st.turnDone, "")
-	if len(w.methods) != 1 || sink.count(func(e any) bool { _, ok := e.(protocol.Error); return ok }) != 1 {
+	if len(w.methods) != 1 || sink.count(func(e any) bool { _, ok := e.(backend.NativeSubmissionUncertain); return ok }) != 1 {
 		t.Fatal("diagnostic failure changed execution")
 	}
 	b, _ := os.ReadFile(path)

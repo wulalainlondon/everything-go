@@ -132,7 +132,7 @@ func TestIntakeAuthenticatedOnceAndFrozenSource(t *testing.T) {
 	if bad["ok"] == true {
 		t.Fatal("clientprincipalaccepted")
 	}
-	h.Emit(backend.NativeTaskAccepted{SessionID: s.ID, RequestID: key, ThreadID: "thread-original", TurnID: "native-intake-turn"})
+	emitVerifiedNativeFixture(h, backend.NativeTaskAccepted{SessionID: s.ID, RequestID: key, ThreadID: "thread-original", TurnID: "native-intake-turn"})
 	task = call("get", map[string]any{"task_id": r["task_id"]}, "")
 	if task["result"].(map[string]any)["axes"].(map[string]any)["execution"] != "native_consumed" {
 		t.Fatal(task)
