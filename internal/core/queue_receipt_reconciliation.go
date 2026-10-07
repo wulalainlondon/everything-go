@@ -8,6 +8,7 @@ import (
 	"everything-go/internal/messagequeue"
 	"everything-go/internal/protocol"
 	"everything-go/internal/session"
+	"time"
 )
 
 // A queue cancellation only removes an owned waiting input; it never interrupts
@@ -47,19 +48,24 @@ func (h *Hub) queueInputCancellable(c *Client, e messagequeue.Entry) bool {
 // here. The read ID + expected queue revision correlate evidence separately from
 // queue state revision, so newly observed acceptance needs no fake transition.
 func (h *Hub) reconcileQueueReceipts(c *Client, cmd clientproto.Command) {
+	h.reconcileQueueReceiptsWithIdentity(c, cmd, c.readIdentity.Load())
+}
+func (h *Hub) reconcileQueueReceiptsWithIdentity(c *Client, cmd clientproto.Command, proof *pairedReadIdentity) {
 	out := protocol.QueueReceiptsReconciled{Type: "queue_receipts_reconciled", SessionID: cmd.SessionID, RequestID: cmd.RequestID, InstanceID: h.cfg.InstanceID, Status: "forbidden", Receipts: []protocol.QueueReceiptEvidence{}}
 	settings := uint64(0)
 	originalThread := ""
 	bound := false
+	var s *session.Session
 	send := func() {
 		current, ok := h.registry.Get(cmd.SessionID)
-		if h.pairedTaskDevice(c) == "" || !ok || !h.controllerInScope(current) || current.Snapshot().Hidden || current.State() == session.Closed || (bound && (current.SettingsSnapshot().ConfigRevision != settings || current.ResumeID() != originalThread)) {
+		if c.readIdentity.Load() != proof || proof == nil || h.pairedTaskDevice(c) == "" || !ok || (bound && current != s) || !h.controllerInScope(current) || current.Snapshot().Hidden || current.State() == session.Closed || (bound && (current.SettingsSnapshot().ConfigRevision != settings || current.ResumeID() != originalThread)) {
 			out.Status = "forbidden"
 			out.Receipts = []protocol.QueueReceiptEvidence{}
 		}
 		c.enqueueEvent(out)
 	}
-	s, ok := h.registry.Get(cmd.SessionID)
+	var ok bool
+	s, ok = h.registry.Get(cmd.SessionID)
 	if h.pairedTaskDevice(c) == "" || !ok || !h.controllerInScope(s) || s.Snapshot().Hidden || s.State() == session.Closed {
 		send()
 		return
@@ -77,8 +83,10 @@ func (h *Hub) reconcileQueueReceipts(c *Client, cmd clientproto.Command) {
 		send()
 		return
 	}
-	h.messageQueueMu.Lock()
-	defer h.messageQueueMu.Unlock()
+	// Store snapshots and final CAS make this pure read independent of the
+	// admission mutex; provider file I/O must not block enqueue/cancel.
+	readContext, cancelRead := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancelRead()
 	snap, err := h.messageQueue.Snapshot(s.ID)
 	if err != nil {
 		out.Status = "unavailable"
@@ -127,19 +135,29 @@ func (h *Hub) reconcileQueueReceipts(c *Client, cmd clientproto.Command) {
 				// persisted original thread/request/turn before exposing final evidence.
 				if hr, ok := h.exec.(historyRouter); ok {
 					if provider, ok := hr.ProviderFor(s); ok {
+						var observed bool
+						var readErr error
 						if reader, ok := provider.(interface {
+							ExactQueueFinalForReceipt(context.Context, string, string, string, string) (bool, error)
+						}); ok {
+							observed, readErr = reader.ExactQueueFinalForReceipt(readContext, native.ThreadID, id, native.TurnID, e.PayloadHash)
+						} else if reader, ok := provider.(interface {
 							ExactQueueFinal(string, string, string) (bool, error)
 						}); ok {
-							observed, err := reader.ExactQueueFinal(native.ThreadID, id, native.TurnID)
-							if err != nil {
-								fact.Reason = "final_unavailable"
-							} else if observed {
-								fact.Final = "observed"
-							} else {
-								fact.Reason = "final_not_observed"
-							}
+							observed, readErr = reader.ExactQueueFinal(native.ThreadID, id, native.TurnID)
 						} else {
 							fact.Reason = "final_unsupported"
+						}
+						if readErr != nil {
+							fact.Reason = "final_unavailable"
+							var classified interface{ QueueFinalReason() string }
+							if errors.As(readErr, &classified) {
+								fact.Reason = classified.QueueFinalReason()
+							}
+						} else if observed {
+							fact.Final = "observed"
+						} else if fact.Reason == "" {
+							fact.Reason = "final_not_observed"
 						}
 					}
 				}
@@ -170,7 +188,8 @@ func (h *Hub) reconcileQueueReceipts(c *Client, cmd clientproto.Command) {
 			continue
 		}
 		native, found, err := h.messageQueue.ExactNativeAcceptance(s.ID, fact.RequestID)
-		if err != nil || !found || native.ThreadID != fact.NativeThreadID || native.TurnID != fact.NativeTurnID {
+		currentEntry, entryFound, entryErr := h.messageQueue.Get(s.ID, fact.RequestID)
+		if err != nil || !found || entryErr != nil || !entryFound || currentEntry.PayloadHash != fact.PayloadHash || native.ThreadID != fact.NativeThreadID || native.TurnID != fact.NativeTurnID {
 			fact.Delivery = "unverified"
 			fact.Final = "unverified"
 			fact.NativeThreadID = ""

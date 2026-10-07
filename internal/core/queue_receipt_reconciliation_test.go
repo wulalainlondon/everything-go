@@ -267,3 +267,95 @@ func TestControllerQueueCancelRejectsPolicyTakeoverAfterProviderIO(t *testing.T)
 		t.Fatal("policy takeover modified original receipt", after, err)
 	}
 }
+
+type nf01ClassifiedError string
+
+func (e nf01ClassifiedError) Error() string            { return string(e) }
+func (e nf01ClassifiedError) QueueFinalReason() string { return string(e) }
+
+type nf01ReceiptProvider struct {
+	*exactQueueProvider
+	hash    string
+	failure error
+}
+
+func (p *nf01ReceiptProvider) ExactQueueFinalForReceipt(ctx context.Context, thread, request, turn, hash string) (bool, error) {
+	p.hash = hash
+	if p.onRead != nil {
+		p.onRead()
+	}
+	return p.failure == nil, p.failure
+}
+
+type nf01ReceiptExec struct {
+	*fakeExec
+	provider *nf01ReceiptProvider
+}
+
+func (e *nf01ReceiptExec) ProviderFor(*session.Session) (backend.HistoryProvider, bool) {
+	return e.provider, true
+}
+func (e *nf01ReceiptExec) AllProviders() []backend.HistoryProvider {
+	return []backend.HistoryProvider{e.provider}
+}
+func TestNF01ReceiptOriginalIdentityRegistryAndFinalAxes(t *testing.T) {
+	for _, mode := range []string{"observed", "index_missing", "identity_generation", "registry_takeover", "late_config"} {
+		t.Run(mode, func(t *testing.T) {
+			h, fe := newTestHub(t)
+			s := h.registry.Create("s1", "Task", t.TempDir(), backend.Codex, "", "", "thread")
+			owner := sharedReadClient(t, h, "owner")
+			e := taskEntry(t, h, s.ID, "r_original", "owner", messagequeue.Uncertain)
+			h.Emit(backend.NativeTaskAccepted{SessionID: s.ID, RequestID: e.RequestID, ThreadID: "thread", TurnID: "turn"})
+			snap, _ := h.messageQueue.Snapshot(s.ID)
+			rev := snap.Revision
+			provider := &nf01ReceiptProvider{exactQueueProvider: &exactQueueProvider{floatingHistoryProvider: &floatingHistoryProvider{}}}
+			switch mode {
+			case "index_missing":
+				provider.failure = nf01ClassifiedError("final_index_unavailable")
+			case "identity_generation":
+				provider.onRead = func() {
+					old := owner.readIdentity.Load()
+					owner.readIdentity.Store(&pairedReadIdentity{token: old.token, deviceID: old.deviceID})
+				}
+			case "registry_takeover":
+				provider.onRead = func() {
+					h.registry.Delete(s.ID)
+					h.registry.Create(s.ID, "Replacement", s.Cwd(), backend.Codex, "", "", "thread")
+				}
+			case "late_config":
+				provider.onRead = func() {
+					before := s.SettingsSnapshot()
+					before.ConfigRevision++
+					s.RestoreFutureConfiguration(before)
+				}
+			}
+			h.SetExecutor(&nf01ReceiptExec{fakeExec: fe, provider: provider})
+			h.reconcileQueueReceipts(owner, clientproto.Command{SessionID: s.ID, RequestID: "readonly", TaskRequestIDs: []string{e.RequestID}, ExpectedRevision: &rev})
+			out := waitForType(t, owner, "queue_receipts_reconciled")
+			if provider.hash != e.PayloadHash {
+				t.Fatal("not canonical immutable hash", provider.hash)
+			}
+			if mode == "identity_generation" || mode == "registry_takeover" || mode == "late_config" {
+				if out["status"] != "forbidden" || len(out["receipts"].([]any)) != 0 {
+					t.Fatal(out)
+				}
+			} else {
+				fact := out["receipts"].([]any)[0].(map[string]any)
+				if fact["admission"] != "uncertain" || fact["execution"] != "unverified" || fact["delivery"] != "native_consumed" || fact["can_cancel"] != false {
+					t.Fatal("axes conflated", fact)
+				}
+				if mode == "observed" && fact["final"] != "observed" {
+					t.Fatal(fact)
+				}
+				if mode == "index_missing" && (fact["final"] != "unverified" || fact["reason"] != "final_index_unavailable") {
+					t.Fatal(fact)
+				}
+			}
+			after, _, _ := h.messageQueue.Get(s.ID, e.RequestID)
+			post, _ := h.messageQueue.Snapshot(s.ID)
+			if after.State != e.State || after.PayloadHash != e.PayloadHash || after.UpdatedAt != e.UpdatedAt || post.Revision != rev {
+				t.Fatal("pure read mutated original receipt")
+			}
+		})
+	}
+}

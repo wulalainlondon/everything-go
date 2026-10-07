@@ -209,6 +209,9 @@ type Codex struct {
 	catalogMu          sync.RWMutex
 	catalog            backend.Definition
 	collaborationModes map[string]map[string]any
+	exactFinalMu       sync.Mutex
+	exactFinalScans    map[string]*exactFinalScan
+	exactFinalClock    uint64
 	rolloutMu          sync.Mutex
 	rolloutRoot        string
 	rolloutScannedAt   time.Time

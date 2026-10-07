@@ -45,14 +45,15 @@ type SessionTask struct {
 	Error              string            `json:"error,omitempty"`
 }
 type SessionTasksSnapshot struct {
-	ChildrenStatus string        `json:"children_status"`
-	Type           string        `json:"type"`
-	SessionID      string        `json:"session_id"`
-	RequestID      string        `json:"request_id"`
-	InstanceID     string        `json:"instance_id"`
-	Status         string        `json:"status"`
-	Message        string        `json:"message,omitempty"`
-	Items          []SessionTask `json:"items"`
-	Children       []SessionTask `json:"children"`
-	HistoryStatus  string        `json:"history_status"`
+	ChildrenCoverage string        `json:"children_coverage,omitempty"`
+	ChildrenStatus   string        `json:"children_status"`
+	Type             string        `json:"type"`
+	SessionID        string        `json:"session_id"`
+	RequestID        string        `json:"request_id"`
+	InstanceID       string        `json:"instance_id"`
+	Status           string        `json:"status"`
+	Message          string        `json:"message,omitempty"`
+	Items            []SessionTask `json:"items"`
+	Children         []SessionTask `json:"children"`
+	HistoryStatus    string        `json:"history_status"`
 }

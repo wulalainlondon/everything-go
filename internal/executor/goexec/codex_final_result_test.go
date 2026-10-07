@@ -53,7 +53,7 @@ func TestExactQueueFinalPinsOriginalThreadRejectsAmbiguousMappingAndNeverDiscove
 		t.Fatal(err)
 	}
 	path := filepath.Join(c.sessionsRoot, "rollout-2026-09-29T17-14-09-"+thread+".jsonl")
-	data := `{"type":"event_msg","payload":{"type":"task_started","turn_id":"exact-turn"}}` + "\n" + `{"type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"Exact original final"}]}}` + "\n"
+	data := fixtureHeader() + `{"type":"event_msg","payload":{"type":"task_started","turn_id":"exact-turn"}}` + "\n" + `{"type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"Exact original final"}]}}` + "\n" + `{"type":"event_msg","payload":{"type":"task_complete","turn_id":"exact-turn","last_agent_message":"Exact original final"}}` + "\n"
 	if err := os.WriteFile(path, []byte(data), 0600); err != nil {
 		t.Fatal(err)
 	}

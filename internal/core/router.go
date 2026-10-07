@@ -413,7 +413,8 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 	case "read_message_queue":
 		h.sendReadonlyMessageQueue(c, cmd)
 	case "reconcile_queue_receipts":
-		h.reconcileQueueReceipts(c, cmd)
+		proof := c.readIdentity.Load()
+		go h.reconcileQueueReceiptsWithIdentity(c, cmd, proof)
 	case "request_message_queue":
 		go h.reconcileMaintenance(cmd.SessionID, false)
 		h.sendMessageQueue(c, cmd)

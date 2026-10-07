@@ -2,6 +2,7 @@ package goexec
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -17,8 +18,7 @@ func (c *Codex) FinalAnswerForRequest(s *session.Session, requestID string) (str
 	return c.finalForExactRequest(s.ResumeID(), requestID, "")
 }
 func (c *Codex) ExactQueueFinal(thread, request, turn string) (bool, error) {
-	_, found, err := c.finalForExactRequest(thread, request, turn)
-	return found, err
+	return c.ExactQueueFinalForReceipt(context.Background(), thread, request, turn, "")
 }
 func (c *Codex) finalForExactRequest(threadID, requestID, expectedTurn string) (string, bool, error) {
 	if threadID == "" || requestID == "" {

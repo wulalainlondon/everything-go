@@ -231,7 +231,7 @@ func (h *Hub) sessionTaskFinals(s *session.Session) (map[string]map[string]any, 
 	return finals, "supported"
 }
 func (h *Hub) sendSessionTasks(c *Client, cmd clientproto.Command) {
-	event := protocol.SessionTasksSnapshot{Type: "session_tasks_snapshot", SessionID: cmd.SessionID, RequestID: cmd.RequestID, InstanceID: h.cfg.InstanceID, Status: "unknown", HistoryStatus: "unknown", ChildrenStatus: "unknown", Items: []protocol.SessionTask{}, Children: []protocol.SessionTask{}}
+	event := protocol.SessionTasksSnapshot{Type: "session_tasks_snapshot", SessionID: cmd.SessionID, RequestID: cmd.RequestID, InstanceID: h.cfg.InstanceID, Status: "unknown", HistoryStatus: "unknown", ChildrenStatus: "unknown", ChildrenCoverage: "unavailable", Items: []protocol.SessionTask{}, Children: []protocol.SessionTask{}}
 	proof := c.readIdentity.Load()
 	owner := h.pairedTaskDevice(c)
 	source, sourceFound := h.registry.Get(cmd.SessionID)
@@ -358,6 +358,7 @@ func (h *Hub) sendSessionTasks(c *Client, cmd clientproto.Command) {
 	// Target details remain gated by the current grant and registered scope.
 	if h.dispatches != nil {
 		event.ChildrenStatus = "supported"
+		event.ChildrenCoverage = "trusted_relations_only"
 		grant, err := h.dispatches.Grant(context.Background(), s.ID)
 		if err != nil {
 			event.Message = "下派範圍狀態無法確認"

@@ -122,17 +122,18 @@ func FilterHash(filter any) (string, error) {
 }
 
 type SnapshotPage struct {
-	Items          []any       `json:"items"`
-	Views          []string    `json:"views"`
-	Watermarks     []Watermark `json:"watermarks"`
-	EventsCursor   string      `json:"events_cursor"`
-	NextPageCursor string      `json:"next_page_cursor,omitempty"`
-	HasMore        bool        `json:"has_more"`
-	Partial        bool        `json:"partial"`
-	Consistency    string      `json:"consistency"`
-	FreezeID       string      `json:"freeze_id"`
-	ExpiresAt      int64       `json:"expires_at_ms"`
-	PageOrder      string      `json:"page_order"`
+	SourceRelationCoverage string      `json:"source_relation_coverage,omitempty"`
+	Items                  []any       `json:"items"`
+	Views                  []string    `json:"views"`
+	Watermarks             []Watermark `json:"watermarks"`
+	EventsCursor           string      `json:"events_cursor"`
+	NextPageCursor         string      `json:"next_page_cursor,omitempty"`
+	HasMore                bool        `json:"has_more"`
+	Partial                bool        `json:"partial"`
+	Consistency            string      `json:"consistency"`
+	FreezeID               string      `json:"freeze_id"`
+	ExpiresAt              int64       `json:"expires_at_ms"`
+	PageOrder              string      `json:"page_order"`
 }
 type SnapshotEngine struct {
 	Codec  *CursorCodec
@@ -181,7 +182,15 @@ func (s SnapshotEngine) Page(ctx context.Context, scope ReadScope, views []strin
 	if len(rows) > limit || (more && len(rows) == 0) {
 		return result, Failure("unknown_acceptance", "unknown", "refresh_snapshot")
 	}
-	result = SnapshotPage{Items: []any{}, Views: append([]string{}, p.Views...), Watermarks: append([]Watermark{}, p.Freeze.Watermarks...), HasMore: more, Consistency: "per_store_snapshot_vector", FreezeID: p.Freeze.ID, ExpiresAt: p.Freeze.ExpiresAt, PageOrder: "task_id"}
+	coverage := "not_requested"
+	partial := false
+	for _, view := range p.Views {
+		if view == "source_children" {
+			coverage = "trusted_relations_only"
+			partial = true
+		}
+	}
+	result = SnapshotPage{SourceRelationCoverage: coverage, Partial: partial, Items: []any{}, Views: append([]string{}, p.Views...), Watermarks: append([]Watermark{}, p.Freeze.Watermarks...), HasMore: more, Consistency: "per_store_snapshot_vector", FreezeID: p.Freeze.ID, ExpiresAt: p.Freeze.ExpiresAt, PageOrder: "task_id"}
 	last := p.After
 	for _, row := range rows {
 		if row.Key == "" || row.Key <= last {

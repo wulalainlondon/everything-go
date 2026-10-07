@@ -1698,6 +1698,12 @@
         },
         "page_order": {
           "const": "task_id"
+        },
+        "source_relation_coverage": {
+          "enum": [
+            "trusted_relations_only",
+            "not_requested"
+          ]
         }
       },
       "required": [

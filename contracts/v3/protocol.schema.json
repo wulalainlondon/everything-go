@@ -391,6 +391,13 @@
         "interrupted",
         "closed"
       ]
+    },
+    "sourceRelationCoverage": {
+      "const": [
+        "trusted_relations_only",
+        "unavailable",
+        "not_requested"
+      ]
     }
   },
   "additionalProperties": false

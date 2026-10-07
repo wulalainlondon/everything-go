@@ -180,3 +180,21 @@ func TestRealSizeCursorFullContractRoundtrip(t *testing.T) {
 		t.Fatal("oversized cursor encoded")
 	}
 }
+
+func TestNF01SourceChildrenCoverageIsFrozenKnownSubsetNotGlobalZero(t *testing.T) {
+	codec, _ := NewCursorCodec(make([]byte, 32), func() time.Time { return time.UnixMilli(1) })
+	source := &fixtureSnapshot{latest: map[string]string{}, seq: 10}
+	engine := SnapshotEngine{codec, source}
+	scope := ReadScope{"authority", "native-worker-scope", "filter", 7}
+	page, e := engine.Page(context.Background(), scope, []string{"source_children"}, "", 10)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if len(page.Items) != 0 || !page.Partial || page.SourceRelationCoverage != "trusted_relations_only" {
+		t.Fatal("scoped empty became global none", page)
+	}
+	self, e := engine.Page(context.Background(), scope, []string{"self"}, "", 10)
+	if e != nil || self.SourceRelationCoverage != "not_requested" {
+		t.Fatal(self, e)
+	}
+}
