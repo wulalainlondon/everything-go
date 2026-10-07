@@ -26,7 +26,7 @@ func NewService(policy Authorizer, gateway Gateway) (*Service, error) {
 	return &Service{c, policy, gateway}, nil
 }
 
-var operations = map[string]bool{"capabilities": true, "create_dispatch": true, "list": true, "get": true, "read_result": true, "append": true, "cancel": true, "snapshot": true, "events": true, "deliver_result": true, "read_input": true, "legacy_source": true}
+var operations = map[string]bool{"capabilities": true, "intake": true, "create_dispatch": true, "list": true, "get": true, "read_result": true, "append": true, "cancel": true, "snapshot": true, "events": true, "deliver_result": true, "read_input": true, "legacy_source": true}
 
 func isMutation(op string) bool {
 	return op == "create_dispatch" || op == "append" || op == "cancel" || op == "deliver_result"
@@ -191,7 +191,7 @@ func MakeNamespace(c VerifiedContext, l Locator, r Request) (Namespace, error) {
 	if err := json.Unmarshal(r.Input, &input); err != nil {
 		return Namespace{}, err
 	}
-	if r.Operation == "create_dispatch" || r.Operation == "legacy_source" {
+	if r.Operation == "create_dispatch" || r.Operation == "intake" || r.Operation == "legacy_source" {
 		if l.TaskID != "" {
 			return Namespace{}, Failure("invalid_argument", "known_none", "correct_input")
 		}
@@ -276,6 +276,11 @@ func normalizeNumbers(value any) (any, error) {
 }
 
 func mutationRequest(r Request) bool {
+	if r.Operation == "intake" {
+		var input struct{ Action string }
+		json.Unmarshal(r.Input, &input)
+		return input.Action == "submit"
+	}
 	if r.Operation != "legacy_source" {
 		return isMutation(r.Operation)
 	}

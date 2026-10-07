@@ -36,8 +36,9 @@ var ErrConflict = errors.New("request ID already belongs to different message co
 var ErrRejected = errors.New("message request was permanently rejected")
 
 type APIAdmission struct {
-	Command taskapi.AuthorizedCommand
-	Record  taskapi.IntentRecord
+	Command   taskapi.AuthorizedCommand
+	Record    taskapi.IntentRecord
+	CanCommit func() bool
 }
 
 type Entry struct {
@@ -173,6 +174,9 @@ func (s *Store) Enqueue(e Entry) (Entry, bool, error) {
 		return Entry{}, false, err
 	}
 	defer tx.Rollback()
+	if e.API != nil && e.API.CanCommit != nil && !e.API.CanCommit() {
+		return Entry{}, false, taskapi.Failure("permission", "known_none", "refresh_identity")
+	}
 	if e.API != nil {
 		original, created, err := s.TaskJournal().ClaimTx(tx, e.API.Command, e.API.Record)
 		if err != nil {
@@ -195,6 +199,9 @@ func (s *Store) Enqueue(e Entry) (Entry, bool, error) {
 	if previous, found, err := lookup(tx, e.SessionID, e.RequestID); err != nil {
 		return Entry{}, false, err
 	} else if found {
+		if e.API != nil && e.API.Command.Request.Operation == "intake" {
+			return previous, false, ErrConflict // never backfill/rebind a preexisting ordinary or other-device request
+		}
 		if previous.PayloadHash != hashText {
 			return previous, false, ErrConflict
 		}
@@ -224,6 +231,9 @@ func (s *Store) Enqueue(e Entry) (Entry, bool, error) {
 	inserted, _, err := lookup(tx, e.SessionID, e.RequestID)
 	if err != nil {
 		return Entry{}, false, err
+	}
+	if e.API != nil && e.API.CanCommit != nil && !e.API.CanCommit() {
+		return Entry{}, false, taskapi.Failure("permission", "known_none", "refresh_identity")
 	}
 	if err = tx.Commit(); err != nil {
 		return Entry{}, false, err

@@ -39,6 +39,12 @@ func (h *Hub) apiTask(ctx context.Context, r taskapi.IntentRecord) (map[string]a
 	revision := uint64(0)
 	var anchor any
 	sealID, finalHash, finalText := "", "", ""
+	if meta.Intake != nil {
+		identity["config_revision"] = meta.Intake.Configuration.Revision
+		if thread, ok := meta.Intake.Source["native_thread_id"]; ok {
+			identity["native_thread_id"] = thread
+		}
+	}
 	if exists {
 		var original apiInput
 		json.Unmarshal(meta.Request.Input, &original)
@@ -171,11 +177,22 @@ func (h *Hub) apiTask(ctx context.Context, r taskapi.IntentRecord) (map[string]a
 	if meta.Caller.SourceSessionID != "" {
 		source["identity"] = map[string]any{"instance_id": h.cfg.InstanceID, "session_id": meta.Caller.SourceSessionID, "request_id": meta.Caller.SourceRequestID, "native_thread_id": meta.SourceThread, "config_revision": meta.SourceRevision}
 	}
+	if meta.Intake != nil {
+		source["identity"] = meta.Intake.Source
+	}
 	task := map[string]any{"task_id": r.TaskID, "task_ref": map[string]string{"authority_instance_id": h.cfg.InstanceID, "path": r.Path, "native_record_id": r.NativeID}, "revision": revision, "definition_revision": uint64(1), "source": source, "target": identity, "axes": axes, "artifact_refs": []any{}, "qa": map[string]any{"status": "not_requested", "evidence_refs": []any{}}, "evidence_refs": []any{}, "receipt_ids": []string{r.ReceiptID}, "child_task_ids": []string{}, "provenance": "legacy", "views": []string{"self"}, "capabilities": []string{"get", "read_result"}}
 	for _, field := range []string{"goal", "scope", "acceptance", "dependencies", "workspace"} {
 		if value, ok := input[field]; ok {
 			task[field] = value
 		}
+	}
+	if meta.Intake != nil {
+		runes := []rune(meta.Intake.Goal)
+		if len(runes) > 4096 {
+			runes = runes[:4096]
+		}
+		task["goal"] = string(runes)
+		task["provenance"] = "unknown" // current execution boundary is inherited, never forged as a new child scope
 	}
 	if worker, ok := input["new_worker"].(map[string]any); ok {
 		task["worker_profile"] = worker["profile"]
@@ -328,6 +345,8 @@ func (h *Hub) Read(ctx context.Context, c taskapi.AuthorizedCommand) (any, error
 	var in apiInput
 	json.Unmarshal(c.Request.Input, &in)
 	switch c.Request.Operation {
+	case "intake":
+		return h.readIntake(ctx, c)
 	case "legacy_source":
 		return h.readLegacySource(ctx, c)
 	case "read_input":
@@ -416,7 +435,7 @@ func (h *Hub) Read(ctx context.Context, c taskapi.AuthorizedCommand) (any, error
 			providers = source.TaskAPICapabilities()
 		}
 		if c.Caller.BindingKind == "paired_human" {
-			ops = append(ops, "legacy_source")
+			ops = append(ops, "legacy_source", "intake")
 		}
 		if !apiOwnedAdmissionEnabled {
 			ops = []string{"capabilities", "list", "get", "read_result", "cancel", "snapshot", "events"}

@@ -566,7 +566,8 @@
             "append",
             "cancel",
             "deliver_result",
-            "legacy_source"
+            "legacy_source",
+            "intake"
           ]
         },
         "authority_instance_id": {
@@ -592,7 +593,8 @@
               "operation": {
                 "enum": [
                   "create_dispatch",
-                  "legacy_source"
+                  "legacy_source",
+                  "intake"
                 ]
               }
             }
@@ -1163,7 +1165,8 @@
             "append",
             "cancel",
             "deliver_result",
-            "legacy_source"
+            "legacy_source",
+            "intake"
           ]
         },
         "intent_hash": {
@@ -2420,6 +2423,9 @@
         },
         {
           "$ref": "#/$defs/Request_legacy_source"
+        },
+        {
+          "$ref": "#/$defs/Request_intake"
         }
       ]
     },
@@ -2836,6 +2842,9 @@
         },
         {
           "$ref": "#/$defs/Response_legacy_source"
+        },
+        {
+          "$ref": "#/$defs/Response_intake"
         }
       ]
     },
@@ -3492,6 +3501,346 @@
           "oneOf": [
             {
               "$ref": "#/$defs/LegacySourcePage"
+            },
+            {
+              "$ref": "#/$defs/Receipt"
+            }
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "api_version",
+        "correlation_id",
+        "operation",
+        "ok",
+        "result"
+      ]
+    },
+    "IntakeTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "instance_id": {
+          "$ref": "#/$defs/ID"
+        },
+        "session_id": {
+          "$ref": "#/$defs/ID"
+        },
+        "expected_native_thread_id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ID"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "expected_config_revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "instance_id",
+        "session_id",
+        "expected_native_thread_id",
+        "expected_config_revision"
+      ]
+    },
+    "IntakeImage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200000
+        },
+        "media_type": {
+          "type": "string",
+          "enum": [
+            "image/jpeg",
+            "image/png",
+            "image/webp"
+          ]
+        }
+      },
+      "required": [
+        "data",
+        "media_type"
+      ]
+    },
+    "IntakeFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "attachment_id": {
+          "type": "string",
+          "pattern": "^u_[a-f0-9]{32}$"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 512
+        },
+        "content": {
+          "type": "string",
+          "maxLength": 200000
+        },
+        "media_type": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483648
+        }
+      },
+      "required": [],
+      "anyOf": [
+        {
+          "required": [
+            "attachment_id"
+          ]
+        },
+        {
+          "required": [
+            "name",
+            "content",
+            "media_type"
+          ]
+        }
+      ]
+    },
+    "IntakeInput": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "action": {
+              "const": "inspect"
+            },
+            "session_id": {
+              "$ref": "#/$defs/ID"
+            }
+          },
+          "required": [
+            "action",
+            "session_id"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "action": {
+              "const": "submit"
+            },
+            "submission_request_id": {
+              "type": "string",
+              "pattern": "^r_[a-f0-9]{32}$"
+            },
+            "target": {
+              "$ref": "#/$defs/IntakeTarget"
+            },
+            "goal": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 32000
+            },
+            "images": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/IntakeImage"
+              },
+              "maxItems": 8
+            },
+            "files": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/IntakeFile"
+              },
+              "maxItems": 20
+            }
+          },
+          "required": [
+            "action",
+            "submission_request_id",
+            "target",
+            "goal"
+          ]
+        }
+      ]
+    },
+    "IntakeContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "available",
+            "unsupported",
+            "permission",
+            "unknown"
+          ]
+        },
+        "session_id": {
+          "$ref": "#/$defs/ID"
+        },
+        "target": {
+          "$ref": "#/$defs/IntakeTarget"
+        },
+        "current_configuration": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "backend": {
+              "type": "string",
+              "maxLength": 4096
+            },
+            "model": {
+              "type": "string",
+              "maxLength": 4096
+            },
+            "effort": {
+              "type": "string",
+              "maxLength": 4096
+            },
+            "sandbox": {
+              "type": "string",
+              "maxLength": 4096
+            },
+            "cwd": {
+              "type": "string",
+              "maxLength": 4096
+            }
+          },
+          "required": [
+            "backend",
+            "model",
+            "effort",
+            "sandbox",
+            "cwd"
+          ]
+        },
+        "configuration_known": {
+          "type": "boolean"
+        },
+        "delegation_grant_enabled": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "scope_behavior": {
+          "const": "preserve_current_session"
+        },
+        "server_verified_binding": {
+          "const": "paired_human"
+        },
+        "max_frame_bytes": {
+          "const": 262144
+        },
+        "max_goal_chars": {
+          "const": 32000
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "status",
+        "session_id",
+        "target",
+        "current_configuration",
+        "configuration_known",
+        "delegation_grant_enabled",
+        "scope_behavior",
+        "server_verified_binding",
+        "max_frame_bytes",
+        "max_goal_chars"
+      ]
+    },
+    "Request_intake": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "task_api_request"
+        },
+        "api_version": {
+          "$ref": "#/$defs/Version"
+        },
+        "correlation_id": {
+          "$ref": "#/$defs/ID"
+        },
+        "operation": {
+          "const": "intake"
+        },
+        "input": {
+          "$ref": "#/$defs/IntakeInput"
+        },
+        "idempotency_key": {
+          "$ref": "#/$defs/Key"
+        }
+      },
+      "required": [
+        "type",
+        "api_version",
+        "correlation_id",
+        "operation",
+        "input"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "input": {
+                "properties": {
+                  "action": {
+                    "const": "submit"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "idempotency_key"
+            ]
+          }
+        }
+      ]
+    },
+    "Response_intake": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "task_api_response"
+        },
+        "api_version": {
+          "$ref": "#/$defs/Version"
+        },
+        "correlation_id": {
+          "$ref": "#/$defs/ID"
+        },
+        "operation": {
+          "const": "intake"
+        },
+        "ok": {
+          "const": true
+        },
+        "result": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/IntakeContext"
             },
             {
               "$ref": "#/$defs/Receipt"

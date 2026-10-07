@@ -20,6 +20,7 @@ import (
 )
 
 type queuedPayload struct {
+	FormalIntake   bool                       `json:"formal_intake,omitempty"`
 	ExpectedTarget *dispatchTargetExpectation `json:"expected_target,omitempty"`
 	Configuration  *session.Configuration     `json:"configuration,omitempty"`
 	MessagePurpose string                     `json:"message_purpose,omitempty"`
@@ -170,6 +171,12 @@ func (h *Hub) runQueuedMessage(s *session.Session, requestID string) {
 	if !payload.ExpectedTarget.matches(s) {
 		h.Emit(backend.NewError(s.ID, requestID, "dispatch_target_changed", "Target thread or configuration changed while waiting; this instruction was not sent"))
 		return
+	}
+	if payload.FormalIntake {
+		if err := h.intakeWritePolicy(s); err != nil {
+			h.Emit(backend.NewError(s.ID, requestID, "intake_scope_changed", "Original task intake permission changed before native consumption"))
+			return
+		}
 	}
 	if payload.Configuration != nil {
 		if err = s.ActivateQueuedConfiguration(*payload.Configuration); err != nil {

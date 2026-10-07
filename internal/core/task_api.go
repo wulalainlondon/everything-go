@@ -70,6 +70,7 @@ type apiMetadata struct {
 	SourceThread   string
 	SourceRevision uint64
 	Transport      string
+	Intake         *intakeMetadata
 }
 type apiSeal struct{ Backend, SessionID, RequestID, ThreadID, TurnID, MessageID, Text, Hash, Status string }
 
@@ -233,6 +234,9 @@ func (h *Hub) Authorize(ctx context.Context, c taskapi.VerifiedContext, r taskap
 	}
 	if c.Authority != h.cfg.InstanceID {
 		return l, taskapi.Failure("wrong_authority", "known_none", "refresh_identity")
+	}
+	if r.Operation == "intake" {
+		return h.authorizeIntake(ctx, c, r, l)
 	}
 	if r.Operation == "legacy_source" {
 		return h.authorizeLegacySource(ctx, c, r, l)
@@ -574,6 +578,9 @@ func (h *Hub) Mutate(ctx context.Context, c taskapi.AuthorizedCommand) (any, err
 	}
 	if _, err := h.Authorize(ctx, c.Caller, c.Request); err != nil {
 		return nil, err
+	}
+	if c.Request.Operation == "intake" {
+		return h.mutateIntake(ctx, c)
 	}
 	if c.Request.Operation == "legacy_source" {
 		return h.mutateLegacySource(ctx, c)

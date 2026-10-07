@@ -25,7 +25,7 @@ func TestTaskAPIEnqueueAtomicClaimReopenAndConflict(t *testing.T) {
 	meta, _ := json.Marshal(map[string]string{"goal": "fixture"})
 	payload := []byte(`{"owner_device":"fixture-device","message_purpose":"instruction","content":"fixture"}`)
 	record := taskapi.IntentRecord{ReceiptID: "receipt1", TaskID: "task1", NativeID: "session/request", SessionID: "session", RequestID: "r_fixture111", Metadata: meta}
-	entry := Entry{SessionID: "session", RequestID: "r_fixture111", Content: "fixture", Payload: payload, API: &APIAdmission{c, record}}
+	entry := Entry{SessionID: "session", RequestID: "r_fixture111", Content: "fixture", Payload: payload, API: &APIAdmission{Command: c, Record: record}}
 	if _, created, e := s.Enqueue(entry); e != nil || !created {
 		t.Fatal(created, e)
 	}
@@ -79,7 +79,7 @@ func TestTaskAPITombstoneRetentionUnknownNoReplay(t *testing.T) {
 	defer s.Close()
 	c := apiFixture()
 	record := taskapi.IntentRecord{ReceiptID: "receipt", TaskID: "task", NativeID: "native", SessionID: "s", RequestID: "r_fixture111", Metadata: []byte(`{}`)}
-	entry := Entry{SessionID: "s", RequestID: record.RequestID, Content: "fixture", Payload: []byte(`{"content":"fixture"}`), API: &APIAdmission{c, record}}
+	entry := Entry{SessionID: "s", RequestID: record.RequestID, Content: "fixture", Payload: []byte(`{"content":"fixture"}`), API: &APIAdmission{Command: c, Record: record}}
 	s.Enqueue(entry)
 	if err := s.TaskJournal().Prune(context.Background(), time.Now().Add(100*24*time.Hour)); err != nil {
 		t.Fatal(err)
@@ -249,7 +249,7 @@ func TestTaskAPIBodyExpiryInvalidatesEventCursor(t *testing.T) {
 	ctx := context.Background()
 	c := apiFixture()
 	record := taskapi.IntentRecord{ReceiptID: "receipt", TaskID: "task", NativeID: "n", SessionID: "s", RequestID: "r", Metadata: []byte(`{}`)}
-	s.Enqueue(Entry{SessionID: "s", RequestID: "r", Payload: []byte(`{}`), API: &APIAdmission{c, record}})
+	s.Enqueue(Entry{SessionID: "s", RequestID: "r", Payload: []byte(`{}`), API: &APIAdmission{Command: c, Record: record}})
 	intent, _ := s.TaskJournal().Lookup(ctx, c.Namespace, c.Request.IdempotencyKey)
 	s.TaskJournal().Outbox(ctx, intent.Key, "resolved")
 	cursor, _ := s.TaskJournal().Watermark(ctx)
@@ -258,5 +258,77 @@ func TestTaskAPIBodyExpiryInvalidatesEventCursor(t *testing.T) {
 	}
 	if _, _, e := s.TaskJournal().Changes(ctx, cursor, 10); e == nil {
 		t.Fatal("expired body invisible to existing consumer")
+	}
+}
+
+func TestIntakeLateAdmissionGuardRollsBackAllFacts(t *testing.T) {
+	s, _ := Open(t.TempDir())
+	defer s.Close()
+	c := apiFixture()
+	c.Request.Operation = "intake"
+	c.Namespace.Operation = "intake"
+	c.Locator.Operation = "intake"
+	record := taskapi.IntentRecord{ReceiptID: "receipt", TaskID: "task", NativeID: "s/r", SessionID: "s", RequestID: "r_original", Metadata: []byte(`{}`)}
+	calls := 0
+	_, _, e := s.Enqueue(Entry{SessionID: "s", RequestID: record.RequestID, Payload: []byte(`{}`), API: &APIAdmission{Command: c, Record: record, CanCommit: func() bool { calls++; return calls == 1 }}})
+	if e == nil {
+		t.Fatal("late revoked admission committed")
+	}
+	if _, found, _ := s.Get("s", record.RequestID); found {
+		t.Fatal("queue row survived rollback")
+	}
+	if _, e := s.TaskJournal().Lookup(context.Background(), c.Namespace, c.Request.IdempotencyKey); e == nil {
+		t.Fatal("intent survived rollback")
+	}
+}
+func TestIntakeCannotAttachJournalToExistingOrdinaryRequest(t *testing.T) {
+	s, _ := Open(t.TempDir())
+	defer s.Close()
+	c := apiFixture()
+	c.Request.Operation = "intake"
+	c.Namespace.Operation = "intake"
+	c.Locator.Operation = "intake"
+	payload := []byte(`{}`)
+	s.Enqueue(Entry{SessionID: "s", RequestID: "r_same", Payload: payload})
+	record := taskapi.IntentRecord{ReceiptID: "receipt", TaskID: "task", NativeID: "s/r_same", SessionID: "s", RequestID: "r_same", Metadata: []byte(`{}`)}
+	_, _, e := s.Enqueue(Entry{SessionID: "s", RequestID: "r_same", Payload: payload, API: &APIAdmission{Command: c, Record: record}})
+	if !errors.Is(e, ErrConflict) {
+		t.Fatal(e)
+	}
+	if _, e := s.TaskJournal().Lookup(context.Background(), c.Namespace, c.Request.IdempotencyKey); e == nil {
+		t.Fatal("ordinaryrow backfilled formal")
+	}
+}
+
+func TestIntakeRestartSameReceiptWithoutReexecution(t *testing.T) {
+	root := t.TempDir()
+	s, _ := Open(root)
+	c := apiFixture()
+	c.Request.Operation = "intake"
+	c.Namespace.Operation = "intake"
+	c.Locator.Operation = "intake"
+	record := taskapi.IntentRecord{ReceiptID: "original-receipt", TaskID: "task", NativeID: "s/r", SessionID: "s", RequestID: "r_original", Metadata: []byte(`{"paired_intake":true}`)}
+	entry := Entry{SessionID: "s", RequestID: record.RequestID, Payload: []byte(`{"content":"originalgoal"}`), API: &APIAdmission{Command: c, Record: record}}
+	if _, created, e := s.Enqueue(entry); e != nil || !created {
+		t.Fatal(e)
+	}
+	s.Transition("s", record.RequestID, []State{Queued}, Running, "", "", "")
+	s.Close()
+	s, e := Open(root)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer s.Close()
+	s.Recover()
+	after, created, e := s.Enqueue(entry)
+	if e != nil || created {
+		t.Fatal("reexecutedacceptedintake", e, created)
+	}
+	if after.State != Uncertain {
+		t.Fatal("restartfactfaked", after.State)
+	}
+	receipt, e := s.TaskJournal().Lookup(context.Background(), c.Namespace, c.Request.IdempotencyKey)
+	if e != nil || receipt.ReceiptID != record.ReceiptID {
+		t.Fatal("receiptchanged", e)
 	}
 }
