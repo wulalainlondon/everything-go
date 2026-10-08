@@ -25,6 +25,7 @@ jobs:
           go-version-file: go.mod
           cache: false
       - name: Verify selected auth and handshake tests actually pass
+        id: tests
         run: |
           set -euo pipefail
           go test -json ./internal/core -run '^(TestAuthValid|TestHandshake)' -count=1 | tee "$RUNNER_TEMP/linux-development-tests.jsonl"
@@ -47,9 +48,12 @@ jobs:
           skipped = {e['Test'] for e in events if e['Action'] == 'skip' and 'Test' in e}
           assert required <= ran & passed, 'missing executed/passed tests: ' + repr(required - (ran & passed))
           assert not skipped, 'selected tests were skipped: ' + repr(skipped)
+          assert not any(e['Action'] == 'fail' for e in events), 'test/package failure'
+          assert any(e['Action'] == 'pass' and e.get('Package') == 'everything-go/internal/core' and 'Test' not in e for e in events), 'missing package pass'
           print('Executed and passed:', ', '.join(sorted(passed)))
           PY
       - name: Build Linux amd64 from clean source
+        id: compile
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
@@ -59,6 +63,7 @@ jobs:
           GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -o "$RUNNER_TEMP/everything-go-linux-amd64" ./cmd/everything-go
           test -z "$(git status --porcelain --untracked-files=all)"
       - name: Verify ELF and intrinsic Go build metadata
+        id: elf
         run: |
           set -euo pipefail
           binary="$RUNNER_TEMP/everything-go-linux-amd64"
@@ -86,11 +91,55 @@ jobs:
           assert text.splitlines()[0].endswith('go' + version), 'toolchain must match go.mod'
           PY
       - name: Isolated authenticated loopback startup smoke
+        id: smoke
         run: |
           set -euo pipefail
           python3 - "$RUNNER_TEMP/everything-go-linux-amd64" <<'PY'
-          import base64, hashlib, json, os, pathlib, secrets, socket, struct, subprocess, sys, tempfile, time
+          import base64, hashlib, json, os, pathlib, re, secrets, socket, struct, subprocess, sys, tempfile, time
           binary = str(pathlib.Path(sys.argv[1]).resolve())
+          def safe_tail(path, token):
+              # Read only a bounded private tail. Never emit arbitrary log text:
+              # project source stages and known error fragments are the allowlist.
+              # Unknown details, paths, state and credential-bearing lines stay private.
+              with open(path, 'rb') as reader:
+                  reader.seek(0, os.SEEK_END)
+                  size = reader.tell()
+                  reader.seek(max(0, size - 8192))
+                  raw = reader.read(8192).decode('utf-8', errors='replace')
+              if size > 8192:
+                  raw = raw.partition('\n')[2]  # discard a partial leading line
+              raw = raw.replace(token, '[synthetic-auth-masked]')
+              stages = ('listen tcp', 'load instance id', 'open native work items',
+                        'open external event inbox', 'open external automation',
+                        'open bridge relay', 'load bridge relay peers',
+                        'initialize PM collaboration', 'initialize file transfer', 'panic:')
+              reasons = ('$HOME is not defined', 'permission denied', 'address already in use',
+                         'unable to open database file', 'out of memory', 'no such file or directory',
+                         'pm_work_store_required', 'nil pointer dereference', 'index out of range')
+              result = []
+              for line in raw.splitlines()[-20:]:
+                  if re.search(r'(?i)token|secret|password|authorization|bearer|cookie|credential|private.key|(?:sk|ghp|github_pat)[_-]', line):
+                      continue
+                  message = re.sub(r'^\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2} ', '', line)
+                  stage = next((s for s in stages if message.startswith(s)), None)
+                  if stage:
+                      found = [r for r in reasons if r in message]
+                      result.append(stage + ': ' + ('; '.join(found) if found else 'details withheld (not allowlisted)'))
+              return result[-20:]
+          def failure_diagnostic(path, token, process, error):
+              # poll BEFORE terminate/kill: cleanup signals are not startup exit codes.
+              code = process.poll() if process is not None else None
+              try:
+                  tail = safe_tail(path, token)
+                  tail_status = 'bounded_allowlist_projection'
+              except OSError:
+                  tail, tail_status = [], 'private_log_unreadable'
+              diagnostic = {'smoke': 'failure', 'error_class': type(error).__name__,
+                            'binary_exit_code_before_cleanup': code,
+                            'process_state': 'not_started' if process is None else ('running' if code is None else 'exited'),
+                            'safe_tail_status': tail_status, 'safe_tail': tail}
+              # JSON escapes controls; fixed prefix cannot invoke GHA workflow commands.
+              print('SMOKE_DIAGNOSTIC=' + json.dumps(diagnostic, ensure_ascii=True), flush=True)
           def exact(sock, size):
               data = b''
               while len(data) < size:
@@ -142,8 +191,10 @@ jobs:
               # No inherited HOME, CODEX_HOME, connector credentials, or native state.
               env = {'PATH': os.defpath, 'BRIDGE_AUTH_TOKEN': token, 'EVERYTHING_GO_NATIVE_WATCH': '0'}
               with open(root / 'bridge.log', 'wb') as log:
-                  process = subprocess.Popen([binary, '--mode=bridge', '--port', str(port), '--data-dir', str(state), '--root-dir', str(project), '--session-store', str(state / 'sessions.json'), '--disable-search', '--disable-native-watcher', '--claude-bin', '/nonexistent/claude', '--codex-bin', '/nonexistent/codex'], cwd=project, env=env, stdout=log, stderr=log)
+                  os.chmod(root / 'bridge.log', 0o600)
+                  process = None
                   try:
+                      process = subprocess.Popen([binary, '--mode=bridge', '--port', str(port), '--data-dir', str(state), '--root-dir', str(project), '--session-store', str(state / 'sessions.json'), '--disable-search', '--disable-native-watcher', '--claude-bin', '/nonexistent/claude', '--codex-bin', '/nonexistent/codex'], cwd=project, env=env, stdout=log, stderr=log)
                       deadline = time.monotonic() + 30
                       while True:
                           assert process.poll() is None, 'bridge exited before startup'
@@ -169,36 +220,82 @@ jobs:
                           else:
                               raise RuntimeError('missing pong')
                       print('CI loopback startup, invalid-token rejection, authenticated hello/ping passed; no AI requests')
+                  except BaseException as error:
+                      log.flush()
+                      failure_diagnostic(root / 'bridge.log', token, process, error)
+                      # Do not print exception messages/tracebacks containing peer data.
+                      raise SystemExit(1)
                   finally:
-                      process.terminate()
-                      try:
-                          process.wait(timeout=5)
-                      except subprocess.TimeoutExpired:
-                          process.kill()
-                          process.wait(timeout=5)
+                      if process is not None and process.poll() is None:
+                          process.terminate()
+                          try:
+                              process.wait(timeout=5)
+                          except subprocess.TimeoutExpired:
+                              process.kill()
+                              process.wait(timeout=5)
           PY
       - name: Stage only development binary and source/checksum manifests
+        id: stage
+        if: ${{ always() && steps.tests.conclusion == 'success' && steps.compile.conclusion == 'success' && steps.elf.conclusion == 'success' }}
+        env:
+          SMOKE_CONCLUSION: ${{ steps.smoke.conclusion }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
         run: |
           set -euo pipefail
-          mkdir -p dist/linux
-          cp "$RUNNER_TEMP/everything-go-linux-amd64" dist/linux/everything-go-linux-amd64
+          artifact_dir="$RUNNER_TEMP/linux-development-artifact"
+          mkdir "$artifact_dir"
+          cp "$RUNNER_TEMP/everything-go-linux-amd64" "$artifact_dir/everything-go-linux-amd64"
           {
             printf 'repository=%s\ncommit=%s\n' "$GITHUB_REPOSITORY" "$GITHUB_SHA"
             printf 'parent=%s\n' "$(git rev-parse HEAD^)"
             printf 'workflow_sha256=%s\n' "$(sha256sum .github/workflows/linux-development-build.yml | cut -d ' ' -f1)"
+            printf 'workflow_sha=%s\n' "$WORKFLOW_SHA"
             printf 'source_path=.\ncommand=./cmd/everything-go\n'
             printf 'go_version=%s\n' "$(go version)"
             printf 'run_id=%s\nrun_attempt=%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
-            printf 'kind=development artifact; main module version from go version -m, not a signed release\n'
-          } > dist/linux/SOURCE_COMMIT.txt
-          (cd dist/linux && sha256sum everything-go-linux-amd64 SOURCE_COMMIT.txt > SHA256SUMS && sha256sum -c SHA256SUMS)
-          test "$(find dist/linux -type f | wc -l)" -eq 3
-      - uses: actions/upload-artifact@v4
+            printf 'tests=success; all nine executed and passed\ncompile=success\nELF_static_cleanVCS=success\nSMOKE_CONCLUSION=%s\n' "$SMOKE_CONCLUSION"
+            printf 'kind=development debugging build\nwarning=NOT usable verified release; checksums are not digital signatures\n'
+            if [[ "$SMOKE_CONCLUSION" == success ]]; then
+              printf 'startup=CI probe passed only; dot/phone/persistent uptime NOT verified\n'
+            else
+              printf 'startup=CI startup failed/not verified; reason only in sanitized smoke diagnostic if available\n'
+            fi
+          } > "$artifact_dir/SOURCE_COMMIT.txt"
+          (cd "$artifact_dir" && sha256sum everything-go-linux-amd64 SOURCE_COMMIT.txt > SHA256SUMS && sha256sum -c SHA256SUMS)
+          test "$(find "$artifact_dir" -type f | wc -l)" -eq 3
+      - name: Upload development debugging artifact
+        id: upload
+        if: ${{ always() && steps.tests.conclusion == 'success' && steps.compile.conclusion == 'success' && steps.elf.conclusion == 'success' && steps.stage.conclusion == 'success' }}
+        uses: actions/upload-artifact@v4
         with:
           name: averything-bridge-linux-amd64-development
           path: |
-            dist/linux/everything-go-linux-amd64
-            dist/linux/SOURCE_COMMIT.txt
-            dist/linux/SHA256SUMS
+            ${{ runner.temp }}/linux-development-artifact/everything-go-linux-amd64
+            ${{ runner.temp }}/linux-development-artifact/SOURCE_COMMIT.txt
+            ${{ runner.temp }}/linux-development-artifact/SHA256SUMS
           if-no-files-found: error
           retention-days: 7
+      - name: Record actual development verification conclusions
+        if: ${{ always() }}
+        env:
+          TESTS_CONCLUSION: ${{ steps.tests.conclusion }}
+          COMPILE_CONCLUSION: ${{ steps.compile.conclusion }}
+          ELF_CONCLUSION: ${{ steps.elf.conclusion }}
+          SMOKE_CONCLUSION: ${{ steps.smoke.conclusion }}
+          UPLOAD_CONCLUSION: ${{ steps.upload.conclusion }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          {
+            printf 'Development debugging build — NOT usable verified release\n\n'
+            printf 'Source commit: `%s`; run: `%s`; attempt: `%s`\n\n' "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+            printf 'Workflow commit: `%s`; workflow SHA256: `%s`; Go: `%s`\n\n' "$WORKFLOW_SHA" "$(sha256sum .github/workflows/linux-development-build.yml | cut -d ' ' -f1)" "$(go version)"
+            printf 'Tests (nine required): %s; compile: %s; ELF/static/cleanVCS: %s\n\n' "$TESTS_CONCLUSION" "$COMPILE_CONCLUSION" "$ELF_CONCLUSION"
+            printf 'SMOKE_CONCLUSION: %s; artifact upload: %s\n\n' "$SMOKE_CONCLUSION" "$UPLOAD_CONCLUSION"
+            if [[ "$SMOKE_CONCLUSION" == success ]]; then
+              printf 'CI probe passed only. dot/phone/persistent uptime NOT verified.\n'
+            else
+              printf 'CI startup failed/not verified. Smoke failure remains a job failure.\n'
+            fi
+            printf 'Binary delivery requires tests + compile + ELF/static/cleanVCS all success. Checksums are not digital signatures. No formal release.\n'
+          } >> "$GITHUB_STEP_SUMMARY"
