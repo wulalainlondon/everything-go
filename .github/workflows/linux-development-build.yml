@@ -1,0 +1,204 @@
+name: linux-development-build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    env:
+      CGO_ENABLED: '0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Verify selected auth and handshake tests actually pass
+        run: |
+          set -euo pipefail
+          go test -json ./internal/core -run '^(TestAuthValid|TestHandshake)' -count=1 | tee "$RUNNER_TEMP/linux-development-tests.jsonl"
+          python3 - "$RUNNER_TEMP/linux-development-tests.jsonl" <<'PY'
+          import json, sys
+          required = {
+              'TestAuthValidUnlockedDoesNotGrantFullAccess',
+              'TestAuthValidLockedEnforcesToken',
+              'TestAuthValidEnvOverrideWins',
+              'TestHandshakeRejectsNonHelloFirstFrame',
+              'TestHandshakeRejectsWrongTokenWhenLocked',
+              'TestHandshakeAcceptsValidHello',
+              'TestHandshakeAcceptsPairedTokenWhenLocked',
+              'TestHandshakeAllowsLANEnrollmentDuringWindow',
+              'TestHandshakeRespectsContextTimeout',
+          }
+          events = [json.loads(line) for line in open(sys.argv[1])]
+          ran = {e['Test'] for e in events if e['Action'] == 'run' and 'Test' in e}
+          passed = {e['Test'] for e in events if e['Action'] == 'pass' and 'Test' in e}
+          skipped = {e['Test'] for e in events if e['Action'] == 'skip' and 'Test' in e}
+          assert required <= ran & passed, 'missing executed/passed tests: ' + repr(required - (ran & passed))
+          assert not skipped, 'selected tests were skipped: ' + repr(skipped)
+          print('Executed and passed:', ', '.join(sorted(passed)))
+          PY
+      - name: Build Linux amd64 from clean source
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          go version
+          # Keep output outside the checkout until intrinsic VCS metadata is frozen.
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -o "$RUNNER_TEMP/everything-go-linux-amd64" ./cmd/everything-go
+          test -z "$(git status --porcelain --untracked-files=all)"
+      - name: Verify ELF and intrinsic Go build metadata
+        run: |
+          set -euo pipefail
+          binary="$RUNNER_TEMP/everything-go-linux-amd64"
+          file "$binary"
+          readelf -h "$binary" | tee "$RUNNER_TEMP/linux-development-elf.txt"
+          grep -Eq 'Class: +ELF64' "$RUNNER_TEMP/linux-development-elf.txt"
+          grep -Eq 'Machine: +Advanced Micro Devices X86-64' "$RUNNER_TEMP/linux-development-elf.txt"
+          readelf -l "$binary" > "$RUNNER_TEMP/linux-development-program-headers.txt"
+          ! grep -q INTERP "$RUNNER_TEMP/linux-development-program-headers.txt"
+          readelf -d "$binary" > "$RUNNER_TEMP/linux-development-dynamic.txt"
+          ! grep -q '(NEEDED)' "$RUNNER_TEMP/linux-development-dynamic.txt"
+          go version -m "$binary" | tee "$RUNNER_TEMP/linux-development-buildinfo.txt"
+          python3 - "$RUNNER_TEMP/linux-development-buildinfo.txt" <<'PY'
+          import os, sys
+          text = open(sys.argv[1]).read()
+          settings = {}
+          for line in text.splitlines():
+              fields = line.strip().split(None, 1)
+              if len(fields) == 2 and fields[0] == 'build' and '=' in fields[1]:
+                  key, value = fields[1].split('=', 1)
+                  settings[key] = value
+          for key, value in {'GOOS': 'linux', 'GOARCH': 'amd64', 'CGO_ENABLED': '0', '-trimpath': 'true', 'vcs.revision': os.environ['GITHUB_SHA'], 'vcs.modified': 'false'}.items():
+              assert settings.get(key) == value, (key, settings.get(key), value)
+          version = next(line.split()[1] for line in open('go.mod') if line.startswith('go '))
+          assert text.splitlines()[0].endswith('go' + version), 'toolchain must match go.mod'
+          PY
+      - name: Isolated authenticated loopback startup smoke
+        run: |
+          set -euo pipefail
+          python3 - "$RUNNER_TEMP/everything-go-linux-amd64" <<'PY'
+          import base64, hashlib, json, os, pathlib, secrets, socket, struct, subprocess, sys, tempfile, time
+          binary = str(pathlib.Path(sys.argv[1]).resolve())
+          def exact(sock, size):
+              data = b''
+              while len(data) < size:
+                  part = sock.recv(size - len(data))
+                  if not part:
+                      raise RuntimeError('unexpected WebSocket EOF')
+                  data += part
+              return data
+          def connect(port):
+              sock = socket.create_connection(('127.0.0.1', port), timeout=3)
+              try:
+                  key = base64.b64encode(secrets.token_bytes(16)).decode()
+                  sock.sendall(('GET / HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n' % (port, key)).encode())
+                  header = b''
+                  while not header.endswith(b'\r\n\r\n'):
+                      header += exact(sock, 1)
+                      assert len(header) < 16384
+                  assert header.split(b'\r\n')[0].startswith(b'HTTP/1.1 101 '), header.split(b'\r\n')[0]
+                  accept = base64.b64encode(hashlib.sha1((key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').encode()).digest())
+                  assert b'sec-websocket-accept: ' + accept.lower() in header.lower()
+                  return sock
+              except BaseException:
+                  sock.close()
+                  raise
+          def send(sock, event):
+              payload = json.dumps(event).encode()
+              mask = secrets.token_bytes(4)
+              head = bytes([0x81, 0x80 | len(payload)]) if len(payload) < 126 else bytes([0x81, 0xfe]) + struct.pack('!H', len(payload))
+              sock.sendall(head + mask + bytes(v ^ mask[i % 4] for i, v in enumerate(payload)))
+          def receive(sock):
+              head = exact(sock, 2)
+              assert head[0] == 0x81 and not head[1] & 0x80, 'expected complete unmasked text frame'
+              size = head[1] & 0x7f
+              if size == 126:
+                  size = struct.unpack('!H', exact(sock, 2))[0]
+              elif size == 127:
+                  size = struct.unpack('!Q', exact(sock, 8))[0]
+              assert size <= 1024 * 1024
+              return json.loads(exact(sock, size))
+          with tempfile.TemporaryDirectory(prefix='linux-development-smoke-') as tmp:
+              root = pathlib.Path(tmp)
+              state, project = root / 'state', root / 'project'
+              state.mkdir(mode=0o700)
+              project.mkdir(mode=0o700)
+              with socket.socket() as reserve:
+                  reserve.bind(('127.0.0.1', 0))
+                  port = reserve.getsockname()[1]
+              token = secrets.token_hex(24)
+              # No inherited HOME, CODEX_HOME, connector credentials, or native state.
+              env = {'PATH': os.defpath, 'BRIDGE_AUTH_TOKEN': token, 'EVERYTHING_GO_NATIVE_WATCH': '0'}
+              with open(root / 'bridge.log', 'wb') as log:
+                  process = subprocess.Popen([binary, '--mode=bridge', '--port', str(port), '--data-dir', str(state), '--root-dir', str(project), '--session-store', str(state / 'sessions.json'), '--disable-search', '--disable-native-watcher', '--claude-bin', '/nonexistent/claude', '--codex-bin', '/nonexistent/codex'], cwd=project, env=env, stdout=log, stderr=log)
+                  try:
+                      deadline = time.monotonic() + 30
+                      while True:
+                          assert process.poll() is None, 'bridge exited before startup'
+                          try:
+                              bad = connect(port)
+                              break
+                          except (OSError, RuntimeError):
+                              if time.monotonic() >= deadline:
+                                  raise RuntimeError('startup timeout')
+                              time.sleep(0.1)
+                      with bad:
+                          send(bad, {'type': 'hello', 'device_id': 'development-negative', 'auth_token': 'invalid'})
+                          event = receive(bad)
+                          assert event['type'] == 'error' and 'Unauthorized' in event['message'], 'bad token was not rejected'
+                      with connect(port) as good:
+                          send(good, {'type': 'hello', 'device_id': 'development-probe', 'auth_token': token, 'connection_probe': True})
+                          event = receive(good)
+                          assert event['type'] == 'hello_ack', 'valid token was not accepted'
+                          send(good, {'type': 'ping'})
+                          for _ in range(100):
+                              if receive(good)['type'] == 'pong':
+                                  break
+                          else:
+                              raise RuntimeError('missing pong')
+                      print('CI loopback startup, invalid-token rejection, authenticated hello/ping passed; no AI requests')
+                  finally:
+                      process.terminate()
+                      try:
+                          process.wait(timeout=5)
+                      except subprocess.TimeoutExpired:
+                          process.kill()
+                          process.wait(timeout=5)
+          PY
+      - name: Stage only development binary and source/checksum manifests
+        run: |
+          set -euo pipefail
+          mkdir -p dist/linux
+          cp "$RUNNER_TEMP/everything-go-linux-amd64" dist/linux/everything-go-linux-amd64
+          {
+            printf 'repository=%s\ncommit=%s\n' "$GITHUB_REPOSITORY" "$GITHUB_SHA"
+            printf 'parent=%s\n' "$(git rev-parse HEAD^)"
+            printf 'workflow_sha256=%s\n' "$(sha256sum .github/workflows/linux-development-build.yml | cut -d ' ' -f1)"
+            printf 'source_path=.\ncommand=./cmd/everything-go\n'
+            printf 'go_version=%s\n' "$(go version)"
+            printf 'run_id=%s\nrun_attempt=%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+            printf 'kind=development artifact; main module version from go version -m, not a signed release\n'
+          } > dist/linux/SOURCE_COMMIT.txt
+          (cd dist/linux && sha256sum everything-go-linux-amd64 SOURCE_COMMIT.txt > SHA256SUMS && sha256sum -c SHA256SUMS)
+          test "$(find dist/linux -type f | wc -l)" -eq 3
+      - uses: actions/upload-artifact@v4
+        with:
+          name: averything-bridge-linux-amd64-development
+          path: |
+            dist/linux/everything-go-linux-amd64
+            dist/linux/SOURCE_COMMIT.txt
+            dist/linux/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7
