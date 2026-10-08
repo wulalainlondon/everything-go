@@ -179,6 +179,11 @@ jobs:
                   size = struct.unpack('!Q', exact(sock, 8))[0]
               assert size <= 1024 * 1024
               return json.loads(exact(sock, size))
+          # This smoke runs on a fresh GitHub-hosted runner, not a private native session.
+          # File transfer needs the runner's existing HOME; never guess or replace it.
+          home = os.environ.get('HOME')
+          if not home or not pathlib.Path(home).is_absolute() or not pathlib.Path(home).is_dir():
+              raise SystemExit('CI smoke requires an existing absolute runner HOME; refusing to guess or replace it')
           with tempfile.TemporaryDirectory(prefix='linux-development-smoke-') as tmp:
               root = pathlib.Path(tmp)
               state, project = root / 'state', root / 'project'
@@ -188,8 +193,8 @@ jobs:
                   reserve.bind(('127.0.0.1', 0))
                   port = reserve.getsockname()[1]
               token = secrets.token_hex(24)
-              # No inherited HOME, CODEX_HOME, connector credentials, or native state.
-              env = {'PATH': os.defpath, 'BRIDGE_AUTH_TOKEN': token, 'EVERYTHING_GO_NATIVE_WATCH': '0'}
+              # Explicit allowlist: unchanged runner HOME, no CODEX_HOME or account/connector credentials.
+              env = {'PATH': os.defpath, 'HOME': home, 'BRIDGE_AUTH_TOKEN': token, 'EVERYTHING_GO_NATIVE_WATCH': '0'}
               with open(root / 'bridge.log', 'wb') as log:
                   os.chmod(root / 'bridge.log', 0o600)
                   process = None
