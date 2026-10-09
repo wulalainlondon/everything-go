@@ -47,7 +47,7 @@ func (s *Store) ReturnContext(ctx context.Context, r Record, thread string, revi
 	if parent != r.ParentSessionID || identity != returnIdentity(r, thread, revision) {
 		return c, false, errors.New("handoff_return_identity_conflict")
 	}
-	err = json.Unmarshal(b, &c.Snapshot)
+	c.Snapshot, err = handoff.DecodeSnapshot(b)
 	return c, err == nil, err
 }
 
@@ -73,7 +73,8 @@ func (s *Store) SealReturnContext(ctx context.Context, r Record, thread string, 
 			if identity != returnIdentity(r, thread, revision) {
 				return errors.New("handoff_return_identity_conflict")
 			}
-			return json.Unmarshal(data, &out.Snapshot)
+			out.Snapshot, err = handoff.DecodeSnapshot(data)
+			return err
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
 			return err
