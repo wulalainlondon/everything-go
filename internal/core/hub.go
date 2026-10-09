@@ -32,6 +32,7 @@ import (
 	"everything-go/internal/fcm"
 	"everything-go/internal/feed"
 	"everything-go/internal/governance"
+	"everything-go/internal/handoff"
 	"everything-go/internal/inbox"
 	"everything-go/internal/media"
 	"everything-go/internal/messagequeue"
@@ -53,6 +54,7 @@ import (
 // Config carries the connection-identity fields surfaced in hello_ack so the
 // app can label the bridge and respect its filesystem jail.
 type Config struct {
+	DelegationHandoff  *handoff.Config
 	DelegationCapacity *delegation.CapacityConfig
 	InstanceName       string
 	InstanceID         string

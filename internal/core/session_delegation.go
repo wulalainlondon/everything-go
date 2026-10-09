@@ -436,9 +436,18 @@ func (h *Hub) reconcileDelegation(ctx context.Context, r delegation.Record) erro
 				return e
 			}
 		}
-		content := delegationReturnText(r)
-		client := &Client{hub: h, deviceID: "delegation-system", send: make(chan []byte, 64), quit: make(chan struct{}), ctx: context.Background()}
-		h.enqueueChatMessageExpected(client, clientproto.Command{Kind: "message", SessionID: r.ParentSessionID, RequestID: r.ParentRequestID, Content: content, MessagePurpose: "result_return"}, returnTarget)
+		// An existing receipt owns its exact payload, even if the process died
+		// before MarkDeliveryQueued. Never reread context or replay acceptance.
+		if _, exists, err := h.messageQueue.Get(r.ParentSessionID, r.ParentRequestID); err != nil {
+			return err
+		} else if !exists {
+			frozen, err := h.delegationReturnContext(ctx, r, parent, thread, revision)
+			if err != nil {
+				return err
+			}
+			client := &Client{hub: h, deviceID: "delegation-system", send: make(chan []byte, 64), quit: make(chan struct{}), ctx: context.Background()}
+			h.enqueueChatMessageExpected(client, clientproto.Command{Kind: "message", SessionID: r.ParentSessionID, RequestID: r.ParentRequestID, Content: frozen.Content, MessagePurpose: "result_return"}, returnTarget)
+		}
 		if _, found, err := h.messageQueue.Get(r.ParentSessionID, r.ParentRequestID); err != nil {
 			return err
 		} else if !found {
