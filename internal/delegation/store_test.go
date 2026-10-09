@@ -2,7 +2,6 @@ package delegation
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -70,32 +69,27 @@ func TestCreateBoundedSerializesConcurrentParentBudget(t *testing.T) {
 	}
 	defer store.Close()
 	var wg sync.WaitGroup
-	outcomes := make(chan error, 4)
-	for i := 0; i < 4; i++ {
+	outcomes := make(chan error, 16)
+	for i := 0; i < 16; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
 			id := fmt.Sprintf("d%d", i)
 			outcomes <- store.CreateBounded(context.Background(), Record{ID: id, ParentSessionID: "parent", ParentRequestID: "return_" + id,
 				OriginRequestID: "parent-turn", ToolCallID: id, IntentHash: id,
-				ChildSessionID: "child_" + id, ChildRequestID: "work_" + id, ChildName: "Check", Cwd: "/workspace", Instruction: "Verify"}, 3)
+				ChildSessionID: "child_" + id, ChildRequestID: "work_" + id, ChildName: "Check", Cwd: "/workspace", Instruction: "Verify"})
 		}(i)
 	}
 	wg.Wait()
 	close(outcomes)
-	succeeded, limited := 0, 0
 	for err := range outcomes {
-		switch {
-		case err == nil:
-			succeeded++
-		case errors.Is(err, ErrParentLimit):
-			limited++
-		default:
+		if err != nil {
 			t.Fatal(err)
 		}
 	}
-	if succeeded != 3 || limited != 1 {
-		t.Fatalf("succeeded=%d limited=%d", succeeded, limited)
+	n, err := store.CountsForParent(context.Background(), "parent")
+	if err != nil || n.Active != 6 || n.Queued != 10 {
+		t.Fatalf("counts=%+v err=%v", n, err)
 	}
 }
 

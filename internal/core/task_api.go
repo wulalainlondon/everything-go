@@ -273,6 +273,30 @@ func (h *Hub) Authorize(ctx context.Context, c taskapi.VerifiedContext, r taskap
 		if err != nil {
 			return l, err
 		}
+		if r.Operation == "cancel" && l.Path == "delegation" {
+			selected, e := h.delegations.TaskJournal().Receipt(ctx, c.StableScopeID, c.NamespaceGeneration, in.CommandReceipt)
+			if e != nil {
+				return l, e
+			}
+			if selected.TaskID != record.TaskID {
+				return l, taskapi.Failure("permission", "known_none", "request_scope_change")
+			}
+			if original, found, e := h.delegations.ByChildRequest(ctx, selected.SessionID, selected.RequestID); e != nil {
+				return l, e
+			} else if found {
+				ns := taskapi.Namespace{Authority: c.Authority, StableScopeID: c.StableScopeID, Generation: c.NamespaceGeneration, Path: l.Path, Operation: r.Operation, TaskID: l.TaskID}
+				if previous, e := h.delegations.TaskJournal().Lookup(ctx, ns, r.IdempotencyKey); e == nil {
+					digest, _ := taskapi.IntentHash(r)
+					if digest != previous.Hash {
+						return l, taskapi.Failure("idempotency_conflict", "known_receipt", "lookup_original")
+					}
+					return l, nil
+				}
+				if original.State == "queued" {
+					return l, h.authorizeQueuedDelegationCancel(ctx, c, r, selected, original, in.Revision)
+				}
+			}
+		}
 		target, ok := h.registry.Get(record.SessionID)
 		if !ok || !h.controllerInScope(target) || target.Snapshot().Hidden {
 			return l, taskapi.Failure("permission", "known_none", "request_scope_change")
@@ -696,15 +720,33 @@ func (h *Hub) Mutate(ctx context.Context, c taskapi.AuthorizedCommand) (any, err
 			record.SessionID = "s_dg_" + id
 			record.RequestID = "dgtask_" + record.NativeID
 			record.TaskID = apiID(h.cfg.InstanceID, "delegation", record.NativeID)
-			r := delegation.Record{ID: record.NativeID, ParentSessionID: c.Caller.SourceSessionID, OriginRequestID: c.Caller.SourceRequestID, ToolCallID: c.Caller.ToolCallID, IntentHash: c.IntentHash, ChildSessionID: record.SessionID, ChildRequestID: record.RequestID, ChildName: in.New.Name, Cwd: in.Workspace.Cwd, Instruction: in.Instruction, Model: in.New.Profile.Model, Effort: in.New.Profile.Effort, Sandbox: "read-only", ParentRequestID: "dgreturn_" + record.NativeID}
-			stored, created, err := h.delegations.CreateAPI(ctx, c, record, r, in.New.Profile.Backend)
+			r := delegation.Record{ID: record.NativeID, ParentSessionID: c.Caller.SourceSessionID, OriginRequestID: c.Caller.SourceRequestID, ToolCallID: c.Caller.ToolCallID, IntentHash: c.IntentHash, ChildSessionID: record.SessionID, ChildRequestID: record.RequestID, ChildName: in.New.Name, Cwd: canonicalCwd, Instruction: in.Instruction, Model: in.New.Profile.Model, Effort: in.New.Profile.Effort, Sandbox: "read-only", ParentRequestID: "dgreturn_" + record.NativeID, SourceThread: c.Caller.SourceResumeID, SourceRevision: c.Caller.SourceConfigRevision, WorkspaceIdentity: rootIdentities[canonicalCwd]}
+			// Preserve the original policy and caller inside the existing store
+			// transaction. Do not recursively Authorize there: it queries this
+			// same store and would deadlock its single SQLite connection.
+			admission := c
+			admission.Revalidate = func(checkContext context.Context) error {
+				if c.Revalidate == nil {
+					return taskapi.Failure("caller_unbound", "known_none", "refresh_identity")
+				}
+				if err := c.Revalidate(checkContext); err != nil {
+					return err
+				}
+				parent, ok := h.registry.Get(c.Caller.SourceSessionID)
+				if !ok || !h.controllerInScope(parent) || parent.Snapshot().Hidden || parent.State() == session.Closed || parent.ResumeID() != c.Caller.SourceResumeID || (c.Caller.SourceConfigKnown && parent.SettingsSnapshot().ConfigRevision != c.Caller.SourceConfigRevision) {
+					return taskapi.Failure("caller_unbound", "known_none", "refresh_identity")
+				}
+				return nil
+			}
+			stored, created, err := h.delegations.CreateAPI(ctx, admission, record, r, in.New.Profile.Backend)
 			if err != nil {
 				return nil, err
 			}
 			if created {
-				if err = h.provisionDelegation(ctx, r); err != nil {
-					return nil, err
-				}
+				// Provisioning is guarded by the same durable reservation/FIFO path.
+				// A post-ACK retryable error must never masquerade as known-no-effect.
+				_ = h.provisionDelegation(ctx, r)
+				h.wakeDelegations()
 			}
 			return h.apiReceipt(ctx, c, stored)
 		}
@@ -724,6 +766,9 @@ func (h *Hub) Mutate(ctx context.Context, c taskapi.AuthorizedCommand) (any, err
 		payload, _ := json.Marshal(queuedPayload{Content: in.Content, MessagePurpose: "instruction", Configuration: &configuration, ExpectedTarget: &dispatchTargetExpectation{target.ResumeID(), target.SettingsSnapshot().ConfigRevision}})
 		var stored taskapi.IntentRecord
 		created := false
+		if c.Locator.Path == "delegation" {
+			return h.appendCapacityDelegation(ctx, c, record, original, in, target)
+		}
 		if c.Locator.Path == "ordinary" {
 			_, created, err = h.messageQueue.Enqueue(messagequeue.Entry{SessionID: record.SessionID, RequestID: record.RequestID, Content: truncateGraphemes(in.Content, 4000), Payload: payload, API: &messagequeue.APIAdmission{Command: c, Record: record}})
 			if err == nil {
@@ -759,6 +804,33 @@ func (h *Hub) Mutate(ctx context.Context, c taskapi.AuthorizedCommand) (any, err
 		}
 		original = selected
 		record.RequestID = original.RequestID
+		if original.Path == "delegation" {
+			if d, found, e := h.delegations.ByChildRequest(ctx, original.SessionID, original.RequestID); e != nil {
+				return nil, e
+			} else if found && d.State == "queued" {
+				admission := c
+				admission.Revalidate = func(check context.Context) error {
+					if e := c.Revalidate(check); e != nil {
+						return e
+					}
+					return h.checkQueuedCancellationSource(c.Caller, c.Request, d)
+				}
+				h.messageQueueMu.Lock()
+				messageRevision, revisionErr := h.delegationMessageRevision(ctx, original.TaskID)
+				if revisionErr != nil {
+					h.messageQueueMu.Unlock()
+					return nil, revisionErr
+				}
+				stored, e := h.delegations.CancelQueuedAPI(ctx, admission, record, original, in.Revision, messageRevision)
+				h.messageQueueMu.Unlock()
+				if e != nil {
+					return nil, e
+				}
+				h.wakeDelegations()
+				return h.apiReceipt(ctx, c, stored)
+			}
+		}
+
 		var stored taskapi.IntentRecord
 		created := false
 		err = j.Transaction(ctx, func(tx *sql.Tx) error { var e error; stored, created, e = j.ClaimTx(tx, c, record); return e })

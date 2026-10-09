@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -52,11 +53,12 @@ import (
 // Config carries the connection-identity fields surfaced in hello_ack so the
 // app can label the bridge and respect its filesystem jail.
 type Config struct {
-	InstanceName string
-	InstanceID   string
-	RootDir      string
-	DataDir      string
-	LanIP        string
+	DelegationCapacity *delegation.CapacityConfig
+	InstanceName       string
+	InstanceID         string
+	RootDir            string
+	DataDir            string
+	LanIP              string
 	// ResolveLANIP is evaluated for each handshake; laptops can change networks
 	// while the hub remains alive. Nil preserves static embedders/tests.
 	ResolveLANIP func() string
@@ -93,6 +95,8 @@ type Hub struct {
 	messageQueue        *messagequeue.Store
 	delegations         *delegation.Store
 	delegationWake      chan struct{}
+	delegationMu        sync.Mutex
+	delegationScheduler atomic.Bool
 	messageQueueMu      sync.Mutex
 	maintenanceHolds    map[string]func()
 	maintenanceCheck    sync.Mutex
@@ -231,6 +235,14 @@ func NewHub(reg *session.Registry, cfg Config, pairing *governance.Pairing, port
 	if store, err := delegation.Open(cfg.DataDir); err != nil {
 		log.Printf("[delegation] storage unavailable: %v", err)
 	} else {
+		capacity := delegation.CapacityConfig{Default: delegation.DefaultLimits}
+		if cfg.DelegationCapacity != nil {
+			capacity = *cfg.DelegationCapacity
+		}
+		if err := store.ConfigureCapacity(context.Background(), capacity); err != nil {
+			store.Close()
+			panic(fmt.Sprintf("invalid delegation capacity: %v", err))
+		}
 		h.delegations = store
 	}
 	if store, err := sessiondispatch.Open(cfg.DataDir); err != nil {

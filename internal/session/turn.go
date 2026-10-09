@@ -103,7 +103,8 @@ func (s *Session) submit(id string, fn func(), wait bool) bool {
 			s.workerUp = true
 			s.quit = make(chan struct{})
 			s.queueChanged = make(chan struct{})
-			go s.runWorker(s.quit)
+			s.workerDone = make(chan struct{})
+			go s.runWorker(s.quit, s.workerDone)
 		}
 		if id != "" {
 			if s.activeQueuedID == id {
@@ -215,7 +216,8 @@ func (s *Session) CancelQueued(id string) error {
 	return ErrQueueNotWaiting
 }
 
-func (s *Session) runWorker(quit <-chan struct{}) {
+func (s *Session) runWorker(quit <-chan struct{}, exited chan<- struct{}) {
+	defer close(exited)
 	for {
 		s.mu.Lock()
 		if s.state == Closed {
@@ -377,5 +379,18 @@ func (s *Session) HoldQueue() func() {
 			}
 			s.signalQueueLocked()
 		})
+	}
+}
+
+// CloseAndWait joins the session actor after its current callback returns.
+// Callers must first release any executor-owned waits; Close alone deliberately
+// does not wait for an external executor to stop.
+func (s *Session) CloseAndWait() {
+	s.Close()
+	s.mu.Lock()
+	done := s.workerDone
+	s.mu.Unlock()
+	if done != nil {
+		<-done
 	}
 }

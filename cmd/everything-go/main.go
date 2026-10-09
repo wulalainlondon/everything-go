@@ -29,6 +29,7 @@ import (
 	"everything-go/internal/automation"
 	"everything-go/internal/backend"
 	"everything-go/internal/core"
+	"everything-go/internal/delegation"
 	"everything-go/internal/deviceinventory"
 	"everything-go/internal/eventinbox"
 	"everything-go/internal/executor"
@@ -58,6 +59,7 @@ func main() {
 	dataDir := flag.String("data-dir", ".", "directory for everything-go's own persisted state")
 	sessionStore := flag.String("session-store", os.Getenv("EVERYTHING_GO_SESSION_STORE"), "canonical saved_sessions.json path (empty = DATA_DIR/everything_go_sessions.json)")
 	instanceName := flag.String("instance-name", "everything-go", "human label shown in the app")
+	delegationCapacity := flag.String("delegation-capacity-config", "", "server-owned per-parent delegation capacity JSON (default 6 active, 64 waiting, 128 reserved results)")
 	rootDir := flag.String("root-dir", "", "filesystem jail root (\"\" = no jail)")
 	permissionCheck := flag.Bool("permission-check", false, "check filesystem permissions needed by the resident bridge and exit")
 	permissionCheckPaths := flag.String("permission-check-paths", "", "additional filesystem paths to check, separated by ':' on Unix or ';' on Windows")
@@ -74,6 +76,20 @@ func main() {
 	mode := flag.String("mode", "bridge", "run mode: bridge | index | devices (read-only local device inventory)")
 	indexPathsStdin := flag.Bool("index-paths-stdin", false, "index only newline-delimited transcript paths read from stdin")
 	flag.Parse()
+	var capacity *delegation.CapacityConfig
+	if *delegationCapacity != "" {
+		f, e := os.Open(*delegationCapacity)
+		if e != nil {
+			log.Fatal("delegation capacity configuration unavailable")
+		}
+		c, e := delegation.ReadCapacityConfig(f)
+		f.Close()
+		if e != nil {
+			log.Fatalf("invalid delegation capacity configuration: %v", e)
+		}
+		capacity = &c
+	}
+
 	if *mode == "devices" {
 		result, err := deviceinventory.Query(context.Background(), *dataDir)
 		if err != nil {
@@ -144,15 +160,16 @@ func main() {
 		log.Fatalf("load instance id: %v", err)
 	}
 	cfg := core.Config{
-		InstanceName: *instanceName,
-		InstanceID:   instanceID,
-		RootDir:      *rootDir,
-		DataDir:      *dataDir,
-		LanIP:        detectLanIP(),
-		ResolveLANIP: detectLanIP,
-		TailscaleIP:  detectTailscaleIP(),
-		Backends:     backend.DefaultRegistry(*remoteWSURL != ""),
-		CodexRemote:  codexRemoteEndpoint(),
+		DelegationCapacity: capacity,
+		InstanceName:       *instanceName,
+		InstanceID:         instanceID,
+		RootDir:            *rootDir,
+		DataDir:            *dataDir,
+		LanIP:              detectLanIP(),
+		ResolveLANIP:       detectLanIP,
+		TailscaleIP:        detectTailscaleIP(),
+		Backends:           backend.DefaultRegistry(*remoteWSURL != ""),
+		CodexRemote:        codexRemoteEndpoint(),
 	}
 	hub := core.NewHub(reg, cfg, pairing, *port)
 	defer hub.CloseDelegations()

@@ -73,6 +73,7 @@ type Session struct {
 	activeQueuedID string
 	quit           chan struct{}
 	workerUp       bool
+	workerDone     chan struct{}
 	turnDone       chan struct{}
 }
 

@@ -378,3 +378,9 @@ func (j *Journal) OutboxState(ctx context.Context, key string) (string, error) {
 	err := j.db.QueryRowContext(ctx, "SELECT state FROM task_api_outbox WHERE namespace_key=?", key).Scan(&state)
 	return state, err
 }
+
+// OriginalCommandForRequest resolves persisted request identity without
+// substituting a task's first turn for a later accepted continuation.
+func (j *Journal) OriginalCommandForRequest(ctx context.Context, session, request string) (IntentRecord, error) {
+	return scanIntent(j.db.QueryRowContext(ctx, "SELECT "+intentColumns+" FROM task_api_intents WHERE session_id=? AND request_id=? ORDER BY rowid LIMIT 1", session, request))
+}

@@ -28,3 +28,10 @@ type DelegationProvider interface {
 	DelegateSession(parent *session.Session, parentRequestID, toolCallID string, spec DelegationSpec) (DelegationReceipt, error)
 	ReadDelegationResult(parent *session.Session, delegationID string, offset, limit int) (DelegationResultPage, error)
 }
+
+// DelegationQueueProvider is optional for adapters. All identities remain
+// bound by the native tool transport, never supplied by the model.
+type DelegationQueueProvider interface {
+	CancelWaitingDelegation(parent *session.Session, id string) (map[string]any, error)
+	DelegationCapacity(parent *session.Session) (map[string]int, error)
+}

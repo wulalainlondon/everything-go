@@ -23,7 +23,7 @@ func (c *Codex) applyDelegationThreadTools(s *session.Session, params map[string
 		"description": "Delegate a user-authorized, independent one-turn task to a new Bridge conversation. Bridge returns its final answer to this conversation after completion.",
 		"tools": []map[string]any{{
 			"type": "function", "name": "delegate_session",
-			"description": "Create a fresh independent Codex session for a bounded task. Use only when the user asks you to delegate or independently check work. The child sees only the instruction you supply, not this chat history.",
+			"description": "Accept a fresh independent Codex task; excess work waits in a durable FIFO. An acceptance receipt does not prove execution started. Query get_capacity for this parent's separate execution, waiting and delivery limits. Use only when the user asks you to delegate or independently check work. The child sees only the instruction you supply, not this chat history.",
 			"inputSchema": map[string]any{
 				"type": "object", "additionalProperties": false,
 				"properties": map[string]any{
@@ -50,6 +50,13 @@ func (c *Codex) applyDelegationThreadTools(s *session.Session, params map[string
 			},
 		}},
 	}}
+	if _, ok := c.delegationProvider.(backend.DelegationQueueProvider); ok {
+		namespaces := params["dynamicTools"].([]map[string]any)
+		entries := namespaces[0]["tools"].([]map[string]any)
+		namespaces[0]["tools"] = append(entries,
+			map[string]any{"type": "function", "name": "get_capacity", "description": "Read this parent's configured execution, waiting and reserved-delivery bounds and counts. No work is started.", "inputSchema": map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{}}},
+			map[string]any{"type": "function", "name": "cancel_waiting_delegation", "description": "Cancel this parent's exact delegation only while it is durably waiting for execution capacity. Already-started or uncertain work is never reported stopped.", "inputSchema": map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{"delegation_id": map[string]any{"type": "string", "minLength": 1}}, "required": []string{"delegation_id"}}})
+	}
 }
 
 func (c *Codex) handleDelegationServerRequest(id any, method string, raw json.RawMessage) bool {
@@ -104,6 +111,24 @@ func (c *Codex) handleDelegationServerRequest(id any, method string, raw json.Ra
 						result, err = provider.DelegateVoiceSession(voiceCaller, spec)
 					} else {
 						err = errors.New("delegation_voice_unsupported")
+					}
+				}
+			case "cancel_waiting_delegation", "get_capacity":
+				provider, ok := c.delegationProvider.(backend.DelegationQueueProvider)
+				if !ok {
+					err = errors.New("delegation_queue_unsupported")
+					break
+				}
+				var args struct {
+					ID string `json:"delegation_id"`
+				}
+				decoder := json.NewDecoder(bytes.NewReader(call.Arguments))
+				decoder.DisallowUnknownFields()
+				if err = decoder.Decode(&args); err == nil {
+					if call.Tool == "get_capacity" {
+						result, err = provider.DelegationCapacity(s)
+					} else {
+						result, err = provider.CancelWaitingDelegation(s, args.ID)
 					}
 				}
 			case "read_result":

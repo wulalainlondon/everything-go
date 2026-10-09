@@ -15,6 +15,7 @@ import (
 
 	contract "everything-go/contracts/task-api/v1"
 	"everything-go/internal/backend"
+	"everything-go/internal/delegation"
 	"everything-go/internal/history"
 	"everything-go/internal/messagequeue"
 	"everything-go/internal/session"
@@ -88,9 +89,41 @@ func (h *Hub) apiTask(ctx context.Context, r taskapi.IntentRecord) (map[string]a
 		if n > revision {
 			revision = n
 		}
+		if r.Path == "delegation" {
+			n, e = h.delegations.Revision(ctx, command.SessionID, command.RequestID)
+			if e != nil {
+				return nil, e
+			}
+			if n > revision {
+				revision = n
+			}
+		}
+	}
+	capacityAccepted := false
+	if r.Path == "delegation" {
+		n, e := h.delegations.Revision(ctx, r.SessionID, r.RequestID)
+		if e != nil {
+			return nil, e
+		}
+		if n > revision {
+			revision = n
+		}
+		if original, ok, e := h.delegations.ByChildRequest(ctx, r.SessionID, r.RequestID); e != nil {
+			return nil, e
+		} else if ok && original.ChildRequestID == r.RequestID && !found {
+			capacityAccepted = true
+			axes["admission"] = "queued"
+			if original.State == "terminal" {
+				if original.Error == "cancelled_before_start" {
+					axes["cancellation"] = "confirmed"
+				} else {
+					axes["execution"] = "failed"
+				}
+			}
+		}
 	}
 	_ = snapshot.Revision
-	if !found {
+	if !found && !capacityAccepted {
 		if state, e := h.apiJournals()[r.Path].OutboxState(ctx, r.Key); e == nil && state == "unknown" {
 			axes["admission"] = "unknown"
 			axes["execution"] = "unknown"
@@ -458,7 +491,18 @@ func (h *Hub) Read(ctx context.Context, c taskapi.AuthorizedCommand) (any, error
 			}
 			routes = map[string]string{}
 		}
-		return map[string]any{"api_versions": []string{contract.Version}, "schema_hash": contract.Hash(), "allowed_operations": ops, "paths": []string{"ordinary", "controller", "delegation"}, "providers": providers, "limits": map[string]int{"max_instruction_chars": 32000, "max_pending_children": 3, "event_retention_days": 30, "max_events_per_scope": 100000, "receipt_retention_days": 90}, "default_worker_profile": map[string]string{"backend": "codex", "model": "gpt-6.1-sol", "effort": "high"}, "mutation_authority_instance_id": h.cfg.InstanceID, "create_routes": routes}, nil
+		capacity := delegation.DefaultLimits
+		if h.delegations == nil {
+			capacity.Active = 0
+			delete(routes, "new_worker")
+		} else {
+			var err error
+			capacity, err = h.delegations.LimitsForParent(ctx, c.Caller.SourceSessionID)
+			if err != nil {
+				return nil, err
+			}
+		}
+		return map[string]any{"api_versions": []string{contract.Version}, "schema_hash": contract.Hash(), "allowed_operations": ops, "paths": []string{"ordinary", "controller", "delegation"}, "providers": providers, "limits": map[string]int{"max_instruction_chars": 32000, "max_pending_children": capacity.Active, "event_retention_days": 30, "max_events_per_scope": 100000, "receipt_retention_days": 90}, "default_worker_profile": map[string]string{"backend": "codex", "model": "gpt-6.1-sol", "effort": "high"}, "mutation_authority_instance_id": h.cfg.InstanceID, "create_routes": routes}, nil
 	case "get":
 		if in.Original != nil {
 			j := h.apiJournals()[c.Locator.Path]

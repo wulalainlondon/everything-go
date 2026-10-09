@@ -74,6 +74,16 @@ func (h *Hub) StartTaskCoordinator(ctx context.Context) {
 							_ = j.Outbox(ctx, r.Key, state)
 							continue
 						}
+						if path == "delegation" {
+							if d, ok, e := h.delegations.ByChildRequest(ctx, r.SessionID, r.RequestID); e == nil && ok {
+								if d.State == "terminal" && (d.DeliveryState == "not_requested" || d.DeliveryState == "failed" || d.DeliveryState == "delivered") {
+									_ = j.Outbox(ctx, r.Key, "resolved")
+								} else {
+									h.wakeDelegations()
+								}
+								continue
+							}
+						}
 						if metadata.Request.Operation != "create_dispatch" {
 							// Missing append queue identity is ambiguous after a crash.
 							// Never provision a child or mint/replay another command.
@@ -100,9 +110,9 @@ func (h *Hub) StartTaskCoordinator(ctx context.Context) {
 								h.submitLocalSessionDispatch(ctx, original)
 							}
 						} else if path == "delegation" {
-							if original, found, err := h.delegations.ByID(ctx, r.NativeID); err == nil && found && original.State == "provisioning" {
-								h.provisionDelegation(ctx, original)
-							}
+							// A single cyclic scheduler owns promotion/provisioning for both
+							// native and API admissions. The journal never bypasses its capacity.
+							h.wakeDelegations()
 						} else if path == "ordinary" {
 							// Ordinary admission is atomic with its original queue
 							// entry. Missing identity cannot be a recoverable prepared

@@ -53,7 +53,11 @@ type dispatchTargetExpectation struct {
 }
 
 func (e *dispatchTargetExpectation) matches(s *session.Session) bool {
-	return e == nil || (s.ResumeID() == e.ThreadID && s.SettingsSnapshot().ConfigRevision == e.Revision && s.State() != session.Closed && !s.Snapshot().Hidden)
+	if e == nil {
+		return true
+	}
+	snap := s.SettingsSnapshot()
+	return snap.ResumeID == e.ThreadID && snap.ConfigRevision == e.Revision && snap.State != session.Closed && !snap.Hidden
 }
 
 func (h *Hub) enqueueChatMessageExpected(c *Client, cmd clientproto.Command, expected *dispatchTargetExpectation) bool {
@@ -72,6 +76,14 @@ func (h *Hub) enqueueChatMessageExpected(c *Client, cmd clientproto.Command, exp
 	}
 	if cmd.RequestID == "" {
 		cmd.RequestID = "legacy_" + randomID()
+	}
+	if err := h.delegationReturnGuard(context.Background(), s, cmd.RequestID, expected); err != nil {
+		h.queueError(c, cmd, "delegation_return_guard", err.Error())
+		return false
+	}
+	if err := h.delegationExecutionGuard(context.Background(), s, cmd.RequestID, false); err != nil {
+		h.queueError(c, cmd, "delegation_capacity_guard", err.Error())
+		return false
 	}
 	content, files, err := h.resolveUploadedVideos(cmd.SessionID, cmd.Content, cmd.Files)
 	if err != nil {
@@ -196,6 +208,20 @@ func (h *Hub) runQueuedMessage(s *session.Session, requestID string) {
 	}
 	if !h.controls.MobileMayWrite(s.ID) {
 		h.Emit(backend.NewError(s.ID, requestID, "session_controlled_by_desktop", "Reclaim the conversation before sending another message"))
+		return
+	}
+
+	// Recheck after activation/events/preview writes, immediately at Send.
+	if !payload.ExpectedTarget.matches(s) || (payload.ExpectedTarget != nil && payload.Configuration != nil && session.ConfigurationFrom(s.Snapshot()) != *payload.Configuration) {
+		h.Emit(backend.NewError(s.ID, requestID, "dispatch_target_changed", "Target changed before Send"))
+		return
+	}
+	if guardErr := h.delegationReturnGuard(context.Background(), s, requestID, payload.ExpectedTarget); guardErr != nil {
+		h.Emit(backend.NewError(s.ID, requestID, "delegation_return_guard", guardErr.Error()))
+		return
+	}
+	if guardErr := h.delegationExecutionGuard(context.Background(), s, requestID, true); guardErr != nil {
+		h.Emit(backend.NewError(s.ID, requestID, "delegation_capacity_guard", guardErr.Error()))
 		return
 	}
 	if err = h.exec.Send(context.Background(), s, requestID, payload.Content, payload.Images, payload.Files); err != nil {

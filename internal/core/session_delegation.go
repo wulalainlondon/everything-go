@@ -20,6 +20,7 @@ import (
 	"everything-go/internal/delegation"
 	"everything-go/internal/messagequeue"
 	"everything-go/internal/protocol"
+	"everything-go/internal/runtimejournal"
 	"everything-go/internal/session"
 )
 
@@ -158,8 +159,13 @@ func (h *Hub) delegateSession(parent *session.Session, parentRequestID, toolCall
 	parentReturnID := "dgreturn_" + id
 	r := delegation.Record{ID: id, ParentSessionID: parent.ID, OriginRequestID: parentRequestID, ToolCallID: toolCallID, IntentHash: intentHash, ParentRequestID: parentReturnID,
 		ChildSessionID: childID, ChildRequestID: childRequestID, ChildName: name, Cwd: childRoot,
-		Instruction: spec.Instruction, Model: model, Effort: effort, Sandbox: sandbox}
-	if err := h.delegations.CreateBounded(context.Background(), r, 3); err != nil {
+		Instruction: spec.Instruction, Model: model, Effort: effort, Sandbox: sandbox, SourceThread: parent.ResumeID(), SourceRevision: parent.SettingsSnapshot().ConfigRevision}
+	var identityErr error
+	r.WorkspaceIdentity, identityErr = taskRootIdentity(childRoot)
+	if identityErr != nil {
+		return backend.DelegationReceipt{}, identityErr
+	}
+	if err := h.delegations.CreateBounded(context.Background(), r); err != nil {
 		// Another copy of this exact tool call may have committed first.
 		if previous, found, lookupErr := h.delegations.ByOrigin(context.Background(), parent.ID, parentRequestID, toolCallID); lookupErr == nil && found {
 			if previous.IntentHash != intentHash {
@@ -211,10 +217,11 @@ func (h *Hub) wakeDelegations() {
 // terminal result capture, and parent delivery. It never resends an accepted
 // message under a new request ID after an ambiguous failure.
 func (h *Hub) StartDelegationScheduler(ctx context.Context) {
-	if h.delegations == nil {
+	if h.delegations == nil || !h.delegationScheduler.CompareAndSwap(false, true) {
 		return
 	}
 	go func() {
+		defer h.delegationScheduler.Store(false)
 		ticker := time.NewTicker(3 * time.Second)
 		defer ticker.Stop()
 		for {
@@ -235,7 +242,7 @@ func (h *Hub) reconcileDelegations(ctx context.Context) error {
 	if h.delegations == nil {
 		return nil
 	}
-	items, err := h.delegations.Pending(ctx)
+	items, err := h.delegations.PendingBatch(ctx, 128)
 	if err != nil {
 		return err
 	}
@@ -248,14 +255,68 @@ func (h *Hub) reconcileDelegations(ctx context.Context) error {
 }
 
 func (h *Hub) reconcileDelegation(ctx context.Context, r delegation.Record) error {
+	h.delegationMu.Lock()
+	defer h.delegationMu.Unlock()
+	var found bool
+	var err error
+	r, found, err = h.delegations.ByID(ctx, r.ID)
+	if err != nil || !found {
+		return err
+	}
+	if r.State == "queued" {
+		promoted, e := h.delegations.TryPromote(ctx, r.ID)
+		if e != nil || !promoted {
+			return e
+		}
+		r.State = "provisioning"
+	}
 	if r.State == "provisioning" {
-		if err := h.provisionDelegation(ctx, r); err != nil {
+		if err := h.provisionDelegationLocked(ctx, r); err != nil {
 			return err
 		}
-		r.State = "running"
+		r, found, err = h.delegations.ByID(ctx, r.ID)
+		if err != nil || !found {
+			return err
+		}
 	}
 	if r.State == "running" {
-		for _, terminal := range h.runtimes.WidgetTerminals(r.ChildSessionID, r.CreatedAt) {
+		entry, found, e := h.messageQueue.Get(r.ChildSessionID, r.ChildRequestID)
+		if e != nil {
+			return e
+		}
+		if found && entry.State == messagequeue.Failed && entry.Message == "Queue is full or session is closed" {
+			// Actor admission refused before Send. Unlike timeout/uncertain, this is a
+			// definitive pre-execution failure even without a runtime terminal event.
+			if _, e = h.delegations.Complete(ctx, r.ChildSessionID, r.ChildRequestID, "failed", "", "child_actor_admission_failed", nil); e != nil {
+				return e
+			}
+			r, _, e = h.delegations.ByID(ctx, r.ID)
+			if e != nil {
+				return e
+			}
+		}
+		if found && entry.State == messagequeue.Cancelled {
+			origin, e := h.messageQueue.CancelOrigin(r.ChildSessionID, r.ChildRequestID)
+			if e != nil {
+				return e
+			}
+			if origin == messagequeue.Queued {
+				if _, e = h.delegations.Complete(ctx, r.ChildSessionID, r.ChildRequestID, "interrupted", "", "cancelled_before_native_handoff", nil); e != nil {
+					return e
+				}
+				r, _, e = h.delegations.ByID(ctx, r.ID)
+				if e != nil {
+					return e
+				}
+			}
+		}
+	}
+	if r.State == "running" || r.State == "collecting" {
+		terminals := h.runtimes.WidgetTerminals(r.ChildSessionID, r.CreatedAt)
+		if r.State == "collecting" {
+			terminals = []runtimejournal.Terminal{{RequestID: r.ChildRequestID, Status: r.TerminalStatus, At: r.UpdatedAt, Source: "delegation_terminal"}}
+		}
+		for _, terminal := range terminals {
 			if terminal.RequestID != r.ChildRequestID {
 				continue
 			}
@@ -264,6 +325,12 @@ func (h *Hub) reconcileDelegation(ctx context.Context, r delegation.Record) erro
 				// Bridge restart. A synthetic interruption is not evidence that
 				// the child actually stopped; wait for a native terminal.
 				continue
+			}
+			if r.State != "collecting" {
+				if err := h.delegations.MarkCollecting(ctx, r.ID, terminal.Status); err != nil {
+					return err
+				}
+				r.State = "collecting"
 			}
 			result := ""
 			if terminal.Status == "completed" {
@@ -278,7 +345,7 @@ func (h *Hub) reconcileDelegation(ctx context.Context, r delegation.Record) erro
 					if json.Unmarshal(data, &metadata) != nil {
 						return errors.New("api_child_metadata_invalid")
 					}
-					intent, e := h.delegations.TaskJournal().Task(ctx, metadata.Caller.StableScopeID, metadata.Caller.NamespaceGeneration, apiID(h.cfg.InstanceID, "delegation", r.ID))
+					intent, e := h.delegations.TaskJournal().OriginalCommandForRequest(ctx, r.ChildSessionID, r.ChildRequestID)
 					if e != nil {
 						return e
 					}
@@ -310,7 +377,7 @@ func (h *Hub) reconcileDelegation(ctx context.Context, r delegation.Record) erro
 					}
 					// The app-server can report done just before the native JSONL is
 					// flushed. Retry asynchronously; never substitute commentary.
-					if !found && time.Since(time.UnixMilli(terminal.At)) < 30*time.Second {
+					if !found {
 						return nil
 					}
 				}
@@ -331,18 +398,30 @@ func (h *Hub) reconcileDelegation(ctx context.Context, r delegation.Record) erro
 			break
 		}
 	}
-	if r.State != "terminal" || r.DeliveryState == "delivered" {
+	if r.State != "terminal" || r.DeliveryState == "delivered" || r.DeliveryState == "failed" || r.DeliveryState == "not_requested" {
 		return nil
 	}
 	if r.DeliveryState == "pending" {
 		parent, ok := h.registry.Get(r.ParentSessionID)
-		if !ok || !h.controls.MobileMayWrite(r.ParentSessionID) || parent.IsStreaming() || parent.QueueLen() > 0 {
+		if !ok || parent.State() == session.Closed {
+			_, e := h.delegations.MarkDeliveryFailed(ctx, r.ParentSessionID, r.ParentRequestID, "source_unavailable")
+			return e
+		}
+		thread, revision, bound, e := h.delegations.SourceBinding(ctx, r.ID)
+		if e != nil {
+			return e
+		}
+		if !bound || parent.ResumeID() != thread || parent.SettingsSnapshot().ConfigRevision != revision {
+			_, e := h.delegations.MarkDeliveryFailed(ctx, r.ParentSessionID, r.ParentRequestID, "source_binding_changed_or_missing")
+			return e
+		}
+		if !h.controls.MobileMayWrite(r.ParentSessionID) || parent.IsStreaming() || parent.QueueLen() > 0 {
 			return nil
 		}
 		if views := h.runtimes.Snapshot("", []string{r.ParentSessionID}); len(views) == 1 && runtimePhaseActive(views[0].Phase) {
 			return nil
 		}
-		var apiReturnTarget *dispatchTargetExpectation
+		returnTarget := &dispatchTargetExpectation{ThreadID: thread, Revision: revision}
 		if data, api, err := h.delegations.APIChildMetadata(ctx, r.ChildSessionID); err != nil {
 			return err
 		} else if api {
@@ -351,11 +430,15 @@ func (h *Hub) reconcileDelegation(ctx context.Context, r delegation.Record) erro
 				_, e := h.delegations.MarkDeliveryFailed(ctx, r.ParentSessionID, r.ParentRequestID, "source_binding_changed")
 				return e
 			}
-			apiReturnTarget = &dispatchTargetExpectation{ThreadID: metadata.SourceThread, Revision: metadata.SourceRevision}
+			// API metadata must agree with the original durable source binding.
+			if metadata.SourceThread != thread || metadata.SourceRevision != revision {
+				_, e := h.delegations.MarkDeliveryFailed(ctx, r.ParentSessionID, r.ParentRequestID, "source_binding_changed")
+				return e
+			}
 		}
 		content := delegationReturnText(r)
 		client := &Client{hub: h, deviceID: "delegation-system", send: make(chan []byte, 64), quit: make(chan struct{}), ctx: context.Background()}
-		h.enqueueChatMessageExpected(client, clientproto.Command{Kind: "message", SessionID: r.ParentSessionID, RequestID: r.ParentRequestID, Content: content, MessagePurpose: "result_return"}, apiReturnTarget)
+		h.enqueueChatMessageExpected(client, clientproto.Command{Kind: "message", SessionID: r.ParentSessionID, RequestID: r.ParentRequestID, Content: content, MessagePurpose: "result_return"}, returnTarget)
 		if _, found, err := h.messageQueue.Get(r.ParentSessionID, r.ParentRequestID); err != nil {
 			return err
 		} else if !found {
@@ -392,6 +475,43 @@ func (h *Hub) reconcileDelegation(ctx context.Context, r delegation.Record) erro
 }
 
 func (h *Hub) provisionDelegation(ctx context.Context, r delegation.Record) error {
+	h.delegationMu.Lock()
+	defer h.delegationMu.Unlock()
+	return h.provisionDelegationLocked(ctx, r)
+}
+func (h *Hub) provisionDelegationLocked(ctx context.Context, r delegation.Record) error {
+	// Never trust a stale scheduler/coordinator snapshot, and never let a direct
+	// API caller skip FIFO promotion or revive a cancelled record.
+	current, found, err := h.delegations.ByID(ctx, r.ID)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return errors.New("delegation_missing")
+	}
+	r = current
+	if r.State == "queued" {
+		promoted, e := h.delegations.TryPromote(ctx, r.ID)
+		if e != nil || !promoted {
+			return e
+		}
+		r.State = "provisioning"
+	}
+	if r.State != "provisioning" {
+		return nil
+	}
+
+	if _, exists, e := h.messageQueue.Get(r.ChildSessionID, r.ChildRequestID); e != nil {
+		return e
+	} else if !exists {
+		if e := h.validateDelegationBinding(ctx, r); e != nil {
+			if err := h.delegations.MarkProvisionFailed(ctx, r.ID, e.Error()); err != nil {
+				return err
+			}
+			return e
+		}
+	}
+
 	if _, ok := h.registry.Get(r.ParentSessionID); !ok {
 		if err := h.delegations.MarkProvisionFailed(ctx, r.ID, "parent_session_missing"); err != nil {
 			return err
@@ -417,11 +537,29 @@ func (h *Hub) provisionDelegation(ctx context.Context, r delegation.Record) erro
 			Cwd: snap.Cwd, Backend: snap.Backend, Model: snap.Model, Sandbox: snap.Sandbox}))
 		h.Emit(h.client.SessionsList(h.sessionSummaries()))
 	}
+	// Validate the actual registry child after creation/recovery and before
+	// queue reuse. Queue commitment is not permission to adopt a changed profile.
+	if e := h.validateDelegationBinding(ctx, r); e != nil {
+		if _, committed, err := h.messageQueue.Get(r.ChildSessionID, r.ChildRequestID); err != nil {
+			return err
+		} else if !committed {
+			if err := h.delegations.MarkProvisionFailed(ctx, r.ID, e.Error()); err != nil {
+				return err
+			}
+		}
+		return e
+	}
 	if _, found, err := h.messageQueue.Get(r.ChildSessionID, r.ChildRequestID); err != nil {
 		return err
 	} else if !found {
 		client := &Client{hub: h, deviceID: "delegation-system", send: make(chan []byte, 64), quit: make(chan struct{}), ctx: context.Background()}
-		h.enqueueChatMessage(client, clientproto.Command{Kind: "message", SessionID: r.ChildSessionID, RequestID: r.ChildRequestID, Content: r.Instruction})
+		expectedThread, expectedRevision, _, err := h.delegations.ExecutionBinding(ctx, r.ID)
+		if err != nil {
+			return err
+		}
+		// Empty is an exact initial-thread expectation, not a wildcard.
+		expected := &dispatchTargetExpectation{ThreadID: expectedThread, Revision: expectedRevision}
+		h.enqueueChatMessageExpected(client, clientproto.Command{Kind: "message", SessionID: r.ChildSessionID, RequestID: r.ChildRequestID, Content: r.Instruction}, expected)
 		if _, queued, err := h.messageQueue.Get(r.ChildSessionID, r.ChildRequestID); err != nil || !queued {
 			return fmt.Errorf("delegation_child_enqueue_failed: %v", err)
 		}
