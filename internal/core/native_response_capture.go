@@ -15,25 +15,37 @@ import (
 type NativeResponseCapture struct {
 	Directory, SourceSession, SourceThread string
 	SourceRevision                         uint64
+	Authority, ConfigPath, ConfigHash      string
+	Operations                             map[string]bool
+	Verifier                               *NativeArtifactVerifier
 	Tasks                                  map[string]string // exact owned task -> expected immutable final hash
 }
 
-func (h *Hub) SetNativeResponseCapture(c *NativeResponseCapture) { h.nativeCapture = c }
+func (h *Hub) SetNativeResponseCapture(c *NativeResponseCapture) { h.nativeCapture.Store(c) }
 
 // Called by the original MCP/native response owner before model consumption.
 // No request body, credential/header/token/env/history/reasoning is persisted.
 // Only the public projection is stored; digest covers the original structured
 // response serialization. It is explicitly NOT raw HTTP/provider-wire proof.
 func (h *Hub) CaptureTaskResponse(ctx context.Context, c backend.TaskCaller, raw json.RawMessage, response taskapi.Response) error {
-	p := h.nativeCapture
+	return h.capturePublicResponse(ctx, c, raw, response, true)
+}
+func (h *Hub) capturePublicResponse(ctx context.Context, c backend.TaskCaller, raw json.RawMessage, response taskapi.Response, verify bool) error {
+	p := h.nativeCapture.Load()
 	if p == nil {
 		return nil
+	}
+	if !h.captureConfigCurrent(p) {
+		return os.ErrPermission
 	}
 	if c.Session == nil || c.Validate == nil || !c.Validate() || c.Session.ID != p.SourceSession || c.ThreadID != p.SourceThread || c.Session.ResumeID() != p.SourceThread || c.Session.SettingsSnapshot().ConfigRevision != p.SourceRevision || c.Session.ActiveQueuedID() != c.RequestID || c.CallID == "" {
 		return nil
 	}
 	var request taskapi.Request
-	if json.Unmarshal(raw, &request) != nil || request.Operation != "get" && request.Operation != "read_result" && request.Operation != "capabilities" {
+	if json.Unmarshal(raw, &request) != nil || request.Operation != "get" && request.Operation != "read_result" && request.Operation != "capabilities" && request.Operation != "artifact_capabilities" && request.Operation != "read_artifact_bytes" {
+		return nil
+	}
+	if p.Operations != nil && !p.Operations[request.Operation] {
 		return nil
 	}
 	if !response.OK {
@@ -44,17 +56,20 @@ func (h *Hub) CaptureTaskResponse(ctx context.Context, c backend.TaskCaller, raw
 	if json.Unmarshal(bodyBytes, &body) != nil {
 		return nil
 	}
-	if request.Operation != "capabilities" {
+	if request.Operation != "capabilities" && request.Operation != "artifact_capabilities" {
 		id, _ := body["task_id"].(string)
 		wanted, selected := p.Tasks[id]
 		if !selected {
+			return nil
+		}
+		if request.Operation == "read_artifact_bytes" && (body["full_hash"] != wanted || body["artifact_id"] != "result.txt" || body["seal_id"] != "seal_"+wanted) {
 			return nil
 		}
 		if request.Operation == "read_result" && body["final_hash"] != wanted {
 			return nil
 		}
 	}
-	fields := []string{"task_id", "task_ref", "axes", "revision", "definition_revision", "seal_id", "final_hash", "receipt_ids", "offset", "next_offset", "has_more", "terminal_status", "text", "api_versions", "schema_hash", "allowed_operations", "paths", "mutation_authority_instance_id"}
+	fields := []string{"task_id", "task_ref", "axes", "revision", "definition_revision", "seal_id", "final_hash", "receipt_ids", "offset", "next_offset", "has_more", "terminal_status", "text", "api_versions", "schema_hash", "allowed_operations", "paths", "mutation_authority_instance_id", "artifact_id", "owner_request_id", "total_bytes", "full_hash", "chunk_hash", "data_base64", "max_range_bytes", "artifact_owner", "reported_paths"}
 	public := map[string]any{}
 	for _, field := range fields {
 		if value, ok := body[field]; ok {
@@ -85,5 +100,12 @@ func (h *Hub) CaptureTaskResponse(ctx context.Context, c backend.TaskCaller, raw
 	}
 	defer file.Close()
 	_, err = file.Write(append(data, '\n'))
+	if err == nil && verify && p.Verifier != nil && request.Operation == "read_artifact_bytes" && body["offset"] == float64(0) {
+		err = h.verifyOriginalArtifact(ctx, c, request, p)
+	}
 	return err
+}
+
+func captureCallerCurrent(p *NativeResponseCapture, c backend.TaskCaller) bool {
+	return c.Session != nil && c.Validate != nil && c.Validate() && c.Session.ID == p.SourceSession && c.ThreadID == p.SourceThread && c.Session.ResumeID() == p.SourceThread && c.Session.SettingsSnapshot().ConfigRevision == p.SourceRevision && c.Session.ActiveQueuedID() == c.RequestID && c.CallID != ""
 }
