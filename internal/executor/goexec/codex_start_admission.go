@@ -62,7 +62,14 @@ func (c *Codex) readStartAdmission(s *session.Session, st *codexState, requestID
 	if response.Thread.Status.Type == "active" {
 		return nil, &codexAcceptanceError{Reason: "native_submission_busy"}
 	}
-	if response.Thread.Status.Type != "idle" {
+	// Codex keeps systemError after a failed turn until the next turn starts.
+	// It is recoverable, but an error notification can precede the terminal
+	// event. Confirm the newest native turn ended without loading its items.
+	if response.Thread.Status.Type == "systemError" {
+		if !c.systemErrorTurnEnded(threadID, epoch) {
+			return nil, &codexAcceptanceError{Reason: "native_idle_unverified"}
+		}
+	} else if response.Thread.Status.Type != "idle" {
 		return nil, &codexAcceptanceError{Reason: "native_idle_unverified"}
 	}
 	st.mu.Lock()
@@ -71,6 +78,30 @@ func (c *Codex) readStartAdmission(s *session.Session, st *codexState, requestID
 		return nil, &codexAcceptanceError{Reason: "native_source_changed"}
 	}
 	return &codexStartAdmission{ThreadID: threadID, RequestID: requestID, Epoch: epoch, Boundary: boundary, ConfigRevision: revision, Source: s}, nil
+}
+
+func (c *Codex) systemErrorTurnEnded(threadID string, epoch uint64) bool {
+	raw, err := c.rpc.requestAtEpoch("thread/turns/list", map[string]any{
+		"threadId": threadID, "limit": 1, "sortDirection": "desc", "itemsView": "notLoaded",
+	}, 15*time.Second, &epoch)
+	if err != nil || len(raw) > 64<<10 {
+		return false
+	}
+	var response struct {
+		Data []struct {
+			ID     string `json:"id"`
+			Status string `json:"status"`
+		} `json:"data"`
+	}
+	if json.Unmarshal(raw, &response) != nil || len(response.Data) != 1 || response.Data[0].ID == "" {
+		return false
+	}
+	switch response.Data[0].Status {
+	case "completed", "interrupted", "failed":
+		return true
+	default:
+		return false
+	}
 }
 
 func (a *codexStartAdmission) sourceKnown() bool {

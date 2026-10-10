@@ -33,7 +33,7 @@ func (c *Codex) applyTaskAPIThreadTools(s *session.Session, params map[string]an
 		// controller/delegation/read tools retain their original parent policy.
 		params["dynamicTools"] = []map[string]any{{"type": "namespace", "name": "bridge_tasks", "description": "Bounded task input/context only.", "tools": tools}}
 		version := c.taskDaemonVersion()
-		if version != "0.160.0" {
+		if !taskapi.SupportedNativeProviderVersion("codex", version) {
 			return errors.New("unsupported: exact bounded Codex daemon version is unverified")
 		}
 		raw, e := c.rpcCall("config/read", map[string]any{"includeLayers": false}, 15*time.Second)
@@ -122,14 +122,14 @@ func (c *Codex) TaskAPICapabilities() []taskapi.ProviderCapability {
 		version = "unknown"
 	}
 	capability := taskapi.UnloadedCapability("codex", version, "Original daemon version and provider tool registration must be verified; account/quota are unknown.")
-	if c.taskProvider != nil && version == "0.160.0" {
+	if c.taskProvider != nil && taskapi.SupportedNativeProviderVersion("codex", version) {
 		capability.Binding = "native_tool"
 		capability.Lifecycle = "registered"
 		capability.NativeEvidence = "exact_turn"
 		capability.Operations = []string{"capabilities", "create_dispatch", "list", "get", "read_result", "snapshot", "events", "read_input"}
 		capability.Models = []any{map[string]any{"model": "gpt-6.1-sol", "efforts": []string{"high"}}}
 		capability.Enforcement = taskapi.ScopeEnforcement{Mode: "gateway_only_tools", Roots: true, Tools: true, Network: true, Delegation: true}
-		capability.Reason = "Adapter registered for exact daemon 0.160.0; per-thread RPC and invocation are distinct later evidence. Existing-thread narrowing, active cancel, steer and BG are unsupported. Account/quota remain unknown."
+		capability.Reason = "Adapter registered for qualified daemon " + version + "; per-thread RPC and invocation are distinct later evidence. Existing-thread narrowing, active cancel, steer and BG are unsupported. Account/quota remain unknown."
 	}
 	return []taskapi.ProviderCapability{capability}
 }

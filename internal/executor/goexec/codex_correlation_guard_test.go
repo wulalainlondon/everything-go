@@ -215,6 +215,9 @@ func TestNativeCorrelationRecoveryIdleGateAndGenerationNoSecondSend(t *testing.T
 				st.turnActive = true
 			}
 			w.reply = func(method string, _ json.RawMessage) (any, error) {
+				if kind == "systemError" && method == "thread/turns/list" {
+					return map[string]any{"data": []any{}}, nil
+				}
 				if method != "thread/read" {
 					t.Fatal("model sent before idle", method)
 				}
@@ -246,7 +249,11 @@ func TestNativeCorrelationRecoveryIdleGateAndGenerationNoSecondSend(t *testing.T
 			if kind != "idle" && err == nil {
 				t.Fatal("unproven idle admitted")
 			}
-			if len(w.methods) > 1 || st.observedTurnID != "old-original-turn" || st.observedRequestID != "old-real-request" {
+			maxReads := 1
+			if kind == "systemError" {
+				maxReads = 2
+			}
+			if len(w.methods) > maxReads || st.observedTurnID != "old-original-turn" || st.observedRequestID != "old-real-request" {
 				t.Fatal("old activity modified or extra RPC")
 			}
 		})

@@ -12,6 +12,7 @@ import (
 
 	"everything-go/internal/backend"
 	"everything-go/internal/session"
+	"everything-go/internal/taskapi"
 )
 
 type codexVoiceCall struct {
@@ -32,12 +33,12 @@ func (c *Codex) voiceThread(s *session.Session) (string, error) {
 		return "", err
 	}
 	diagnostics, _ := c.RuntimeDiagnostics()["codex"].(map[string]any)
-	if version, _ := diagnostics["running_version"].(string); version != "0.160.0" && c.authPath != "" {
+	if version, _ := diagnostics["running_version"].(string); !taskapi.SupportedNativeProviderVersion("codex", version) && c.authPath != "" {
 		c.refreshRuntimeDiagnostics(filepath.Dir(c.authPath))
 		diagnostics, _ = c.RuntimeDiagnostics()["codex"].(map[string]any)
 	}
-	if version, _ := diagnostics["running_version"].(string); version != "0.160.0" {
-		return "", fmt.Errorf("共享 Codex app-server 為 %s；雙向語音需要已驗證的 0.160.0", version)
+	if version, _ := diagnostics["running_version"].(string); !taskapi.SupportedNativeProviderVersion("codex", version) {
+		return "", fmt.Errorf("共享 Codex app-server 為 %s；雙向語音需要已驗證的 CLI 介面版本", version)
 	}
 	return c.resumeExactControllerThread(s)
 }

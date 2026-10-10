@@ -268,7 +268,7 @@ func (c *Claude) taskSpawn(s *session.Session, args []string, pm *backend.PMConf
 		return args, nil, nil
 	}
 	version := c.taskVersion()
-	if version != "2.1.280" && version != "2.1.291" {
+	if !taskapi.SupportedNativeProviderVersion("claude", version) {
 		if bounded {
 			return nil, nil, fmt.Errorf("unsupported: bounded task provider version")
 		}
@@ -316,7 +316,7 @@ func addTaskEnvironment(current []string, lease *claudeTaskLease) []string {
 func (c *Claude) TaskAPICapabilities() []taskapi.ProviderCapability {
 	version := c.taskVersion()
 	capability := taskapi.UnloadedCapability("claude", version, "MCP registration or exact provider version is unavailable.")
-	if c.taskProvider != nil && c.taskMCP != nil && (version == "2.1.280" || version == "2.1.291") {
+	if c.taskProvider != nil && c.taskMCP != nil && taskapi.SupportedNativeProviderVersion("claude", version) {
 		capability.Binding = "mcp_process_binding"
 		capability.Lifecycle = "registered"
 		capability.NativeEvidence = "exact_provider_token"

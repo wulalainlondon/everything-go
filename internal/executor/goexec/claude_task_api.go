@@ -15,7 +15,7 @@ type ClaudeTaskAPIVerifier struct {
 }
 
 func (v ClaudeTaskAPIVerifier) Verify(ctx context.Context, inv taskapi.Invocation) (taskapi.VerifiedContext, error) {
-	if v.Authority == nil || (v.Version != "2.1.280" && v.Version != "2.1.291") {
+	if v.Authority == nil || !taskapi.SupportedNativeProviderVersion("claude", v.Version) {
 		return taskapi.VerifiedContext{}, taskapi.Failure("unsupported", "known_none", "read_capabilities")
 	}
 	state, err := v.Authority.LookupTaskInvocation(ctx, inv)
@@ -34,7 +34,7 @@ func ClaudeTaskAPIInterfaceCapability(version string) taskapi.ProviderCapability
 	return taskapi.UnloadedCapability("claude", version, "B4 interface only; authenticated per-process MCP not registered/loaded")
 }
 func PrepareClaudeTaskWorker(profile backend.TaskWorkerProfile, version string, parent, scope taskapi.ChildScope, enforcement taskapi.ScopeEnforcement) (backend.TaskWorkerPlan, error) {
-	if profile.Backend != "claude" || profile.Model == "" || profile.Effort == "" || (version != "2.1.280" && version != "2.1.291") {
+	if profile.Backend != "claude" || profile.Model == "" || profile.Effort == "" || !taskapi.SupportedNativeProviderVersion("claude", version) {
 		return backend.TaskWorkerPlan{}, taskapi.Failure("unsupported", "known_none", "read_capabilities")
 	}
 	if err := taskapi.ValidateChildScope(parent, scope, enforcement); err != nil {

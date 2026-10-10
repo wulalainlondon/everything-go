@@ -179,7 +179,7 @@ func (h *Hub) ExecuteTask(ctx context.Context, c backend.TaskCaller, raw []byte)
 		if !ok || s != c.Session || c.Validate == nil || !c.Validate() || s.ActiveQueuedID() != c.RequestID || s.ResumeID() != c.ThreadID || s.State() == session.Closed || s.Snapshot().Hidden || !h.controls.MobileMayWrite(s.ID) {
 			return taskapi.VerifiedContext{}, taskapi.Failure("caller_unbound", "known_none", "refresh_identity")
 		}
-		if s.Backend() == backend.Codex && (c.ProviderVersion != "0.160.0" || c.ProcessGeneration != "" || c.TurnID == "") || s.Backend() == backend.Claude && ((c.ProviderVersion != "2.1.280" && c.ProviderVersion != "2.1.291") || c.ProcessGeneration == "" || c.TurnID != "") {
+		if s.Backend() == backend.Codex && (!taskapi.SupportedNativeProviderVersion("codex", c.ProviderVersion) || c.ProcessGeneration != "" || c.TurnID == "") || s.Backend() == backend.Claude && (!taskapi.SupportedNativeProviderVersion("claude", c.ProviderVersion) || c.ProcessGeneration == "" || c.TurnID != "") {
 			return taskapi.VerifiedContext{}, taskapi.Failure("unsupported", "known_none", "read_capabilities")
 		}
 		snapshot := s.Snapshot()
