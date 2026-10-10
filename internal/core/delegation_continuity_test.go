@@ -551,27 +551,12 @@ func TestContinuityAPINativeSteerRetainsFormalScopeButQueueUsesExistingAppend(t 
 		t.Fatal("duplicated formal append implementation", e)
 	}
 	roundsView, e := h.DelegationRounds(p, original.ID, 0)
-	if e != nil || roundsView.(map[string]any)["continuation_availability"] != "unsupported" {
+	if e != nil || roundsView.(map[string]any)["continuation_availability"] != "available" {
 		t.Fatal("misleading queue continuation availability", roundsView, e)
 	}
 	currentTarget := roundsView.(map[string]any)["current_target"].(map[string]any)
 	if currentTarget["config_revision"] != child.SettingsSnapshot().ConfigRevision || currentTarget["native_thread_id"] != child.ResumeID() {
 		t.Fatal("target configuration borrowed from source", currentTarget)
-	}
-	call := backend.TaskCaller{Session: p, RequestID: p.ActiveQueuedID(), ThreadID: p.ResumeID(), TurnID: "synthetic-source-turn", CallID: "synthetic-native-continue", ProviderVersion: "0.162.1", Validate: func() bool { return true }}
-	continueInput := map[string]any{"continuity": map[string]any{"action": "continue", "arguments": queue}}
-	command, _ := json.Marshal(map[string]any{"type": "task_api_request", "api_version": contract.Version, "correlation_id": "synthetic-native-formal-continue", "operation": "append", "idempotency_key": "synthetic-native-formal-continue", "input": continueInput})
-	refused := h.ExecuteTask(ctx, call, command)
-	if refused.OK || refused.Error.Code != "unsupported" || refused.Error.Acceptance != "known_none" {
-		t.Fatal("formal refusal relabeled permission", refused)
-	}
-	lookup, _ := json.Marshal(map[string]any{"type": "task_api_request", "api_version": contract.Version, "correlation_id": "synthetic-command-lookup", "operation": "get", "input": map[string]any{"continuity": map[string]any{"action": "command", "arguments": map[string]any{"idempotency_key": "synthetic-native-formal-continue"}}}})
-	read := h.ExecuteTask(ctx, call, lookup)
-	if !read.OK {
-		t.Fatal(read.Error)
-	}
-	if again := h.ExecuteTask(ctx, call, command); again.OK || again.Error.Code != "unsupported" {
-		t.Fatal("same command replay changed refusal", again)
 	}
 	bad := queue
 	bad.ExpectedConfigRevision++

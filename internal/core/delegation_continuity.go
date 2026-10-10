@@ -124,12 +124,9 @@ func (h *Hub) continuityBaseAt(parent *session.Session, id string, expectedSourc
 		return root, round, nil, e
 	}
 	base := root
-	proof, accepted, e := h.messageQueue.ExactNativeAcceptance(root.ChildSessionID, root.ChildRequestID)
+	proofThread, e := h.originalDelegationThread(ctx, root)
 	if e != nil {
 		return base, round, nil, e
-	}
-	if !accepted {
-		return base, round, nil, errors.New("delegation_native_binding_missing")
 	}
 	thread, rev, pinned, e := h.delegations.NativeThread(ctx, root.ChildSessionID)
 	if e != nil {
@@ -142,12 +139,12 @@ func (h *Hub) continuityBaseAt(parent *session.Session, id string, expectedSourc
 		if e != nil {
 			return base, round, nil, e
 		}
-		thread = proof.ThreadID
+		thread = proofThread
 		if e = h.delegations.PinNativeThread(ctx, root.ChildSessionID, thread, rev); e != nil {
 			return base, round, nil, e
 		}
 	}
-	if pinned && thread != proof.ThreadID {
+	if pinned && thread != proofThread {
 		return base, round, nil, errors.New("delegation_native_binding_changed")
 	}
 	child, ok := h.registry.Get(root.ChildSessionID)
@@ -348,7 +345,17 @@ func (h *Hub) DelegationRounds(parent *session.Session, id string, after uint64)
 	if _, formal, e := h.delegations.APIBackend(ctx, root.ChildSessionID); e != nil {
 		return nil, e
 	} else if formal && availability == "available" {
-		availability, reason = "unsupported", "formal_task_native_queue_continuation_unsupported"
+		retained, _, child, e := h.continuityBase(parent, root.ID)
+		if e != nil {
+			availability, reason = "unsupported", "original_provider_binding_unverified"
+		} else {
+			raw, _, e := h.delegations.APIChildMetadata(ctx, child.ID)
+			var meta apiMetadata
+			var input apiInput
+			if e != nil || json.Unmarshal(raw, &meta) != nil || json.Unmarshal(meta.Request.Input, &input) != nil || h.enforceExistingScope(child, input) != nil || retained.ExpectedThread != child.ResumeID() {
+				availability, reason = "unsupported", "retained_task_scope_unqualified"
+			}
+		}
 	}
 	for _, r := range rounds {
 		record, _, _ := h.delegations.ByID(ctx, r.ID)

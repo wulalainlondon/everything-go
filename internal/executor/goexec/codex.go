@@ -2996,6 +2996,15 @@ func (c *Codex) ensureThread(s *session.Session, st *codexState) error {
 	if pinErr != nil {
 		return pinErr
 	}
+	if c.taskProvider != nil {
+		scope, e := c.taskProvider.TaskWorkerScope(s)
+		if e != nil {
+			return e
+		}
+		if scope != nil {
+			preserveContext = true
+		}
+	}
 	if preserveContext {
 		if fi, e := os.Stat(runtime.ExpandPath(snap.Cwd)); e != nil || !fi.IsDir() {
 			return errors.New("delegation_original_workspace_unavailable")
@@ -3007,13 +3016,22 @@ func (c *Codex) ensureThread(s *session.Session, st *codexState) error {
 			return err
 		}
 		if scope != nil {
+			if err := c.ValidateExistingTaskScope(s, *scope, s.Snapshot().Cwd); err != nil {
+				return err
+			}
 			params := map[string]any{"threadId": have, "excludeTurns": true}
 			if err = c.applyTaskAPIThreadTools(s, params); err != nil {
 				return err
 			}
-			if _, err = c.rpcCall("thread/resume", params, 15*time.Second); err != nil {
+			reply, err := c.rpcCall("thread/resume", params, 15*time.Second)
+			if err != nil {
 				return errors.New("unsupported: bounded task policy rebind failed")
 			}
+			var resumed struct{ Thread struct{ ID string } }
+			if json.Unmarshal(reply, &resumed) != nil || resumed.Thread.ID != have {
+				return errors.New("unsupported: bounded original thread changed")
+			}
+
 		}
 	}
 	if have != "" {

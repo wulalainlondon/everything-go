@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	artifactcontract "everything-go/contracts/task-api/artifacts-v3"
 	contract "everything-go/contracts/task-api/v1"
 	"everything-go/internal/backend"
 	"everything-go/internal/coordination"
@@ -153,6 +154,14 @@ func (h *Hub) TaskTools(s *session.Session) ([]map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
+	extra, err := artifactcontract.ToolInputs()
+	if err != nil {
+		return nil, err
+	}
+	for name, input := range extra {
+		defs[name] = input
+	}
+
 	legacyWorker := false
 	if h.delegations != nil && scope == nil {
 		legacyWorker, err = h.delegations.HasChild(context.Background(), s.ID)
@@ -207,7 +216,10 @@ func (h *Hub) ExecuteTask(ctx context.Context, c backend.TaskCaller, raw []byte)
 		}
 	}
 	caller, bindErr := taskapi.BindCaller(ctx, verifier, taskapi.Invocation{})
-	response, continuityHandled := h.executeNativeContinuity(ctx, caller, c.Session, raw)
+	response, continuityHandled := h.executeArtifactBytes(ctx, caller, raw)
+	if !continuityHandled {
+		response, continuityHandled = h.executeNativeContinuity(ctx, caller, c.Session, raw)
+	}
 	if !continuityHandled {
 		response = h.taskService.Execute(ctx, caller, raw)
 	}
@@ -228,7 +240,11 @@ func (h *Hub) handleTaskAPI(ctx context.Context, c *Client, raw []byte) {
 		return
 	}
 	caller, _ := h.taskHuman(c)
-	c.enqueueEvent(h.taskService.Execute(ctx, caller, raw))
+	response, handled := h.executeArtifactBytes(ctx, caller, raw)
+	if !handled {
+		response = h.taskService.Execute(ctx, caller, raw)
+	}
+	c.enqueueEvent(response)
 }
 func (h *Hub) Authorize(ctx context.Context, c taskapi.VerifiedContext, r taskapi.Request) (taskapi.Locator, error) {
 	var in apiInput
@@ -1000,6 +1016,26 @@ func (h *Hub) TaskWorkerScope(s *session.Session) (*taskapi.ChildScope, error) {
 	if json.Unmarshal(meta.Request.Input, &input) != nil {
 		return nil, errors.New("child scope unavailable")
 	}
+	root, found, err := h.delegations.OriginalRootForChild(context.Background(), s.ID)
+	if err != nil || !found {
+		return nil, errors.New("original bounded profile unavailable")
+	}
+	provider, _, err := h.delegations.APIBackend(context.Background(), s.ID)
+	if err != nil {
+		return nil, err
+	}
+	_, revision, _, err := h.delegations.ExecutionBinding(context.Background(), root.ID)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateDelegationChildProfile(root, s, s.ResumeID(), revision, provider, true); err != nil {
+		return nil, err
+	}
+	for path, want := range meta.RootIdentities {
+		if got, err := taskRootIdentity(path); err != nil || got != want {
+			return nil, errors.New("bounded root identity changed")
+		}
+	}
 	return &taskapi.ChildScope{Roots: meta.CanonicalRoots, Operations: input.Scope.Operations, Sandbox: input.Scope.Sandbox, Network: input.Scope.Network, MaxChildren: input.Scope.MaxChildren}, nil
 }
 
@@ -1145,4 +1181,12 @@ func apiEffectRequests(operation, request string) []string {
 		return []string{}
 	}
 	return []string{request}
+}
+
+func (h *Hub) existingTargetCreationAvailable() bool {
+	if mode, ok := h.exec.(interface{ ExistingTaskScopeMode() string }); ok && mode.ExistingTaskScopeMode() == "retained_bounded_only" {
+		return false
+	}
+	_, ok := h.exec.(backend.ExistingTaskScopeEnforcer)
+	return ok
 }

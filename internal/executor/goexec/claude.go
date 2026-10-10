@@ -198,6 +198,18 @@ func (c *Claude) state(sessionID string) *claudeState {
 // Send writes a user message to the session's claude process (spawning it on
 // first use) and lets the stdout reader stream the response.
 func (c *Claude) Send(ctx context.Context, s *session.Session, reqID, content string, images []backend.ImageAttachment, files []backend.FileAttachment) error {
+	if c.taskProvider != nil && s.ResumeID() != "" {
+		scope, err := c.taskProvider.TaskWorkerScope(s)
+		if err != nil {
+			return err
+		}
+		if scope != nil {
+			if err := c.ValidateExistingTaskScope(s, *scope, s.Snapshot().Cwd); err != nil {
+				return err
+			}
+		}
+	}
+
 	c.mu.Lock()
 	p := c.procs[s.ID]
 	if p != nil && p.taskLease != nil && p.currentReqID() == "" {

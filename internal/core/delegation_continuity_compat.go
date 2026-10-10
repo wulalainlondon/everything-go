@@ -84,6 +84,13 @@ func (h *Hub) executeNativeContinuity(ctx context.Context, caller taskapi.BoundC
 			return fail("invalid_argument", "known_none")
 		}
 		command = delegation.ContinuityCommand{Parent: parent.ID, Key: request.IdempotencyKey, Hash: digest, Action: action, Request: bound.SourceRequestID, Call: "continuity-api:" + request.IdempotencyKey}
+		if action == "continue" {
+			taskID, e := h.formalContinuationTask(ctx, parent, in.Continuity.Arguments)
+			if e != nil {
+				return fail("permission", "known_none")
+			}
+			command.EffectTaskID = taskID
+		}
 		fresh, e := h.delegations.ReserveContinuityCommand(ctx, command)
 		if e != nil {
 			return fail("unknown_acceptance", "unknown")
@@ -103,6 +110,11 @@ func (h *Hub) executeNativeContinuity(ctx context.Context, caller taskapi.BoundC
 			if stored.State == "completed" {
 				if json.Unmarshal(stored.Result, &data) != nil {
 					return fail("unknown_acceptance", "known_receipt")
+				}
+			} else if action == "continue" && stored.EffectTaskID != "" {
+				data, err = h.recoverFormalOwner(ctx, bound, parent, stored)
+				if err != nil {
+					return fail("unknown_acceptance", "unknown")
 				}
 			} else if action == "continue" {
 				// Recover the original durable core receipt, never re-execute a
@@ -127,7 +139,11 @@ func (h *Hub) executeNativeContinuity(ctx context.Context, caller taskapi.BoundC
 			var a backend.DelegationContinuation
 			err = json.Unmarshal(in.Continuity.Arguments, &a)
 			if err == nil {
-				data, err = h.ContinueDelegation(parent, bound.SourceRequestID, command.Call, a)
+				if command.EffectTaskID != "" {
+					data, err = h.continueFormalOwner(ctx, caller, parent, command, request, a)
+				} else {
+					data, err = h.ContinueDelegation(parent, bound.SourceRequestID, command.Call, a)
+				}
 			}
 		case "reauthorize_pair":
 			var a delegationReauthorization
@@ -176,6 +192,15 @@ func (h *Hub) executeNativeContinuity(ctx context.Context, caller taskapi.BoundC
 				if err == nil {
 					state = command.State
 					data = map[string]any{"idempotency_key": command.Key, "state": command.State, "error_code": command.Error}
+					if command.State == "reserved" && command.EffectTaskID != "" {
+						recovered, recoveryErr := h.recoverFormalOwner(ctx, bound, parent, command)
+						data.(map[string]any)["effect_task_id"] = command.EffectTaskID
+						if recoveryErr == nil {
+							data.(map[string]any)["recovered_original_effect"] = recovered
+						} else {
+							data.(map[string]any)["acceptance"] = "unknown"
+						}
+					}
 					if len(command.Result) > 0 {
 						var result any
 						if json.Unmarshal(command.Result, &result) == nil {

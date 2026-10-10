@@ -84,3 +84,12 @@ func (s *Store) APIChildMetadata(ctx context.Context, child string) ([]byte, boo
 	err = json.Unmarshal(raw, &profile)
 	return profile.Metadata, true, err
 }
+
+// OriginalRootForChild reads the canonical round owner, not a new ledger.
+func (s *Store) OriginalRootForChild(ctx context.Context, child string) (Record, bool, error) {
+	r, err := scanRecord(s.db.QueryRowContext(ctx, "SELECT "+columns+" FROM session_delegations WHERE child_session_id=? AND id IN (SELECT logical_id FROM delegation_rounds)", child))
+	if errors.Is(err, sql.ErrNoRows) {
+		return r, false, nil
+	}
+	return r, err == nil, err
+}

@@ -507,11 +507,11 @@ func (h *Hub) Read(ctx context.Context, c taskapi.AuthorizedCommand) (any, error
 	case "capabilities":
 		ops := []string{"capabilities", "create_dispatch", "list", "get", "read_result", "append", "cancel", "snapshot", "events"}
 		routes := map[string]string{}
-		if _, ok := h.exec.(backend.ExistingTaskScopeEnforcer); ok {
+		if h.existingTargetCreationAvailable() {
 			routes["existing_target"] = "ordinary"
 		}
 		if c.Caller.SourceSessionID != "" {
-			if _, ok := h.exec.(backend.ExistingTaskScopeEnforcer); ok {
+			if h.existingTargetCreationAvailable() {
 				routes["existing_target"] = "controller"
 			}
 			routes["new_worker"] = "delegation"

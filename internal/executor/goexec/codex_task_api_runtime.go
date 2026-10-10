@@ -110,6 +110,13 @@ func (c *Codex) handleTaskAPIServerRequest(id any, method string, raw json.RawMe
 			return st.turnActive && !st.turnStartPending && st.reqID == request && st.currentTurnID == call.TurnID && st.threadID == call.ThreadID
 		}}
 		response := c.taskProvider.ExecuteTask(context.Background(), caller, call.Arguments)
+		if sink, ok := c.taskProvider.(backend.NativeTaskResponseCapture); ok {
+			if err := sink.CaptureTaskResponse(context.Background(), caller, call.Arguments, response); err != nil {
+				_ = c.rpc.write(map[string]any{"id": id, "result": map[string]any{"success": false, "contentItems": []map[string]any{{"type": "inputText", "text": "owned_capture_failed"}}}})
+				return
+			}
+		}
+
 		encoded, _ := json.Marshal(response)
 		_ = c.rpc.write(map[string]any{"id": id, "result": map[string]any{"success": response.OK, "contentItems": []map[string]any{{"type": "inputText", "text": string(encoded)}}}})
 	}()
@@ -127,9 +134,12 @@ func (c *Codex) TaskAPICapabilities() []taskapi.ProviderCapability {
 		capability.Lifecycle = "registered"
 		capability.NativeEvidence = "exact_turn"
 		capability.Operations = []string{"capabilities", "create_dispatch", "list", "get", "read_result", "snapshot", "events", "read_input"}
+		if version == "0.162.1" {
+			capability.Operations = append(capability.Operations, "append")
+		}
 		capability.Models = []any{map[string]any{"model": "gpt-6.1-sol", "efforts": []string{"high"}}}
 		capability.Enforcement = taskapi.ScopeEnforcement{Mode: "gateway_only_tools", Roots: true, Tools: true, Network: true, Delegation: true}
-		capability.Reason = "Adapter registered for qualified daemon " + version + "; per-thread RPC and invocation are distinct later evidence. Existing-thread narrowing, active cancel, steer and BG are unsupported. Account/quota remain unknown."
+		capability.Reason = "Adapter registered for qualified daemon " + version + "; per-thread RPC and invocation are distinct later evidence. Only original-owner retained bounded append is qualified. Arbitrary existing-thread narrowing, active cancel, steer and BG are unsupported. Account/quota remain unknown."
 	}
 	return []taskapi.ProviderCapability{capability}
 }
