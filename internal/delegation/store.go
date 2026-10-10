@@ -16,18 +16,21 @@ import (
 )
 
 type Record struct {
-	ExpectedThread                                        string
-	ExpectedRevision                                      uint64
-	WorkspaceIdentity                                     string
-	SourceThread                                          string
-	SourceRevision                                        uint64
-	ID, ParentSessionID, ChildSessionID, ChildRequestID   string
-	OriginRequestID, ToolCallID, IntentHash               string
-	ChildName, Cwd, Instruction, Model, Effort, Sandbox   string
-	ParentRequestID, State, TerminalStatus, Result, Error string
-	DeliveryState, DeliveryError                          string
-	Artifacts                                             []string
-	CreatedAt, UpdatedAt                                  int64
+	RoundVersion                                                            uint64
+	AcceptedBackend                                                         string
+	LogicalID, PreviousID, Authority, GrantDigest, Mode, ExecutionRequestID string
+	ExpectedThread                                                          string
+	ExpectedRevision                                                        uint64
+	WorkspaceIdentity                                                       string
+	SourceThread                                                            string
+	SourceRevision                                                          uint64
+	ID, ParentSessionID, ChildSessionID, ChildRequestID                     string
+	OriginRequestID, ToolCallID, IntentHash                                 string
+	ChildName, Cwd, Instruction, Model, Effort, Sandbox                     string
+	ParentRequestID, State, TerminalStatus, Result, Error                   string
+	DeliveryState, DeliveryError                                            string
+	Artifacts                                                               []string
+	CreatedAt, UpdatedAt                                                    int64
 }
 
 type Store struct{ db *sql.DB }
@@ -77,7 +80,7 @@ func Open(dataDir string) (*Store, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	if _, err = db.Exec(ddl + capacityDDL + handoffDDL); err != nil {
+	if _, err = db.Exec(ddl + capacityDDL + handoffDDL + continuityDDL); err != nil {
 		db.Close()
 		return nil, err
 	}

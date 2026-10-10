@@ -710,6 +710,10 @@
         },
         "expected_execution": {
           "$ref": "#/$defs/ExecutionRef"
+        },
+        "return_to_parent": {
+          "type": "boolean",
+          "description": "Delegation queue append only: reserve and return this exact round through original parent handoff; default false retains legacy behavior."
         }
       },
       "required": [
@@ -1346,6 +1350,95 @@
         },
         "final_hash": {
           "$ref": "#/$defs/Hash"
+        },
+        "continuity": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "logical_task_id": {
+              "$ref": "#/$defs/ID"
+            },
+            "current_round_id": {
+              "$ref": "#/$defs/ID"
+            },
+            "current_round_version": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "earlier_rounds_omitted": {
+              "type": "boolean"
+            },
+            "rounds": {
+              "type": "array",
+              "maxItems": 128,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "previous_round_id": {
+                    "type": "string"
+                  },
+                  "execution": {
+                    "type": "string"
+                  },
+                  "terminal_status": {
+                    "type": "string"
+                  },
+                  "delivery": {
+                    "type": "string"
+                  },
+                  "dispatcher_session_id": {
+                    "type": "string"
+                  },
+                  "dispatcher_request_id": {
+                    "type": "string"
+                  },
+                  "qa_round_id": {
+                    "type": "string"
+                  },
+                  "qa_verdict": {
+                    "type": "string"
+                  },
+                  "successor_reason": {
+                    "type": "string"
+                  },
+                  "delegation_id": {
+                    "$ref": "#/$defs/ID"
+                  },
+                  "request_id": {
+                    "$ref": "#/$defs/ID"
+                  },
+                  "round_version": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9007199254740991
+                  }
+                },
+                "required": [
+                  "previous_round_id",
+                  "execution",
+                  "terminal_status",
+                  "delivery",
+                  "dispatcher_session_id",
+                  "dispatcher_request_id",
+                  "qa_round_id",
+                  "qa_verdict",
+                  "successor_reason",
+                  "delegation_id",
+                  "request_id",
+                  "round_version"
+                ]
+              }
+            }
+          },
+          "required": [
+            "logical_task_id",
+            "current_round_id",
+            "current_round_version",
+            "rounds",
+            "earlier_rounds_omitted"
+          ]
         }
       },
       "required": [

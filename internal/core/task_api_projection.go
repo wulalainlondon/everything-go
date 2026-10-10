@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -247,7 +248,7 @@ func (h *Hub) apiTask(ctx context.Context, r taskapi.IntentRecord) (map[string]a
 		}
 	}
 	if r.Path == "delegation" {
-		if original, found, e := h.delegations.ByID(ctx, r.NativeID); e == nil && found && len(original.Artifacts) > 0 {
+		if original, found, e := h.delegations.ByChildRequest(ctx, r.SessionID, r.RequestID); e == nil && found && len(original.Artifacts) > 0 {
 			artifacts := []any{}
 			for i, path := range original.Artifacts {
 				if len(artifacts) == 100 {
@@ -320,6 +321,41 @@ func (h *Hub) apiTask(ctx context.Context, r taskapi.IntentRecord) (map[string]a
 		axes["delivery"] = state
 		if state == "delivered" {
 			task["source_delivery_anchor"] = deliveryAnchor
+		}
+	}
+	if r.Path == "delegation" {
+		if d, found, e := h.delegations.ByChildRequest(ctx, r.SessionID, r.RequestID); e != nil {
+			return nil, e
+		} else if found {
+			if m, found, e := h.delegations.Round(ctx, d.ID); e != nil {
+				return nil, e
+			} else if found {
+				latest, e := h.delegations.LatestRound(ctx, m.LogicalID)
+				if e != nil {
+					return nil, e
+				}
+				after := uint64(0)
+				if latest.Version > 128 {
+					after = latest.Version - 128
+				}
+				rounds, e := h.delegations.RoundsAfter(ctx, m.LogicalID, after)
+				if e != nil {
+					return nil, e
+				}
+				out := []any{}
+				for _, round := range rounds {
+					record, found, e := h.delegations.ByID(ctx, round.ID)
+					if e != nil || !found {
+						return nil, errors.New("delegation_round_missing")
+					}
+					qa, verdict, e := h.delegations.QAForRound(ctx, round.ID)
+					if e != nil {
+						return nil, e
+					}
+					out = append(out, map[string]any{"delegation_id": round.ID, "round_version": round.Version, "previous_round_id": round.PreviousID, "request_id": record.ChildRequestID, "execution": record.State, "terminal_status": record.TerminalStatus, "delivery": record.DeliveryState, "dispatcher_session_id": record.ParentSessionID, "dispatcher_request_id": record.OriginRequestID, "qa_round_id": qa, "qa_verdict": verdict, "successor_reason": ""})
+				}
+				task["continuity"] = map[string]any{"logical_task_id": m.LogicalID, "current_round_id": latest.ID, "current_round_version": latest.Version, "rounds": out, "earlier_rounds_omitted": after > 0}
+			}
 		}
 	}
 	return task, nil
@@ -500,6 +536,22 @@ func (h *Hub) Read(ctx context.Context, c taskapi.AuthorizedCommand) (any, error
 			capacity, err = h.delegations.LimitsForParent(ctx, c.Caller.SourceSessionID)
 			if err != nil {
 				return nil, err
+			}
+		}
+		if h.delegations != nil && c.Caller.SourceSessionID != "" {
+			if worker, e := h.delegations.HasChild(ctx, c.Caller.SourceSessionID); e != nil {
+				return nil, e
+			} else if worker {
+				ops = []string{"capabilities"}
+				routes = map[string]string{}
+				capacity.Active = 0
+				if s, found := h.registry.Get(c.Caller.SourceSessionID); found {
+					if formal, e := h.TaskWorkerScope(s); e != nil {
+						return nil, e
+					} else if formal != nil {
+						ops = append(ops, "read_input")
+					}
+				}
 			}
 		}
 		return map[string]any{"api_versions": []string{contract.Version}, "schema_hash": contract.Hash(), "allowed_operations": ops, "paths": []string{"ordinary", "controller", "delegation"}, "providers": providers, "limits": map[string]int{"max_instruction_chars": 32000, "max_pending_children": capacity.Active, "event_retention_days": 30, "max_events_per_scope": 100000, "receipt_retention_days": 90}, "default_worker_profile": map[string]string{"backend": "codex", "model": "gpt-6.1-sol", "effort": "high"}, "mutation_authority_instance_id": h.cfg.InstanceID, "create_routes": routes}, nil
@@ -901,11 +953,11 @@ func (h *Hub) apiDelivery(ctx context.Context, r taskapi.IntentRecord) (string, 
 	var metadata apiMetadata
 	json.Unmarshal(r.Metadata, &metadata)
 	if r.Path == "delegation" {
-		original, found, e := h.delegations.ByID(ctx, r.NativeID)
+		original, found, e := h.delegations.ByChildRequest(ctx, r.SessionID, r.RequestID)
 		if e != nil || !found {
 			return "unknown", nil
 		}
-		if r.RequestID != original.ChildRequestID {
+		if original.DeliveryState == "not_requested" {
 			return "not_requested", nil
 		}
 		parentID = original.ParentSessionID

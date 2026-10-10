@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"strings"
 	"time"
@@ -498,6 +499,11 @@ func (h *Hub) promoteQueuedMessage(c *Client, cmd clientproto.Command) {
 		var result backend.SteerResult
 		steerErr := decodeErr
 		if decodeErr == nil {
+			if e := h.delegationExecutionGuard(context.Background(), s, cmd.RequestID, false); e != nil {
+				steerErr = fmt.Errorf("%w: %v", backend.ErrSteerRejected, e)
+			}
+		}
+		if decodeErr == nil && steerErr == nil {
 			result, steerErr = steerer.Steer(context.Background(), s, cmd.RequestID, payload.Content, payload.Images, payload.Files)
 			if steerErr == nil && !result.StrictACK {
 				steerErr = errors.New("native steer acceptance unverified")

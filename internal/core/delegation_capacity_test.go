@@ -299,7 +299,11 @@ func TestCapacityHubAPIAppendUsesReservationAndOriginalNativeThread(t *testing.T
 	ctx := context.Background()
 	root := caller.Parent.Cwd()
 	started := make(chan string, 8)
-	h.SetExecutor(&capacityAppendExecutor{&capacityScopeCapabilityFixture{&fakeExec{sink: h, onSend: func(s *session.Session, req, _ string) { s.SetResumeID("synthetic-child-thread"); started <- req }}}})
+	h.SetExecutor(&capacityAppendExecutor{&capacityScopeCapabilityFixture{&fakeExec{sink: h, onSend: func(s *session.Session, req, _ string) {
+		s.SetResumeID("synthetic-child-thread")
+		emitVerifiedNativeFixture(h, backend.NativeTaskAccepted{SessionID: s.ID, RequestID: req, ThreadID: s.ResumeID(), TurnID: "synthetic-turn-" + req})
+		started <- req
+	}}}})
 	binding := taskapi.VerifiedContext{Authority: h.cfg.InstanceID, StableScopeID: "session:" + caller.Parent.ID, SourceSessionID: caller.Parent.ID, SourceResumeID: caller.Parent.ResumeID(), SourceConfigKnown: true, SourceConfigRevision: caller.Parent.SettingsSnapshot().ConfigRevision, BindingKind: "native_tool", InvocationGeneration: "synthetic-append-capacity", SourceRequestID: caller.RequestID, Transport: "native_dynamic_tool"}
 	bound, e := taskapi.BindCaller(ctx, apiVerifier{func() (taskapi.VerifiedContext, error) { return binding, nil }}, taskapi.Invocation{})
 	if e != nil {

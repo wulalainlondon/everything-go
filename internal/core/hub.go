@@ -238,6 +238,12 @@ func NewHub(reg *session.Registry, cfg Config, pairing *governance.Pairing, port
 		log.Printf("[delegation] storage unavailable: %v", err)
 	} else {
 		capacity := delegation.CapacityConfig{Default: delegation.DefaultLimits}
+		if cfg.InstanceID != "" {
+			if err := store.BindAuthority(context.Background(), cfg.InstanceID); err != nil {
+				store.Close()
+				panic(fmt.Sprintf("invalid delegation authority: %v", err))
+			}
+		}
 		if cfg.DelegationCapacity != nil {
 			capacity = *cfg.DelegationCapacity
 		}
@@ -557,6 +563,16 @@ func (h *Hub) Emit(event any) {
 		if h.messageQueue != nil {
 			if err := h.messageQueue.RecordNativeAcceptance(accepted.SessionID, accepted.RequestID, accepted.ThreadID, accepted.TurnID); err != nil {
 				log.Printf("[tasks] native acceptance persistence failed: %v", err)
+			} else if h.delegations != nil {
+				if r, found, e := h.delegations.ByChildRequest(context.Background(), accepted.SessionID, accepted.RequestID); e == nil && found {
+					_, revision, _, e := h.delegations.ExecutionBinding(context.Background(), r.ID)
+					if e == nil {
+						e = h.delegations.PinNativeThread(context.Background(), r.ChildSessionID, accepted.ThreadID, revision)
+					}
+					if e != nil {
+						log.Printf("[delegation] immutable native binding refused: %v", e)
+					}
+				}
 			}
 		}
 		return

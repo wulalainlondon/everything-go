@@ -29,6 +29,7 @@ import (
 )
 
 type apiInput struct {
+	ReturnToParent             bool   `json:"return_to_parent"`
 	IncludeRelationCoverage    bool   `json:"include_relation_coverage"`
 	TaskID                     string `json:"task_id"`
 	SessionID                  string `json:"session_id"`
@@ -151,8 +152,18 @@ func (h *Hub) TaskTools(s *session.Session) ([]map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
+	legacyWorker := false
+	if h.delegations != nil && scope == nil {
+		legacyWorker, err = h.delegations.HasChild(context.Background(), s.ID)
+		if err != nil {
+			return nil, err
+		}
+	}
 	tools := []map[string]any{}
 	for name, schema := range defs {
+		if legacyWorker && name != "task_capabilities" {
+			continue
+		}
 		if scope != nil && name != "task_read_input" && name != "task_capabilities" {
 			continue
 		}
@@ -224,10 +235,14 @@ func (h *Hub) Authorize(ctx context.Context, c taskapi.VerifiedContext, r taskap
 	if c.SourceSessionID != "" {
 		if source, ok := h.registry.Get(c.SourceSessionID); ok {
 			worker, e := h.TaskWorkerScope(source)
+			legacyWorker := false
+			if h.delegations != nil && worker == nil {
+				legacyWorker, e = h.delegations.HasChild(ctx, source.ID)
+			}
 			if e != nil {
 				return l, taskapi.Failure("unsupported", "known_none", "read_capabilities")
 			}
-			if worker != nil && r.Operation != "read_input" && r.Operation != "capabilities" {
+			if (legacyWorker && r.Operation != "capabilities") || (worker != nil && r.Operation != "read_input" && r.Operation != "capabilities") {
 				return l, taskapi.Failure("permission", "known_none", "request_scope_change")
 			}
 		}
@@ -720,7 +735,7 @@ func (h *Hub) Mutate(ctx context.Context, c taskapi.AuthorizedCommand) (any, err
 			record.SessionID = "s_dg_" + id
 			record.RequestID = "dgtask_" + record.NativeID
 			record.TaskID = apiID(h.cfg.InstanceID, "delegation", record.NativeID)
-			r := delegation.Record{ID: record.NativeID, ParentSessionID: c.Caller.SourceSessionID, OriginRequestID: c.Caller.SourceRequestID, ToolCallID: c.Caller.ToolCallID, IntentHash: c.IntentHash, ChildSessionID: record.SessionID, ChildRequestID: record.RequestID, ChildName: in.New.Name, Cwd: canonicalCwd, Instruction: in.Instruction, Model: in.New.Profile.Model, Effort: in.New.Profile.Effort, Sandbox: "read-only", ParentRequestID: "dgreturn_" + record.NativeID, SourceThread: c.Caller.SourceResumeID, SourceRevision: c.Caller.SourceConfigRevision, WorkspaceIdentity: rootIdentities[canonicalCwd]}
+			r := delegation.Record{ID: record.NativeID, ParentSessionID: c.Caller.SourceSessionID, OriginRequestID: c.Caller.SourceRequestID, ToolCallID: c.Caller.ToolCallID, IntentHash: c.IntentHash, ChildSessionID: record.SessionID, ChildRequestID: record.RequestID, ChildName: in.New.Name, Cwd: canonicalCwd, Instruction: in.Instruction, Model: in.New.Profile.Model, Effort: in.New.Profile.Effort, Sandbox: "read-only", ParentRequestID: "dgreturn_" + record.NativeID, SourceThread: c.Caller.SourceResumeID, SourceRevision: c.Caller.SourceConfigRevision, WorkspaceIdentity: rootIdentities[canonicalCwd], Authority: h.cfg.InstanceID}
 			// Preserve the original policy and caller inside the existing store
 			// transaction. Do not recursively Authorize there: it queries this
 			// same store and would deadlock its single SQLite connection.

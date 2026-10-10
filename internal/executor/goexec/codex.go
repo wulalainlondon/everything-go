@@ -2695,6 +2695,13 @@ func (c *Codex) startTurnWithStaleRetry(s *session.Session, st *codexState, thre
 		c.finalizePendingRecovery(s, st, threadID)
 		return nil
 	}
+	pinned, pinErr := c.delegationContextPinned(s)
+	if pinErr != nil {
+		return pinErr
+	}
+	if pinned && isStaleThreadError(err) {
+		return fmt.Errorf("delegation_original_thread_unavailable_successor_required: %w", err)
+	}
 	if !isStaleThreadError(err) || codexPinnedRequest(requestID) {
 		return err
 	}
@@ -2979,6 +2986,16 @@ func (c *Codex) ensureThread(s *session.Session, st *codexState) error {
 	st.mu.Lock()
 	have := st.threadID
 	st.mu.Unlock()
+	snap := s.Snapshot()
+	preserveContext, pinErr := c.delegationContextPinned(s)
+	if pinErr != nil {
+		return pinErr
+	}
+	if preserveContext {
+		if fi, e := os.Stat(runtime.ExpandPath(snap.Cwd)); e != nil || !fi.IsDir() {
+			return errors.New("delegation_original_workspace_unavailable")
+		}
+	}
 	if have != "" && c.taskProvider != nil {
 		scope, err := c.taskProvider.TaskWorkerScope(s)
 		if err != nil {
@@ -3015,9 +3032,11 @@ func (c *Codex) ensureThread(s *session.Session, st *codexState) error {
 		return nil
 	}
 
-	snap := s.Snapshot()
 	cwd := runtime.ExpandPath(snap.Cwd)
 	if fi, err := os.Stat(cwd); err != nil || !fi.IsDir() {
+		if preserveContext {
+			return errors.New("delegation_original_workspace_unavailable")
+		}
 		cwd, _ = os.UserHomeDir()
 	}
 	sandbox := codexSandboxForSession(snap)
@@ -3034,6 +3053,9 @@ func (c *Codex) ensureThread(s *session.Session, st *codexState) error {
 		// only for the legacy private stdio transport whose resume response still
 		// contains the complete history.
 		if c.appServerMode != "daemon" && c.rolloverEnabled && rolloutBytes > c.coldResumeMaxBytes {
+			if preserveContext {
+				return errors.New("delegation_context_limit_successor_required")
+			}
 			var err error
 			recovery, err = c.prepareColdRecovery(snap, rolloutPath, rolloutBytes, "cold_resume_hard_limit")
 			if err != nil {
@@ -3064,10 +3086,16 @@ func (c *Codex) ensureThread(s *session.Session, st *codexState) error {
 			raw, err := c.rpcCall("thread/resume", resumeParams, 15*time.Second)
 			if err == nil {
 				threadID = extractThreadID(raw, snap.ResumeID)
+				if preserveContext && threadID != snap.ResumeID {
+					return errors.New("delegation_resume_thread_changed")
+				}
 				threadMetadataRaw = append(json.RawMessage(nil), raw...)
 			} else if isActiveWriterError(err) {
 				return fmt.Errorf("thread/resume refused: %w: %v", backend.ErrThreadActiveWriter, err)
 			} else if isStaleThreadError(err) {
+				if preserveContext {
+					return fmt.Errorf("delegation_original_thread_unavailable_successor_required: %w", err)
+				}
 				recoverySnap, recoveryPath, recoveryBytes, ok := c.latestAvailableRecoverySource(snap)
 				if !ok {
 					return fmt.Errorf("thread not found and no local rollout generation is available: %w", err)

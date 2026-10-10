@@ -33,5 +33,10 @@ func (h *Hub) delegationReturnContext(ctx context.Context, r delegation.Record, 
 			}
 		}
 	}
+	if meta, found, e := h.delegations.Round(ctx, r.ID); e != nil {
+		return delegation.ReturnContext{}, e
+	} else if found {
+		r.LogicalID, r.RoundVersion, r.PreviousID = meta.LogicalID, meta.Version, meta.PreviousID
+	}
 	return h.delegations.SealReturnContext(ctx, r, thread, revision, snapshot, delegationReturnText(r))
 }

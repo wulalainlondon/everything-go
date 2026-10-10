@@ -99,6 +99,11 @@ func (h *Hub) validateDelegationChild(ctx context.Context, r delegation.Record, 
 	} else if api {
 		provider = selected
 	}
+	return validateDelegationChildProfile(r, child, thread, revision, provider, active)
+}
+
+// Pure profile check is safe inside the owning store transaction.
+func validateDelegationChildProfile(r delegation.Record, child *session.Session, thread string, revision uint64, provider string, active bool) error {
 	match := func(s session.Snapshot) bool {
 		cwd, err := filepath.EvalSymlinks(s.Cwd)
 		expected, e := filepath.EvalSymlinks(r.Cwd)
@@ -225,9 +230,54 @@ func (h *Hub) appendCapacityDelegation(ctx context.Context, c taskapi.Authorized
 	if !ok {
 		return nil, taskapi.Failure("permission", "known_none", "request_scope_change")
 	}
+	if c.Caller.SourceSessionID != base.ParentSessionID {
+		return nil, taskapi.Failure("permission", "known_none", "request_scope_change")
+	}
+	sourceThread, sourceRevision, bound, e := h.delegations.SourceBinding(ctx, base.ID)
+	if e != nil {
+		return nil, e
+	}
+	if !bound || parent.ResumeID() != sourceThread || parent.SettingsSnapshot().ConfigRevision != sourceRevision {
+		return nil, taskapi.Failure("permission", "known_none", "refresh_identity")
+	}
+	rootRound, has, e := h.delegations.Round(ctx, base.ID)
+	if e != nil {
+		return nil, e
+	}
+	if !has {
+		return nil, errors.New("delegation_continuity_binding_missing")
+	}
+	latestRound, e := h.delegations.LatestRound(ctx, rootRound.LogicalID)
+	if e != nil {
+		return nil, e
+	}
 	snap := target.SettingsSnapshot()
+	// Retain the accepted profile, never copy an elevated registry profile.
+	_, revision, _, e := h.delegations.ExecutionBinding(ctx, base.ID)
+	if e != nil {
+		return nil, e
+	}
+	proof, nativeAccepted, e := h.messageQueue.ExactNativeAcceptance(base.ChildSessionID, base.ChildRequestID)
+	if e != nil {
+		return nil, e
+	}
+	if !nativeAccepted || proof.ThreadID != target.ResumeID() {
+		return nil, taskapi.Failure("stale_revision", "known_none", "refresh_identity")
+	}
+	if e = h.validateDelegationChild(ctx, base, target, proof.ThreadID, revision, true); e != nil {
+		return nil, taskapi.Failure("permission", "known_none", "request_scope_change")
+	}
+	if thread, rev, pinned, e := h.delegations.NativeThread(ctx, target.ID); e != nil {
+		return nil, e
+	} else if pinned && (thread != target.ResumeID() || rev != snap.ConfigRevision) {
+		return nil, taskapi.Failure("stale_revision", "known_none", "refresh_identity")
+	}
 	id := "dgfollow_" + intent.RequestID
-	r := delegation.Record{ID: id, ParentSessionID: parent.ID, ChildSessionID: target.ID, ChildRequestID: intent.RequestID, ParentRequestID: "dgreturn_" + id, OriginRequestID: c.Caller.SourceRequestID, ToolCallID: c.Caller.ToolCallID, IntentHash: c.IntentHash, ChildName: snap.Name, Cwd: snap.Cwd, Instruction: in.Content, Model: snap.Model, Effort: snap.Effort, Sandbox: snap.Sandbox, SourceThread: parent.ResumeID(), SourceRevision: parent.SettingsSnapshot().ConfigRevision, ExpectedThread: target.ResumeID(), ExpectedRevision: snap.ConfigRevision, DeliveryState: "not_requested"}
+	r := delegation.Record{ID: id, LogicalID: rootRound.LogicalID, PreviousID: latestRound.ID, Authority: h.cfg.InstanceID, ParentSessionID: parent.ID, ChildSessionID: target.ID, ChildRequestID: intent.RequestID, ParentRequestID: "dgreturn_" + id, OriginRequestID: c.Caller.SourceRequestID, ToolCallID: c.Caller.ToolCallID, IntentHash: c.IntentHash, ChildName: snap.Name, Cwd: snap.Cwd, Instruction: in.Content, Model: snap.Model, Effort: snap.Effort, Sandbox: base.Sandbox, SourceThread: sourceThread, SourceRevision: sourceRevision, ExpectedThread: target.ResumeID(), ExpectedRevision: snap.ConfigRevision, DeliveryState: "not_requested"}
+	if in.ReturnToParent {
+		r.DeliveryState = "pending"
+	}
+	r.GrantDigest = delegationGrantDigest(r, r.SourceThread, r.SourceRevision)
 	r.WorkspaceIdentity, err = taskRootIdentity(r.Cwd)
 	if err != nil {
 		return nil, err
@@ -242,7 +292,7 @@ func (h *Hub) appendCapacityDelegation(ctx context.Context, c taskapi.Authorized
 		if !ok || current != target || !sourceOK || source != parent || target.ResumeID() != r.ExpectedThread || target.SettingsSnapshot().ConfigRevision != r.ExpectedRevision || parent.ResumeID() != r.SourceThread || parent.SettingsSnapshot().ConfigRevision != r.SourceRevision || target.State() == session.Closed || !h.controls.MobileMayWrite(target.ID) || !h.controls.MobileMayWrite(parent.ID) {
 			return taskapi.Failure("permission", "known_none", "request_scope_change")
 		}
-		return nil
+		return validateDelegationChildProfile(base, target, r.ExpectedThread, r.ExpectedRevision, snap.Backend, true)
 	}
 	stored, created, err := h.delegations.CreateAPIContinuation(ctx, admission, intent, r)
 	if err != nil {
@@ -307,6 +357,16 @@ func (h *Hub) delegationExecutionGuard(ctx context.Context, target *session.Sess
 	thread, revision, _, err := h.delegations.ExecutionBinding(ctx, r.ID)
 	if err != nil {
 		return err
+	}
+	if meta, found, e := h.delegations.Round(ctx, r.ID); e != nil {
+		return e
+	} else if found && meta.Mode == "steer" {
+		if active {
+			return errors.New("delegation_steer_cannot_start_new_turn")
+		}
+		if !actual.IsStreaming() || actual.ActiveQueuedID() != meta.ExecutionRequestID {
+			return errors.New("delegation_steer_active_round_changed")
+		}
 	}
 	return h.validateDelegationChild(ctx, r, actual, thread, revision, active)
 }

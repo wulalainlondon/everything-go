@@ -116,7 +116,7 @@ type Counts struct{ Active, Queued, Delivery, Reserved int }
 func countsFor(ctx context.Context, q queryRow, parent string) (Counts, error) {
 	var n Counts
 	err := q.QueryRowContext(ctx, `SELECT
- COALESCE(SUM(state IN ('provisioning','running')),0),COALESCE(SUM(state='queued'),0),
+ COALESCE(SUM(state IN ('provisioning','running') AND id NOT IN (SELECT id FROM delegation_rounds WHERE mode='steer')),0),COALESCE(SUM(state='queued'),0),
  COALESCE(SUM(state='collecting' OR (state='terminal' AND delivery_state IN ('pending','queued'))),0),
  COALESCE(SUM(state!='terminal' OR delivery_state IN ('pending','queued')),0)
  FROM session_delegations WHERE parent_session_id=?`, parent).Scan(&n.Active, &n.Queued, &n.Delivery, &n.Reserved)
@@ -142,7 +142,7 @@ func admissionState(ctx context.Context, tx *sql.Tx, parent, child string) (stri
 		return "", ErrDeliveryLimit
 	}
 	var sameChild bool
-	if err = tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM session_delegations WHERE child_session_id=? AND state IN ('provisioning','running'))", child).Scan(&sameChild); err != nil {
+	if err = tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM session_delegations WHERE child_session_id=? AND state IN ('provisioning','running','collecting') AND id NOT IN (SELECT id FROM delegation_rounds WHERE mode='steer'))", child).Scan(&sameChild); err != nil {
 		return "", err
 	}
 	if n.Active < l.Active && n.Queued == 0 && !sameChild && n.Active+n.Delivery < l.Delivery {
@@ -158,6 +158,21 @@ func insertBounded(ctx context.Context, tx *sql.Tx, r Record) (string, error) {
 		return "", errors.New("incomplete delegation identity")
 	}
 	state, err := admissionState(ctx, tx, r.ParentSessionID, r.ChildSessionID)
+	if r.Mode == "steer" {
+		// A supplement reserves a separate result, but shares the original active slot.
+		l, e := limitsFor(ctx, tx, r.ParentSessionID)
+		if e != nil {
+			return "", e
+		}
+		n, e := countsFor(ctx, tx, r.ParentSessionID)
+		if e != nil {
+			return "", e
+		}
+		if n.Reserved >= l.Delivery {
+			return "", ErrDeliveryLimit
+		}
+		state, err = "provisioning", nil
+	}
 	if err != nil {
 		return "", err
 	}
@@ -177,6 +192,9 @@ func insertBounded(ctx context.Context, tx *sql.Tx, r Record) (string, error) {
 	// Both native and Task API ACKs now promise durable queued work. This fence
 	// is committed with authority validation and all identity/outbox facts.
 	_, err = tx.ExecContext(ctx, "INSERT INTO native_delegation_commitments VALUES(?,?)", r.ID, now)
+	if err == nil {
+		err = insertRound(ctx, tx, r)
+	}
 	return state, err
 }
 func (s *Store) SourceBinding(ctx context.Context, id string) (string, uint64, bool, error) {
@@ -215,11 +233,11 @@ func (s *Store) TryPromote(ctx context.Context, id string) (bool, error) {
 			return nil
 		}
 		var sameChild bool
-		if err = tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM session_delegations WHERE child_session_id=? AND state IN ('provisioning','running'))", child).Scan(&sameChild); err != nil || sameChild {
+		if err = tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM session_delegations WHERE child_session_id=? AND state IN ('provisioning','running','collecting') AND id NOT IN (SELECT id FROM delegation_rounds WHERE mode='steer'))", child).Scan(&sameChild); err != nil || sameChild {
 			return err
 		}
 		var older bool
-		if err = tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM session_delegations q WHERE q.parent_session_id=? AND q.state='queued' AND q.rowid<? AND NOT EXISTS(SELECT 1 FROM session_delegations a WHERE a.child_session_id=q.child_session_id AND a.state IN ('provisioning','running')))", parent, seq).Scan(&older); err != nil || older {
+		if err = tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM session_delegations q WHERE q.parent_session_id=? AND q.state='queued' AND q.rowid<? AND NOT EXISTS(SELECT 1 FROM session_delegations a WHERE a.child_session_id=q.child_session_id AND a.state IN ('provisioning','running','collecting') AND a.id NOT IN (SELECT id FROM delegation_rounds WHERE mode='steer')))", parent, seq).Scan(&older); err != nil || older {
 			return err
 		}
 		_, err = tx.ExecContext(ctx, "UPDATE session_delegations SET state='provisioning',updated_at=? WHERE id=? AND state='queued'", time.Now().UnixMilli(), id)

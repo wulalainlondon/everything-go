@@ -35,3 +35,27 @@ type DelegationQueueProvider interface {
 	CancelWaitingDelegation(parent *session.Session, id string) (map[string]any, error)
 	DelegationCapacity(parent *session.Session) (map[string]int, error)
 }
+
+// Continuation arguments contain expectations, never a caller identity, sandbox
+// or replacement session. The native transport binds the original parent.
+type DelegationContinuation struct {
+	DelegationID           string `json:"delegation_id"`
+	ExpectedPreviousID     string `json:"expected_previous_round_id"`
+	InstanceID             string `json:"instance_id"`
+	ExpectedThreadID       string `json:"expected_thread_id"`
+	ExpectedConfigRevision uint64 `json:"expected_config_revision"`
+	Content                string `json:"content"`
+	Mode                   string `json:"mode"`
+	ActiveRequestID        string `json:"active_request_id,omitempty"`
+}
+type DelegationContinuityProvider interface {
+	ContinueDelegation(*session.Session, string, string, DelegationContinuation) (any, error)
+	DelegationRounds(*session.Session, string, uint64) (any, error)
+	BindDelegationQA(*session.Session, string, string, string, string) (any, error)
+	RecordDelegationReview(*session.Session, string, string, string, string) (any, error)
+}
+
+// Context preservation is an execution constraint, not worker permissions.
+type DelegationContextProvider interface {
+	PreserveDelegationContext(*session.Session) (bool, error)
+}
