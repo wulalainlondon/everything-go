@@ -63,7 +63,7 @@ func CompatibleToolInputs() (map[string]any, error) {
 	}
 	out := map[string]any{}
 	for _, operation := range []string{"artifact_capabilities", "read_artifact_bytes"} {
-		out["task_"+operation] = map[string]any{"$schema": "https://json-schema.org/draft/2020-12/schema", "$defs": definitions, "oneOf": []any{map[string]string{"$ref": "#/$defs/v3_Request_" + operation}, map[string]string{"$ref": "#/$defs/v4_Request_" + operation}}}
+		out["task_"+operation] = map[string]any{"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object", "$defs": definitions, "oneOf": []any{map[string]string{"$ref": "#/$defs/v3_Request_" + operation}, map[string]string{"$ref": "#/$defs/v4_Request_" + operation}}}
 	}
 	return out, nil
 }
