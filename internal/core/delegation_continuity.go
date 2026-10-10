@@ -41,6 +41,11 @@ func delegationGrantDigest(r delegation.Record, thread string, revision uint64) 
 	return continuityDigest([]any{r.ParentSessionID, thread, revision, r.ChildSessionID, r.Cwd, r.Sandbox, r.Model, r.Effort, r.WorkspaceIdentity})
 }
 func (h *Hub) continuityBase(parent *session.Session, id string) (delegation.Record, delegation.Round, *session.Session, error) {
+	return h.continuityBaseAt(parent, id, nil)
+}
+
+// expectedSource is used only by explicit reauthorization to validate the old epoch.
+func (h *Hub) continuityBaseAt(parent *session.Session, id string, expectedSource *uint64) (delegation.Record, delegation.Round, *session.Session, error) {
 	ctx := context.Background()
 	base, found, e := h.delegations.ByID(ctx, id)
 	if e != nil {
@@ -67,7 +72,26 @@ func (h *Hub) continuityBase(parent *session.Session, id string) (delegation.Rec
 	if e != nil {
 		return base, round, nil, e
 	}
-	if !bound || parent.ResumeID() != source || parent.SettingsSnapshot().ConfigRevision != revision {
+	_, _, root.WorkspaceIdentity, e = h.delegations.ExecutionBinding(ctx, root.ID)
+	if e != nil {
+		return base, round, nil, e
+	}
+	originalRevision := revision
+	epoch, hasEpoch, e := h.delegations.SourceEpoch(ctx, root.ID)
+	if e != nil {
+		return base, round, nil, e
+	}
+	if hasEpoch {
+		if epoch.Parent != parent.ID || epoch.Authority != h.cfg.InstanceID || epoch.Thread != source || epoch.GrantDigest != delegationGrantDigest(root, source, originalRevision) {
+			return base, round, nil, errors.New("delegation_reauthorization_binding_changed")
+		}
+		revision = epoch.ToRevision
+	}
+	wantRevision := parent.SettingsSnapshot().ConfigRevision
+	if expectedSource != nil {
+		wantRevision = *expectedSource
+	}
+	if !bound || parent.ResumeID() != source || wantRevision != revision {
 		return base, round, nil, errors.New("delegation_source_binding_changed")
 	}
 	proof, accepted, e := h.messageQueue.ExactNativeAcceptance(root.ChildSessionID, root.ChildRequestID)
@@ -119,7 +143,7 @@ func (h *Hub) continuityBase(parent *session.Session, id string) (delegation.Rec
 	if !exists || (rootMeta.Authority != "" && rootMeta.Authority != h.cfg.InstanceID) {
 		return base, round, nil, errors.New("delegation_wrong_authority")
 	}
-	if rootMeta.GrantDigest != "" && rootMeta.GrantDigest != delegationGrantDigest(root, source, revision) {
+	if rootMeta.GrantDigest != "" && rootMeta.GrantDigest != delegationGrantDigest(root, source, originalRevision) {
 		return base, round, nil, errors.New("delegation_grants_changed")
 	}
 	return root, round, child, nil
@@ -291,7 +315,20 @@ func (h *Hub) DelegationRounds(parent *session.Session, id string, after uint64)
 			availability, reason = "successor_required", "original_context_limit"
 		}
 	}
-	return map[string]any{"continuation_availability": availability, "successor_reason": reason, "has_more": next < latest.Version, "next_version": next, "logical_task_id": round.LogicalID, "session_id": root.ChildSessionID, "native_thread_id": root.ExpectedThread, "owner_logical_task_id": owner, "qa_logical_task_id": qa, "rounds": out}, nil
+	sourceThread, originalRevision, sourceBound, e := h.delegations.SourceBinding(ctx, root.ID)
+	if e != nil {
+		return nil, e
+	}
+	epoch, _, e := h.delegations.SourceEpoch(ctx, root.ID)
+	if e != nil {
+		return nil, e
+	}
+	effectiveRevision := originalRevision
+	if epoch.Epoch > 0 {
+		effectiveRevision = epoch.ToRevision
+	}
+	sourceAuthorization := map[string]any{"original_source_revision": originalRevision, "effective_source_revision": effectiveRevision, "authorization_epoch": epoch.Epoch, "source_thread_id": sourceThread, "matches_current_parent": sourceBound && sourceThread == parent.ResumeID() && effectiveRevision == parent.SettingsSnapshot().ConfigRevision}
+	return map[string]any{"source_authorization": sourceAuthorization, "continuation_availability": availability, "successor_reason": reason, "has_more": next < latest.Version, "next_version": next, "logical_task_id": round.LogicalID, "session_id": root.ChildSessionID, "native_thread_id": root.ExpectedThread, "owner_logical_task_id": owner, "qa_logical_task_id": qa, "rounds": out}, nil
 }
 func (h *Hub) BindDelegationQA(parent *session.Session, request, call, ownerID, qaID string) (any, error) {
 	if e := h.continuityCaller(parent, request, call); e != nil {

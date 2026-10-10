@@ -45,3 +45,27 @@ result protections remain authoritative. This extension is not a conversion of
 a legacy dg identifier into an invented canonical ta1 receipt. It does not
 modify past results, reset context, silently replace a session or publish QA on
 behalf of its reviewer. Handoff snapshots remain fixed per return preparation.
+
+## Explicit source revision reauthorization
+
+A changed parent configuration remains denied by default. After explicit human
+approval, the unchanged original native parent may append `reauthorize_pair`.
+Its closed arguments pin `owner_delegation_id`, `qa_delegation_id`, `instance_id`,
+`expected_source_thread_id`, `expected_source_revision`, `new_source_revision`,
+`expected_owner_thread_id`, `expected_qa_thread_id`, and both
+`expected_owner_config_revision` / `expected_qa_config_revision`.
+
+The new revision must match current authenticated parent settings and be greater
+than the exact prior effective revision. Both logical roots must belong to this
+parent, have independent original native threads, preserve their accepted child
+profiles/workspace/sandbox, and have no unfinished execution or delivery. Existing
+owner/QA responsibility cannot change. Admission appends both source authority
+epochs atomically under predecessor CAS; it never edits original source bindings,
+old results or frozen return snapshots. A subsequent drift still fails closed.
+New rounds bind to the newly approved revision. The usual idempotency journal
+applies; an uncertain reserved command is not replayed under another key.
+
+This is an explicit permission-changing operation: caller authentication alone
+is not human approval. Agents must obtain human authorization for the concrete
+pair and old/new source revisions before invoking it. It remains unavailable to
+workers, global controllers, foreign parents and paired-client transport.

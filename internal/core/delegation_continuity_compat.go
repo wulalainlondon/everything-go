@@ -129,6 +129,12 @@ func (h *Hub) executeNativeContinuity(ctx context.Context, caller taskapi.BoundC
 			if err == nil {
 				data, err = h.ContinueDelegation(parent, bound.SourceRequestID, command.Call, a)
 			}
+		case "reauthorize_pair":
+			var a delegationReauthorization
+			err = json.Unmarshal(in.Continuity.Arguments, &a)
+			if err == nil {
+				data, err = h.reauthorizeDelegationPair(parent, bound.SourceRequestID, command.Call, a)
+			}
 		case "bind_qa":
 			var a struct {
 				Owner string `json:"owner_delegation_id"`
