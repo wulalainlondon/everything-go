@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	artifact "everything-go/contracts/task-api/artifacts-v3"
+	artifact4 "everything-go/contracts/task-api/artifacts-v4"
 	"everything-go/internal/backend"
 	"everything-go/internal/taskapi"
 	"io"
@@ -22,6 +23,9 @@ func verifierPinned(v *NativeArtifactVerifier) bool {
 		if !filepath.IsAbs(pin.path) || len(pin.hash) != 64 || captureHash(pin.path) != pin.hash {
 			return false
 		}
+	}
+	if v.SDK4Hash != "" && captureHash(filepath.Join(filepath.Dir(v.Script), "artifact-v4.mjs")) != v.SDK4Hash {
+		return false
 	}
 	return true
 }
@@ -47,14 +51,26 @@ func (h *Hub) verifyOriginalArtifact(ctx context.Context, c backend.TaskCaller, 
 		return fail
 	}
 	var tuple struct {
-		Task     string `json:"task_id"`
-		Seal     string `json:"seal_id"`
-		Artifact string `json:"artifact_id"`
-		Hash     string `json:"expected_hash"`
-		Offset   int    `json:"offset"`
+		Task         string `json:"task_id"`
+		Seal         string `json:"seal_id"`
+		Artifact     string `json:"artifact_id"`
+		Hash         string `json:"expected_hash"`
+		OwnerRequest string `json:"owner_request_id"`
+		Offset       int    `json:"offset"`
 	}
 	if json.Unmarshal(initial.Input, &tuple) != nil || tuple.Offset != 0 || p.Tasks[tuple.Task] != tuple.Hash || tuple.Seal != "seal_"+tuple.Hash || tuple.Artifact != "result.txt" {
 		return fail
+	}
+	validate := artifact.Validate
+	v4 := initial.Version == artifact4.Version
+	if initial.Version != artifact.Version && !v4 {
+		return fail
+	}
+	if v4 {
+		validate = artifact4.Validate
+		if tuple.OwnerRequest == "" || len(p.Verifier.SDK4Hash) != 64 {
+			return fail
+		}
 	}
 	runctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
@@ -81,7 +97,10 @@ func (h *Hub) verifyOriginalArtifact(ctx context.Context, c backend.TaskCaller, 
 	}()
 	enc := json.NewEncoder(stdin)
 	input := map[string]any{"task_id": tuple.Task, "seal_id": tuple.Seal, "artifact_id": tuple.Artifact, "expected_hash": tuple.Hash, "offset": 0, "limit": 32768}
-	if enc.Encode(map[string]any{"kind": "verify", "version": 1, "input": input}) != nil {
+	if v4 {
+		input["owner_request_id"] = tuple.OwnerRequest
+	}
+	if enc.Encode(map[string]any{"kind": "verify", "version": 1, "api_version": initial.Version, "input": input}) != nil {
 		return fail
 	}
 	scanner := bufio.NewScanner(stdout)
@@ -92,17 +111,18 @@ func (h *Hub) verifyOriginalArtifact(ctx context.Context, c backend.TaskCaller, 
 			return fail
 		}
 		var frame struct {
-			Version int             `json:"version"`
-			Kind    string          `json:"kind"`
-			Request json.RawMessage `json:"request"`
-			Hash    string          `json:"full_hash"`
-			Bytes   int             `json:"bytes"`
+			Version      int             `json:"version"`
+			Kind         string          `json:"kind"`
+			Request      json.RawMessage `json:"request"`
+			OwnerRequest string          `json:"owner_request_id"`
+			Hash         string          `json:"full_hash"`
+			Bytes        int             `json:"bytes"`
 		}
 		if json.Unmarshal(scanner.Bytes(), &frame) != nil || frame.Version != 1 {
 			return fail
 		}
 		if frame.Kind == "verified" {
-			if frame.Hash != tuple.Hash || frame.Bytes < 0 || frame.Bytes > 8*1024*1024 || reads < 2 {
+			if (v4 && frame.OwnerRequest != tuple.OwnerRequest) || frame.Hash != tuple.Hash || frame.Bytes < 0 || frame.Bytes > 8*1024*1024 || reads < 2 {
 				return fail
 			}
 			stdin.Close()
@@ -110,6 +130,10 @@ func (h *Hub) verifyOriginalArtifact(ctx context.Context, c backend.TaskCaller, 
 				return fail
 			}
 			proof := map[string]any{"evidence_kind": "original_response_owner_artifact_sdk_verifier", "raw_wire": false, "source_session_id": c.Session.ID, "source_request_id": c.RequestID, "native_call_id": c.CallID, "correlation_id": initial.CorrelationID, "task_id": tuple.Task, "seal_id": tuple.Seal, "artifact_id": tuple.Artifact, "full_hash": frame.Hash, "bytes": frame.Bytes, "owner_subreads": reads, "subreads_are_separate_provider_native_calls": false}
+			if v4 {
+				proof["owner_request_id"] = tuple.OwnerRequest
+				proof["api_version"] = initial.Version
+			}
 			b, _ := json.Marshal(proof)
 			key := sha256.Sum256([]byte(c.RequestID + "\x00" + c.CallID + "\x00" + initial.CorrelationID))
 			f, e := os.OpenFile(filepath.Join(p.Directory, hex.EncodeToString(key[:])+"-verified.json"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
@@ -120,11 +144,11 @@ func (h *Hub) verifyOriginalArtifact(ctx context.Context, c backend.TaskCaller, 
 			_, e = f.Write(append(b, '\n'))
 			return e
 		}
-		if frame.Kind != "original-owner-read" || reads >= 1024 || artifact.Validate(frame.Request, "Request") != nil {
+		if frame.Kind != "original-owner-read" || reads >= 1024 || validate(frame.Request, "Request") != nil {
 			return fail
 		}
 		var req taskapi.Request
-		if json.Unmarshal(frame.Request, &req) != nil || req.Version != artifact.Version {
+		if json.Unmarshal(frame.Request, &req) != nil || req.Version != initial.Version {
 			return fail
 		}
 		if req.Operation != "artifact_capabilities" && req.Operation != "read_artifact_bytes" {
@@ -132,12 +156,13 @@ func (h *Hub) verifyOriginalArtifact(ctx context.Context, c backend.TaskCaller, 
 		}
 		if req.Operation == "read_artifact_bytes" {
 			var t struct {
-				Task     string `json:"task_id"`
-				Seal     string `json:"seal_id"`
-				Artifact string `json:"artifact_id"`
-				Hash     string `json:"expected_hash"`
+				Task         string `json:"task_id"`
+				Seal         string `json:"seal_id"`
+				Artifact     string `json:"artifact_id"`
+				Hash         string `json:"expected_hash"`
+				OwnerRequest string `json:"owner_request_id"`
 			}
-			if json.Unmarshal(req.Input, &t) != nil || t.Task != tuple.Task || t.Seal != tuple.Seal || t.Artifact != tuple.Artifact || t.Hash != tuple.Hash {
+			if json.Unmarshal(req.Input, &t) != nil || t.Task != tuple.Task || t.Seal != tuple.Seal || t.Artifact != tuple.Artifact || t.Hash != tuple.Hash || v4 && t.OwnerRequest != tuple.OwnerRequest {
 				return fail
 			}
 		}

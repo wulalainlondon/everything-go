@@ -69,7 +69,7 @@ func (h *Hub) capturePublicResponse(ctx context.Context, c backend.TaskCaller, r
 			return nil
 		}
 	}
-	fields := []string{"task_id", "task_ref", "axes", "revision", "definition_revision", "seal_id", "final_hash", "receipt_ids", "offset", "next_offset", "has_more", "terminal_status", "text", "api_versions", "schema_hash", "allowed_operations", "paths", "mutation_authority_instance_id", "artifact_id", "owner_request_id", "total_bytes", "full_hash", "chunk_hash", "data_base64", "max_range_bytes", "artifact_owner", "reported_paths"}
+	fields := []string{"task_id", "task_ref", "axes", "revision", "definition_revision", "seal_id", "final_hash", "receipt_ids", "offset", "next_offset", "has_more", "terminal_status", "text", "api_versions", "schema_hash", "allowed_operations", "paths", "mutation_authority_instance_id", "artifact_id", "owner_request_id", "owner_round_id", "total_bytes", "full_hash", "chunk_hash", "data_base64", "max_range_bytes", "artifact_owner", "reported_paths"}
 	public := map[string]any{}
 	for _, field := range fields {
 		if value, ok := body[field]; ok {

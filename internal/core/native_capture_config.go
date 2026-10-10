@@ -19,6 +19,7 @@ type NativeArtifactVerifier struct {
 	NodeHash   string `json:"node_sha256"`
 	Script     string `json:"script"`
 	ScriptHash string `json:"script_sha256"`
+	SDK4Hash   string `json:"sdk4_sha256,omitempty"`
 	SDKHash    string `json:"sdk_sha256"`
 }
 type NativeCaptureConfig struct {

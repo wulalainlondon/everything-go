@@ -18,7 +18,7 @@ import (
 	"strings"
 	"time"
 
-	artifactcontract "everything-go/contracts/task-api/artifacts-v3"
+	artifactcontract "everything-go/contracts/task-api/artifacts-v4"
 	contract "everything-go/contracts/task-api/v1"
 	"everything-go/internal/backend"
 	"everything-go/internal/coordination"
@@ -154,7 +154,7 @@ func (h *Hub) TaskTools(s *session.Session) ([]map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	extra, err := artifactcontract.ToolInputs()
+	extra, err := artifactcontract.CompatibleToolInputs()
 	if err != nil {
 		return nil, err
 	}

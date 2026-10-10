@@ -17,6 +17,15 @@
         "read_artifact_bytes"
       ],
       "status": "candidate-only explicit artifact family"
+    },
+    {
+      "version": "1.0.0-rc.4",
+      "schema_sha256": "bc435ada82f2cad34f8c0bcc4df7a6a3c9029e38d3e3211fc7581d08e55d9bea",
+      "operations": [
+        "artifact_capabilities",
+        "read_artifact_bytes"
+      ],
+      "status": "candidate-only artifact family; explicit owner request selector"
     }
   ]
 }
