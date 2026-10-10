@@ -27,6 +27,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"everything-go/internal/agentvisibility"
 	"everything-go/internal/backend"
 	"everything-go/internal/executor"
 	"everything-go/internal/protocol"
@@ -63,6 +64,8 @@ var (
 )
 
 type codexState struct {
+	visibility agentvisibility.Channel
+
 	mu       sync.Mutex
 	ensureMu sync.Mutex
 
@@ -172,6 +175,8 @@ func (st *codexState) touch(now time.Time) {
 
 // Codex implements executor.Executor over the codex app-server.
 type Codex struct {
+	metadataObserverBoot string
+
 	taskProvider       backend.TaskAPIProvider
 	voiceMu            sync.Mutex
 	voiceCalls         map[string]*codexVoiceCall

@@ -1,6 +1,7 @@
 package goexec
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -92,31 +93,47 @@ func (p *rpcPlumber) request(method string, params any, timeout time.Duration) (
 }
 
 func (p *rpcPlumber) requestAtEpoch(method string, params any, timeout time.Duration, expected *uint64) (json.RawMessage, error) {
+	return p.requestAtEpochContext(context.Background(), method, params, timeout, expected)
+}
+
+// Cancellation retires only this response correlation. It neither cancels the
+// server operation nor closes/replaces the shared writer. Writes retain the
+// original transport's locking and I/O bounds; ctx bounds the response wait.
+func (p *rpcPlumber) requestAtEpochContext(ctx context.Context, method string, params any, timeout time.Duration, expected *uint64) (json.RawMessage, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	p.mu.Lock()
 	id := p.nextID
 	p.nextID++
 	ch := make(chan rpcReply, 1)
 	p.pending[id] = ch
 	p.mu.Unlock()
+	defer func() {
+		p.mu.Lock()
+		delete(p.pending, id)
+		p.mu.Unlock()
+	}()
 
 	req := map[string]any{"id": id, "method": method}
 	if params != nil {
 		req["params"] = params
 	}
 	if err := p.writeAtEpoch(req, expected); err != nil {
-		p.mu.Lock()
-		delete(p.pending, id)
-		p.mu.Unlock()
 		return nil, err
 	}
 
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 	select {
 	case reply := <-ch:
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		return reply.result, reply.err
-	case <-time.After(timeout):
-		p.mu.Lock()
-		delete(p.pending, id)
-		p.mu.Unlock()
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-timer.C:
 		return nil, &rpcTimeoutError{Name: p.name, Method: method, Timeout: timeout}
 	}
 }

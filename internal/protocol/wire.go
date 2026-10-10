@@ -597,38 +597,66 @@ type RecentMessage struct {
 }
 
 // SessionSummary mirrors SessionSummarySchema.
+// SessionSourceMetadata never asserts that an unmapped session is human-created.
+type SessionSourceMetadata struct {
+	MetadataError  string                      `json:"metadata_error,omitempty"`
+	NativeThreadID string                      `json:"native_thread_id,omitempty"`
+	Version        int                         `json:"version"`
+	Origin         string                      `json:"origin"`
+	Coverage       string                      `json:"coverage"`
+	CreatedBy      string                      `json:"created_by,omitempty"`
+	Relationships  []SessionSourceRelationship `json:"relationships"`
+}
+type SessionSourceRelationship struct {
+	OriginRequestID string `json:"origin_request_id,omitempty"`
+	RootSessionID   string `json:"root_session_id,omitempty"`
+	LineageStatus   string `json:"lineage_status"`
+	LineageScope    string `json:"lineage_scope"`
+	Execution       string `json:"execution"`
+	DelegationID    string `json:"delegation_id"`
+	ParentSessionID string `json:"parent_session_id,omitempty"`
+	ParentAvailable bool   `json:"parent_available"`
+	ChildRequestID  string `json:"child_request_id"`
+	State           string `json:"state"`
+	TerminalStatus  string `json:"terminal_status"`
+	Final           string `json:"final"`
+	Delivery        string `json:"delivery"`
+	QA              string `json:"qa"`
+	UpdatedAtUnixMS int64  `json:"updated_at_unix_ms"`
+}
 type SessionSummary struct {
-	ContextUsed          *int            `json:"context_used,omitempty"`
-	ContextMax           *int            `json:"context_max,omitempty"`
-	ActiveModel          string          `json:"active_model,omitempty"`
-	ActiveEffort         string          `json:"active_effort,omitempty"`
-	ActiveServiceTier    string          `json:"active_service_tier,omitempty"`
-	ActiveConfigRevision uint64          `json:"active_config_revision"`
-	ConfigRevision       uint64          `json:"config_revision"`
-	ID                   string          `json:"id"`
-	Name                 string          `json:"name"`
-	AuthorityInstanceID  string          `json:"authority_instance_id,omitempty"`
-	MetadataRevision     uint64          `json:"metadata_revision"`
-	NameUpdatedAt        int64           `json:"name_updated_at,omitempty"`
-	NameUpdatedBy        string          `json:"name_updated_by,omitempty"`
-	LastNameMutationID   string          `json:"last_name_mutation_id,omitempty"`
-	IsStreaming          bool            `json:"is_streaming"`
-	CreatedAt            float64         `json:"created_at"`
-	LastActivity         float64         `json:"last_activity,omitempty"`
-	Cwd                  string          `json:"cwd,omitempty"`
-	Model                string          `json:"model,omitempty"`
-	Effort               string          `json:"effort,omitempty"`
-	ServiceTier          string          `json:"service_tier,omitempty"`
-	CollaborationMode    string          `json:"collaboration_mode,omitempty"`
-	Personality          string          `json:"personality,omitempty"`
-	Backend              string          `json:"backend,omitempty"`
-	Sandbox              string          `json:"sandbox,omitempty"`
-	Pinned               bool            `json:"pinned"`
-	Hidden               bool            `json:"hidden"`
-	RecentMessages       []RecentMessage `json:"recent_messages,omitempty"`
-	PreviewText          string          `json:"preview_text,omitempty"`
-	PreviewRole          string          `json:"preview_role,omitempty"`
-	PreviewVersion       int             `json:"preview_version,omitempty"`
+	SessionSource        *SessionSourceMetadata `json:"session_source,omitempty"`
+	ContextUsed          *int                   `json:"context_used,omitempty"`
+	ContextMax           *int                   `json:"context_max,omitempty"`
+	ActiveModel          string                 `json:"active_model,omitempty"`
+	ActiveEffort         string                 `json:"active_effort,omitempty"`
+	ActiveServiceTier    string                 `json:"active_service_tier,omitempty"`
+	ActiveConfigRevision uint64                 `json:"active_config_revision"`
+	ConfigRevision       uint64                 `json:"config_revision"`
+	ID                   string                 `json:"id"`
+	Name                 string                 `json:"name"`
+	AuthorityInstanceID  string                 `json:"authority_instance_id,omitempty"`
+	MetadataRevision     uint64                 `json:"metadata_revision"`
+	NameUpdatedAt        int64                  `json:"name_updated_at,omitempty"`
+	NameUpdatedBy        string                 `json:"name_updated_by,omitempty"`
+	LastNameMutationID   string                 `json:"last_name_mutation_id,omitempty"`
+	IsStreaming          bool                   `json:"is_streaming"`
+	CreatedAt            float64                `json:"created_at"`
+	LastActivity         float64                `json:"last_activity,omitempty"`
+	Cwd                  string                 `json:"cwd,omitempty"`
+	Model                string                 `json:"model,omitempty"`
+	Effort               string                 `json:"effort,omitempty"`
+	ServiceTier          string                 `json:"service_tier,omitempty"`
+	CollaborationMode    string                 `json:"collaboration_mode,omitempty"`
+	Personality          string                 `json:"personality,omitempty"`
+	Backend              string                 `json:"backend,omitempty"`
+	Sandbox              string                 `json:"sandbox,omitempty"`
+	Pinned               bool                   `json:"pinned"`
+	Hidden               bool                   `json:"hidden"`
+	RecentMessages       []RecentMessage        `json:"recent_messages,omitempty"`
+	PreviewText          string                 `json:"preview_text,omitempty"`
+	PreviewRole          string                 `json:"preview_role,omitempty"`
+	PreviewVersion       int                    `json:"preview_version,omitempty"`
 }
 
 // CodexLiveDiff carries the latest aggregated turn diff. Replacing rather than

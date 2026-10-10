@@ -241,6 +241,7 @@ func main() {
 		codex.SetDelegationProvider(hub)
 		codex.SetSessionControlProvider(hub)
 		codex.SetDataDir(*dataDir)
+		codex.RegisterExistingDaemonObservation()
 		ollama := goexec.NewOllama(terminal, *ollamaHost, "")
 		backends := map[string]executor.Executor{
 			"claude": claude,
@@ -379,6 +380,8 @@ func main() {
 	mux.HandleFunc("/api/events/v1/events", hub.ServeEventAPI)
 	mux.HandleFunc("/api/automation/v1/", hub.ServeAutomationAPI)
 	mux.HandleFunc("/api/relay/v1/", hub.ServeRelayAPI)
+	mux.HandleFunc("/api/internal-agents/v1/observation", hub.ServeInternalAgentObservation)
+	mux.HandleFunc("/api/plugin-metadata/v1/status", hub.ServePluginMetadataStatus)
 	mux.HandleFunc("/api/session-control/v1/", hub.ServeSessionControlAPI)
 	mux.HandleFunc("/api/notification/v1/replies", hub.ServeNotificationReplyAPI)
 	mux.HandleFunc("/api/widgets/v1/", hub.ServeWidgetAPI)

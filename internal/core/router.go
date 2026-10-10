@@ -308,6 +308,16 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 	case "session_mark_read":
 		h.handleSharedRead(c, cmd)
 
+	case "request_internal_agent_observation":
+		go h.handleInternalAgentObservation(ctx, c, cmd.SessionID, cmd.RequestID)
+
+	case "request_plugin_metadata_status":
+		if h.pairedTaskDevice(c) != "" {
+			c.enqueueEvent(pluginMetadataStatus())
+		} else {
+			c.enqueueEvent(h.client.Error("", "observation_forbidden", "Original paired reader required"))
+		}
+
 	case "request_runtime_snapshot":
 		c.enqueueEvent(h.runtimeSnapshotForClient(c))
 
@@ -1304,6 +1314,7 @@ func (h *Hub) sessionSummaries() []protocol.SessionSummary {
 			PreviewText:    previewText, PreviewRole: previewRole, PreviewVersion: sessionPreviewPolicyVersion,
 		})
 	}
+	h.projectSessionSources(out)
 	return out
 }
 
