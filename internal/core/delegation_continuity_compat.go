@@ -84,14 +84,26 @@ func (h *Hub) executeNativeContinuity(ctx context.Context, caller taskapi.BoundC
 			return fail("invalid_argument", "known_none")
 		}
 		command = delegation.ContinuityCommand{Parent: parent.ID, Key: request.IdempotencyKey, Hash: digest, Action: action, Request: bound.SourceRequestID, Call: "continuity-api:" + request.IdempotencyKey}
-		if action == "continue" {
+		_, exists, e := h.delegations.ContinuityCommand(ctx, parent.ID, request.IdempotencyKey)
+		if e != nil {
+			return fail("unknown_acceptance", "unknown")
+		}
+		if !exists && action == "continue" {
 			taskID, e := h.formalContinuationTask(ctx, parent, in.Continuity.Arguments)
 			if e != nil {
 				return fail("permission", "known_none")
 			}
 			command.EffectTaskID = taskID
+			if taskID != "" {
+				if e := h.prepareFormalOwner(ctx, bound, &command, request, in.Continuity.Arguments); e != nil {
+					return fail("permission", "known_none")
+				}
+			}
 		}
-		fresh, e := h.delegations.ReserveContinuityCommand(ctx, command)
+		fresh := false
+		if !exists {
+			fresh, e = h.delegations.ReserveContinuityCommand(ctx, command)
+		}
 		if e != nil {
 			return fail("unknown_acceptance", "unknown")
 		}
@@ -104,6 +116,11 @@ func (h *Hub) executeNativeContinuity(ctx context.Context, caller taskapi.BoundC
 				return fail("idempotency_conflict", "known_receipt")
 			}
 			command = stored
+			if stored.EffectTaskID != "" {
+				if _, e := h.checkedFormalOwner(ctx, bound, parent, stored); e != nil {
+					return fail("unknown_acceptance", "unknown")
+				}
+			}
 			if stored.State == "refused" {
 				return fail(stored.Error, "known_none")
 			}
@@ -140,7 +157,7 @@ func (h *Hub) executeNativeContinuity(ctx context.Context, caller taskapi.BoundC
 			err = json.Unmarshal(in.Continuity.Arguments, &a)
 			if err == nil {
 				if command.EffectTaskID != "" {
-					data, err = h.continueFormalOwner(ctx, caller, parent, command, request, a)
+					data, err = h.continueFormalOwner(ctx, caller, parent, command)
 				} else {
 					data, err = h.ContinueDelegation(parent, bound.SourceRequestID, command.Call, a)
 				}
