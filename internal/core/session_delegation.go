@@ -466,12 +466,11 @@ func (h *Hub) reconcileDelegation(ctx context.Context, r delegation.Record) erro
 			return err
 		} else if api {
 			var metadata apiMetadata
-			if json.Unmarshal(data, &metadata) != nil || parent.ResumeID() != metadata.SourceThread || parent.SettingsSnapshot().ConfigRevision != metadata.SourceRevision || parent.State() == session.Closed {
-				_, e := h.delegations.MarkDeliveryFailed(ctx, r.ParentSessionID, r.ParentRequestID, "source_binding_changed")
-				return e
-			}
-			// API metadata must agree with the original durable source binding.
-			if metadata.SourceThread != thread || metadata.SourceRevision != revision {
+			decodeErr := json.Unmarshal(data, &metadata)
+			effectiveThread, effectiveRevision, bindingErr := h.formalDelegationReturnSource(ctx, r, parent, metadata)
+			// The formal profile retains ORIGINAL metadata. An explicit epoch alone
+			// permits this new return; no metadata or past return is rewritten.
+			if decodeErr != nil || bindingErr != nil || parent.State() == session.Closed || effectiveThread != thread || effectiveRevision != revision {
 				_, e := h.delegations.MarkDeliveryFailed(ctx, r.ParentSessionID, r.ParentRequestID, "source_binding_changed")
 				return e
 			}

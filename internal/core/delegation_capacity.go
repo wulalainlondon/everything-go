@@ -233,13 +233,14 @@ func (h *Hub) appendCapacityDelegation(ctx context.Context, c taskapi.Authorized
 	if c.Caller.SourceSessionID != base.ParentSessionID {
 		return nil, taskapi.Failure("permission", "known_none", "request_scope_change")
 	}
-	sourceThread, sourceRevision, bound, e := h.delegations.SourceBinding(ctx, base.ID)
-	if e != nil {
-		return nil, e
-	}
-	if !bound || parent.ResumeID() != sourceThread || parent.SettingsSnapshot().ConfigRevision != sourceRevision {
+	// Use the same validated effective source epoch as the native continuation.
+	// The original binding remains immutable; this new round binds to the explicitly
+	// approved current revision, with authority/profile/workspace checks unchanged.
+	effective, _, registeredChild, e := h.continuityBase(parent, base.ID)
+	if e != nil || registeredChild != target {
 		return nil, taskapi.Failure("permission", "known_none", "refresh_identity")
 	}
+	sourceThread, sourceRevision := effective.SourceThread, effective.SourceRevision
 	rootRound, has, e := h.delegations.Round(ctx, base.ID)
 	if e != nil {
 		return nil, e

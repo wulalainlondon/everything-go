@@ -104,3 +104,35 @@ func workspaceWithin(parent, child string) bool {
 	rel, e := filepath.Rel(root, target)
 	return e == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
+
+// formalDelegationReturnSource relates immutable formal metadata to the original
+// logical root, then uses the same authority/child/profile/workspace-validated
+// effective epoch as continuation admission. Caller cannot supply a replacement.
+func (h *Hub) formalDelegationReturnSource(ctx context.Context, r delegation.Record, parent *session.Session, metadata apiMetadata) (string, uint64, error) {
+	round, found, e := h.delegations.Round(ctx, r.ID)
+	if e != nil {
+		return "", 0, e
+	}
+	if !found {
+		return "", 0, errors.New("delegation_continuity_binding_missing")
+	}
+	original, found, e := h.delegations.ByID(ctx, round.LogicalID)
+	if e != nil {
+		return "", 0, e
+	}
+	if !found || original.ParentSessionID != parent.ID || original.ChildSessionID != r.ChildSessionID {
+		return "", 0, errors.New("delegation_continuation_forbidden")
+	}
+	thread, revision, bound, e := h.delegations.SourceBinding(ctx, original.ID)
+	if e != nil {
+		return "", 0, e
+	}
+	if !bound || metadata.SourceThread != thread || metadata.SourceRevision != revision {
+		return "", 0, errors.New("delegation_source_binding_changed")
+	}
+	effective, _, _, e := h.continuityBase(parent, original.ID)
+	if e != nil {
+		return "", 0, e
+	}
+	return effective.SourceThread, effective.SourceRevision, nil
+}
