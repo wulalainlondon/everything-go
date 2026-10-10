@@ -44,46 +44,50 @@ func (h *Hub) continuityBase(parent *session.Session, id string) (delegation.Rec
 	return h.continuityBaseAt(parent, id, nil)
 }
 
-// expectedSource is used only by explicit reauthorization to validate the old epoch.
-func (h *Hub) continuityBaseAt(parent *session.Session, id string, expectedSource *uint64) (delegation.Record, delegation.Round, *session.Session, error) {
-	ctx := context.Background()
+// continuitySourceAt resolves immutable root provenance and the explicitly
+// approved source epoch. It performs no child lookup, native receipt upgrade or
+// execution eligibility check, so sealed terminal failures/results can return.
+func (h *Hub) continuitySourceAt(ctx context.Context, parent *session.Session, id string, expectedSource *uint64) (delegation.Record, delegation.Round, error) {
+	if e := h.delegationQueueParent(parent); e != nil {
+		return delegation.Record{}, delegation.Round{}, e
+	}
 	base, found, e := h.delegations.ByID(ctx, id)
 	if e != nil {
-		return base, delegation.Round{}, nil, e
+		return base, delegation.Round{}, e
 	}
 	if !found || base.ParentSessionID != parent.ID {
-		return base, delegation.Round{}, nil, errors.New("delegation_continuation_forbidden")
+		return base, delegation.Round{}, errors.New("delegation_continuation_forbidden")
 	}
 	round, found, e := h.delegations.Round(ctx, id)
 	if e != nil {
-		return base, round, nil, e
+		return base, round, e
 	}
 	if !found {
-		return base, round, nil, errors.New("delegation_continuity_binding_missing")
+		return base, round, errors.New("delegation_continuity_binding_missing")
 	}
 	root, ok, e := h.delegations.ByID(ctx, round.LogicalID)
 	if e != nil {
-		return base, round, nil, e
+		return base, round, e
 	}
-	if !ok || root.ParentSessionID != parent.ID {
-		return base, round, nil, errors.New("delegation_continuation_forbidden")
+	if !ok || root.ParentSessionID != parent.ID || root.ChildSessionID != base.ChildSessionID {
+		return base, round, errors.New("delegation_continuation_forbidden")
 	}
 	source, revision, bound, e := h.delegations.SourceBinding(ctx, root.ID)
 	if e != nil {
-		return base, round, nil, e
+		return base, round, e
 	}
 	_, _, root.WorkspaceIdentity, e = h.delegations.ExecutionBinding(ctx, root.ID)
 	if e != nil {
-		return base, round, nil, e
+		return base, round, e
 	}
 	originalRevision := revision
 	epoch, hasEpoch, e := h.delegations.SourceEpoch(ctx, root.ID)
 	if e != nil {
-		return base, round, nil, e
+		return base, round, e
 	}
 	if hasEpoch {
 		if epoch.Parent != parent.ID || epoch.Authority != h.cfg.InstanceID || epoch.Thread != source || epoch.GrantDigest != delegationGrantDigest(root, source, originalRevision) {
-			return base, round, nil, errors.New("delegation_reauthorization_binding_changed")
+			return base, round, errors.New("delegation_reauthorization_binding_changed")
 		}
 		revision = epoch.ToRevision
 	}
@@ -92,8 +96,33 @@ func (h *Hub) continuityBaseAt(parent *session.Session, id string, expectedSourc
 		wantRevision = *expectedSource
 	}
 	if !bound || parent.ResumeID() != source || wantRevision != revision {
-		return base, round, nil, errors.New("delegation_source_binding_changed")
+		return base, round, errors.New("delegation_source_binding_changed")
 	}
+	if round.Authority != "" && round.Authority != h.cfg.InstanceID {
+		return base, round, errors.New("delegation_wrong_authority")
+	}
+	rootMeta, exists, e := h.delegations.Round(ctx, root.ID)
+	if e != nil {
+		return base, round, e
+	}
+	if !exists || (rootMeta.Authority != "" && rootMeta.Authority != h.cfg.InstanceID) {
+		return base, round, errors.New("delegation_wrong_authority")
+	}
+	if rootMeta.GrantDigest != "" && rootMeta.GrantDigest != delegationGrantDigest(root, source, originalRevision) {
+		return base, round, errors.New("delegation_grants_changed")
+	}
+	root.SourceThread, root.SourceRevision = source, revision
+	return root, round, nil
+}
+
+// expectedSource is used only by explicit reauthorization to validate the old epoch.
+func (h *Hub) continuityBaseAt(parent *session.Session, id string, expectedSource *uint64) (delegation.Record, delegation.Round, *session.Session, error) {
+	ctx := context.Background()
+	root, round, e := h.continuitySourceAt(ctx, parent, id, expectedSource)
+	if e != nil {
+		return root, round, nil, e
+	}
+	base := root
 	proof, accepted, e := h.messageQueue.ExactNativeAcceptance(root.ChildSessionID, root.ChildRequestID)
 	if e != nil {
 		return base, round, nil, e
@@ -128,23 +157,10 @@ func (h *Hub) continuityBaseAt(parent *session.Session, id string, expectedSourc
 		return base, round, nil, e
 	}
 	root.AcceptedBackend = child.Backend()
-	root.SourceThread, root.SourceRevision, root.ExpectedThread, root.ExpectedRevision = source, revision, thread, rev
+	root.ExpectedThread, root.ExpectedRevision = thread, rev
 	_, _, root.WorkspaceIdentity, e = h.delegations.ExecutionBinding(ctx, root.ID)
 	if e != nil {
 		return base, round, nil, e
-	}
-	if round.Authority != "" && round.Authority != h.cfg.InstanceID {
-		return base, round, nil, errors.New("delegation_wrong_authority")
-	}
-	rootMeta, exists, e := h.delegations.Round(ctx, root.ID)
-	if e != nil {
-		return base, round, nil, e
-	}
-	if !exists || (rootMeta.Authority != "" && rootMeta.Authority != h.cfg.InstanceID) {
-		return base, round, nil, errors.New("delegation_wrong_authority")
-	}
-	if rootMeta.GrantDigest != "" && rootMeta.GrantDigest != delegationGrantDigest(root, source, originalRevision) {
-		return base, round, nil, errors.New("delegation_grants_changed")
 	}
 	return root, round, child, nil
 }

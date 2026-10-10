@@ -471,7 +471,13 @@ func (h *Hub) reconcileDelegation(ctx context.Context, r delegation.Record) erro
 			// The formal profile retains ORIGINAL metadata. An explicit epoch alone
 			// permits this new return; no metadata or past return is rewritten.
 			if decodeErr != nil || bindingErr != nil || parent.State() == session.Closed || effectiveThread != thread || effectiveRevision != revision {
-				_, e := h.delegations.MarkDeliveryFailed(ctx, r.ParentSessionID, r.ParentRequestID, "source_binding_changed")
+				reason := "source_binding_changed"
+				if decodeErr != nil {
+					reason = "delegation_metadata_invalid"
+				} else if bindingErr != nil {
+					reason = bindingErr.Error()
+				}
+				_, e := h.delegations.MarkDeliveryFailed(ctx, r.ParentSessionID, r.ParentRequestID, reason)
 				return e
 			}
 		}

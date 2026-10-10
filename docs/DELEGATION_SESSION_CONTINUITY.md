@@ -114,3 +114,29 @@ frozen handoff returns. They do not certify installed native tool loading, real
 runtime execution, independent external QA or deployment. Those axes remain
 pending until the coordinator validates the exact frozen candidate and performs
 one necessary already-authorized original workflow round after external QA.
+
+## Stored terminal return and execution admission
+
+Formal terminal return resolves the original logical root SourceBinding, immutable
+API caller/profile/workspace provenance, original grant digest and approved
+source epoch. It still requires the original registered writable parent in scope,
+its unchanged native thread and current approved revision, and this round's own
+source binding and before-Send target expectation. Malformed metadata, foreign
+provenance and unapproved epochs fail closed without creating a return receipt.
+
+A verified pre-execution failure, queued cancellation or provision refusal has no
+native acceptance. Its stored terminal notice can return without fabricating one.
+A stored completed result can return after its child closes or changes future
+settings. Neither case renews execution authority, rewrites accepted metadata or
+pins a native thread. The accepted historical workspace identity remains stored;
+returning old data does not require executing in that workspace again.
+
+Append, continue, reauthorization and child Send still require the original exact
+native receipt/thread, current executable child, accepted profile, workspace and
+sandbox. Closed, deleted, archived or drifted children cannot resume through this
+return path. Execution, delivery and handoff snapshot remain separate axes.
+
+An existing original parent-return receipt owns its request ID and frozen payload
+across store reopen. Reconciliation never rereads a later handoff to replace it.
+Uncertain acceptance is retained under that original receipt; it is not resent or
+steered, and no replacement request/session or ordinary-message fallback is used.

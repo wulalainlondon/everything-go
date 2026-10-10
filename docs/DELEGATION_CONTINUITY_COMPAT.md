@@ -69,3 +69,8 @@ This is an explicit permission-changing operation: caller authentication alone
 is not human approval. Agents must obtain human authorization for the concrete
 pair and old/new source revisions before invoking it. It remains unavailable to
 workers, global controllers, foreign parents and paired-client transport.
+
+Terminal return uses source/epoch-only validation described in
+`DELEGATION_SESSION_CONTINUITY.md`; a stored failure/result can be reported even
+when the original worker cannot start another turn. This does not change the
+compatibility command schema, continuation authorization or any prior receipt.

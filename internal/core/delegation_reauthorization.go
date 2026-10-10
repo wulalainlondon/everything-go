@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"everything-go/internal/delegation"
 	"everything-go/internal/session"
@@ -106,8 +107,8 @@ func workspaceWithin(parent, child string) bool {
 }
 
 // formalDelegationReturnSource relates immutable formal metadata to the original
-// logical root, then uses the same authority/child/profile/workspace-validated
-// effective epoch as continuation admission. Caller cannot supply a replacement.
+// logical root and source authority epoch, without requiring a finished child
+// to remain executable. Caller cannot supply a replacement or renew execution.
 func (h *Hub) formalDelegationReturnSource(ctx context.Context, r delegation.Record, parent *session.Session, metadata apiMetadata) (string, uint64, error) {
 	round, found, e := h.delegations.Round(ctx, r.ID)
 	if e != nil {
@@ -130,9 +131,32 @@ func (h *Hub) formalDelegationReturnSource(ctx context.Context, r delegation.Rec
 	if !bound || metadata.SourceThread != thread || metadata.SourceRevision != revision {
 		return "", 0, errors.New("delegation_source_binding_changed")
 	}
-	effective, _, _, e := h.continuityBase(parent, original.ID)
+	effective, _, e := h.continuitySourceAt(ctx, parent, r.ID, nil)
 	if e != nil {
 		return "", 0, e
+	}
+	// Validate the stored formal provenance, never today's child settings or
+	// workspace inode. Returning old data does not authorize another execution.
+	var input apiInput
+	if json.Unmarshal(metadata.Request.Input, &input) != nil || input.New == nil || metadata.Request.Operation != "create_dispatch" ||
+		metadata.Caller.Authority != h.cfg.InstanceID || metadata.Caller.SourceSessionID != parent.ID ||
+		metadata.Caller.SourceResumeID != thread || !metadata.Caller.SourceConfigKnown || metadata.Caller.SourceConfigRevision != revision ||
+		metadata.CanonicalCwd != original.Cwd || metadata.RootIdentities[original.Cwd] != effective.WorkspaceIdentity || effective.WorkspaceIdentity == "" ||
+		input.New.Profile.Model != original.Model || input.New.Profile.Effort != original.Effort || input.Scope.Sandbox != original.Sandbox ||
+		r.ParentSessionID != parent.ID || r.Cwd != original.Cwd || r.Model != original.Model || r.Effort != original.Effort || r.Sandbox != original.Sandbox {
+		return "", 0, errors.New("delegation_grants_changed")
+	}
+	provider, api, e := h.delegations.APIBackend(ctx, original.ChildSessionID)
+	if e != nil {
+		return "", 0, e
+	}
+	if !api || provider != input.New.Profile.Backend || len(metadata.CanonicalRoots) == 0 {
+		return "", 0, errors.New("delegation_grants_changed")
+	}
+	for _, path := range metadata.CanonicalRoots {
+		if metadata.RootIdentities[path] == "" {
+			return "", 0, errors.New("delegation_grants_changed")
+		}
 	}
 	return effective.SourceThread, effective.SourceRevision, nil
 }

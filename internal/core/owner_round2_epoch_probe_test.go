@@ -227,7 +227,16 @@ func TestOwnerRound2FormalEpochReturnRejectsFreshDriftAndMetadataAdoption(t *tes
 				snap.Model = "foreign-model"
 				child.RestoreFutureConfiguration(snap)
 			}
-			if _, _, e = h.formalDelegationReturnSource(ctx, owner, p, metadata); e == nil {
+			if kind == "child_profile_drift" {
+				// Child drift blocks NEW execution; stored terminal return does not
+				// renew execution authority (SC-QA2-001).
+				if _, _, _, e = h.continuityBase(p, owner.ID); e == nil {
+					t.Fatal("continuation admitted unapproved child drift")
+				}
+				if _, _, e = h.formalDelegationReturnSource(ctx, owner, p, metadata); e != nil {
+					t.Fatal("old terminal source incorrectly requires executable child", e)
+				}
+			} else if _, _, e = h.formalDelegationReturnSource(ctx, owner, p, metadata); e == nil {
 				t.Fatal("formal epoch admitted unapproved drift", kind)
 			}
 			after, _, e := h.delegations.APIChildMetadata(ctx, child.ID)
