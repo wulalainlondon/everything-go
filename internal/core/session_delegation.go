@@ -397,7 +397,7 @@ func (h *Hub) reconcileDelegation(ctx context.Context, r delegation.Record) erro
 					if !ok || seal == "" {
 						return nil
 					}
-					sealed, e := h.messageQueue.TaskSeal(ctx, r.ChildSessionID, r.ChildRequestID, seal)
+					sealed, e := h.messageQueue.TaskSeal(ctx, r.ChildSessionID, executionRequest, seal)
 					if e != nil {
 						return e
 					}
