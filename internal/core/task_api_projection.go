@@ -355,6 +355,9 @@ func (h *Hub) apiTask(ctx context.Context, r taskapi.IntentRecord) (map[string]a
 					out = append(out, map[string]any{"delegation_id": round.ID, "round_version": round.Version, "previous_round_id": round.PreviousID, "request_id": record.ChildRequestID, "execution": record.State, "terminal_status": record.TerminalStatus, "delivery": record.DeliveryState, "dispatcher_session_id": record.ParentSessionID, "dispatcher_request_id": record.OriginRequestID, "qa_round_id": qa, "qa_verdict": verdict, "successor_reason": ""})
 				}
 				task["continuity"] = map[string]any{"logical_task_id": m.LogicalID, "current_round_id": latest.ID, "current_round_version": latest.Version, "rounds": out, "earlier_rounds_omitted": after > 0}
+				if err := h.projectCanonicalDelegationQA(ctx, latest.ID, task, axes); err != nil {
+					return nil, err
+				}
 			}
 		}
 	}

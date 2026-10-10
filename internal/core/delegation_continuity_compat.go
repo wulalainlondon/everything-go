@@ -189,6 +189,16 @@ func (h *Hub) executeNativeContinuity(ctx context.Context, caller taskapi.BoundC
 		}
 	}
 	if err != nil {
+		// A precise unsupported refusal is not permission failure. Persist the
+		// original command outcome without retrying or relaxing the enforcer.
+		if failure, ok := err.(*taskapi.APIError); ok && failure.Acceptance == "known_none" && op == "append" {
+			_, accepted, lookupErr := h.delegations.ByOrigin(ctx, parent.ID, command.Request, command.Call)
+			if lookupErr == nil && !accepted {
+				if finishErr := h.delegations.FinishContinuityCommand(ctx, command, "refused", nil, failure.Code); finishErr == nil {
+					return fail(failure.Code, "known_none")
+				}
+			}
+		}
 		// Core validation failures precede its transactional effect reservation.
 		// Database/transport failures remain uncertain; never guess that an
 		// absent reply means the original operation did not happen.
