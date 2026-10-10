@@ -15,7 +15,7 @@ TaskService, Gateway/Authorizer, SnapshotSource and provider verifier ports are 
 Run: go test ./contracts/task-api/v1 ./internal/taskapi; provider fixture tests: go test ./internal/executor/goexec -run TestTaskAPI. B2/B3/B5/B7 need owner accepted base and hooks; fixture maps exist only in *_test.go. No new task DB/ledger.
 
 Session-continuity candidate extension: delegation `append` retains its original
-scoped journal and adds optional `return_to_parent:true`. The new round has an
+scoped journal and adds optional `return_to_parent:true` with `expected_previous_round_id` CAS. The new round has an
 independent return receipt/frozen handoff. Task DTOs expose bounded `continuity`
 round metadata; original command execution/final/QA/delivery axes are preserved.
 Explicit delegated steering uses the original-parent native tool in

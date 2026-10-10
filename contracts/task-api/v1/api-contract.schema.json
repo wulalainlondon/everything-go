@@ -714,6 +714,10 @@
         "return_to_parent": {
           "type": "boolean",
           "description": "Delegation queue append only: reserve and return this exact round through original parent handoff; default false retains legacy behavior."
+        },
+        "expected_previous_round_id": {
+          "$ref": "#/$defs/ID",
+          "description": "Logical delegation round CAS, independent of timestamp/state revision; required for a requested per-round parent return."
         }
       },
       "required": [
@@ -736,6 +740,23 @@
             "required": [
               "expected_active_request_id",
               "expected_execution"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "return_to_parent": {
+                "const": true
+              }
+            },
+            "required": [
+              "return_to_parent"
+            ]
+          },
+          "then": {
+            "required": [
+              "expected_previous_round_id"
             ]
           }
         }

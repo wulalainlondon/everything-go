@@ -37,8 +37,13 @@ func TestTaskAPIAuthenticatedWSCanonicalStore(t *testing.T) {
 		<-release
 		h.Emit(protocol.NewDone(s.ID, req))
 	}}})
-	conn, ctx, cleanup := dialWS(t, h)
+	conn, _, cleanup := dialWS(t, h)
 	defer cleanup()
+	// This case verifies a full authenticated multi-command transaction chain,
+	// not a three-second performance budget shared by every read/write. Race
+	// instrumentation and contract validation may exceed that handshake budget.
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
 	send := func(value any) {
 		raw, _ := json.Marshal(value)
 		if err := conn.Write(ctx, websocket.MessageText, raw); err != nil {

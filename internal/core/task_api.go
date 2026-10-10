@@ -29,6 +29,7 @@ import (
 )
 
 type apiInput struct {
+	ExpectedPreviousRoundID    string `json:"expected_previous_round_id"`
 	ReturnToParent             bool   `json:"return_to_parent"`
 	IncludeRelationCoverage    bool   `json:"include_relation_coverage"`
 	TaskID                     string `json:"task_id"`
@@ -275,6 +276,9 @@ func (h *Hub) Authorize(ctx context.Context, c taskapi.VerifiedContext, r taskap
 			return l, taskapi.Failure("wrong_authority", "known_none", "refresh_identity")
 		}
 		l.Path = ref[1]
+		if r.Operation == "append" && l.Path != "delegation" && (in.ReturnToParent || in.ExpectedPreviousRoundID != "") {
+			return l, taskapi.Failure("unsupported", "known_none", "read_capabilities")
+		}
 		l.TaskID = in.TaskID
 		record, err := h.apiRecord(ctx, c, in.TaskID)
 		var legacy legacySourceMetadata
@@ -355,6 +359,21 @@ func (h *Hub) Authorize(ctx context.Context, c taskapi.VerifiedContext, r taskap
 				}
 				if err := h.enforceExistingScope(target, originalInput); err != nil {
 					return l, err
+				}
+				if l.Path == "delegation" && in.ExpectedPreviousRoundID != "" {
+					if root, found, e := h.delegations.Round(ctx, record.NativeID); e != nil {
+						return l, e
+					} else if !found {
+						return l, taskapi.Failure("not_found", "known_none", "lookup_original")
+					} else {
+						latest, e := h.delegations.LatestRound(ctx, root.LogicalID)
+						if e != nil {
+							return l, e
+						}
+						if latest.ID != in.ExpectedPreviousRoundID {
+							return l, taskapi.Failure("stale_revision", "known_none", "refresh_identity")
+						}
+					}
 				}
 			}
 			if in.Mode == "steer" {

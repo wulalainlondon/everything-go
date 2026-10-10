@@ -554,7 +554,7 @@ func TestContinuityAPINativeSteerRetainsFormalScopeButQueueUsesExistingAppend(t 
 	if e != nil {
 		t.Fatal(e)
 	}
-	appendInput := map[string]any{"task_id": intent.TaskID, "expected_revision": task["revision"], "target": map[string]any{"instance_id": h.cfg.InstanceID, "session_id": child.ID, "expected_native_thread_id": child.ResumeID(), "expected_config_revision": child.SettingsSnapshot().ConfigRevision}, "mode": "queue", "content": "queued formal fix", "return_to_parent": true}
+	appendInput := map[string]any{"task_id": intent.TaskID, "expected_revision": task["revision"], "target": map[string]any{"instance_id": h.cfg.InstanceID, "session_id": child.ID, "expected_native_thread_id": child.ResumeID(), "expected_config_revision": child.SettingsSnapshot().ConfigRevision}, "mode": "queue", "content": "queued formal fix", "return_to_parent": true, "expected_previous_round_id": original.ID}
 	raw, _ = json.Marshal(map[string]any{"type": "task_api_request", "api_version": contract.Version, "correlation_id": "synthetic-formal", "operation": "append", "idempotency_key": "synthetic-formal-fix", "input": appendInput})
 	binding.ToolCallID = "synthetic-append-formal"
 	bound, e = taskapi.BindCaller(ctx, apiVerifier{func() (taskapi.VerifiedContext, error) { return binding, nil }}, taskapi.Invocation{})
@@ -612,6 +612,15 @@ func TestContinuityAPINativeSteerRetainsFormalScopeButQueueUsesExistingAppend(t 
 	}
 	if otherRequest != fix.ChildRequestID {
 		t.Fatal("per-round receipt correlation absent")
+	}
+	// A native steer changes logical rounds even when command timestamps alias.
+	// An old predecessor cannot admit an API queue correction against that round.
+	appendInput["expected_revision"] = originalTask["revision"]
+	appendInput["expected_previous_round_id"] = fix.ID
+	raw, _ = json.Marshal(map[string]any{"type": "task_api_request", "api_version": contract.Version, "correlation_id": "synthetic-stale-round", "operation": "append", "idempotency_key": "synthetic-stale-round-key", "input": appendInput})
+	stale := h.taskService.Execute(ctx, bound, raw)
+	if stale.OK || stale.Error.Code != "stale_revision" || stale.Error.Acceptance != "known_none" {
+		t.Fatal("native/API round CAS race", stale)
 	}
 }
 

@@ -10,7 +10,7 @@ nor legacy children receive management tools or management authorization.
 
 | Target | Legal continuation | Evidence/return |
 |---|---|---|
-| TaskAPI delegation queue round | Existing `bridge_tasks.task_append` (`append` envelope); optional `return_to_parent:true` | Existing scoped journal/idempotency receipt, capacity reservation, per-round parent handoff |
+| TaskAPI delegation queue round | Existing `bridge_tasks.task_append` (`append` envelope); optional `return_to_parent:true` with `expected_previous_round_id` | Existing scoped journal/idempotency receipt, capacity reservation, `expected_previous_round_id` CAS for a requested parent handoff |
 | Legacy `bridge_sessions.delegate_session` child, idle or active with a queue supplement | `bridge_sessions.continue_delegation`, `mode:queue` | A new persisted ordinary `r_` request and delegation round; original session/thread/profile |
 | Explicit active supplement to either kind of owned delegated child | `bridge_sessions.continue_delegation`, `mode:steer`, exact `active_request_id` | Existing native queue promotion/strict steer ACK; shares the exact original execution request/turn, reserves its own result/return |
 | Managed target via controller | Still `controller_managed_target_forbidden` | Refusal retained; no ordinary-message fallback |

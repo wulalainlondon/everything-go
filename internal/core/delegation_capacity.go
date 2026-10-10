@@ -274,6 +274,9 @@ func (h *Hub) appendCapacityDelegation(ctx context.Context, c taskapi.Authorized
 	}
 	id := "dgfollow_" + intent.RequestID
 	r := delegation.Record{ID: id, LogicalID: rootRound.LogicalID, PreviousID: latestRound.ID, Authority: h.cfg.InstanceID, ParentSessionID: parent.ID, ChildSessionID: target.ID, ChildRequestID: intent.RequestID, ParentRequestID: "dgreturn_" + id, OriginRequestID: c.Caller.SourceRequestID, ToolCallID: c.Caller.ToolCallID, IntentHash: c.IntentHash, ChildName: snap.Name, Cwd: snap.Cwd, Instruction: in.Content, Model: snap.Model, Effort: snap.Effort, Sandbox: base.Sandbox, SourceThread: sourceThread, SourceRevision: sourceRevision, ExpectedThread: target.ResumeID(), ExpectedRevision: snap.ConfigRevision, DeliveryState: "not_requested"}
+	if in.ExpectedPreviousRoundID != "" {
+		r.PreviousID = in.ExpectedPreviousRoundID
+	}
 	if in.ReturnToParent {
 		r.DeliveryState = "pending"
 	}

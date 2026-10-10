@@ -15,6 +15,7 @@
     },
     "mode": "queue",
     "content": "Apply the QA failure within the original accepted scope; keep original results.",
-    "return_to_parent": true
+    "return_to_parent": true,
+    "expected_previous_round_id": "original-round-id-from-continuity-metadata"
   }
 }
