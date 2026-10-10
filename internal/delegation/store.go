@@ -80,7 +80,7 @@ func Open(dataDir string) (*Store, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	if _, err = db.Exec(ddl + capacityDDL + handoffDDL + continuityDDL); err != nil {
+	if _, err = db.Exec(ddl + capacityDDL + handoffDDL + continuityDDL + continuityCommandDDL); err != nil {
 		db.Close()
 		return nil, err
 	}

@@ -616,37 +616,12 @@
       "description": "Unambiguous canonical-store locator. Append/cancel/delivery keys are namespaced by task_id; create by server-resolved path. Caller stable scope/generation is server-bound and never client-selected."
     },
     "GetInput": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "task_id": {
-          "$ref": "#/$defs/ID"
-        },
-        "original_receipt": {
-          "$ref": "#/$defs/LookupReceipt"
-        }
-      },
-      "required": [],
       "oneOf": [
         {
-          "required": [
-            "task_id"
-          ],
-          "not": {
-            "required": [
-              "original_receipt"
-            ]
-          }
+          "$ref": "#/$defs/OriginalGetInput"
         },
         {
-          "required": [
-            "original_receipt"
-          ],
-          "not": {
-            "required": [
-              "task_id"
-            ]
-          }
+          "$ref": "#/$defs/NativeContinuityGetInput"
         }
       ]
     },
@@ -679,86 +654,12 @@
       ]
     },
     "AppendInput": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "task_id": {
-          "$ref": "#/$defs/ID"
-        },
-        "expected_revision": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 9007199254740991
-        },
-        "target": {
-          "$ref": "#/$defs/Target"
-        },
-        "content": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 32000
-        },
-        "mode": {
-          "type": "string",
-          "enum": [
-            "queue",
-            "steer"
-          ]
-        },
-        "expected_active_request_id": {
-          "$ref": "#/$defs/ID"
-        },
-        "expected_execution": {
-          "$ref": "#/$defs/ExecutionRef"
-        },
-        "return_to_parent": {
-          "type": "boolean",
-          "description": "Delegation queue append only: reserve and return this exact round through original parent handoff; default false retains legacy behavior."
-        },
-        "expected_previous_round_id": {
-          "$ref": "#/$defs/ID",
-          "description": "Logical delegation round CAS, independent of timestamp/state revision; required for a requested per-round parent return."
-        }
-      },
-      "required": [
-        "task_id",
-        "expected_revision",
-        "target",
-        "content",
-        "mode"
-      ],
-      "allOf": [
+      "oneOf": [
         {
-          "if": {
-            "properties": {
-              "mode": {
-                "const": "steer"
-              }
-            }
-          },
-          "then": {
-            "required": [
-              "expected_active_request_id",
-              "expected_execution"
-            ]
-          }
+          "$ref": "#/$defs/OriginalAppendInput"
         },
         {
-          "if": {
-            "properties": {
-              "return_to_parent": {
-                "const": true
-              }
-            },
-            "required": [
-              "return_to_parent"
-            ]
-          },
-          "then": {
-            "required": [
-              "expected_previous_round_id"
-            ]
-          }
+          "$ref": "#/$defs/NativeContinuityAppendInput"
         }
       ]
     },
@@ -2665,6 +2566,9 @@
             },
             {
               "$ref": "#/$defs/Receipt"
+            },
+            {
+              "$ref": "#/$defs/NativeContinuityResult"
             }
           ]
         }
@@ -2730,7 +2634,14 @@
           "const": true
         },
         "result": {
-          "$ref": "#/$defs/Receipt"
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Receipt"
+            },
+            {
+              "$ref": "#/$defs/NativeContinuityResult"
+            }
+          ]
         }
       },
       "required": [
@@ -3969,6 +3880,431 @@
         "operation",
         "ok",
         "result"
+      ]
+    },
+    "NativeContinuityAppendInput": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "continuity": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "action": {
+                  "const": "continue"
+                },
+                "arguments": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "delegation_id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 256
+                    },
+                    "expected_previous_round_id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 256
+                    },
+                    "instance_id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 256
+                    },
+                    "expected_thread_id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 256
+                    },
+                    "expected_config_revision": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "content": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 32000
+                    },
+                    "mode": {
+                      "type": "string",
+                      "enum": [
+                        "queue",
+                        "steer"
+                      ]
+                    },
+                    "active_request_id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 256
+                    }
+                  },
+                  "required": [
+                    "delegation_id",
+                    "expected_previous_round_id",
+                    "instance_id",
+                    "expected_thread_id",
+                    "expected_config_revision",
+                    "content",
+                    "mode"
+                  ],
+                  "allOf": [
+                    {
+                      "if": {
+                        "properties": {
+                          "mode": {
+                            "const": "steer"
+                          }
+                        }
+                      },
+                      "then": {
+                        "required": [
+                          "active_request_id"
+                        ]
+                      }
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "action",
+                "arguments"
+              ]
+            }
+          },
+          "required": [
+            "continuity"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "continuity": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "action": {
+                  "const": "bind_qa"
+                },
+                "arguments": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "owner_delegation_id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 256
+                    },
+                    "qa_delegation_id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 256
+                    }
+                  },
+                  "required": [
+                    "owner_delegation_id",
+                    "qa_delegation_id"
+                  ]
+                }
+              },
+              "required": [
+                "action",
+                "arguments"
+              ]
+            }
+          },
+          "required": [
+            "continuity"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "continuity": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "action": {
+                  "const": "record_review"
+                },
+                "arguments": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "owner_round_id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 256
+                    },
+                    "qa_round_id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 256
+                    }
+                  },
+                  "required": [
+                    "owner_round_id",
+                    "qa_round_id"
+                  ]
+                }
+              },
+              "required": [
+                "action",
+                "arguments"
+              ]
+            }
+          },
+          "required": [
+            "continuity"
+          ]
+        }
+      ]
+    },
+    "NativeContinuityGetInput": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "continuity": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "action": {
+                  "const": "rounds"
+                },
+                "arguments": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "delegation_id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 256
+                    },
+                    "after_version": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "delegation_id"
+                  ]
+                }
+              },
+              "required": [
+                "action",
+                "arguments"
+              ]
+            }
+          },
+          "required": [
+            "continuity"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "continuity": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "action": {
+                  "const": "command"
+                },
+                "arguments": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "idempotency_key": {
+                      "$ref": "#/$defs/Key"
+                    }
+                  },
+                  "required": [
+                    "idempotency_key"
+                  ]
+                }
+              },
+              "required": [
+                "action",
+                "arguments"
+              ]
+            }
+          },
+          "required": [
+            "continuity"
+          ]
+        }
+      ]
+    },
+    "OriginalAppendInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "task_id": {
+          "$ref": "#/$defs/ID"
+        },
+        "expected_revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "target": {
+          "$ref": "#/$defs/Target"
+        },
+        "content": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32000
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "queue",
+            "steer"
+          ]
+        },
+        "expected_active_request_id": {
+          "$ref": "#/$defs/ID"
+        },
+        "expected_execution": {
+          "$ref": "#/$defs/ExecutionRef"
+        },
+        "return_to_parent": {
+          "type": "boolean",
+          "description": "Delegation queue append only: reserve and return this exact round through original parent handoff; default false retains legacy behavior."
+        },
+        "expected_previous_round_id": {
+          "$ref": "#/$defs/ID",
+          "description": "Logical delegation round CAS, independent of timestamp/state revision; required for a requested per-round parent return."
+        }
+      },
+      "required": [
+        "task_id",
+        "expected_revision",
+        "target",
+        "content",
+        "mode"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "steer"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "expected_active_request_id",
+              "expected_execution"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "return_to_parent": {
+                "const": true
+              }
+            },
+            "required": [
+              "return_to_parent"
+            ]
+          },
+          "then": {
+            "required": [
+              "expected_previous_round_id"
+            ]
+          }
+        }
+      ]
+    },
+    "OriginalGetInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "task_id": {
+          "$ref": "#/$defs/ID"
+        },
+        "original_receipt": {
+          "$ref": "#/$defs/LookupReceipt"
+        }
+      },
+      "required": [],
+      "oneOf": [
+        {
+          "required": [
+            "task_id"
+          ],
+          "not": {
+            "required": [
+              "original_receipt"
+            ]
+          }
+        },
+        {
+          "required": [
+            "original_receipt"
+          ],
+          "not": {
+            "required": [
+              "task_id"
+            ]
+          }
+        }
+      ]
+    },
+    "NativeContinuityResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "continuity": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "action": {
+              "enum": [
+                "continue",
+                "bind_qa",
+                "record_review",
+                "rounds",
+                "command"
+              ]
+            },
+            "data": {
+              "type": "object"
+            },
+            "idempotency_key": {
+              "type": "string",
+              "maxLength": 512
+            },
+            "state": {
+              "enum": [
+                "read",
+                "completed",
+                "reserved",
+                "refused"
+              ]
+            }
+          },
+          "required": [
+            "action",
+            "data",
+            "state"
+          ]
+        }
+      },
+      "required": [
+        "continuity"
       ]
     }
   }

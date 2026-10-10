@@ -207,7 +207,10 @@ func (h *Hub) ExecuteTask(ctx context.Context, c backend.TaskCaller, raw []byte)
 		}
 	}
 	caller, bindErr := taskapi.BindCaller(ctx, verifier, taskapi.Invocation{})
-	response := h.taskService.Execute(ctx, caller, raw)
+	response, continuityHandled := h.executeNativeContinuity(ctx, caller, c.Session, raw)
+	if !continuityHandled {
+		response = h.taskService.Execute(ctx, caller, raw)
+	}
 	if bindErr == nil {
 		kind := "native_tool_invoked"
 		if !response.OK {

@@ -74,6 +74,8 @@ type Config struct {
 // the executor.Sink (Emit broadcasts an event to connected clients, or buffers
 // it when none are connected so a reconnecting client can recover it).
 type Hub struct {
+	continuityCompatMu sync.Mutex
+
 	taskService         *taskapi.Service
 	taskCursor          *taskapi.CursorCodec
 	taskMu              sync.Mutex
