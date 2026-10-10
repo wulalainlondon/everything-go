@@ -141,7 +141,7 @@ func TestOwnerRound3FormalTerminalExistingReceiptReopenNeverReplays(t *testing.T
 }
 
 func TestOwnerRound3FormalTerminalSourceRejectsImmutableProvenanceDrift(t *testing.T) {
-	for _, kind := range []string{"caller_parent", "caller_authority", "caller_thread", "caller_revision", "model", "sandbox", "workspace_identity", "canonical_root", "backend", "foreign_round"} {
+	for _, kind := range []string{"caller_parent", "caller_authority", "caller_thread", "caller_revision", "caller_request", "caller_call", "transport", "model", "sandbox", "workspace_identity", "canonical_root", "backend", "foreign_round"} {
 		t.Run(kind, func(t *testing.T) {
 			h, p, r, sends := qa2FormalFixture(t, "provision_failure")
 			ctx := context.Background()
@@ -166,6 +166,12 @@ func TestOwnerRound3FormalTerminalSourceRejectsImmutableProvenanceDrift(t *testi
 				meta.Caller.SourceResumeID = "foreign"
 			case "caller_revision":
 				meta.Caller.SourceConfigRevision++
+			case "caller_request":
+				meta.Caller.SourceRequestID = "foreign"
+			case "caller_call":
+				meta.Caller.ToolCallID = "foreign"
+			case "transport":
+				meta.Caller.Transport = "foreign"
 			case "model":
 				input.New.Profile.Model = "foreign"
 			case "sandbox":

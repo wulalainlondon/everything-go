@@ -140,6 +140,7 @@ func (h *Hub) formalDelegationReturnSource(ctx context.Context, r delegation.Rec
 	var input apiInput
 	if json.Unmarshal(metadata.Request.Input, &input) != nil || input.New == nil || metadata.Request.Operation != "create_dispatch" ||
 		metadata.Caller.Authority != h.cfg.InstanceID || metadata.Caller.SourceSessionID != parent.ID ||
+		metadata.Caller.SourceRequestID != original.OriginRequestID || metadata.Caller.ToolCallID != original.ToolCallID || metadata.Caller.Transport != metadata.Transport ||
 		metadata.Caller.SourceResumeID != thread || !metadata.Caller.SourceConfigKnown || metadata.Caller.SourceConfigRevision != revision ||
 		metadata.CanonicalCwd != original.Cwd || metadata.RootIdentities[original.Cwd] != effective.WorkspaceIdentity || effective.WorkspaceIdentity == "" ||
 		input.New.Profile.Model != original.Model || input.New.Profile.Effort != original.Effort || input.Scope.Sandbox != original.Sandbox ||
