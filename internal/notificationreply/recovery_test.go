@@ -74,6 +74,9 @@ func TestUncertainPreservesOldHistoryAndIsNotPruned(t *testing.T) {
 		t.Fatal("uncertain capacity eviction")
 	}
 	s.Enqueue("new", "s", "new")
+	if newRow, newOK := s.Get("new"); !newOK || newRow.Status != StatusPending {
+		t.Fatal("uncertain soft-cap evicted genuine Pending")
+	}
 	if _, ok = s.Get("uncertain"); !ok {
 		t.Fatal("later prune deleted unknown")
 	}

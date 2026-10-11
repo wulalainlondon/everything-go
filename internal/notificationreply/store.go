@@ -175,7 +175,7 @@ func (s *Store) load() {
 func (s *Store) pruneLocked() {
 	cutoff := s.now().Add(-retention).UnixMilli()
 	for id, record := range s.records {
-		if record.UpdatedAt < cutoff && record.Status != StatusUncertain && record.Status != StatusDispatching {
+		if record.UpdatedAt < cutoff && (record.Status == StatusSent || record.Status == StatusFailed) {
 			delete(s.records, id)
 		}
 	}
@@ -184,7 +184,7 @@ func (s *Store) pruneLocked() {
 	}
 	ordered := make([]Record, 0, len(s.records))
 	for _, record := range s.records {
-		if record.Status != StatusUncertain && record.Status != StatusDispatching {
+		if record.Status == StatusSent || record.Status == StatusFailed {
 			ordered = append(ordered, record)
 		}
 	}
