@@ -114,6 +114,14 @@ func (h *Hub) ServeNotificationReplyAPI(w http.ResponseWriter, r *http.Request) 
 		writeNotificationReply(w, http.StatusAccepted, notificationReplyResponse{ReplyID: record.ID, SessionID: record.SessionID, RequestID: "notification-reply-" + record.ID, Status: notificationreply.StatusUncertain, Error: "acceptance_unknown_lookup_original"})
 		return
 	}
+	if !created && (record.Status == notificationreply.StatusSent || record.Status == notificationreply.StatusFailed || record.Status == notificationreply.StatusDispatching) {
+		errorCode := ""
+		if record.Status == notificationreply.StatusFailed {
+			errorCode = "previous_reply_failed_lookup_original"
+		}
+		writeNotificationReply(w, http.StatusAccepted, notificationReplyResponse{ReplyID: record.ID, SessionID: record.SessionID, RequestID: "notification-reply-" + record.ID, Status: record.Status, Error: errorCode})
+		return
+	}
 	queuePosition := 0
 	if created || record.Status == notificationreply.StatusPending {
 		queuePosition, err = h.dispatchNotificationReply(input.ReplyID)
