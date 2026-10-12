@@ -625,6 +625,8 @@ type SessionSourceRelationship struct {
 	UpdatedAtUnixMS int64  `json:"updated_at_unix_ms"`
 }
 type SessionSummary struct {
+	// Current registered native identity; empty explicitly means not established.
+	ClaudeUUID           string                 `json:"claude_uuid"`
 	SessionSource        *SessionSourceMetadata `json:"session_source,omitempty"`
 	ContextUsed          *int                   `json:"context_used,omitempty"`
 	ContextMax           *int                   `json:"context_max,omitempty"`
