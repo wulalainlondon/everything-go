@@ -355,6 +355,24 @@ func (lease *claudeTaskLease) revoke() {
 	}
 }
 
+// Ending a business turn immediately invalidates every captured TaskCaller.
+// The still-running CLI may ping/list its MCP transport while idle; removing
+// that endpoint here makes a healthy completed turn look like a disconnected
+// server. Stop/DELETE/process exit still revoke the entire transport, and Send
+// creates a fresh process/lease before any later business turn.
+func (lease *claudeTaskLease) endTurn() {
+	lease.mu.Lock()
+	lease.requestID = ""
+	lease.mu.Unlock()
+}
+
+func (lease *claudeTaskLease) hasTurn() bool {
+	lease.mu.Lock()
+	defer lease.mu.Unlock()
+	// Revocation is not proof that an in-flight native turn finished.
+	return lease.requestID != ""
+}
+
 // Preserve the original caller preset; only a verified bounded worker gets the
 // stricter gateway-only preset. One value per CLI policy option, no bypass.
 func normalizeClaudeTaskArgs(args []string, worker bool, taskTools []string) []string {

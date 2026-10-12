@@ -23,15 +23,16 @@ type NativeArtifactVerifier struct {
 	SDKHash    string `json:"sdk_sha256"`
 }
 type NativeCaptureConfig struct {
-	Version    int                     `json:"version"`
-	Authority  string                  `json:"authority_instance_id"`
-	Source     string                  `json:"source_session_id"`
-	Thread     string                  `json:"source_native_thread_id"`
-	Revision   uint64                  `json:"source_config_revision"`
-	Sink       string                  `json:"sink_name"`
-	Operations []string                `json:"read_operations"`
-	Tasks      map[string]string       `json:"selected_task_hashes"`
-	Verifier   *NativeArtifactVerifier `json:"artifact_verifier,omitempty"`
+	Version              int                     `json:"version"`
+	Authority            string                  `json:"authority_instance_id"`
+	Source               string                  `json:"source_session_id"`
+	Thread               string                  `json:"source_native_thread_id"`
+	Revision             uint64                  `json:"source_config_revision"`
+	Sink                 string                  `json:"sink_name"`
+	Operations           []string                `json:"read_operations"`
+	Tasks                map[string]string       `json:"selected_task_hashes"`
+	AdditionalTaskHashes map[string][]string     `json:"additional_task_hashes,omitempty"`
+	Verifier             *NativeArtifactVerifier `json:"artifact_verifier,omitempty"`
 }
 
 func captureOwned(p string, mode os.FileMode) bool {
@@ -88,8 +89,28 @@ func (h *Hub) ConfigureNativeResponseCapture(path string) error {
 		return reject
 	}
 	s, found := h.registry.Get(cfg.Source)
-	if cfg.Version != 1 || cfg.Authority == "" || cfg.Authority != h.cfg.InstanceID || !found || (s.Backend() != "claude" && s.Backend() != "codex") || cfg.Thread == "" || s.ResumeID() != cfg.Thread || s.SettingsSnapshot().ConfigRevision != cfg.Revision {
+	if (cfg.Version != 1 && cfg.Version != 2) || cfg.Authority == "" || cfg.Authority != h.cfg.InstanceID || !found || (s.Backend() != "claude" && s.Backend() != "codex") || cfg.Thread == "" || s.ResumeID() != cfg.Thread || s.SettingsSnapshot().ConfigRevision != cfg.Revision {
 		return reject
+	}
+	var fields map[string]json.RawMessage
+	json.Unmarshal(raw, &fields)
+	if _, present := fields["additional_task_hashes"]; present && cfg.Version != 2 {
+		return reject
+	}
+	// Version 2 admits a finite set of explicitly selected historical hashes
+	// for the SAME already-owned tasks. It never adds tasks or caller rights.
+	for id, hashes := range cfg.AdditionalTaskHashes {
+		primary, selected := cfg.Tasks[id]
+		if !selected || len(hashes) == 0 || len(hashes) > 4 {
+			return reject
+		}
+		seen := map[string]bool{primary: true}
+		for _, hash := range hashes {
+			if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(hash) || seen[hash] {
+				return reject
+			}
+			seen[hash] = true
+		}
 	}
 	if h.delegations == nil {
 		return reject
@@ -148,7 +169,7 @@ func (h *Hub) ConfigureNativeResponseCapture(path string) error {
 			return reject
 		}
 	}
-	h.nativeCapture.Store(&NativeResponseCapture{Directory: dir, SourceSession: cfg.Source, SourceThread: cfg.Thread, SourceRevision: cfg.Revision, Authority: cfg.Authority, ConfigPath: path, ConfigHash: captureHash(path), Operations: ops, Tasks: cfg.Tasks, Verifier: cfg.Verifier})
+	h.nativeCapture.Store(&NativeResponseCapture{Version: cfg.Version, Directory: dir, SourceSession: cfg.Source, SourceThread: cfg.Thread, SourceRevision: cfg.Revision, Authority: cfg.Authority, ConfigPath: path, ConfigHash: captureHash(path), Operations: ops, Tasks: cfg.Tasks, AdditionalTaskHashes: cfg.AdditionalTaskHashes, Verifier: cfg.Verifier})
 	return nil
 }
 func (h *Hub) captureConfigCurrent(p *NativeResponseCapture) bool {

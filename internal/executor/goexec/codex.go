@@ -2842,6 +2842,11 @@ func codexTurnParams(threadID string, input []map[string]any, effort string) map
 
 func (c *Codex) codexTurnParamsForSession(threadID string, input []map[string]any, snap session.Snapshot, sandboxOverride string) map[string]any {
 	params := codexTurnParams(threadID, input, snap.Effort)
+	if snap.Model != "" {
+		// A resumed thread can report older defaults. The admitted turn's
+		// selected model, like its effort, remains an explicit turn override.
+		params["model"] = snap.Model
+	}
 	params["sandboxPolicy"] = codexTurnSandboxPolicy(snap, sandboxOverride)
 	if snap.ServiceTier != "" {
 		params["serviceTier"] = snap.ServiceTier
@@ -3184,7 +3189,11 @@ func (c *Codex) ensureThread(s *session.Session, st *codexState) error {
 	c.mu.Lock()
 	c.threadToSession[threadID] = s
 	c.mu.Unlock()
-	c.applyThreadRuntimeMetadata(s, threadMetadataRaw)
+	if !preserveContext {
+		c.applyThreadRuntimeMetadata(s, threadMetadataRaw)
+	}
+	// Retained task/owner profiles are immutable. Thread defaults are not the
+	// admitted turn configuration and must not disable its scoped toolset.
 
 	if recovery == nil {
 		s.SetResumeID(threadID)

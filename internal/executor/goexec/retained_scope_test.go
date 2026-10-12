@@ -56,9 +56,12 @@ func TestExtensionCodexRetainedResumeProbeFailClosed(t *testing.T) {
 					if frame.Method != "thread/resume" || frame.Params["threadId"] != s.ResumeID() || frame.Params["sandbox"] != "read-only" || frame.Params["approvalPolicy"] != "never" {
 						t.Fatal("resume policy not retained")
 					}
-					tools := frame.Params["dynamicTools"].([]any)
-					if len(tools) != 1 {
-						t.Fatal("ambient namespace retained")
+					if _, present := frame.Params["dynamicTools"]; present {
+						t.Fatal("resume advertised an unsupported dynamic catalog override")
+					}
+					config := frame.Params["config"].(map[string]any)
+					if config["web_search"] != "disabled" || frame.Params["baseInstructions"] == "" {
+						t.Fatal("retained gateway-only policy missing")
 					}
 					id := s.ResumeID()
 					if wrong {

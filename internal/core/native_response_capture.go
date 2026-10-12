@@ -13,12 +13,32 @@ import (
 
 // Default-off, operator-owned acceptance scratch; never a model tool or caller.
 type NativeResponseCapture struct {
+	Version                                int
 	Directory, SourceSession, SourceThread string
 	SourceRevision                         uint64
 	Authority, ConfigPath, ConfigHash      string
 	Operations                             map[string]bool
 	Verifier                               *NativeArtifactVerifier
 	Tasks                                  map[string]string // exact owned task -> expected immutable final hash
+	AdditionalTaskHashes                   map[string][]string
+}
+
+func (p *NativeResponseCapture) selectedHash(task, hash string) bool {
+	primary, selected := p.Tasks[task]
+	if !selected {
+		return false
+	}
+	if primary == hash {
+		return true
+	}
+	if p.Version == 2 {
+		for _, candidate := range p.AdditionalTaskHashes[task] {
+			if candidate == hash {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (h *Hub) SetNativeResponseCapture(c *NativeResponseCapture) { h.nativeCapture.Store(c) }
@@ -58,18 +78,27 @@ func (h *Hub) capturePublicResponse(ctx context.Context, c backend.TaskCaller, r
 	}
 	if request.Operation != "capabilities" && request.Operation != "artifact_capabilities" {
 		id, _ := body["task_id"].(string)
-		wanted, selected := p.Tasks[id]
+		_, selected := p.Tasks[id]
 		if !selected {
 			return nil
 		}
-		if request.Operation == "read_artifact_bytes" && (body["full_hash"] != wanted || body["artifact_id"] != "result.txt" || body["seal_id"] != "seal_"+wanted) {
-			return nil
+		if request.Operation == "read_artifact_bytes" {
+			hash, _ := body["full_hash"].(string)
+			if !p.selectedHash(id, hash) || body["artifact_id"] != "result.txt" || body["seal_id"] != "seal_"+hash {
+				return nil
+			}
 		}
-		if request.Operation == "read_result" && body["final_hash"] != wanted {
-			return nil
+		if request.Operation == "read_result" {
+			hash, _ := body["final_hash"].(string)
+			if !p.selectedHash(id, hash) {
+				return nil
+			}
 		}
 	}
 	fields := []string{"task_id", "task_ref", "axes", "revision", "definition_revision", "seal_id", "final_hash", "receipt_ids", "offset", "next_offset", "has_more", "terminal_status", "text", "api_versions", "schema_hash", "allowed_operations", "paths", "mutation_authority_instance_id", "artifact_id", "owner_request_id", "owner_round_id", "total_bytes", "full_hash", "chunk_hash", "data_base64", "max_range_bytes", "artifact_owner", "reported_paths"}
+	if p.Version == 2 {
+		fields = append(fields, "target", "continuity", "qa", "result_anchor", "anchor", "source_delivery_anchor")
+	}
 	public := map[string]any{}
 	for _, field := range fields {
 		if value, ok := body[field]; ok {

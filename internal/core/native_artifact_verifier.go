@@ -58,7 +58,7 @@ func (h *Hub) verifyOriginalArtifact(ctx context.Context, c backend.TaskCaller, 
 		OwnerRequest string `json:"owner_request_id"`
 		Offset       int    `json:"offset"`
 	}
-	if json.Unmarshal(initial.Input, &tuple) != nil || tuple.Offset != 0 || p.Tasks[tuple.Task] != tuple.Hash || tuple.Seal != "seal_"+tuple.Hash || tuple.Artifact != "result.txt" {
+	if json.Unmarshal(initial.Input, &tuple) != nil || tuple.Offset != 0 || !p.selectedHash(tuple.Task, tuple.Hash) || tuple.Seal != "seal_"+tuple.Hash || tuple.Artifact != "result.txt" {
 		return fail
 	}
 	validate := artifact.Validate

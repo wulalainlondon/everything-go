@@ -32,6 +32,12 @@ func (c *Codex) applyTaskAPIThreadTools(s *session.Session, params map[string]an
 		// Bounded workers receive only the scoped gateway namespace. Legacy
 		// controller/delegation/read tools retain their original parent policy.
 		params["dynamicTools"] = []map[string]any{{"type": "namespace", "name": "bridge_tasks", "description": "Bounded task input/context only.", "tools": tools}}
+		if _, resume := params["threadId"]; resume {
+			// 0.162.1 restores the SAME thread's original dynamic catalog;
+			// ThreadResumeParams has no dynamicTools field. Never claim an
+			// ignored parameter re-registered or narrowed an arbitrary thread.
+			delete(params, "dynamicTools")
+		}
 		version := c.taskDaemonVersion()
 		if !taskapi.SupportedNativeProviderVersion("codex", version) {
 			return errors.New("unsupported: exact bounded Codex daemon version is unverified")
