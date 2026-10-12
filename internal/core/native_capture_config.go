@@ -32,6 +32,7 @@ type NativeCaptureConfig struct {
 	Operations           []string                `json:"read_operations"`
 	Tasks                map[string]string       `json:"selected_task_hashes"`
 	AdditionalTaskHashes map[string][]string     `json:"additional_task_hashes,omitempty"`
+	WorkerReadProofs     bool                    `json:"worker_read_proofs,omitempty"`
 	Verifier             *NativeArtifactVerifier `json:"artifact_verifier,omitempty"`
 }
 
@@ -89,12 +90,15 @@ func (h *Hub) ConfigureNativeResponseCapture(path string) error {
 		return reject
 	}
 	s, found := h.registry.Get(cfg.Source)
-	if (cfg.Version != 1 && cfg.Version != 2) || cfg.Authority == "" || cfg.Authority != h.cfg.InstanceID || !found || (s.Backend() != "claude" && s.Backend() != "codex") || cfg.Thread == "" || s.ResumeID() != cfg.Thread || s.SettingsSnapshot().ConfigRevision != cfg.Revision {
+	if (cfg.Version != 1 && cfg.Version != 2 && cfg.Version != 3) || cfg.Authority == "" || cfg.Authority != h.cfg.InstanceID || !found || (s.Backend() != "claude" && s.Backend() != "codex") || cfg.Thread == "" || s.ResumeID() != cfg.Thread || s.SettingsSnapshot().ConfigRevision != cfg.Revision {
 		return reject
 	}
 	var fields map[string]json.RawMessage
 	json.Unmarshal(raw, &fields)
-	if _, present := fields["additional_task_hashes"]; present && cfg.Version != 2 {
+	if _, present := fields["additional_task_hashes"]; present && cfg.Version < 2 {
+		return reject
+	}
+	if _, present := fields["worker_read_proofs"]; present && cfg.Version != 3 {
 		return reject
 	}
 	// Version 2 admits a finite set of explicitly selected historical hashes
@@ -118,13 +122,21 @@ func (h *Hub) ConfigureNativeResponseCapture(path string) error {
 	if child, e := h.delegations.HasChild(context.Background(), s.ID); e != nil || child {
 		return reject
 	}
-	if len(cfg.Tasks) == 0 || len(cfg.Tasks) > 4 || len(cfg.Operations) == 0 || len(cfg.Operations) > 5 || !regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`).MatchString(cfg.Sink) {
+	maxOperations := 5
+	if cfg.Version == 3 {
+		maxOperations = 6
+	}
+	if len(cfg.Tasks) == 0 || len(cfg.Tasks) > 4 || len(cfg.Operations) == 0 || len(cfg.Operations) > maxOperations || !regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`).MatchString(cfg.Sink) {
 		return reject
 	}
 	ops := map[string]bool{}
 	for _, op := range cfg.Operations {
 		switch op {
 		case "get", "read_result", "capabilities", "artifact_capabilities", "read_artifact_bytes":
+		case "events":
+			if cfg.Version != 3 {
+				return reject
+			}
 		default:
 			return reject
 		}
@@ -169,7 +181,7 @@ func (h *Hub) ConfigureNativeResponseCapture(path string) error {
 			return reject
 		}
 	}
-	h.nativeCapture.Store(&NativeResponseCapture{Version: cfg.Version, Directory: dir, SourceSession: cfg.Source, SourceThread: cfg.Thread, SourceRevision: cfg.Revision, Authority: cfg.Authority, ConfigPath: path, ConfigHash: captureHash(path), Operations: ops, Tasks: cfg.Tasks, AdditionalTaskHashes: cfg.AdditionalTaskHashes, Verifier: cfg.Verifier})
+	h.nativeCapture.Store(&NativeResponseCapture{Version: cfg.Version, Directory: dir, SourceSession: cfg.Source, SourceThread: cfg.Thread, SourceRevision: cfg.Revision, Authority: cfg.Authority, ConfigPath: path, ConfigHash: captureHash(path), Operations: ops, Tasks: cfg.Tasks, AdditionalTaskHashes: cfg.AdditionalTaskHashes, Verifier: cfg.Verifier, WorkerReadProofs: cfg.WorkerReadProofs})
 	return nil
 }
 func (h *Hub) captureConfigCurrent(p *NativeResponseCapture) bool {

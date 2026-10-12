@@ -123,6 +123,10 @@ func (h *Hub) projectCanonicalDelegationQA(ctx context.Context, selected string,
 	projected := task["qa"].(map[string]any)
 	projected["reviewer_ref"] = apiID(h.cfg.InstanceID, "delegation", qm.LogicalID)
 	projected["task_revision"] = task["revision"]
+	// The sealed review proves the round verdict, not individual acceptance
+	// criteria. The existing public contract requires this collection for PASS;
+	// keep it empty instead of inventing criterion-level evidence.
+	projected["criterion_evidence"] = []any{}
 	return nil
 }
 

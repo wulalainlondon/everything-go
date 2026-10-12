@@ -105,7 +105,12 @@ func TestMorrieCanonicalQAStoreProjection(t *testing.T) {
 				// A subsequent unreviewed round cannot inherit this verdict.
 				fresh := continuityContinue(t, h, p, "synthetic-next-owner", continuityInput(owner, p, h, "new owner final"))
 				correctionSeal(t, h, fresh, false)
-				next, err := h.apiTask(context.Background(), intent)
+				// apiTask is an exact-request projection; select the new request
+				// explicitly in this legacy-store fixture. Public formal reads are
+				// covered through ExecuteTask by the public-contract regression.
+				nextIntent := intent
+				nextIntent.RequestID = fresh.ChildRequestID
+				next, err := h.apiTask(context.Background(), nextIntent)
 				if err != nil || next["axes"].(map[string]string)["qa"] != "pending" {
 					t.Fatal("old verdict leaked to current round", next, err)
 				}

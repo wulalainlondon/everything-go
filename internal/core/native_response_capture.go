@@ -21,6 +21,7 @@ type NativeResponseCapture struct {
 	Verifier                               *NativeArtifactVerifier
 	Tasks                                  map[string]string // exact owned task -> expected immutable final hash
 	AdditionalTaskHashes                   map[string][]string
+	WorkerReadProofs                       bool
 }
 
 func (p *NativeResponseCapture) selectedHash(task, hash string) bool {
@@ -31,7 +32,7 @@ func (p *NativeResponseCapture) selectedHash(task, hash string) bool {
 	if primary == hash {
 		return true
 	}
-	if p.Version == 2 {
+	if p.Version >= 2 {
 		for _, candidate := range p.AdditionalTaskHashes[task] {
 			if candidate == hash {
 				return true
@@ -58,11 +59,14 @@ func (h *Hub) capturePublicResponse(ctx context.Context, c backend.TaskCaller, r
 	if !h.captureConfigCurrent(p) {
 		return os.ErrPermission
 	}
+	if c.Session != nil && c.Session.ID != p.SourceSession {
+		return h.captureWorkerRead(ctx, p, c, raw, response)
+	}
 	if c.Session == nil || c.Validate == nil || !c.Validate() || c.Session.ID != p.SourceSession || c.ThreadID != p.SourceThread || c.Session.ResumeID() != p.SourceThread || c.Session.SettingsSnapshot().ConfigRevision != p.SourceRevision || c.Session.ActiveQueuedID() != c.RequestID || c.CallID == "" {
 		return nil
 	}
 	var request taskapi.Request
-	if json.Unmarshal(raw, &request) != nil || request.Operation != "get" && request.Operation != "read_result" && request.Operation != "capabilities" && request.Operation != "artifact_capabilities" && request.Operation != "read_artifact_bytes" {
+	if json.Unmarshal(raw, &request) != nil || request.Operation != "get" && request.Operation != "read_result" && request.Operation != "capabilities" && request.Operation != "artifact_capabilities" && request.Operation != "read_artifact_bytes" && !(p.Version == 3 && request.Operation == "events") {
 		return nil
 	}
 	if p.Operations != nil && !p.Operations[request.Operation] {
@@ -76,7 +80,47 @@ func (h *Hub) capturePublicResponse(ctx context.Context, c backend.TaskCaller, r
 	if json.Unmarshal(bodyBytes, &body) != nil {
 		return nil
 	}
-	if request.Operation != "capabilities" && request.Operation != "artifact_capabilities" {
+	var eventInput struct {
+		Session string `json:"session_id"`
+		Path    string `json:"path"`
+		Cursor  string `json:"cursor"`
+	}
+	if request.Operation == "events" {
+		if json.Unmarshal(request.Input, &eventInput) != nil || eventInput.Path != "delegation" || eventInput.Session == "" {
+			return nil
+		}
+		selected := false
+		for id := range p.Tasks {
+			r, err := h.delegations.TaskJournal().FindTask(ctx, id)
+			if err == nil && r.ScopeID == "session:"+p.SourceSession && r.SessionID == eventInput.Session {
+				selected = true
+			}
+		}
+		if !selected {
+			return nil
+		}
+		events, ok := body["events"].([]any)
+		if !ok {
+			return nil
+		}
+		for _, item := range events {
+			event, ok := item.(map[string]any)
+			if !ok {
+				return nil
+			}
+			ref, ok := event["task_ref"].(map[string]any)
+			if !ok {
+				return nil
+			}
+			native, _ := ref["native_record_id"].(string)
+			if ref["authority_instance_id"] != h.cfg.InstanceID || ref["path"] != "delegation" {
+				return nil
+			}
+			if _, ok := p.Tasks[apiID(h.cfg.InstanceID, "delegation", native)]; !ok {
+				return nil
+			}
+		}
+	} else if request.Operation != "capabilities" && request.Operation != "artifact_capabilities" {
 		id, _ := body["task_id"].(string)
 		_, selected := p.Tasks[id]
 		if !selected {
@@ -96,14 +140,22 @@ func (h *Hub) capturePublicResponse(ctx context.Context, c backend.TaskCaller, r
 		}
 	}
 	fields := []string{"task_id", "task_ref", "axes", "revision", "definition_revision", "seal_id", "final_hash", "receipt_ids", "offset", "next_offset", "has_more", "terminal_status", "text", "api_versions", "schema_hash", "allowed_operations", "paths", "mutation_authority_instance_id", "artifact_id", "owner_request_id", "owner_round_id", "total_bytes", "full_hash", "chunk_hash", "data_base64", "max_range_bytes", "artifact_owner", "reported_paths"}
-	if p.Version == 2 {
+	if p.Version >= 2 {
 		fields = append(fields, "target", "continuity", "qa", "result_anchor", "anchor", "source_delivery_anchor")
+	}
+	if p.Version == 3 && request.Operation == "events" {
+		fields = append(fields, "events", "next_cursor", "retention_floor", "partial")
 	}
 	public := map[string]any{}
 	for _, field := range fields {
 		if value, ok := body[field]; ok {
 			public[field] = value
 		}
+	}
+	if request.Operation == "events" {
+		public["requested_session_id"] = eventInput.Session
+		digest := sha256.Sum256([]byte(eventInput.Cursor))
+		public["request_cursor_sha256"] = hex.EncodeToString(digest[:])
 	}
 	if !c.Validate() || ctx.Err() != nil {
 		return nil
