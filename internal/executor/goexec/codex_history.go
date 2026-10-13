@@ -259,6 +259,8 @@ func parseCodexHistoryLines(lines []history.TailLine, resumeID string, truncated
 	var messages []map[string]any
 	turnID := ""
 	turnBySource := map[string]string{}
+	// A bounded tail may begin inside a turn, before its exact closing marker.
+	unboundLeadingTail := truncated
 	for _, ln := range lines {
 		var row codexHistoryRow
 		if json.Unmarshal(ln.Data, &row) != nil {
@@ -266,13 +268,34 @@ func parseCodexHistoryLines(lines []history.TailLine, resumeID string, truncated
 		}
 		if row.Type == "turn_context" || row.Type == "event_msg" {
 			var event struct {
-				Type   string `json:"type"`
-				TurnID string `json:"turn_id"`
+				Type   string          `json:"type"`
+				TurnID string          `json:"turn_id"`
+				Error  json.RawMessage `json:"error"`
 			}
 			if json.Unmarshal(row.Payload, &event) == nil {
 				if row.Type == "turn_context" || event.Type == "task_started" {
+					unboundLeadingTail = false
 					turnID = event.TurnID
 				} else if event.Type == "task_complete" || event.Type == "turn_aborted" {
+					if unboundLeadingTail && turnID == "" && event.Type == "task_complete" && event.TurnID != "" &&
+						(len(event.Error) == 0 || string(event.Error) == "null") && len(records) > 0 {
+						last := len(records) - 1
+						final := parseCodexHistoryPayload(records[last].row.Payload)
+						finalCount := 0
+						for _, candidate := range records {
+							payload := parseCodexHistoryPayload(candidate.row.Payload)
+							if payload.Type == "message" && payload.Role == "assistant" && payload.Phase == "final_answer" {
+								finalCount++
+							}
+						}
+						// Only the single final immediately before this exact close is
+						// recovered. Other rows and unknown/aborted/legacy turns remain
+						// unbound; the persisted turn/request journal is still required.
+						if finalCount == 1 && final.Type == "message" && final.Role == "assistant" && final.Phase == "final_answer" {
+							turnBySource["codex:"+resumeID+":line:"+itoa(records[last].lineNo)] = event.TurnID
+						}
+					}
+					unboundLeadingTail = false
 					turnID = ""
 				}
 			}
