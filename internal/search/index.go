@@ -124,6 +124,11 @@ const codexMessageIDVersion = "2-offset"
 
 func (idx *Index) runVersionedMaintenance() int64 {
 	var changed int64
+	if cleaned, err := idx.refreshPresentationProjection(); err != nil {
+		log.Printf("[search] presentation projection maintenance: %v", err)
+	} else {
+		changed += cleaned
+	}
 	if rebuilt, err := idx.refreshCodexMessageIDVersion(); err != nil {
 		log.Printf("[search] Codex message ID migration: %v", err)
 	} else if rebuilt > 0 {

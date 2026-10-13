@@ -57,3 +57,17 @@ func PresentationHashes(ctx context.Context, original string) (string, string) {
 	effective := sha256.Sum256([]byte(PresentationContent(ctx, original)))
 	return hex.EncodeToString(raw[:]), hex.EncodeToString(effective[:])
 }
+
+// OriginalPresentationContent is for derived display/search projections only.
+// The provider transcript and durable request payload must retain their bytes.
+func OriginalPresentationContent(text string) string {
+	if !strings.HasPrefix(text, "[Averything presentation context: conversation-visual.v1]\n") && !strings.HasPrefix(text, "[Averything presentation context: text-v1]\n") {
+		return text
+	}
+	const end = "[/Averything presentation context]\n\n"
+	index := strings.Index(text, end)
+	if index < 0 || index > 12000 {
+		return text
+	}
+	return text[index+len(end):]
+}
