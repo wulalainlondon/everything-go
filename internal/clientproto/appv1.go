@@ -44,23 +44,24 @@ type Command struct {
 	ReadEpoch       string
 	ReadToken       string
 
-	Name            string
-	Cwd             string
-	Backend         string
-	Model           string
-	ModelSet        bool
-	Sandbox         string
-	ResumeClaudeID  string
-	MessagePurpose  string
-	TaskRequestIDs  []string
-	TaskTarget      *protocol.TaskTarget
-	TaskOrigin      *protocol.TaskOrigin
-	Content         string
-	UploadRequestID string
-	UploadID        string
-	UploadKind      string
-	MediaType       string
-	SizeBytes       int64
+	Name               string
+	Cwd                string
+	Backend            string
+	Model              string
+	ModelSet           bool
+	Sandbox            string
+	ResumeClaudeID     string
+	MessagePurpose     string
+	TaskRequestIDs     []string
+	TaskTarget         *protocol.TaskTarget
+	TaskOrigin         *protocol.TaskOrigin
+	VisualPresentation string
+	Content            string
+	UploadRequestID    string
+	UploadID           string
+	UploadKind         string
+	MediaType          string
+	SizeBytes          int64
 
 	Effort                 string
 	EffortSet              bool
@@ -200,23 +201,24 @@ func (AppV1) ParseCommand(in protocol.Inbound) Command {
 		ReadEpoch:       in.ReadEpoch,
 		ReadToken:       in.ReadToken,
 
-		Name:            in.Name,
-		Cwd:             in.Cwd,
-		Backend:         in.Backend,
-		Model:           in.Model,
-		ModelSet:        in.ModelSet,
-		Sandbox:         in.Sandbox,
-		ResumeClaudeID:  in.ResumeClaudeID,
-		MessagePurpose:  in.MessagePurpose,
-		TaskRequestIDs:  in.TaskRequestIDs,
-		TaskTarget:      in.TaskTarget,
-		TaskOrigin:      in.TaskOrigin,
-		Content:         in.Content,
-		UploadRequestID: in.UploadRequestID,
-		UploadID:        in.UploadID,
-		UploadKind:      in.UploadKind,
-		MediaType:       in.MediaType,
-		SizeBytes:       in.SizeBytes,
+		Name:               in.Name,
+		Cwd:                in.Cwd,
+		Backend:            in.Backend,
+		Model:              in.Model,
+		ModelSet:           in.ModelSet,
+		Sandbox:            in.Sandbox,
+		ResumeClaudeID:     in.ResumeClaudeID,
+		MessagePurpose:     in.MessagePurpose,
+		TaskRequestIDs:     in.TaskRequestIDs,
+		TaskTarget:         in.TaskTarget,
+		TaskOrigin:         in.TaskOrigin,
+		Content:            in.Content,
+		VisualPresentation: in.VisualPresentation,
+		UploadRequestID:    in.UploadRequestID,
+		UploadID:           in.UploadID,
+		UploadKind:         in.UploadKind,
+		MediaType:          in.MediaType,
+		SizeBytes:          in.SizeBytes,
 
 		Effort: func() string {
 			if in.Effort != nil {

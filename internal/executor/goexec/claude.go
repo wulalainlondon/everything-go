@@ -235,7 +235,7 @@ func (c *Claude) Send(ctx context.Context, s *session.Session, reqID, content st
 		c.sink.Emit(backend.NewSessionCommandStarted(s.ID, reqID, 0))
 	}
 
-	payload := userMessageJSON(content, images, files)
+	payload := userMessageJSON(backend.PresentationContent(ctx, content), images, files)
 	if p.taskLease != nil {
 		var frame map[string]any
 		json.Unmarshal(payload, &frame)

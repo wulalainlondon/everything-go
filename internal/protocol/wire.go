@@ -59,7 +59,8 @@ type Inbound struct {
 	TaskTarget     *TaskTarget `json:"task_target,omitempty"`
 	TaskOrigin     *TaskOrigin `json:"task_origin,omitempty"`
 	// message
-	Content string `json:"content"`
+	Content            string `json:"content"`
+	VisualPresentation string `json:"visual_presentation,omitempty"`
 
 	// binary video upload control frames
 	UploadRequestID string `json:"upload_request_id"`

@@ -2206,7 +2206,7 @@ func (c *Codex) Send(ctx context.Context, s *session.Session, reqID, content str
 		st.finish(err.Error())
 		return err
 	}
-	input := c.codexInput(s, reqID, reqID, content, images, files, st)
+	input := c.codexInput(s, reqID, reqID, backend.PresentationContent(ctx, content), images, files, st)
 	go c.runTurn(s, st, threadID, input, done, sandboxOverride)
 	return nil
 }
@@ -2225,7 +2225,7 @@ func (c *Codex) Steer(ctx context.Context, s *session.Session, clientUserMessage
 	if err := c.ensureServer(); err != nil {
 		return backend.SteerResult{}, fmt.Errorf("%w: %v", backend.ErrSteerRejected, err)
 	}
-	return c.steerActiveTurn(s, clientUserMessageID, content, images, files)
+	return c.steerActiveTurn(s, clientUserMessageID, backend.PresentationContent(ctx, content), images, files)
 }
 
 func (c *Codex) steerActiveTurn(s *session.Session, clientUserMessageID, content string, images []backend.ImageAttachment, files []backend.FileAttachment) (backend.SteerResult, error) {

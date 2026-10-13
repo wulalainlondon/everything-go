@@ -21,15 +21,18 @@ import (
 )
 
 type queuedPayload struct {
-	FormalIntake   bool                       `json:"formal_intake,omitempty"`
-	ExpectedTarget *dispatchTargetExpectation `json:"expected_target,omitempty"`
-	Configuration  *session.Configuration     `json:"configuration,omitempty"`
-	MessagePurpose string                     `json:"message_purpose,omitempty"`
-	OwnerDevice    string                     `json:"owner_device,omitempty"`
-	Origin         *protocol.TaskOrigin       `json:"task_origin,omitempty"`
-	Content        string                     `json:"content"`
-	Images         []backend.ImageAttachment  `json:"images,omitempty"`
-	Files          []backend.FileAttachment   `json:"files,omitempty"`
+	VisualUserHash      string                     `json:"visual_user_hash,omitempty"`
+	VisualEffectiveHash string                     `json:"visual_effective_hash,omitempty"`
+	VisualPresentation  string                     `json:"visual_presentation,omitempty"`
+	FormalIntake        bool                       `json:"formal_intake,omitempty"`
+	ExpectedTarget      *dispatchTargetExpectation `json:"expected_target,omitempty"`
+	Configuration       *session.Configuration     `json:"configuration,omitempty"`
+	MessagePurpose      string                     `json:"message_purpose,omitempty"`
+	OwnerDevice         string                     `json:"owner_device,omitempty"`
+	Origin              *protocol.TaskOrigin       `json:"task_origin,omitempty"`
+	Content             string                     `json:"content"`
+	Images              []backend.ImageAttachment  `json:"images,omitempty"`
+	Files               []backend.FileAttachment   `json:"files,omitempty"`
 }
 
 func (h *Hub) queueError(c *Client, cmd clientproto.Command, code, message string) {
@@ -86,6 +89,13 @@ func (h *Hub) enqueueChatMessageExpected(c *Client, cmd clientproto.Command, exp
 		h.queueError(c, cmd, "delegation_capacity_guard", err.Error())
 		return false
 	}
+	if !backend.ValidVisualPresentation(cmd.VisualPresentation) {
+		h.queueError(c, cmd, "visual_presentation_invalid", "Unknown visual presentation mode")
+		return false
+	}
+	if cmd.MessagePurpose != "" && cmd.MessagePurpose != "instruction" {
+		cmd.VisualPresentation = ""
+	}
 	content, files, err := h.resolveUploadedVideos(cmd.SessionID, cmd.Content, cmd.Files)
 	if err != nil {
 		h.queueError(c, cmd, "invalid_attachment", err.Error())
@@ -109,13 +119,17 @@ func (h *Hub) enqueueChatMessageExpected(c *Client, cmd clientproto.Command, exp
 		h.queueError(c, cmd, "task_origin_rejected", admissionErr.Error())
 		return false
 	}
-	intent, err := json.Marshal(queuedPayload{MessagePurpose: cmd.MessagePurpose, Origin: cmd.TaskOrigin, Content: content, Images: cmd.Images, Files: files, ExpectedTarget: expected})
+	userHash, effectiveHash := "", ""
+	if cmd.VisualPresentation != "" {
+		userHash, effectiveHash = backend.PresentationHashes(backend.WithVisualPresentation(context.Background(), cmd.VisualPresentation), content)
+	}
+	intent, err := json.Marshal(queuedPayload{VisualUserHash: userHash, VisualEffectiveHash: effectiveHash, VisualPresentation: cmd.VisualPresentation, MessagePurpose: cmd.MessagePurpose, Origin: cmd.TaskOrigin, Content: content, Images: cmd.Images, Files: files, ExpectedTarget: expected})
 	if err != nil {
 		h.queueError(c, cmd, "invalid_message", err.Error())
 		return false
 	}
 	intentHash := sha256.Sum256(intent)
-	payload, err := json.Marshal(queuedPayload{MessagePurpose: cmd.MessagePurpose, OwnerDevice: owner, Origin: cmd.TaskOrigin, Content: content, Images: cmd.Images, Files: files, Configuration: &config, ExpectedTarget: expected})
+	payload, err := json.Marshal(queuedPayload{VisualUserHash: userHash, VisualEffectiveHash: effectiveHash, VisualPresentation: cmd.VisualPresentation, MessagePurpose: cmd.MessagePurpose, OwnerDevice: owner, Origin: cmd.TaskOrigin, Content: content, Images: cmd.Images, Files: files, Configuration: &config, ExpectedTarget: expected})
 	if err != nil {
 		h.queueError(c, cmd, "invalid_message", err.Error())
 		return false
@@ -225,7 +239,7 @@ func (h *Hub) runQueuedMessage(s *session.Session, requestID string) {
 		h.Emit(backend.NewError(s.ID, requestID, "delegation_capacity_guard", guardErr.Error()))
 		return
 	}
-	if err = h.exec.Send(context.Background(), s, requestID, payload.Content, payload.Images, payload.Files); err != nil {
+	if err = h.exec.Send(backend.WithVisualPresentation(context.Background(), payload.VisualPresentation), s, requestID, payload.Content, payload.Images, payload.Files); err != nil {
 		if errors.Is(err, backend.ErrThreadActiveWriter) {
 			h.markDesktopWriter(s)
 		}
@@ -504,7 +518,7 @@ func (h *Hub) promoteQueuedMessage(c *Client, cmd clientproto.Command) {
 			}
 		}
 		if decodeErr == nil && steerErr == nil {
-			result, steerErr = steerer.Steer(context.Background(), s, cmd.RequestID, payload.Content, payload.Images, payload.Files)
+			result, steerErr = steerer.Steer(backend.WithVisualPresentation(context.Background(), payload.VisualPresentation), s, cmd.RequestID, payload.Content, payload.Images, payload.Files)
 			if steerErr == nil && !result.StrictACK {
 				steerErr = errors.New("native steer acceptance unverified")
 			}

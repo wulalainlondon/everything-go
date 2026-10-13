@@ -167,7 +167,7 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 			helloInput.Capabilities = append(helloInput.Capabilities, "device_inventory_v1")
 		}
 		if !c.enrollmentOnly {
-			helloInput.Capabilities = append(helloInput.Capabilities, "session_config_revision_v1", "file_attachments_v1", "next_message_config_v1", "bootstrap_snapshot_v1")
+			helloInput.Capabilities = append(helloInput.Capabilities, "session_config_revision_v1", "file_attachments_v1", "next_message_config_v1", "bootstrap_snapshot_v1", "conversation_visual_v1")
 		}
 		c.enqueueEvent(h.client.HelloAck(helloInput))
 		if c.inventoryProbe || cmd.ConnectionProbe {
