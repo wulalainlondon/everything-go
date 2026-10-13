@@ -124,3 +124,30 @@ func TestBoundedFileTailStillProducesAnExactSharedReadIdentity(t *testing.T) {
 		t.Fatalf("tail identity missing: %+v", got)
 	}
 }
+
+func TestClosingTurnFixDoesNotReusePreFixPersistedCache(t *testing.T) {
+	t.Setenv("EVERYTHING_GO_HISTORY_LOAD_MAX_BYTES", "4096")
+	root := t.TempDir()
+	thread := "00000000-0000-0000-0000-000000000124"
+	path := filepath.Join(root, "rollout-2026-10-13T00-00-00-"+thread+".jsonl")
+	rows := []string{`{"type":"event_msg","payload":{"type":"task_started","turn_id":"original-native-turn"}}`, `{"type":"response_item","payload":{"type":"message","role":"user","content":"` + strings.Repeat("x", 8192) + `"}}`, tailFinal, tailComplete}
+	if err := os.WriteFile(path, []byte(strings.Join(rows, "\n")+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := history.FileKey{Path: path, MtimeNS: fi.ModTime().UnixNano(), Size: fi.Size()}
+	history.DefaultCache().Save("codex:turns-v2:"+thread, key, []map[string]any{{"role": "assistant", "content": "final tail", "source_message_id": "codex:" + thread + ":line:3", "history_read_result_verified": true}})
+	c := NewCodex(&capSink{}, "codex")
+	c.sessionsRoot = root
+	c.SetDataDir(t.TempDir())
+	if err := c.rememberTurnRequest(thread, "original-native-turn", "original-request"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := c.LoadHistory(thread, history.Opts{Mode: "snapshot", Limit: 20})
+	if err != nil || len(got.Messages) != 1 || got.Messages[0]["request_id"] != "original-request" {
+		t.Fatalf("reused old persisted cache without closing identity: error=%v result=%+v", err, got)
+	}
+}
