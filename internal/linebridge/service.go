@@ -673,6 +673,11 @@ func (s *Service) Execute(ctx context.Context, c Caller, r Request) (any, error)
 		return s.config.Subjects(), nil
 	case "create_account":
 		return s.Create(ctx, c, r.Label, false)
+	case "transfer_owner":
+		if !c.Admin || !strings.HasPrefix(r.Subject, "device:") || s.config.SubjectAllowed == nil || !s.config.SubjectAllowed(c.Subject) || !s.config.SubjectAllowed(r.Subject) {
+			return nil, Fail("line_admin_required")
+		}
+		return s.store.TransferOwner(ctx, c, r.Account, r.Subject, r.Revision)
 	case "adopt_legacy":
 		return s.Create(ctx, c, r.Label, true)
 	case "status":

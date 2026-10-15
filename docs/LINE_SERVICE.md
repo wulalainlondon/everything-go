@@ -102,6 +102,15 @@ from the actual app-server invocation. Delegated children are excluded. Model
 tools cannot pair accounts, grant themselves access, select arbitrary SDK RPCs
 or read arbitrary local files.
 
+An account owner can use the paired-device management API `transfer_owner`
+after disabling the account, specifying the exact current binding revision and
+another currently paired device. The transaction retains the account/profile and
+all receipts, revokes previous sharing, stops subscriptions and advances the
+binding revision. The new owner must explicitly enable it. This API is excluded
+from native model tools. Device identity repair in the Android management page
+uses an explicit existing-credential claim against the known original Bridge
+authority; ordinary probes and startup do not change the pairing.
+
 Fresh QR login stays encrypted in staging. Go checks principal identity and
 duplicate binding before committing the login. Same-account re-login preserves
 old E2EE key entries and an encrypted previous-login file. A wrong-account scan

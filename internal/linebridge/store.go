@@ -239,11 +239,7 @@ func (s *Store) Accounts(ctx context.Context, c Caller) ([]Account, error) {
 	return out, rows.Err()
 }
 func (s *Store) Grant(ctx context.Context, c Caller, account, subject string, allowed []string) error {
-	a, err := s.Account(ctx, account)
-	if err != nil {
-		return err
-	}
-	if a.Owner != c.Subject || subject == "" {
+	if subject == "" {
 		return Fail("line_forbidden")
 	}
 	for _, scope := range allowed {
@@ -262,6 +258,13 @@ func (s *Store) Grant(ctx context.Context, c Caller, account, subject string, al
 		return err
 	}
 	defer tx.Rollback()
+	var owner string
+	if err = tx.QueryRowContext(ctx, "SELECT owner FROM line_accounts WHERE id=?", account).Scan(&owner); err != nil {
+		return err
+	}
+	if owner != c.Subject {
+		return Fail("line_forbidden")
+	}
 	if _, err = tx.ExecContext(ctx, "DELETE FROM line_grants WHERE account=? AND subject=?", account, subject); err != nil {
 		return err
 	}
@@ -295,15 +298,18 @@ func (s *Store) SetAuth(ctx context.Context, id, state string) {
 	_, _ = s.db.ExecContext(ctx, "UPDATE line_accounts SET auth_state=? WHERE id=?", state, id)
 }
 func (s *Store) SetEnabled(ctx context.Context, c Caller, id string, enabled bool) error {
-	a, err := s.Account(ctx, id)
+	result, err := s.db.ExecContext(ctx, "UPDATE line_accounts SET enabled=?,revision=revision+1 WHERE id=? AND owner=?", enabled, id, c.Subject)
 	if err != nil {
 		return err
 	}
-	if a.Owner != c.Subject {
+	n, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
 		return Fail("line_forbidden")
 	}
-	_, err = s.db.ExecContext(ctx, "UPDATE line_accounts SET enabled=?,revision=revision+1 WHERE id=?", enabled, id)
-	return err
+	return nil
 }
 func (s *Store) SaveTarget(ctx context.Context, account, external, name, kind string) (Target, error) {
 	if external == "" || name == "" || len(external) > 128 {
