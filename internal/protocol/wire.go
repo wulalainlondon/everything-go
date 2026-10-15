@@ -1462,6 +1462,7 @@ func NewUsageReport(fiveHour, sevenDay, sevenDaySonnet *UsageWindow) UsageReport
 // --- Status -----------------------------------------------------------------
 
 type StatusResult struct {
+	RequestID string         `json:"request_id,omitempty"`
 	Type      string         `json:"type"`
 	SessionID string         `json:"session_id"`
 	Status    map[string]any `json:"status"`
