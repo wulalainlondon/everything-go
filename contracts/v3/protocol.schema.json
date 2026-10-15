@@ -264,6 +264,7 @@
         "codex_goal_clear",
         "codex_goal_get",
         "codex_goal_set",
+        "codex_voice_media_state",
         "codex_voice_start",
         "codex_voice_stop",
         "codex_voice_text",

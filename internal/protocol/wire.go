@@ -125,6 +125,13 @@ type Inbound struct {
 	// from "absent" (the app sends null when unknown).
 	SDP                string `json:"sdp"`
 	VoiceID            string `json:"voice_id,omitempty"`
+	VoiceMediaCapable  bool   `json:"voice_media_capable,omitempty"`
+	MediaCommandID     string `json:"media_command_id,omitempty"`
+	MediaSequence      uint64 `json:"media_sequence,omitempty"`
+	MediaState         string `json:"media_state,omitempty"`
+	MediaErrorCode     string `json:"media_error_code,omitempty"`
+	MediaVideoID       string `json:"media_video_id,omitempty"`
+	MediaVolume        *int   `json:"media_volume,omitempty"`
 	VoiceName          string `json:"voice_name,omitempty"`
 	VoiceMode          string `json:"voice_mode,omitempty"`
 	LineHandoffCapable bool   `json:"line_handoff_capable,omitempty"`

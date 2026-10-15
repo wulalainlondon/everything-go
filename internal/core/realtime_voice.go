@@ -15,6 +15,8 @@ import (
 var voiceIdentifier = regexp.MustCompile(`^[A-Za-z0-9_-]{8,100}$`)
 
 type clientVoiceCall struct {
+	mediaCapable       bool
+	media              *voiceMediaSession
 	handoffCapable     bool
 	handoffPeer        string
 	handoffAccount     string
@@ -77,7 +79,7 @@ func (h *Hub) handleVoiceStart(c *Client, cmd clientproto.Command) {
 		parent = context.Background()
 	}
 	ctx, cancel := context.WithTimeout(parent, 60*time.Second)
-	call := &clientVoiceCall{handoffCapable: cmd.LineHandoffCapable, session: s, voiceID: cmd.VoiceID, requestID: cmd.RequestID, cancel: cancel}
+	call := &clientVoiceCall{mediaCapable: cmd.VoiceMediaCapable, handoffCapable: cmd.LineHandoffCapable, session: s, voiceID: cmd.VoiceID, requestID: cmd.RequestID, cancel: cancel}
 	h.voiceMu.Lock()
 	if h.voiceClients == nil {
 		h.voiceClients = map[*Client]*clientVoiceCall{}
