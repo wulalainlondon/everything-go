@@ -44,3 +44,7 @@ push_relay_client.json
 /monitoring_env.sh
 .env
 .env.*
+
+# Managed LINE account and media runtimes
+/services/*/node_modules/
+/services/line-account/dist/

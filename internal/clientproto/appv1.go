@@ -106,12 +106,18 @@ type Command struct {
 	MsgUUID          string
 	Around           int
 
-	SDP           string
-	VoiceID       string
-	VoiceName     string
-	Candidate     string
-	SDPMid        string
-	SDPMLineIndex *int
+	SDP                string
+	VoiceID            string
+	VoiceName          string
+	VoiceMode          string
+	LineHandoffCapable bool
+	LinePeerName       string
+	LineAccountRef     string
+	LineCallID         string
+	LineTargetRef      string
+	Candidate          string
+	SDPMid             string
+	SDPMLineIndex      *int
 
 	Answers   map[string]any
 	Cancelled *bool
@@ -268,12 +274,18 @@ func (AppV1) ParseCommand(in protocol.Inbound) Command {
 		MsgUUID:          in.MsgUUID,
 		Around:           in.Around,
 
-		SDP:           in.SDP,
-		VoiceID:       in.VoiceID,
-		VoiceName:     in.VoiceName,
-		Candidate:     in.Candidate,
-		SDPMid:        in.SDPMid,
-		SDPMLineIndex: in.SDPMLineIndex,
+		SDP:                in.SDP,
+		VoiceID:            in.VoiceID,
+		VoiceName:          in.VoiceName,
+		VoiceMode:          in.VoiceMode,
+		LineHandoffCapable: in.LineHandoffCapable,
+		LinePeerName:       in.LinePeerName,
+		LineAccountRef:     in.LineAccountRef,
+		LineCallID:         in.LineCallID,
+		LineTargetRef:      in.LineTargetRef,
+		Candidate:          in.Candidate,
+		SDPMid:             in.SDPMid,
+		SDPMLineIndex:      in.SDPMLineIndex,
 
 		Answers:   in.Answers,
 		Cancelled: in.Cancelled,

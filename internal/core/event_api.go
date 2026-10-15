@@ -130,6 +130,10 @@ func (h *Hub) publishExternalEvent(event eventinbox.Event, deduped bool) error {
 }
 
 func (h *Hub) publishExternalEventUpdate(event eventinbox.Event) error {
+	if strings.HasPrefix(event.Source, lineSourcePrefix) {
+		h.publishLineEvent(event)
+		return nil
+	}
 	h.materializeExternalEvent(&event)
 	return h.broadcastOnline(h.client.ExternalEventUpsert(eventinbox.View{Event: event}))
 }
@@ -155,6 +159,9 @@ func (h *Hub) eventIngressAuthorized(r *http.Request) bool {
 }
 
 func validateExternalEvent(input externalEventRequest, eventKey string) error {
+	if strings.HasPrefix(input.Source, lineSourcePrefix) {
+		return errors.New("reserved event source")
+	}
 	if !eventNameRE.MatchString(input.Source) {
 		return errors.New("source must match [a-zA-Z0-9_.-] and be at most 64 characters")
 	}

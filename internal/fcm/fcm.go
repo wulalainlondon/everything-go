@@ -530,8 +530,21 @@ func (n *Notifier) NotifyExternalEvent(instanceID, eventID, source, kind, severi
 	n.sendAll(msg, "external_event")
 }
 
+// NotifyScopedExternalEvent sends a generic wake-up only to devices whose
+// source grant is still valid at actual dispatch, including every retry.
+func (n *Notifier) NotifyScopedExternalEvent(instanceID, eventID, source, kind string, allowed func(string) bool) {
+	if allowed == nil {
+		return
+	}
+	msg := v1message{allowedDevice: allowed}
+	msg.Message.Notification = &v1notification{Title: "LINE 訊息", Body: "收到新事件，請開啟 Bridge 查看"}
+	msg.Message.Data = map[string]string{"type": "external_event", "schema_version": fcmPayloadSchemaVersion, "event_id": eventID, "source": source, "kind": kind, "authority_instance_id": instanceID, "deep_link": "bridge://inbox/events/" + eventID}
+	n.sendAll(msg, "external_event")
+}
+
 type v1message struct {
-	Message struct {
+	allowedDevice func(string) bool
+	Message       struct {
 		Token        string            `json:"token"`
 		Notification *v1notification   `json:"notification,omitempty"`
 		Data         map[string]string `json:"data"`

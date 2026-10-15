@@ -127,6 +127,12 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 			if _, ok := h.exec.(backend.RealtimeVoiceExecutor); ok && h.cfg.CodexRemote != "" {
 				helloInput.Capabilities = append(helloInput.Capabilities, "codex_realtime_voice_v1", "codex_voice_selection_v1")
 			}
+			if h.LineVoiceEnabled() {
+				helloInput.Capabilities = append(helloInput.Capabilities, "line_voice_v2")
+			}
+			if h.LineServiceEnabled() {
+				helloInput.Capabilities = append(helloInput.Capabilities, "line_accounts_v1")
+			}
 			if _, ok := h.exec.(backend.RecapExecutor); ok {
 				helloInput.Capabilities = append(helloInput.Capabilities, "session_recap_v1")
 			}
@@ -194,8 +200,8 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		c.enqueueEvent(h.client.SessionsList(h.sessionSummaries()))
 		c.enqueueEvent(h.runtimeSnapshotForClient(c))
 		if h.events != nil {
-			if snapshot, err := h.events.Snapshot(ctx, c.deviceID, 0); err == nil {
-				c.enqueueEvent(h.client.ExternalEventSnapshot(snapshot))
+			if snapshot, err := h.externalSnapshot(ctx, c.deviceID); err == nil {
+				c.enqueueEventUnlogged(h.client.ExternalEventSnapshot(snapshot))
 			} else {
 				log.Printf("[events] snapshot device=%s: %v", c.deviceID, err)
 			}
@@ -939,11 +945,11 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		if h.events == nil {
 			return
 		}
-		if snapshot, err := h.events.Snapshot(ctx, c.deviceID, 0); err == nil {
+		if snapshot, err := h.externalSnapshot(ctx, c.deviceID); err == nil {
 			for index := range snapshot.Items {
 				h.materializeExternalEvent(&snapshot.Items[index].Event)
 			}
-			c.enqueueEvent(h.client.ExternalEventSnapshot(snapshot))
+			c.enqueueEventUnlogged(h.client.ExternalEventSnapshot(snapshot))
 		} else {
 			c.enqueueEvent(h.client.Error("", "", "Event inbox unavailable: "+err.Error()))
 		}
@@ -952,9 +958,15 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		if h.events == nil {
 			return
 		}
+		if !h.authorizeLineEvent(ctx, c.deviceID, cmd.EventID) {
+			return
+		}
 		read := true
 		if item, err := h.events.Mark(ctx, cmd.EventID, c.deviceID, &read, nil); err == nil {
-			c.enqueueEvent(h.client.ExternalEventState(item))
+			if projected, ok := h.projectLineEvent(ctx, c.deviceID, item.Event); ok {
+				item.Event = projected
+				c.enqueueEventUnlogged(h.client.ExternalEventState(item))
+			}
 		} else {
 			c.enqueueEvent(h.client.Error("", "", "Event update failed: "+err.Error()))
 		}
@@ -963,9 +975,15 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		if h.events == nil {
 			return
 		}
+		if !h.authorizeLineEvent(ctx, c.deviceID, cmd.EventID) {
+			return
+		}
 		dismissed := true
 		if item, err := h.events.Mark(ctx, cmd.EventID, c.deviceID, nil, &dismissed); err == nil {
-			c.enqueueEvent(h.client.ExternalEventState(item))
+			if projected, ok := h.projectLineEvent(ctx, c.deviceID, item.Event); ok {
+				item.Event = projected
+				c.enqueueEventUnlogged(h.client.ExternalEventState(item))
+			}
 		} else {
 			c.enqueueEvent(h.client.Error("", "", "Event update failed: "+err.Error()))
 		}

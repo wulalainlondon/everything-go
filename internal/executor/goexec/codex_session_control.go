@@ -14,6 +14,7 @@ import (
 
 func (c *Codex) SetSessionControlProvider(p backend.SessionControlProvider) { c.controlProvider = p }
 func (c *Codex) applySessionControlThreadTools(s *session.Session, params map[string]any) {
+	c.applyLineServiceTools(s, params)
 	if c.controlProvider == nil || s == nil || strings.HasPrefix(s.ID, "s_dg_") {
 		return
 	}
@@ -86,6 +87,9 @@ func (c *Codex) sessionControlCaller(s *session.Session, turnID, callID string) 
 	return backend.SessionControlCaller{Parent: s, RequestID: request, TurnID: turnID, ToolCallID: callID, VoiceID: voiceID}, nil
 }
 func (c *Codex) handleSessionControlServerRequest(id any, method string, raw json.RawMessage) bool {
+	if c.handleLineServiceTool(id, method, raw) {
+		return true
+	}
 	if method != "item/tool/call" || c.controlProvider == nil {
 		return false
 	}

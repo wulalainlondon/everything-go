@@ -7,6 +7,7 @@ import (
 
 	"everything-go/internal/backend"
 	"everything-go/internal/clientproto"
+	"everything-go/internal/linevoice"
 	"everything-go/internal/protocol"
 	"everything-go/internal/session"
 )
@@ -14,10 +15,17 @@ import (
 var voiceIdentifier = regexp.MustCompile(`^[A-Za-z0-9_-]{8,100}$`)
 
 type clientVoiceCall struct {
+	handoffCapable     bool
+	handoffPeer        string
+	handoffAccount     string
+	handoffTarget      string
+	handoffID          string
 	session            *session.Session
 	voiceID, requestID string
 	cancel             context.CancelFunc
 	stopping           bool
+	kind               string
+	line               *linevoice.Call
 }
 
 func voiceEvent(cmd clientproto.Command, state, message string) protocol.RealtimeVoiceEvent {
@@ -30,6 +38,14 @@ func (h *Hub) ownsVoice(c *Client, call *clientVoiceCall) bool {
 }
 
 func (h *Hub) handleVoiceStart(c *Client, cmd clientproto.Command) {
+	if cmd.VoiceMode == "line" {
+		h.handleLineVoiceStart(c, cmd)
+		return
+	}
+	if cmd.VoiceMode != "" && cmd.VoiceMode != "codex" {
+		c.enqueueEvent(voiceEvent(cmd, "error", "不支援的通話模式"))
+		return
+	}
 	if !backend.ValidRealtimeVoiceName(cmd.VoiceName) {
 		c.enqueueEvent(voiceEvent(cmd, "error", "此音色不支援目前的語音版本"))
 		return
@@ -61,7 +77,7 @@ func (h *Hub) handleVoiceStart(c *Client, cmd clientproto.Command) {
 		parent = context.Background()
 	}
 	ctx, cancel := context.WithTimeout(parent, 60*time.Second)
-	call := &clientVoiceCall{session: s, voiceID: cmd.VoiceID, requestID: cmd.RequestID, cancel: cancel}
+	call := &clientVoiceCall{handoffCapable: cmd.LineHandoffCapable, session: s, voiceID: cmd.VoiceID, requestID: cmd.RequestID, cancel: cancel}
 	h.voiceMu.Lock()
 	if h.voiceClients == nil {
 		h.voiceClients = map[*Client]*clientVoiceCall{}
@@ -139,7 +155,15 @@ func (h *Hub) stopClientVoice(c *Client, call *clientVoiceCall) {
 		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 		defer cancel()
 		var err error
-		if exec, ok := h.exec.(backend.RealtimeVoiceExecutor); ok {
+		if call.kind == "line" {
+			h.voiceMu.Lock()
+			line := call.line
+			h.voiceMu.Unlock()
+			if line != nil {
+				line.Close()
+				err = line.WaitClosed(ctx)
+			}
+		} else if exec, ok := h.exec.(backend.RealtimeVoiceExecutor); ok {
 			err = exec.StopRealtimeVoice(ctx, call.session, call.voiceID)
 		}
 		h.voiceMu.Lock()
@@ -185,7 +209,7 @@ func (h *Hub) handleVoiceText(c *Client, cmd clientproto.Command) {
 	h.voiceMu.Lock()
 	call := h.voiceClients[c]
 	h.voiceMu.Unlock()
-	if call == nil || call.voiceID != cmd.VoiceID || call.session.ID != cmd.SessionID || !h.controls.MobileMayWrite(cmd.SessionID) {
+	if call == nil || call.kind == "line" || call.voiceID != cmd.VoiceID || call.session.ID != cmd.SessionID || !h.controls.MobileMayWrite(cmd.SessionID) {
 		c.enqueueEvent(voiceEvent(cmd, "error", "語音對話已失效或沒有寫入權限"))
 		return
 	}

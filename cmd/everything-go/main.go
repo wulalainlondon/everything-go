@@ -218,6 +218,15 @@ func main() {
 		log.Printf("bootstrapped %d connector account(s)", created)
 	}
 	hub.SetAutomation(automationStore)
+	transfers, err := filetransfer.NewService(*dataDir, *rootDir, hub.HTTPAuthorized)
+	if err != nil {
+		log.Fatalf("initialize file transfer: %v", err)
+	}
+	if lineService, lineErr := configuredLineService(hub, *dataDir, instanceID, transfers); lineErr != nil {
+		log.Printf("LINE service unavailable: %s", lineErr.Error())
+	} else if lineService != nil {
+		defer func() { lineService.Close(); _ = lineService.Store().Close() }()
+	}
 	relayStore, err := relay.Open(*dataDir)
 	if err != nil {
 		log.Fatalf("open bridge relay: %v", err)
@@ -365,10 +374,6 @@ func main() {
 		}()
 	}
 
-	transfers, err := filetransfer.NewService(*dataDir, *rootDir, hub.HTTPAuthorized)
-	if err != nil {
-		log.Fatalf("initialize file transfer: %v", err)
-	}
 	mux := http.NewServeMux()
 	mux.Handle("/media/", media.Handler())
 	mux.Handle("/upload", transfers.UploadHandler())
@@ -379,6 +384,7 @@ func main() {
 	mux.HandleFunc("/api/inbox/v1/files/", hub.ServeInboxDownload)
 	mux.HandleFunc("/api/events/v1/events", hub.ServeEventAPI)
 	mux.HandleFunc("/api/automation/v1/", hub.ServeAutomationAPI)
+	mux.HandleFunc("/api/line/v1/", hub.ServeLineAPI)
 	mux.HandleFunc("/api/relay/v1/", hub.ServeRelayAPI)
 	mux.HandleFunc("/api/internal-agents/v1/observation", hub.ServeInternalAgentObservation)
 	mux.HandleFunc("/api/plugin-metadata/v1/status", hub.ServePluginMetadataStatus)

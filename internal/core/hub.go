@@ -34,6 +34,7 @@ import (
 	"everything-go/internal/governance"
 	"everything-go/internal/handoff"
 	"everything-go/internal/inbox"
+	"everything-go/internal/linebridge"
 	"everything-go/internal/media"
 	"everything-go/internal/messagequeue"
 	"everything-go/internal/nativewatch"
@@ -128,6 +129,7 @@ type Hub struct {
 	notificationReplies *notificationreply.Store
 	work                *workitems.Service
 	events              *eventinbox.Store
+	lineService         *linebridge.Service
 	automation          *automation.Store
 	automationManager   *automation.Manager
 	relay               *relay.Store

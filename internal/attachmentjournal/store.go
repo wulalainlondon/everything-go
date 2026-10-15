@@ -134,6 +134,23 @@ func (s *Store) Get(attachmentID string) (Record, bool) {
 	return cloneRecord(record), true
 }
 
+// ListSession is a bounded source view; it neither changes device ACKs nor
+// exposes records belonging to a different conversation.
+func (s *Store) ListSession(sessionID string, limit int) []Record {
+	if sessionID == "" || limit < 1 || limit > 50 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := []Record{}
+	for i := len(s.records) - 1; i >= 0 && len(out) < limit; i-- {
+		if s.records[i].SessionID == sessionID {
+			out = append(out, cloneRecord(s.records[i]))
+		}
+	}
+	return out
+}
+
 // Pin keeps a canonical record alive while a WorkItem references it. The
 // WorkItem ID is the idempotency key, so restart/reconciliation can safely pin
 // again without inflating a reference count.
