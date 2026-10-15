@@ -15,6 +15,7 @@ type VoiceMediaProvider interface {
 	ExecuteVoiceMedia(context.Context, SessionControlCaller, string, VoiceMediaRequest) (any, error)
 }
 type VoiceMediaResult struct {
+	Transport         string `json:"transport,omitempty"`
 	Action            string `json:"action,omitempty"`
 	ActionConfirmed   bool   `json:"action_confirmed"`
 	CommandID         string `json:"command_id,omitempty"`

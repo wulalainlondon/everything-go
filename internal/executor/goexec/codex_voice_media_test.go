@@ -72,3 +72,16 @@ func TestVoiceMediaInstalledNativeCatalogAcceptance(t *testing.T) {
 	}
 	t.Logf("NATIVE_SCHEMA_ACCEPTED thread=%s namespace=bridge_media tools=3 model_turn=false playback=false", id)
 }
+
+func TestVoiceMediaInstructionsUseExistingToolsWithoutPermissionOverrides(t *testing.T) {
+	input := backend.RealtimeVoiceStart{VoiceID: "voice-original", SDP: "v=0", MediaInstructions: "exact private channel instructions"}
+	params := realtimeVoiceStartParams("thread-original", input)
+	if params["realtimeStartInstructions"] != input.MediaInstructions || params["threadId"] != "thread-original" || params["realtimeSessionId"] != "voice-original" {
+		t.Fatal(params)
+	}
+	for _, key := range []string{"sandbox", "permissions", "modelProvider", "dynamicTools"} {
+		if _, ok := params[key]; ok {
+			t.Fatal("voice overrides nativeprofile", key)
+		}
+	}
+}

@@ -2,6 +2,8 @@ package core
 
 import (
 	"context"
+	"everything-go/internal/voicemediaipc"
+	"log"
 	"regexp"
 	"time"
 
@@ -15,6 +17,7 @@ import (
 var voiceIdentifier = regexp.MustCompile(`^[A-Za-z0-9_-]{8,100}$`)
 
 type clientVoiceCall struct {
+	mediaIPC           *voicemediaipc.Channel
 	mediaCapable       bool
 	media              *voiceMediaSession
 	handoffCapable     bool
@@ -92,10 +95,14 @@ func (h *Hub) handleVoiceStart(c *Client, cmd clientproto.Command) {
 	}
 	h.voiceClients[c] = call
 	h.voiceMu.Unlock()
+	mediaInstructions, mediaError := h.openVoiceMediaLocal(c, call)
+	if mediaError != nil {
+		log.Printf("[voice-media] private local control unavailable")
+	}
 	c.enqueueEvent(voiceEvent(cmd, "starting", ""))
 	go func() {
 		defer cancel()
-		answer, err := exec.StartRealtimeVoice(ctx, s, backend.RealtimeVoiceStart{VoiceID: cmd.VoiceID, VoiceName: cmd.VoiceName, SDP: cmd.SDP, OnEvent: func(event backend.RealtimeVoiceEvent) {
+		answer, err := exec.StartRealtimeVoice(ctx, s, backend.RealtimeVoiceStart{MediaInstructions: mediaInstructions, VoiceID: cmd.VoiceID, VoiceName: cmd.VoiceName, SDP: cmd.SDP, OnEvent: func(event backend.RealtimeVoiceEvent) {
 			if !c.live() || !h.ownsVoice(c, call) {
 				return
 			}
@@ -105,6 +112,7 @@ func (h *Hub) handleVoiceStart(c *Client, cmd clientproto.Command) {
 			out.ThreadID = s.ResumeID()
 			c.enqueueEvent(out)
 			if event.State == "closed" {
+				h.closeVoiceMediaLocal(call)
 				h.voiceMu.Lock()
 				if h.voiceClients[c] == call {
 					delete(h.voiceClients, c)
@@ -119,6 +127,7 @@ func (h *Hub) handleVoiceStart(c *Client, cmd clientproto.Command) {
 			return
 		}
 		if err != nil {
+			h.closeVoiceMediaLocal(call)
 			h.voiceMu.Lock()
 			if h.voiceClients[c] == call {
 				delete(h.voiceClients, c)
@@ -153,6 +162,7 @@ func (h *Hub) stopClientVoice(c *Client, call *clientVoiceCall) {
 	call.stopping = true
 	h.voiceMu.Unlock()
 	call.cancel()
+	h.closeVoiceMediaLocal(call)
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 		defer cancel()

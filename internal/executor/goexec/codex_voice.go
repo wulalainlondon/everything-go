@@ -280,6 +280,9 @@ func (c *Codex) failVoiceCalls() {
 
 func realtimeVoiceStartParams(thread string, input backend.RealtimeVoiceStart) map[string]any {
 	params := map[string]any{"threadId": thread, "outputModality": "audio", "transport": map[string]any{"type": "webrtc", "sdp": input.SDP}, "version": "v3", "realtimeSessionId": input.VoiceID, "clientManagedHandoffs": false, "includeStartupContext": true, "flushTranscriptTailOnSessionEnd": false}
+	if input.MediaInstructions != "" {
+		params["realtimeStartInstructions"] = input.MediaInstructions
+	}
 	if input.VoiceName != "" {
 		params["voice"] = input.VoiceName
 	}

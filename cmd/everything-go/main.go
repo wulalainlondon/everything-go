@@ -46,10 +46,14 @@ import (
 	"everything-go/internal/search"
 	"everything-go/internal/session"
 	"everything-go/internal/sourcepolicy"
+	"everything-go/internal/voicemediaipc"
 	"everything-go/internal/workitems"
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "voice-media" {
+		os.Exit(voicemediaipc.RunCLI(os.Args[2:], os.Stdout, os.Stderr))
+	}
 	port := flag.Int("port", 8767, "WebSocket listen port (Python prod uses 8766)")
 	execName := flag.String("executor", "go", "AI executor: go | python")
 	claudeBin := flag.String("claude-bin", "claude", "path to the claude CLI binary")

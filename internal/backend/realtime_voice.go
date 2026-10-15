@@ -7,10 +7,11 @@ import (
 
 // RealtimeVoice is separate from Send/Stop: ending audio must never interrupt a turn.
 type RealtimeVoiceStart struct {
-	VoiceID   string
-	VoiceName string
-	SDP       string
-	OnEvent   func(RealtimeVoiceEvent)
+	MediaInstructions string
+	VoiceID           string
+	VoiceName         string
+	SDP               string
+	OnEvent           func(RealtimeVoiceEvent)
 }
 type RealtimeVoiceAnswer struct{ ThreadID, VoiceID, SDP string }
 type RealtimeVoiceEvent struct{ State, Text, Role, Message string }

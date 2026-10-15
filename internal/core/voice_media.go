@@ -8,6 +8,7 @@ import (
 	"everything-go/internal/backend"
 	"everything-go/internal/clientproto"
 	"everything-go/internal/protocol"
+	"everything-go/internal/session"
 	"fmt"
 	"net/url"
 	"regexp"
@@ -109,8 +110,14 @@ func (h *Hub) ExecuteVoiceMedia(ctx context.Context, caller backend.SessionContr
 	if caller.Parent == nil || caller.ToolCallID == "" || caller.VoiceID == "" {
 		return nil, errors.New("voice_media_active_voice_required")
 	}
-	s, ok := h.registry.Get(caller.Parent.ID)
-	if !ok || s != caller.Parent || !h.controls.MobileMayWrite(s.ID) {
+	return h.executeVoiceMedia(ctx, caller.Parent, caller.VoiceID, caller.RequestID, caller.ToolCallID, "native_tool", nil, method, input)
+}
+
+// local_user_socket authority is the private per-call OS-user channel, never a
+// fabricated SessionControlCaller. Both transports share the same scope checks.
+func (h *Hub) executeVoiceMedia(ctx context.Context, parent *session.Session, voiceID, requestID, operationID, transport string, expectedCall *clientVoiceCall, method string, input backend.VoiceMediaRequest) (any, error) {
+	s, ok := h.registry.Get(parent.ID)
+	if !ok || s != parent || !h.controls.MobileMayWrite(s.ID) {
 		return nil, errors.New("voice_media_caller_not_owned")
 	}
 	action := input.Action
@@ -155,13 +162,13 @@ func (h *Hub) ExecuteVoiceMedia(ctx context.Context, caller backend.SessionContr
 	var owner *Client
 	var call *clientVoiceCall
 	for c, v := range h.voiceClients {
-		if v.session == s && v.voiceID == caller.VoiceID && c.live() {
+		if v.session == s && v.voiceID == voiceID && c.live() {
 			owner = c
 			call = v
 			break
 		}
 	}
-	if call == nil || call.stopping || call.kind == "line" {
+	if call == nil || call.stopping || call.kind == "line" || (expectedCall != nil && call != expectedCall) {
 		h.voiceMu.Unlock()
 		return nil, errors.New("voice_media_active_voice_required")
 	}
@@ -184,7 +191,7 @@ func (h *Hub) ExecuteVoiceMedia(ctx context.Context, caller backend.SessionContr
 	}
 	encoded, _ := json.Marshal([]any{method, input})
 	fingerprint := fmt.Sprintf("%x", sha256.Sum256(encoded))
-	if old := m.receipts[caller.ToolCallID]; old != nil {
+	if old := m.receipts[transport+"|"+operationID]; old != nil {
 		if old.fingerprint != fingerprint {
 			h.voiceMu.Unlock()
 			return nil, errors.New("voice_media_intent_conflict")
@@ -220,14 +227,14 @@ func (h *Hub) ExecuteVoiceMedia(ctx context.Context, caller backend.SessionContr
 	m.state = "queued"
 	m.errorCode = ""
 	m.observedAt = 0
-	id := fmt.Sprintf("vm_%x", sha256.Sum256([]byte(h.cfg.InstanceID+"\x00"+s.ID+"\x00"+caller.VoiceID+"\x00"+caller.ToolCallID)))
-	receipt := &voiceMediaReceipt{fingerprint: fingerprint, desiredVolume: m.volume, settled: make(chan struct{}), result: backend.VoiceMediaResult{Action: action, CommandID: id, Sequence: m.sequence, State: "queued", Title: m.title, VideoURL: "https://www.youtube.com/watch?v=" + m.video, Volume: m.volume}}
+	id := fmt.Sprintf("vm_%x", sha256.Sum256([]byte(h.cfg.InstanceID+"\x00"+s.ID+"\x00"+voiceID+"\x00"+transport+"\x00"+operationID)))
+	receipt := &voiceMediaReceipt{fingerprint: fingerprint, desiredVolume: m.volume, settled: make(chan struct{}), result: backend.VoiceMediaResult{Transport: transport, Action: action, CommandID: id, Sequence: m.sequence, State: "queued", Title: m.title, VideoURL: "https://www.youtube.com/watch?v=" + m.video, Volume: m.volume}}
 	if m.video == "" {
 		receipt.result.VideoURL = ""
 	}
 	m.current = receipt
-	m.receipts[caller.ToolCallID] = receipt
-	event := voiceEvent(clientproto.Command{SessionID: s.ID, RequestID: caller.RequestID, VoiceID: caller.VoiceID}, "media", "")
+	m.receipts[transport+"|"+operationID] = receipt
+	event := voiceEvent(clientproto.Command{SessionID: s.ID, RequestID: requestID, VoiceID: voiceID}, "media", "")
 	event.ThreadID = s.ResumeID()
 	event.Media = &protocol.VoiceMediaCommand{Action: action, CommandID: id, Sequence: m.sequence, VideoID: m.video, Title: m.title, Volume: m.volume}
 	h.voiceMu.Unlock()
