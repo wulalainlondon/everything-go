@@ -159,7 +159,7 @@ func (h *Hub) enqueueChatMessageExpected(c *Client, cmd clientproto.Command, exp
 	}
 	if inserted {
 		behind := s.State() != session.Idle || s.QueueLen() > 0
-		if !s.SubmitNamed(cmd.RequestID, func() { h.runQueuedMessage(s, cmd.RequestID) }) {
+		if !h.submitQueuedMessage(s, cmd.RequestID) {
 			_, _, _ = h.messageQueue.Transition(cmd.SessionID, cmd.RequestID, []messagequeue.State{messagequeue.Queued}, messagequeue.Failed, "Queue is full or session is closed", "", "")
 			h.publishMessageQueue(cmd.SessionID)
 			h.queueError(c, cmd, "queue_full", "Queue is full or session is closed; this message was not started")
@@ -240,6 +240,10 @@ func (h *Hub) runQueuedMessage(s *session.Session, requestID string) {
 		return
 	}
 	if err = h.exec.Send(backend.WithVisualPresentation(context.Background(), payload.VisualPresentation), s, requestID, payload.Content, payload.Images, payload.Files); err != nil {
+		if errors.Is(err, backend.ErrNativeSubmissionBusy) {
+			h.deferUnsubmittedQueuedMessage(s, requestID)
+			return
+		}
 		if errors.Is(err, backend.ErrThreadActiveWriter) {
 			h.markDesktopWriter(s)
 		}
@@ -256,6 +260,50 @@ func (h *Hub) runQueuedMessage(s *session.Session, requestID string) {
 			h.Emit(backend.NewError(s.ID, requestID, code, err.Error()))
 		}
 	}
+}
+
+func (h *Hub) queuedSubmissionReady(s *session.Session, requestID string) bool {
+	if !h.controls.MobileMayWrite(s.ID) {
+		return true // The normal start path records the existing ownership refusal.
+	}
+	reader, ok := h.exec.(backend.QueuedSubmissionReader)
+	if !ok {
+		return true
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	defer cancel()
+	return reader.QueuedSubmissionReady(ctx, s, requestID) == nil
+}
+
+func (h *Hub) submitQueuedMessage(s *session.Session, requestID string) bool {
+	return s.SubmitNamedWhenReady(requestID,
+		func() bool { return h.queuedSubmissionReady(s, requestID) },
+		func() { h.runQueuedMessage(s, requestID) })
+}
+
+// Only the adapter's typed pre-input busy result permits restoring the same
+// waiting input. No uncertain, accepted or old failed receipt is replayed.
+func (h *Hub) deferUnsubmittedQueuedMessage(s *session.Session, requestID string) {
+	h.messageQueueMu.Lock()
+	_, accepted, nativeErr := h.messageQueue.ExactNativeAcceptance(s.ID, requestID)
+	var changed bool
+	var err error
+	if nativeErr == nil && !accepted {
+		_, changed, err = h.messageQueue.Transition(s.ID, requestID, []messagequeue.State{messagequeue.Running}, messagequeue.Queued, "native_submission_busy", "", "")
+	}
+	deferred := changed && err == nil && s.DeferActiveNamed(requestID,
+		func() bool { return h.queuedSubmissionReady(s, requestID) },
+		func() { h.runQueuedMessage(s, requestID) })
+	if changed && !deferred {
+		_, _, _ = h.messageQueue.Transition(s.ID, requestID, []messagequeue.State{messagequeue.Queued}, messagequeue.Uncertain, "native_defer_unconfirmed", "", "")
+	}
+	h.messageQueueMu.Unlock()
+	if !deferred {
+		h.Emit(backend.NativeSubmissionUncertain{SessionID: s.ID, RequestID: requestID, Reason: "native_defer_unconfirmed"})
+		return
+	}
+	h.updateRuntime(s.ID, "queued", requestID, s.QueueLen(), "", "")
+	h.publishMessageQueue(s.ID)
 }
 
 func (h *Hub) messageQueueSnapshot(sessionID string) (protocol.MessageQueueSnapshot, error) {
@@ -604,7 +652,7 @@ func (h *Hub) resumeQueuedMessages() {
 			continue
 		}
 		id := e.RequestID
-		if !s.SubmitNamed(id, func() { h.runQueuedMessage(s, id) }) {
+		if !h.submitQueuedMessage(s, id) {
 			log.Printf("[message-queue] waiting to restore session=%s request=%s", e.SessionID, id)
 		}
 	}

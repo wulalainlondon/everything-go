@@ -85,6 +85,13 @@ func (m *Mux) Send(ctx context.Context, s *session.Session, reqID, content strin
 	return sendReliable(ctx, e, m.terminal, s, reqID, content, images, files)
 }
 func (m *Mux) Stop(ctx context.Context, s *session.Session) error { return m.pick(s).Stop(ctx, s) }
+
+func (m *Mux) QueuedSubmissionReady(ctx context.Context, s *session.Session, requestID string) error {
+	if reader, ok := m.pick(s).(backend.QueuedSubmissionReader); ok {
+		return reader.QueuedSubmissionReady(ctx, s, requestID)
+	}
+	return nil
+}
 func (m *Mux) StartRealtimeVoice(ctx context.Context, s *session.Session, input backend.RealtimeVoiceStart) (backend.RealtimeVoiceAnswer, error) {
 	voice, ok := m.pick(s).(backend.RealtimeVoiceExecutor)
 	if !ok {

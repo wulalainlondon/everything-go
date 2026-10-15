@@ -1,8 +1,10 @@
 package goexec
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"everything-go/internal/backend"
 	"everything-go/internal/recovery"
 	"everything-go/internal/session"
 	"time"
@@ -16,6 +18,62 @@ type codexAcceptanceError struct {
 }
 
 func (e *codexAcceptanceError) Error() string { return e.Reason }
+func (e *codexAcceptanceError) Unwrap() error {
+	if e.Reason == "native_submission_busy" {
+		return backend.ErrNativeSubmissionBusy
+	}
+	return nil
+}
+
+// Read metadata before dequeuing after a restart. No resume, settings changes,
+// history load or input RPC is allowed here. Send still performs its complete
+// admission after the actor starts, including a second idle/source check.
+func (c *Codex) QueuedSubmissionReady(ctx context.Context, s *session.Session, requestID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	st := c.state(s.ID)
+	st.mu.Lock()
+	threadID, busy := st.threadID, st.turnActive || st.compactActive
+	st.mu.Unlock()
+	if busy {
+		return backend.ErrNativeSubmissionBusy
+	}
+	if threadID == "" {
+		threadID = s.ResumeID()
+	}
+	if threadID == "" {
+		return nil
+	}
+	if err := c.ensureServer(); err != nil {
+		return err
+	}
+	epoch := c.rpc.transportEpoch.Load()
+	raw, err := c.rpc.requestAtEpoch("thread/read", map[string]any{"threadId": threadID, "includeTurns": false}, 5*time.Second, &epoch)
+	if err != nil {
+		if isStaleThreadError(err) {
+			return nil
+		} // Existing Send recovery owns this case.
+		return err
+	}
+	var response struct {
+		Thread struct {
+			ID     string `json:"id"`
+			Status struct {
+				Type string `json:"type"`
+			} `json:"status"`
+		} `json:"thread"`
+	}
+	if len(raw) > 64<<10 || json.Unmarshal(raw, &response) != nil || response.Thread.ID != threadID || ctx.Err() != nil || c.rpc.transportEpoch.Load() != epoch {
+		return &codexAcceptanceError{Reason: "native_idle_unverified"}
+	}
+	if response.Thread.Status.Type == "active" {
+		return backend.ErrNativeSubmissionBusy
+	}
+	// notLoaded/systemError need the existing resume/terminal proof in Send;
+	// this read only prevents a known-active thread from being dequeued.
+	return nil
+}
 func codexCorrelationReason(err error) string {
 	var e *codexAcceptanceError
 	if errors.As(err, &e) {

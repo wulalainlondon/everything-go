@@ -14,6 +14,29 @@ import (
 
 type capSink struct{ events []any }
 
+func TestReliableMuxPreservesUncertainAndPreSubmissionBusy(t *testing.T) {
+	for _, busy := range []bool{false, true} {
+		sink := &capSink{}
+		terminal := NewTerminalSink(sink)
+		inner := &reliableFake{sink: terminal, err: errors.New("native_acceptance_unknown"),
+			emit: backend.NativeSubmissionUncertain{SessionID: "s1", RequestID: "r1", Reason: "native_acceptance_unknown"}}
+		if busy {
+			inner.err, inner.emit = backend.ErrNativeSubmissionBusy, nil
+		}
+		mux := NewReliableMux(map[string]Executor{"codex": inner}, inner, terminal)
+		s := session.NewRegistry().Create("s1", "n", "/tmp", "codex", "", "", "")
+		_ = mux.Send(context.Background(), s, "r1", "hi", nil, nil)
+		for _, event := range sink.events {
+			if _, ok := event.(protocol.Error); ok {
+				t.Fatal("manufactured failure", event)
+			}
+		}
+		if !terminal.Done(turnKey{sessionID: "s1", reqID: "r1"}) {
+			t.Fatal("adapter invocation leaked")
+		}
+	}
+}
+
 func (s *capSink) Emit(e any) { s.events = append(s.events, e) }
 
 type reliableFake struct {

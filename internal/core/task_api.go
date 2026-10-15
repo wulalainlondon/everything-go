@@ -954,7 +954,7 @@ func (h *Hub) Mutate(ctx context.Context, c taskapi.AuthorizedCommand) (any, err
 	return nil, taskapi.Failure("unsupported", "known_none", "read_capabilities")
 }
 func (h *Hub) submitAPINamed(s *session.Session, id string) {
-	if !s.SubmitNamed(id, func() { h.runQueuedMessage(s, id) }) {
+	if !h.submitQueuedMessage(s, id) {
 		h.messageQueue.Transition(s.ID, id, []messagequeue.State{messagequeue.Queued}, messagequeue.Failed, "Actor unavailable", "", "")
 	}
 	h.publishMessageQueue(s.ID)

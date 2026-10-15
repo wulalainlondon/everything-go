@@ -2139,7 +2139,9 @@ func (c *Codex) Send(ctx context.Context, s *session.Session, reqID, content str
 	}
 	admission, err := c.readStartAdmission(s, st, reqID)
 	if err != nil {
-		c.sink.Emit(backend.NativeSubmissionUncertain{SessionID: s.ID, RequestID: reqID, Reason: codexCorrelationReason(err)})
+		if !errors.Is(err, backend.ErrNativeSubmissionBusy) {
+			c.sink.Emit(backend.NativeSubmissionUncertain{SessionID: s.ID, RequestID: reqID, Reason: codexCorrelationReason(err)})
+		}
 		return err
 	}
 	// Durable chat admission pins a configuration per message. Apply it only

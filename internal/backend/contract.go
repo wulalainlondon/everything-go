@@ -17,6 +17,8 @@ var (
 	ErrSteerRejected      = errors.New("steering was rejected before applying input")
 	ErrNoActiveTurn       = errors.New("there is no active turn to steer")
 	ErrThreadActiveWriter = errors.New("codex thread is controlled by another client")
+	// Returned only before any native input RPC has been attempted.
+	ErrNativeSubmissionBusy = errors.New("native_submission_busy")
 )
 
 const (
@@ -124,6 +126,12 @@ type Executor interface {
 	Stop(ctx context.Context, s *session.Session) error
 	Clear(ctx context.Context, s *session.Session) error
 	Close(ctx context.Context, s *session.Session) error
+}
+
+// QueuedSubmissionReader reads native readiness without submitting model input.
+// A non-nil result keeps an ordinary queued input waiting and cancellable.
+type QueuedSubmissionReader interface {
+	QueuedSubmissionReady(context.Context, *session.Session, string) error
 }
 
 type sandboxOverrideContextKey struct{}
