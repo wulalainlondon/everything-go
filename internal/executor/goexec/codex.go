@@ -2232,11 +2232,19 @@ func (c *Codex) Steer(ctx context.Context, s *session.Session, clientUserMessage
 
 func (c *Codex) steerActiveTurn(s *session.Session, clientUserMessageID, content string, images []backend.ImageAttachment, files []backend.FileAttachment) (backend.SteerResult, error) {
 	st := c.state(s.ID)
+	source := s.Snapshot()
+	config := session.ConfigurationFrom(source)
 	st.mu.Lock()
 	active := st.turnActive && !st.turnStartPending && !st.stopping
 	threadID := st.threadID
 	turnID := st.currentTurnID
 	activeRequestID := st.reqID
+	observed := !st.turnActive && !st.compactActive && !st.stopping && !st.turnStartPending &&
+		st.observedTurnID != "" && st.observedRequestID != "" && st.threadID == source.ResumeID
+	if observed {
+		active = true
+		turnID, activeRequestID = st.observedTurnID, st.observedRequestID
+	}
 	epoch := c.rpc.transportEpoch.Load()
 	st.mu.Unlock()
 	if !active || threadID == "" || turnID == "" || activeRequestID == "" || clientUserMessageID == "" {
@@ -2268,8 +2276,16 @@ func (c *Codex) steerActiveTurn(s *session.Session, clientUserMessageID, content
 		return backend.SteerResult{}, fmt.Errorf("native async reply acceptance could not be correlated to the expected turn")
 	}
 	st.mu.Lock()
-	current := st.turnActive && !st.turnStartPending && !st.stopping && st.threadID == threadID && st.currentTurnID == turnID && st.reqID == activeRequestID && c.rpc.transportEpoch.Load() == epoch
+	current := st.turnActive && !st.turnStartPending && !st.stopping && st.threadID == threadID && st.currentTurnID == turnID && st.reqID == activeRequestID
+	if observed {
+		current = !st.turnActive && !st.compactActive && !st.stopping && !st.turnStartPending &&
+			st.threadID == threadID && st.observedTurnID == turnID && st.observedRequestID == activeRequestID
+	}
+	current = current && c.rpc.transportEpoch.Load() == epoch
 	st.mu.Unlock()
+	if observed {
+		current = current && s.ResumeID() == threadID && session.ConfigurationFrom(s.Snapshot()) == config
+	}
 	if !current {
 		return backend.SteerResult{}, &codexAcceptanceError{Reason: "native_current_request_changed"}
 	}

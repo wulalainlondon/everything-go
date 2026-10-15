@@ -159,6 +159,11 @@ func (h *Hub) enqueueChatMessageExpected(c *Client, cmd clientproto.Command, exp
 	}
 	if inserted {
 		behind := s.State() != session.Idle || s.QueueLen() > 0
+		// An observed native turn is live without claiming the Session worker.
+		// A queued follow-up must not replace its active request presentation.
+		if views := h.runtimes.Snapshot("", []string{s.ID}); len(views) == 1 && views[0].Phase != "queued" && runtimePhaseActive(views[0].Phase) {
+			behind = true
+		}
 		if !h.submitQueuedMessage(s, cmd.RequestID) {
 			_, _, _ = h.messageQueue.Transition(cmd.SessionID, cmd.RequestID, []messagequeue.State{messagequeue.Queued}, messagequeue.Failed, "Queue is full or session is closed", "", "")
 			h.publishMessageQueue(cmd.SessionID)
@@ -540,7 +545,7 @@ func (h *Hub) promoteQueuedMessage(c *Client, cmd clientproto.Command) {
 		h.queueResult(c, cmd, "promote", "retained", "此訊息的設定與本輪不同，保留原本的排隊位置。", e)
 		return
 	}
-	finish, err := s.ReserveQueued(cmd.RequestID)
+	finish, err := s.ReserveSteeringCandidate(cmd.RequestID)
 	if err != nil {
 		h.messageQueueMu.Unlock()
 		h.queueResult(c, cmd, "promote", "retained", err.Error(), e)

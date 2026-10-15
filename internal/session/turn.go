@@ -160,18 +160,25 @@ func (s *Session) signalQueueLocked() {
 // finish(true) removes the item; finish(false) restores its original FIFO place.
 // The closure is idempotent and must be called after persisting the outcome.
 func (s *Session) ReserveQueued(id string) (finish func(bool), err error) {
-	return s.reserveQueued(id, true)
+	return s.reserveQueued(id, true, true)
 }
 func (s *Session) ReserveWaiting(id string) (finish func(bool), err error) {
-	return s.reserveQueued(id, false)
+	return s.reserveQueued(id, false, false)
 }
-func (s *Session) reserveQueued(id string, requireActive bool) (finish func(bool), err error) {
+
+// ReserveSteeringCandidate holds the FIFO boundary while the adapter checks
+// an exact native turn. Observed native work does not own this Session worker;
+// only the adapter's strict steer ACK may consume the reserved input.
+func (s *Session) ReserveSteeringCandidate(id string) (finish func(bool), err error) {
+	return s.reserveQueued(id, false, true)
+}
+func (s *Session) reserveQueued(id string, requireActive, exclusive bool) (finish func(bool), err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if requireActive && s.state != Streaming {
 		return nil, ErrQueueNoActiveTurn
 	}
-	if requireActive && s.queueHolds > 0 {
+	if exclusive && s.queueHolds > 0 {
 		return nil, ErrQueueBusy
 	}
 	var target *queuedTurn
