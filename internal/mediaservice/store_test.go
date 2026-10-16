@@ -17,6 +17,28 @@ func testOrigin() backend.MediaOrigin {
 func testRequest() Request {
 	return Request{ID: "vop_one_operation", Thread: "t", Method: "play_youtube", Input: backend.VoiceMediaRequest{URL: "https://youtu.be/M7lc1UVf-VE"}}
 }
+func TestKnownDispatchReceiptSurvivesCallerDeadlineWithoutReplay(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	r, err := s.Execute(ctx, testOrigin(), testRequest(), func() (backend.VoiceMediaResult, error) {
+		cancel() // Device dispatch completed just as the caller's budget expired.
+		return backend.VoiceMediaResult{CommandID: "original-command", State: "queued"}, nil
+	})
+	if err != nil || r.CommandID != "original-command" || r.Dispatched == nil || !*r.Dispatched || r.PlaybackConfirmed {
+		t.Fatal(r, err)
+	}
+	r, err = s.Execute(context.Background(), testOrigin(), testRequest(), func() (backend.VoiceMediaResult, error) {
+		t.Fatal("replayed after deadline")
+		return backend.VoiceMediaResult{}, nil
+	})
+	if err != nil || r.CommandID != "original-command" || !r.Historical || r.PlaybackConfirmed {
+		t.Fatal(r, err)
+	}
+}
 func TestReceiptSurvivesRestartAndDoesNotReplayUnknown(t *testing.T) {
 	dir := t.TempDir()
 	s, e := Open(dir)

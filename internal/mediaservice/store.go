@@ -68,9 +68,21 @@ func Open(root string) (*Store, error) {
 }
 func (s *Store) Close() error { return s.db.Close() }
 
+// Authorization and dispatch always use the caller's context. Recording a
+// known result is a separate bounded local durability step: a caller timeout
+// must not erase the command ID and turn it into an apparently new intent.
+func (s *Store) saveResult(ctx context.Context, thread, id string, raw []byte) error {
+	write, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
+	defer cancel()
+	_, err := s.db.ExecContext(write, `UPDATE media_operations SET result=? WHERE thread=? AND id=?`, raw, thread, id)
+	return err
+}
+
 func decorate(r backend.VoiceMediaResult, id string, accepted, dispatched bool) Result {
 	x := Result{VoiceMediaResult: r, OperationID: id, Accepted: accepted, Dispatched: &dispatched, SuggestedAction: "none"}
 	switch {
+	case r.ErrorCode == "audio_route_unverified" || r.AudioCheck == "shared_media_route_unverified":
+		x.SuggestedAction = "check_bluetooth_media_connection"
 	case r.ErrorCode == "voice_media_player_not_ready":
 		x.SuggestedAction = "music_unavailable_for_this_call"
 	case r.ErrorCode == "autoplay_blocked":
@@ -161,7 +173,7 @@ func (s *Store) Execute(ctx context.Context, o backend.MediaOrigin, q Request, r
 		if fresh.CommandID != "" && fresh.CommandID == old.CommandID {
 			old = decorate(fresh, id, true, old.Dispatched != nil && *old.Dispatched)
 			b, _ := json.Marshal(old)
-			if _, e = s.db.ExecContext(ctx, `UPDATE media_operations SET result=? WHERE thread=? AND id=?`, b, q.Thread, id); e != nil {
+			if e = s.saveResult(ctx, q.Thread, id, b); e != nil {
 				return Result{}, e
 			}
 			return old, nil
@@ -204,7 +216,7 @@ func (s *Store) Execute(ctx context.Context, o backend.MediaOrigin, q Request, r
 			r.Observed, r.PlaybackConfirmed, r.ActionConfirmed = false, false, false
 			result := decorate(r, id, true, false)
 			b, _ = json.Marshal(result)
-			if _, saveErr := s.db.ExecContext(ctx, `UPDATE media_operations SET result=? WHERE thread=? AND id=?`, b, q.Thread, id); saveErr != nil {
+			if saveErr := s.saveResult(ctx, q.Thread, id, b); saveErr != nil {
 				return unknown, saveErr
 			}
 			return result, nil
@@ -214,7 +226,7 @@ func (s *Store) Execute(ctx context.Context, o backend.MediaOrigin, q Request, r
 	}
 	result := decorate(r, id, true, r.CommandID != "")
 	b, _ = json.Marshal(result)
-	if _, e = s.db.ExecContext(ctx, `UPDATE media_operations SET result=? WHERE thread=? AND id=?`, b, q.Thread, id); e != nil {
+	if e = s.saveResult(ctx, q.Thread, id, b); e != nil {
 		return unknown, e
 	}
 	return result, nil

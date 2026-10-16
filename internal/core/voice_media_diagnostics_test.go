@@ -97,6 +97,37 @@ func TestMediaDiagnosticsRejectClaimsOfActualPredictedRoutes(t *testing.T) {
 		t.Fatal("valid read-only diagnostic rejected")
 	}
 }
+
+func TestSharedMediaTrackVerificationDoesNotClaimYouTubeAudibility(t *testing.T) {
+	h, owner, caller, m := inspectionFixture(t)
+	verified, muted, volume := true, false, 53
+	a := &protocol.MediaAudioInfo{AudioProfile: "bluetooth_media", SharedRouteVerified: &verified, SpeechOutputObservation: "actual_track", SpeechOutputRoute: "bluetooth_media", MicrophoneObservation: "actual_track", MicrophoneInput: "phone", SharedOutputDevice: "Buds2 Pro", PlayerMuted: &muted, SystemMediaMuted: &muted, SystemMediaVolume: &volume, MediaRoutingObservation: "predicted", PredictedMediaRoutes: []string{"bluetooth_media"}, VoiceRoute: "bluetooth"}
+	ack := clientproto.Command{SessionID: caller.Parent.ID, ThreadID: caller.Parent.ResumeID(), VoiceID: caller.VoiceID, MediaCommandID: m.current.result.CommandID, MediaSequence: 1, MediaVideoID: m.video, MediaState: "playing", MediaAudio: a}
+	h.handleVoiceMediaState(owner, ack)
+	r := mediaResult(m, m.current)
+	if r.AudioCheck != "shared_media_output_unverified" || r.Audio == nil || r.Audio.SharedOutputDevice != "Buds2 Pro" || r.Audio.MediaRoutingObservation != "predicted" {
+		t.Fatal(r)
+	}
+	ack.MediaState, ack.MediaErrorCode = "error", "audio_route_unverified"
+	h.handleVoiceMediaState(owner, ack)
+	r = mediaResult(m, m.current)
+	if r.PlaybackConfirmed || r.ErrorCode != "audio_route_unverified" {
+		t.Fatal(r)
+	}
+	for _, mutate := range []func(*protocol.MediaAudioInfo){
+		func(x *protocol.MediaAudioInfo) { x.AudioProfile = "standard" },
+		func(x *protocol.MediaAudioInfo) { x.SpeechOutputRoute = "bluetooth_hfp" },
+		func(x *protocol.MediaAudioInfo) { x.MicrophoneObservation = "predicted" },
+		func(x *protocol.MediaAudioInfo) { x.MicrophoneInput = "other" },
+		func(x *protocol.MediaAudioInfo) { x.SharedOutputDevice = "bad\nlabel" },
+	} {
+		bad := *a
+		mutate(&bad)
+		if validMediaAudio(&bad) {
+			t.Fatal("accepted inconsistent verification", bad)
+		}
+	}
+}
 func TestMediaEndpointIdentifiesNativePhoneBeforeAnySong(t *testing.T) {
 	h, owner, caller, _ := inspectionFixture(t)
 	h.voiceClients[owner].media = nil

@@ -13,6 +13,15 @@ type VoiceMediaCommand struct {
 // MediaAudioInfo separates player/system gain observations from human audibility.
 // VoiceRoute is the confirmed VOICE route, not a claim about WebView media routing.
 type MediaAudioInfo struct {
+	// These observations concern the app-owned WebRTC tracks only. They do not
+	// attest to the official YouTube player's actual route or audible output.
+	AudioProfile            string   `json:"audio_profile,omitempty"`
+	SharedRouteVerified     *bool    `json:"shared_route_verified,omitempty"`
+	SpeechOutputObservation string   `json:"speech_output_observation,omitempty"`
+	SpeechOutputRoute       string   `json:"speech_output_route,omitempty"`
+	SharedOutputDevice      string   `json:"shared_output_device,omitempty"`
+	MicrophoneObservation   string   `json:"microphone_observation,omitempty"`
+	MicrophoneInput         string   `json:"microphone_input,omitempty"`
 	DeviceModel             string   `json:"device_model,omitempty"`
 	CommunicationProfile    string   `json:"communication_profile,omitempty"`
 	CommunicationDevice     string   `json:"communication_device,omitempty"`

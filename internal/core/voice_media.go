@@ -126,6 +126,10 @@ func mediaResult(m *voiceMediaSession, r *voiceMediaReceipt) backend.VoiceMediaR
 			result.AudioCheck = "system_media_muted"
 		case a.SystemMediaVolume != nil && *a.SystemMediaVolume == 0:
 			result.AudioCheck = "system_media_volume_zero"
+		case a.AudioProfile == "bluetooth_media" && a.SharedRouteVerified != nil && *a.SharedRouteVerified:
+			result.AudioCheck = "shared_media_output_unverified"
+		case a.AudioProfile == "bluetooth_media":
+			result.AudioCheck = "shared_media_route_unverified"
 		case a.CommunicationProfile == "bluetooth_hfp":
 			result.AudioCheck = "bluetooth_call_media_unverified"
 		case a.VoiceRoute == "bluetooth" && a.CommunicationProfile == "":
@@ -322,7 +326,7 @@ func (h *Hub) handleVoiceMediaState(c *Client, cmd clientproto.Command) {
 		return
 	}
 	switch cmd.MediaErrorCode {
-	case "", "autoplay_blocked", "foreground_required", "video_not_found", "embed_blocked", "client_identity", "player_error", "network_error":
+	case "", "autoplay_blocked", "foreground_required", "video_not_found", "embed_blocked", "client_identity", "player_error", "network_error", "audio_route_unverified":
 	default:
 		return
 	}
