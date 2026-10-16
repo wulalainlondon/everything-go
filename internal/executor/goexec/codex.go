@@ -181,24 +181,25 @@ type Codex struct {
 	mediaOrigins          mediaOriginState
 	metadataObserverBoot  string
 
-	taskProvider       backend.TaskAPIProvider
-	voiceMu            sync.Mutex
-	voiceCalls         map[string]*codexVoiceCall
-	voicePreparing     map[string]bool
-	recapStoreMu       sync.Mutex
-	recapStore         *recap.Store
-	recapSlots         chan struct{}
-	pmProvider         backend.PMProvider
-	delegationProvider backend.DelegationProvider
-	controlProvider    backend.SessionControlProvider
-	toolEnvironment    toolEnvironmentState
-	toolRPCGate        sync.RWMutex
-	sink               executor.Sink
-	tools              *toolEmitter
-	codexBin           string
-	sessionsRoot       string
-	indexPath          string
-	rpc                *rpcPlumber
+	taskProvider           backend.TaskAPIProvider
+	voiceMu                sync.Mutex
+	voiceCalls             map[string]*codexVoiceCall
+	voicePreparing         map[string]bool
+	voicePermissionSignals map[string]chan json.RawMessage
+	recapStoreMu           sync.Mutex
+	recapStore             *recap.Store
+	recapSlots             chan struct{}
+	pmProvider             backend.PMProvider
+	delegationProvider     backend.DelegationProvider
+	controlProvider        backend.SessionControlProvider
+	toolEnvironment        toolEnvironmentState
+	toolRPCGate            sync.RWMutex
+	sink                   executor.Sink
+	tools                  *toolEmitter
+	codexBin               string
+	sessionsRoot           string
+	indexPath              string
+	rpc                    *rpcPlumber
 
 	startMu               sync.Mutex
 	proc                  *exec.Cmd
@@ -1127,6 +1128,9 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 	var m codexMsg
 	if json.Unmarshal(raw, &m) != nil {
 		return
+	}
+	if m.Method == "thread/settings/updated" {
+		c.observeVoicePermissionSettings(m.Params)
 	}
 	// Server→client request (has id + method, no result/error).
 	if len(m.ID) > 0 && string(m.ID) != "null" && m.Method != "" {

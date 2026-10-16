@@ -53,6 +53,24 @@ func (c *Codex) syncVoiceSessionPermissions(ctx context.Context, s *session.Sess
 	if err = c.validateAppSandbox(s, ""); err != nil {
 		return err
 	}
+	signal := make(chan json.RawMessage, 1)
+	c.voiceMu.Lock()
+	if c.voicePermissionSignals == nil {
+		c.voicePermissionSignals = map[string]chan json.RawMessage{}
+	}
+	if c.voicePermissionSignals[thread] != nil {
+		c.voiceMu.Unlock()
+		return errors.New("voice_session_preparation_pending")
+	}
+	c.voicePermissionSignals[thread] = signal
+	c.voiceMu.Unlock()
+	defer func() {
+		c.voiceMu.Lock()
+		if c.voicePermissionSignals[thread] == signal {
+			delete(c.voicePermissionSignals, thread)
+		}
+		c.voiceMu.Unlock()
+	}()
 	// realtime/start has no permission override. Its backing turns inherit the
 	// native thread defaults, so synchronize them before starting the voice.
 	if _, err = c.rpcCall("thread/settings/update", c.sessionPermissionSettings(thread, snap), 15*time.Second); err != nil {
@@ -68,11 +86,20 @@ func (c *Codex) syncVoiceSessionPermissions(ctx context.Context, s *session.Sess
 	if after.ResumeID != thread || after.ConfigRevision != snap.ConfigRevision || after.Sandbox != snap.Sandbox || after.Cwd != snap.Cwd || after.Backend != snap.Backend {
 		return errors.New("voice_session_configuration_changed")
 	}
-	// A metadata-only resume also checks that the provider did not ignore the
-	// requested policy. No new thread, turn, permission fallback or retry occurs.
-	raw, err := c.rpcCall("thread/resume", map[string]any{"threadId": thread, "excludeTurns": true}, 15*time.Second)
-	if err != nil {
-		return err
+	// The native settings notification works even before a voice-first thread
+	// has a rollout. Older providers can be checked by metadata-only resume.
+	var raw json.RawMessage
+	timer := time.NewTimer(time.Second)
+	defer timer.Stop()
+	select {
+	case raw = <-signal:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		raw, err = c.rpcCall("thread/resume", map[string]any{"threadId": thread, "excludeTurns": true}, 15*time.Second)
+		if err != nil {
+			return err
+		}
 	}
 	if !voicePermissionMetadataMatches(raw, c.sessionPermissionSettings(thread, snap)) {
 		return errors.New("voice_session_permissions_not_applied")
@@ -85,6 +112,38 @@ func (c *Codex) syncVoiceSessionPermissions(ctx context.Context, s *session.Sess
 		return errors.New("voice_session_configuration_changed")
 	}
 	return nil
+}
+
+// Capture only the permission projection for a currently waiting original
+// thread. Never keep transcripts, credentials, or settings from other threads.
+func (c *Codex) observeVoicePermissionSettings(raw json.RawMessage) {
+	var event struct {
+		ThreadID string `json:"threadId"`
+		Settings struct {
+			Cwd      string          `json:"cwd"`
+			Approval json.RawMessage `json:"approvalPolicy"`
+			Reviewer json.RawMessage `json:"approvalsReviewer"`
+			Sandbox  json.RawMessage `json:"sandboxPolicy"`
+		} `json:"threadSettings"`
+	}
+	if len(raw) > 1<<20 || json.Unmarshal(raw, &event) != nil {
+		return
+	}
+	c.voiceMu.Lock()
+	defer c.voiceMu.Unlock()
+	ch := c.voicePermissionSignals[event.ThreadID]
+	if ch == nil {
+		return
+	}
+	projection, err := json.Marshal(map[string]any{"thread": map[string]string{"id": event.ThreadID}, "cwd": event.Settings.Cwd, "approvalPolicy": event.Settings.Approval, "approvalsReviewer": event.Settings.Reviewer, "sandbox": event.Settings.Sandbox})
+	if err != nil {
+		return
+	}
+	select {
+	case <-ch:
+	default:
+	}
+	ch <- projection
 }
 
 func voicePermissionMetadataMatches(raw json.RawMessage, requested map[string]any) bool {

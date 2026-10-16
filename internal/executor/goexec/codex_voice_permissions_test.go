@@ -105,6 +105,36 @@ func TestVoiceStartupSynchronizesColdAndWarmSessionBeforeRealtime(t *testing.T) 
 	}
 }
 
+func TestVoiceFirstSettingsNotificationVerifiesWithoutRollout(t *testing.T) {
+	for _, policy := range []string{"dangerFullAccess", "readOnly"} {
+		t.Run(policy, func(t *testing.T) {
+			c, s, w := voicePermissionFixture(t)
+			c.state(s.ID).threadID = s.ResumeID()
+			w.reply = func(method string, _ json.RawMessage) (any, error) {
+				if method != "thread/settings/update" {
+					t.Errorf("fresh thread must not need rollout metadata: %s", method)
+				}
+				// Another thread's event must never satisfy this waiter.
+				other, _ := json.Marshal(map[string]any{"method": "thread/settings/updated", "params": map[string]any{"threadId": "other", "threadSettings": map[string]any{"cwd": s.Cwd(), "sandboxPolicy": map[string]any{"type": "dangerFullAccess"}, "approvalPolicy": "never", "approvalsReviewer": "user"}}})
+				c.dispatch(other)
+				if len(c.voicePermissionSignals[s.ResumeID()]) != 0 {
+					t.Fatal("cross-thread event accepted")
+				}
+				event, _ := json.Marshal(map[string]any{"method": "thread/settings/updated", "params": map[string]any{"threadId": s.ResumeID(), "threadSettings": map[string]any{"cwd": s.Cwd(), "sandboxPolicy": map[string]any{"type": policy, "networkAccess": false}, "approvalPolicy": "never", "approvalsReviewer": "user"}}})
+				c.dispatch(event)
+				return map[string]any{}, nil
+			}
+			err := c.syncVoiceSessionPermissions(context.Background(), s, s.ResumeID())
+			if (err == nil) != (policy == "dangerFullAccess") {
+				t.Fatalf("wrong notification result: %v", err)
+			}
+			if len(c.voicePermissionSignals) != 0 || !reflect.DeepEqual(w.methods, []string{"thread/settings/update"}) {
+				t.Fatal("waiter leaked or unexpected native call", w.methods)
+			}
+		})
+	}
+}
+
 func TestVoiceRefusesFailedSyncAndConcurrentSessionChanges(t *testing.T) {
 	for _, cause := range []string{"rejected", "changed", "updating", "metadata"} {
 		t.Run(cause, func(t *testing.T) {

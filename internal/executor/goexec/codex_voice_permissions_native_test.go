@@ -142,8 +142,16 @@ func TestInstalledNativeVoicePermissionInheritance(t *testing.T) {
 			}
 		}
 	}
-	runFixtureTurn() // Persist an original rollout before exercising exact cold resume.
-	s := session.NewRegistry().Create("voice-permission-native-probe", "owned settings fixture", cwd, backend.Codex, "", "danger-full-access", id)
+	s := session.NewRegistry().Create("voice-permission-native-probe", "owned settings fixture", cwd, backend.Codex, "", "read-only", id)
+	c.state(s.ID).threadID = id
+	c.mu.Lock()
+	c.threadToSession[id] = s
+	c.mu.Unlock()
+	if e := c.syncVoiceSessionPermissions(context.Background(), s, id); e != nil {
+		t.Fatal("fresh voice-first permission verification", e)
+	}
+	runFixtureTurn()            // Persist only after verifying the new thread works without a rollout.
+	c.state(s.ID).threadID = "" // Exercise exact cold restoration on the same persisted identity.
 	results := []map[string]any{}
 	for i, mode := range []string{"danger-full-access", "read-only", "workspace-write"} {
 		s.ApplyConfig("", "", mode)
@@ -228,7 +236,7 @@ func TestInstalledNativeVoicePermissionInheritance(t *testing.T) {
 	}
 	archived = true
 	if out := os.Getenv("EVERYTHING_GO_VOICE_PERMISSION_PROBE_RESULT"); out != "" {
-		b, _ := json.MarshalIndent(map[string]any{"thread_id": id, "results": results, "archived": archived, "local_mock_model_requests": counter.Load(), "paid_model_or_realtime_calls": false}, "", "  ")
+		b, _ := json.MarshalIndent(map[string]any{"thread_id": id, "results": results, "archived": archived, "fresh_voice_first_verified": true, "local_mock_model_requests": counter.Load(), "paid_model_or_realtime_calls": false}, "", "  ")
 		if !filepath.IsAbs(out) || !strings.Contains(out, "voice-session-permissions-") {
 			t.Fatal("scoped result path required")
 		}
