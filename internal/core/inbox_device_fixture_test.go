@@ -83,6 +83,7 @@ func TestInboxNativeDeviceFixture(t *testing.T) {
 		if index == 1 {
 			instance = "inbox-native-qa-b"
 		}
+		instance += "-" + os.Getenv("INBOX_DEVICE_FIXTURE_GENERATION")
 		dir := t.TempDir()
 		dir, _ = filepath.EvalSymlinks(dir)
 		reg := session.NewRegistry()
@@ -158,6 +159,11 @@ func TestInboxNativeDeviceFixture(t *testing.T) {
 				}
 				p.events = append(p.events, e)
 			}
+			extra, _, err := events.Insert(ctx, eventinbox.Input{Source: "github", EventKey: "qa-new-session-event", Kind: "issue.updated", Title: "QA 新對話事件", Body: "唯讀新對話驗收資料", Data: json.RawMessage(`{"subject_id":43}`)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			p.events = append(p.events, extra)
 		}
 		mux := http.NewServeMux()
 		mux.HandleFunc("/fixture/enroll", func(w http.ResponseWriter, r *http.Request) {
@@ -173,7 +179,7 @@ func TestInboxNativeDeviceFixture(t *testing.T) {
 				return
 			}
 			p.device.Store(in.Device)
-			_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "instance_id": h.cfg.InstanceID})
 		})
 		mux.HandleFunc("/fixture/begin", func(w http.ResponseWriter, r *http.Request) {
 			if p.begun.CompareAndSwap(false, true) {
@@ -194,14 +200,29 @@ func TestInboxNativeDeviceFixture(t *testing.T) {
 			}
 			_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 		})
+		mux.HandleFunc("/fixture/new-event", func(w http.ResponseWriter, r *http.Request) {
+			event, dedup, err := h.events.Insert(ctx, eventinbox.Input{Source: "github", EventKey: "qa-future-rule-event", Kind: "issue.updated", Title: "QA 規則後續事件", Body: "測試啟用後的新事件", Data: json.RawMessage(`{"subject_id":44}`)})
+			if err != nil {
+				http.Error(w, "fixture insert failed", 500)
+				return
+			}
+			_ = h.publishExternalEvent(event, dedup)
+			_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+		})
 		mux.HandleFunc("/fixture/stats", func(w http.ResponseWriter, r *http.Request) {
 			assignments, _ := h.automation.EventAssignments(ctx)
 			snapshot, _ := h.events.SnapshotIncludingArchived(ctx, p.device.Load().(string), 0)
-			_ = json.NewEncoder(w).Encode(map[string]any{"target_allowed": h.eventSessionAllowed(sessionObject), "target_state": int(sessionObject.State()), "provider_mock": true, "provider_calls": p.exec.calls.Load(), "answers": p.exec.answered.Load(), "permission_approved": p.permission.Load(), "assignments": assignments, "events": snapshot.Items})
+			_ = json.NewEncoder(w).Encode(map[string]any{"session_count": len(h.registry.List()), "target_allowed": h.eventSessionAllowed(sessionObject), "target_state": int(sessionObject.State()), "provider_mock": true, "provider_calls": p.exec.calls.Load(), "answers": p.exec.answered.Load(), "permission_approved": p.permission.Load(), "assignments": assignments, "events": snapshot.Items})
 		})
 		mux.HandleFunc("/fixture/stop", func(w http.ResponseWriter, r *http.Request) { stopOnce.Do(func() { close(stop) }); w.WriteHeader(204) })
 		mux.HandleFunc("/api/automation/v1/", h.ServeAutomationAPI)
-		mux.HandleFunc("/", h.ServeWS)
+		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			if p.device.Load() == nil {
+				http.Error(w, "fixture enrollment required before native bootstrap", 503)
+				return
+			}
+			h.ServeWS(w, r)
+		})
 		listener, err := net.Listen("tcp", "127.0.0.1:"+port)
 		if err != nil {
 			t.Fatal(err)
@@ -234,6 +255,7 @@ func TestInboxNativeDeviceFixture(t *testing.T) {
 		case <-ticker.C:
 			for _, p := range peers {
 				p.h.drainEventAssignments(ctx)
+				p.h.drainAutomationQueue(ctx)
 			}
 		}
 	}
