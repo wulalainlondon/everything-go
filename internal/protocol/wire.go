@@ -123,26 +123,28 @@ type Inbound struct {
 	// WebRTC signaling: webrtc_offer carries SDP; webrtc_ice carries a trickled
 	// candidate. SDPMLineIndex is a pointer because 0 is a valid index distinct
 	// from "absent" (the app sends null when unknown).
-	SDP                string          `json:"sdp"`
-	VoiceID            string          `json:"voice_id,omitempty"`
-	VoiceMediaCapable  bool            `json:"voice_media_capable,omitempty"`
-	MediaCommandID     string          `json:"media_command_id,omitempty"`
-	MediaSequence      uint64          `json:"media_sequence,omitempty"`
-	MediaState         string          `json:"media_state,omitempty"`
-	MediaErrorCode     string          `json:"media_error_code,omitempty"`
-	MediaVideoID       string          `json:"media_video_id,omitempty"`
-	MediaAudio         *MediaAudioInfo `json:"media_audio,omitempty"`
-	MediaVolume        *int            `json:"media_volume,omitempty"`
-	VoiceName          string          `json:"voice_name,omitempty"`
-	VoiceMode          string          `json:"voice_mode,omitempty"`
-	LineHandoffCapable bool            `json:"line_handoff_capable,omitempty"`
-	LinePeerName       string          `json:"line_peer_name,omitempty"`
-	LineAccountRef     string          `json:"line_account_ref,omitempty"`
-	LineCallID         string          `json:"line_call_id,omitempty"`
-	LineTargetRef      string          `json:"line_target_ref,omitempty"`
-	Candidate          string          `json:"candidate"`
-	SDPMid             string          `json:"sdpMid"`
-	SDPMLineIndex      *int            `json:"sdpMLineIndex"`
+	SDP                      string          `json:"sdp"`
+	VoiceID                  string          `json:"voice_id,omitempty"`
+	VoiceMediaCapable        bool            `json:"voice_media_capable,omitempty"`
+	VoiceMediaObserveCapable bool            `json:"voice_media_observe_capable,omitempty"`
+	VoiceDeviceModel         string          `json:"voice_device_model,omitempty"`
+	MediaCommandID           string          `json:"media_command_id,omitempty"`
+	MediaSequence            uint64          `json:"media_sequence,omitempty"`
+	MediaState               string          `json:"media_state,omitempty"`
+	MediaErrorCode           string          `json:"media_error_code,omitempty"`
+	MediaVideoID             string          `json:"media_video_id,omitempty"`
+	MediaAudio               *MediaAudioInfo `json:"media_audio,omitempty"`
+	MediaVolume              *int            `json:"media_volume,omitempty"`
+	VoiceName                string          `json:"voice_name,omitempty"`
+	VoiceMode                string          `json:"voice_mode,omitempty"`
+	LineHandoffCapable       bool            `json:"line_handoff_capable,omitempty"`
+	LinePeerName             string          `json:"line_peer_name,omitempty"`
+	LineAccountRef           string          `json:"line_account_ref,omitempty"`
+	LineCallID               string          `json:"line_call_id,omitempty"`
+	LineTargetRef            string          `json:"line_target_ref,omitempty"`
+	Candidate                string          `json:"candidate"`
+	SDPMid                   string          `json:"sdpMid"`
+	SDPMLineIndex            *int            `json:"sdpMLineIndex"`
 
 	// user_input_response: the app's answer to an AskUserQuestion interaction.
 	// Answers is keyed by question_id. Cancelled is a pointer to distinguish

@@ -106,26 +106,28 @@ type Command struct {
 	MsgUUID          string
 	Around           int
 
-	SDP                string
-	VoiceMediaCapable  bool
-	MediaCommandID     string
-	MediaSequence      uint64
-	MediaState         string
-	MediaErrorCode     string
-	MediaVideoID       string
-	MediaAudio         *protocol.MediaAudioInfo
-	MediaVolume        *int
-	VoiceID            string
-	VoiceName          string
-	VoiceMode          string
-	LineHandoffCapable bool
-	LinePeerName       string
-	LineAccountRef     string
-	LineCallID         string
-	LineTargetRef      string
-	Candidate          string
-	SDPMid             string
-	SDPMLineIndex      *int
+	SDP                      string
+	VoiceMediaCapable        bool
+	VoiceMediaObserveCapable bool
+	VoiceDeviceModel         string
+	MediaCommandID           string
+	MediaSequence            uint64
+	MediaState               string
+	MediaErrorCode           string
+	MediaVideoID             string
+	MediaAudio               *protocol.MediaAudioInfo
+	MediaVolume              *int
+	VoiceID                  string
+	VoiceName                string
+	VoiceMode                string
+	LineHandoffCapable       bool
+	LinePeerName             string
+	LineAccountRef           string
+	LineCallID               string
+	LineTargetRef            string
+	Candidate                string
+	SDPMid                   string
+	SDPMLineIndex            *int
 
 	Answers   map[string]any
 	Cancelled *bool
@@ -284,7 +286,7 @@ func (AppV1) ParseCommand(in protocol.Inbound) Command {
 
 		SDP:               in.SDP,
 		VoiceID:           in.VoiceID,
-		VoiceMediaCapable: in.VoiceMediaCapable, MediaCommandID: in.MediaCommandID, MediaSequence: in.MediaSequence, MediaState: in.MediaState, MediaErrorCode: in.MediaErrorCode, MediaVideoID: in.MediaVideoID, MediaVolume: in.MediaVolume, MediaAudio: in.MediaAudio,
+		VoiceMediaCapable: in.VoiceMediaCapable, VoiceMediaObserveCapable: in.VoiceMediaObserveCapable, VoiceDeviceModel: in.VoiceDeviceModel, MediaCommandID: in.MediaCommandID, MediaSequence: in.MediaSequence, MediaState: in.MediaState, MediaErrorCode: in.MediaErrorCode, MediaVideoID: in.MediaVideoID, MediaVolume: in.MediaVolume, MediaAudio: in.MediaAudio,
 		VoiceName:          in.VoiceName,
 		VoiceMode:          in.VoiceMode,
 		LineHandoffCapable: in.LineHandoffCapable,

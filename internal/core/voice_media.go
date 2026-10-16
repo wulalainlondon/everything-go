@@ -62,6 +62,7 @@ type voiceMediaReceipt struct {
 	closed        bool
 }
 type voiceMediaSession struct {
+	observation                    chan struct{}
 	audio                          *protocol.MediaAudioInfo
 	sequence                       uint64
 	current                        *voiceMediaReceipt
@@ -82,7 +83,22 @@ func mediaResult(m *voiceMediaSession, r *voiceMediaReceipt) backend.VoiceMediaR
 		result.ErrorCode = m.errorCode
 		result.Audio = m.audio
 	}
-	fresh := result.Observed && result.LastObservedMS > 0 && time.Now().UnixMilli()-result.LastObservedMS <= 30000
+	if r == m.current && m.observedAt > 0 {
+		result.LastObservedState = m.state
+	}
+	age := time.Now().UnixMilli() - result.LastObservedMS
+	if result.LastObservedMS > 0 {
+		result.ObservationAgeMS = &age
+	}
+	fresh := result.Observed && result.LastObservedMS > 0 && age >= 0 && age <= 30000
+	if result.Endpoint != nil {
+		endpoint := *result.Endpoint
+		endpoint.Verification = "bound_current_call"
+		if fresh && result.Audio != nil && result.Audio.DeviceModel != "" {
+			endpoint.Model = result.Audio.DeviceModel
+		}
+		result.Endpoint = &endpoint
+	}
 	result.PlaybackConfirmed = result.State == "playing" && fresh && result.ErrorCode == ""
 	result.ActionConfirmed = false
 	if fresh && result.ErrorCode == "" {
@@ -110,6 +126,10 @@ func mediaResult(m *voiceMediaSession, r *voiceMediaReceipt) backend.VoiceMediaR
 			result.AudioCheck = "system_media_muted"
 		case a.SystemMediaVolume != nil && *a.SystemMediaVolume == 0:
 			result.AudioCheck = "system_media_volume_zero"
+		case a.CommunicationProfile == "bluetooth_hfp":
+			result.AudioCheck = "bluetooth_call_media_unverified"
+		case a.VoiceRoute == "bluetooth" && a.CommunicationProfile == "":
+			result.AudioCheck = "bluetooth_media_route_unknown"
 		case a.PlayerMuted != nil && a.SystemMediaVolume != nil && a.SystemMediaMuted != nil:
 			result.AudioCheck = "enabled_output_unverified"
 		}
@@ -209,11 +229,9 @@ func (h *Hub) executeVoiceMedia(ctx context.Context, parent *session.Session, vo
 	if method == "status" {
 		if m.current == nil {
 			h.voiceMu.Unlock()
-			return backend.VoiceMediaResult{State: "idle", Volume: 35, Observed: true}, nil
+			return backend.VoiceMediaResult{State: "idle", Volume: 35, Observed: true, Endpoint: h.mediaEndpoint(owner)}, nil
 		}
-		result := mediaResult(m, m.current)
-		h.voiceMu.Unlock()
-		return result, nil
+		return h.inspectMediaLocked(ctx, owner, call, m)
 	}
 	encoded, _ := json.Marshal([]any{method, input})
 	fingerprint := fmt.Sprintf("%x", sha256.Sum256(encoded))
@@ -255,7 +273,7 @@ func (h *Hub) executeVoiceMedia(ctx context.Context, parent *session.Session, vo
 	m.observedAt = 0
 	m.audio = nil
 	id := fmt.Sprintf("vm_%x", sha256.Sum256([]byte(h.cfg.InstanceID+"\x00"+s.ID+"\x00"+voiceID+"\x00"+transport+"\x00"+operationID)))
-	receipt := &voiceMediaReceipt{fingerprint: fingerprint, desiredVolume: m.volume, settled: make(chan struct{}), result: backend.VoiceMediaResult{Transport: transport, Action: action, CommandID: id, Sequence: m.sequence, State: "queued", Title: m.title, VideoURL: "https://www.youtube.com/watch?v=" + m.video, Volume: m.volume}}
+	receipt := &voiceMediaReceipt{fingerprint: fingerprint, desiredVolume: m.volume, settled: make(chan struct{}), result: backend.VoiceMediaResult{Endpoint: h.mediaEndpoint(owner), Transport: transport, Action: action, CommandID: id, Sequence: m.sequence, State: "queued", Title: m.title, VideoURL: "https://www.youtube.com/watch?v=" + m.video, Volume: m.volume}}
 	if m.video == "" {
 		receipt.result.VideoURL = ""
 	}
@@ -303,6 +321,9 @@ func (h *Hub) handleVoiceMediaState(c *Client, cmd clientproto.Command) {
 		return
 	}
 	if a := cmd.MediaAudio; a != nil {
+		if !validMediaAudio(a) {
+			return
+		}
 		if a.SystemMediaVolume != nil && (*a.SystemMediaVolume < 0 || *a.SystemMediaVolume > 100) {
 			return
 		}
@@ -322,12 +343,22 @@ func (h *Hub) handleVoiceMediaState(c *Client, cmd clientproto.Command) {
 	m.state = cmd.MediaState
 	m.errorCode = cmd.MediaErrorCode
 	m.observedAt = time.Now().UnixMilli()
+	if m.observation != nil {
+		close(m.observation)
+		m.observation = nil
+	}
 	if m.state == "stopped" {
 		m.video = ""
 		m.title = ""
 	}
 	r.result.Audio = m.audio
+	if m.audio != nil && m.audio.DeviceModel != "" && r.result.Endpoint != nil {
+		endpoint := *r.result.Endpoint
+		endpoint.Model = m.audio.DeviceModel
+		r.result.Endpoint = &endpoint
+	}
 	r.result.State = m.state
+	r.result.LastObservedState = m.state
 	r.result.ErrorCode = m.errorCode
 	r.result.LastObservedMS = m.observedAt
 	r.result.Observed = true

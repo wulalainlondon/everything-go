@@ -79,6 +79,13 @@ func decorate(r backend.VoiceMediaResult, id string, accepted, dispatched bool) 
 		x.SuggestedAction = "adjust_media_volume"
 	case r.AudioCheck == "player_muted" || r.AudioCheck == "player_volume_zero":
 		x.SuggestedAction = "adjust_player_volume"
+	case r.AudioCheck == "bluetooth_call_media_unverified":
+		x.SuggestedAction = "check_bluetooth_output"
+		if r.Audio != nil && r.Audio.SpeakerRouteAvailable != nil && *r.Audio.SpeakerRouteAvailable {
+			x.SuggestedAction = "try_phone_speaker"
+		}
+	case r.AudioCheck == "bluetooth_media_route_unknown":
+		x.SuggestedAction = "check_bluetooth_output"
 	case r.State == "queued" || r.State == "buffering":
 		x.SuggestedAction = "wait"
 	case r.State == "expired" || r.State == "voice_ended":
@@ -131,11 +138,17 @@ func (s *Store) Execute(ctx context.Context, o backend.MediaOrigin, q Request, r
 			old.AudioCheck = "stale"
 			old.Historical = true
 			old.SuggestedAction = "reconnect_voice"
-			return old, nil
+			return historical(old), nil
 		}
 		// Never let a completed receipt refresh itself from some newer command.
 		fresh, e := run()
 		if e != nil {
+			if e.Error() == "media_voice_expired" {
+				old.State = "voice_ended"
+				old = historical(old)
+				old.SuggestedAction = "reconnect_voice"
+				return old, nil
+			}
 			return historical(old), nil
 		}
 		if fresh.CommandID != "" && fresh.CommandID == old.CommandID {
@@ -188,6 +201,11 @@ func (s *Store) Execute(ctx context.Context, o backend.MediaOrigin, q Request, r
 	return result, nil
 }
 func historical(r Result) Result {
+	if r.Endpoint != nil {
+		endpoint := *r.Endpoint
+		endpoint.Verification = "historical_receipt"
+		r.Endpoint = &endpoint
+	}
 	r.Historical = true
 	r.Observed = false
 	r.PlaybackConfirmed = false

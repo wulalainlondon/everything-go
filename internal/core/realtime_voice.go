@@ -19,21 +19,23 @@ import (
 var voiceIdentifier = regexp.MustCompile(`^[A-Za-z0-9_-]{8,100}$`)
 
 type clientVoiceCall struct {
-	mediaGeneration    string
-	mediaIPC           *voicemediaipc.Channel
-	mediaCapable       bool
-	media              *voiceMediaSession
-	handoffCapable     bool
-	handoffPeer        string
-	handoffAccount     string
-	handoffTarget      string
-	handoffID          string
-	session            *session.Session
-	voiceID, requestID string
-	cancel             context.CancelFunc
-	stopping           bool
-	kind               string
-	line               *linevoice.Call
+	mediaObserveCapable bool
+	mediaDeviceModel    string
+	mediaGeneration     string
+	mediaIPC            *voicemediaipc.Channel
+	mediaCapable        bool
+	media               *voiceMediaSession
+	handoffCapable      bool
+	handoffPeer         string
+	handoffAccount      string
+	handoffTarget       string
+	handoffID           string
+	session             *session.Session
+	voiceID, requestID  string
+	cancel              context.CancelFunc
+	stopping            bool
+	kind                string
+	line                *linevoice.Call
 }
 
 func voiceEvent(cmd clientproto.Command, state, message string) protocol.RealtimeVoiceEvent {
@@ -58,7 +60,7 @@ func (h *Hub) handleVoiceStart(c *Client, cmd clientproto.Command) {
 		c.enqueueEvent(voiceEvent(cmd, "error", "此音色不支援目前的語音版本"))
 		return
 	}
-	if !voiceIdentifier.MatchString(cmd.VoiceID) || !voiceIdentifier.MatchString(cmd.RequestID) || len(cmd.SDP) > 64*1024 {
+	if !voiceIdentifier.MatchString(cmd.VoiceID) || !voiceIdentifier.MatchString(cmd.RequestID) || len(cmd.SDP) > 64*1024 || !safeMediaLabel(cmd.VoiceDeviceModel) {
 		c.enqueueEvent(voiceEvent(cmd, "error", "語音請求格式無效"))
 		return
 	}
@@ -86,6 +88,8 @@ func (h *Hub) handleVoiceStart(c *Client, cmd clientproto.Command) {
 	}
 	ctx, cancel := context.WithTimeout(parent, 60*time.Second)
 	call := &clientVoiceCall{mediaCapable: cmd.VoiceMediaCapable, handoffCapable: cmd.LineHandoffCapable, session: s, voiceID: cmd.VoiceID, requestID: cmd.RequestID, cancel: cancel}
+	call.mediaObserveCapable = cmd.VoiceMediaObserveCapable
+	call.mediaDeviceModel = cmd.VoiceDeviceModel
 	nonce := make([]byte, 16)
 	if _, err := rand.Read(nonce); err != nil {
 		cancel()

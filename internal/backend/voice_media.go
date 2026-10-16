@@ -31,6 +31,9 @@ type VoiceMediaProvider interface {
 	ExecuteVoiceMedia(context.Context, SessionControlCaller, string, VoiceMediaRequest) (any, error)
 }
 type VoiceMediaResult struct {
+	Endpoint          *MediaEndpoint           `json:"endpoint,omitempty"`
+	LastObservedState string                   `json:"last_observed_state,omitempty"`
+	ObservationAgeMS  *int64                   `json:"observation_age_ms,omitempty"`
 	Audio             *protocol.MediaAudioInfo `json:"audio,omitempty"`
 	AudioCheck        string                   `json:"audio_check"`
 	Transport         string                   `json:"transport,omitempty"`
@@ -47,4 +50,18 @@ type VoiceMediaResult struct {
 	NeedsUserAction   bool                     `json:"needs_user_action"`
 	ErrorCode         string                   `json:"error_code,omitempty"`
 	LastObservedMS    int64                    `json:"last_observed_ms,omitempty"`
+}
+
+// Diagnostic identity of the actual bound client, never an address for routing.
+type MediaEndpoint struct {
+	VoiceID           string `json:"voice_id"`
+	BridgeInstanceID  string `json:"bridge_instance_id"`
+	DeviceInventoryID string `json:"device_inventory_id,omitempty"`
+	ClientID          string `json:"client_id,omitempty"`
+	Platform          string `json:"platform"`
+	Name              string `json:"name,omitempty"`
+	Model             string `json:"model,omitempty"`
+	AppVersion        string `json:"app_version,omitempty"`
+	AppBuild          string `json:"app_build,omitempty"`
+	Verification      string `json:"verification"`
 }
