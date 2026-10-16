@@ -1136,11 +1136,17 @@ func (h *Hub) sendHistory(c *Client, s *session.Session, cmd clientproto.Command
 			IncludeThinking: cmd.IncludeThinking,
 		})
 		if err != nil {
-			return nil
+			return err
 		}
 		return res
 	})
 	if v == nil {
+		return
+	}
+	if err, failed := v.(error); failed {
+		if c.live() {
+			c.enqueueEvent(h.client.Error(s.ID, history.ErrorCode(err), err.Error()))
+		}
 		return
 	}
 	res := v.(*history.Result)
@@ -1267,9 +1273,15 @@ func (h *Hub) sendResumable(c *Client, limit int) {
 	}
 	// One provider scan per (limit) within the TTL, shared across reconnect
 	// bursts and browse_dir (#6). Re-check liveness after the (slow) scan (#3).
-	all := h.coalescedResumable(limit)
+	all, err := h.coalescedResumableChecked(limit)
 	if !c.live() {
 		return
+	}
+	if err != nil {
+		c.enqueueEvent(h.client.Error("", history.ErrorCode(err), err.Error()))
+		if len(all) == 0 {
+			return
+		}
 	}
 	c.enqueueEvent(h.client.ResumableSessions(all))
 }

@@ -31,9 +31,15 @@ func appendCodexHistoryCommentary(current, next string) string {
 }
 
 func (c *Codex) LoadHistory(resumeID string, opts history.Opts) (*history.Result, error) {
-	path := c.findCodexSessionFile(resumeID)
+	path, findErr := c.findCodexSessionFileChecked(resumeID)
+	if findErr != nil {
+		return nil, findErr
+	}
 	if path == "" {
 		return history.Slice(nil, opts), nil
+	}
+	if err := history.CheckFile("codex", path); err != nil {
+		return nil, err
 	}
 	if fi, err := os.Stat(path); err == nil && !fi.IsDir() {
 		key := history.FileKey{Path: path, MtimeNS: fi.ModTime().UnixNano(), Size: fi.Size()}
@@ -51,7 +57,7 @@ func (c *Codex) LoadHistory(resumeID string, opts history.Opts) (*history.Result
 		}
 		messages, truncated, err := c.readCodexHistory(path, resumeID)
 		if err != nil {
-			return history.Slice(nil, opts), nil
+			return nil, history.SourceError("codex", path, err)
 		}
 		// A bounded tail is still canonical for this exact file key. Persist it so
 		// completed large sessions do not rescan hundreds of MB on every open or
@@ -68,7 +74,7 @@ func (c *Codex) LoadHistory(resumeID string, opts history.Opts) (*history.Result
 	}
 	messages, _, err := c.readCodexHistory(path, resumeID)
 	if err != nil {
-		return history.Slice(nil, opts), nil
+		return nil, history.SourceError("codex", path, err)
 	}
 	if !opts.IncludeThinking {
 		messages = history.StripThinkingBlocks(messages)
@@ -78,7 +84,10 @@ func (c *Codex) LoadHistory(resumeID string, opts history.Opts) (*history.Result
 
 func (c *Codex) ResumableSessions(limit int) ([]history.ResumableSession, error) {
 	limit = history.ClampLimit(limit)
-	paths := c.codexRolloutFiles()
+	paths, _, err := c.codexRolloutCatalogChecked(false)
+	if err != nil {
+		return nil, err
+	}
 	sort.Slice(paths, func(i, j int) bool {
 		return filepath.Base(paths[i]) > filepath.Base(paths[j])
 	})
@@ -91,6 +100,9 @@ func (c *Codex) ResumableSessions(limit int) ([]history.ResumableSession, error)
 		// Codex multi-agent workers have their own rollout files, but app-server
 		// deliberately rejects direct turn/start input for those child threads.
 		// They belong in the live agent tree, not in the resumable-session picker.
+		if err := history.CheckFile("codex", path); err != nil {
+			return nil, err
+		}
 		if codexRolloutIsSubagent(path) {
 			continue
 		}
@@ -163,16 +175,24 @@ func (c *Codex) TranscriptPath(resumeID string) (string, bool) {
 }
 
 func (c *Codex) findCodexSessionFile(resumeID string) string {
+	path, _ := c.findCodexSessionFileChecked(resumeID)
+	return path
+}
+
+func (c *Codex) findCodexSessionFileChecked(resumeID string) (string, error) {
 	if resumeID == "" {
-		return ""
+		return "", nil
 	}
 	for _, force := range []bool{false, true} {
-		_, byID := c.codexRolloutCatalog(force)
+		_, byID, err := c.codexRolloutCatalogChecked(force)
+		if err != nil {
+			return "", err
+		}
 		if path := byID[resumeID]; path != "" {
-			return path
+			return path, nil
 		}
 	}
-	return ""
+	return "", nil
 }
 
 func (c *Codex) codexRolloutFiles() []string {
@@ -181,14 +201,28 @@ func (c *Codex) codexRolloutFiles() []string {
 }
 
 func (c *Codex) codexRolloutCatalog(force bool) ([]string, map[string]string) {
+	paths, ids, _ := c.codexRolloutCatalogChecked(force)
+	return paths, ids
+}
+
+func (c *Codex) codexRolloutCatalogChecked(force bool) ([]string, map[string]string, error) {
+	if err := history.CheckDirectory("codex", c.sessionsRoot); err != nil {
+		return nil, nil, err
+	}
 	c.rolloutMu.Lock()
 	defer c.rolloutMu.Unlock()
 	if !force && c.rolloutRoot == c.sessionsRoot && len(c.rolloutPaths) > 0 && time.Since(c.rolloutScannedAt) < 30*time.Second {
-		return append([]string(nil), c.rolloutPaths...), cloneStringMap(c.rolloutByID)
+		return append([]string(nil), c.rolloutPaths...), cloneStringMap(c.rolloutByID), nil
 	}
 	var out []string
-	_ = filepath.WalkDir(c.sessionsRoot, func(path string, d os.DirEntry, err error) error {
-		if err != nil || d == nil || d.IsDir() {
+	walkErr := filepath.WalkDir(c.sessionsRoot, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return history.SourceError("codex", path, err)
+		}
+		if d == nil || d.IsDir() {
 			return nil
 		}
 		name := d.Name()
@@ -197,6 +231,9 @@ func (c *Codex) codexRolloutCatalog(force bool) ([]string, map[string]string) {
 		}
 		return nil
 	})
+	if walkErr != nil {
+		return nil, nil, walkErr
+	}
 	byID := make(map[string]string, len(out))
 	for _, path := range out {
 		if uid := codexRolloutUID(filepath.Base(path)); uid != "" {
@@ -207,7 +244,7 @@ func (c *Codex) codexRolloutCatalog(force bool) ([]string, map[string]string) {
 	c.rolloutScannedAt = time.Now()
 	c.rolloutPaths = append(c.rolloutPaths[:0], out...)
 	c.rolloutByID = byID
-	return append([]string(nil), out...), cloneStringMap(byID)
+	return append([]string(nil), out...), cloneStringMap(byID), nil
 }
 
 func cloneStringMap(in map[string]string) map[string]string {

@@ -1,6 +1,7 @@
 package core
 
 import (
+	"errors"
 	"log"
 	"sync"
 	"time"
@@ -95,7 +96,7 @@ func (h *Hub) coalesce(sf *singleflight.Group, cache *ttlCache, key string, ttl 
 		h.storm.heavySem <- struct{}{} // bounded concurrency backstop
 		defer func() { <-h.storm.heavySem }()
 		res := fn()
-		if res != nil {
+		if _, failed := res.(error); res != nil && !failed {
 			cache.set(key, res, ttl)
 		}
 		return res, nil
@@ -105,29 +106,52 @@ func (h *Hub) coalesce(sf *singleflight.Group, cache *ttlCache, key string, ttl 
 
 // coalescedResumable runs the (heavy) all-providers resumable scan at most once
 // per (limit) within the TTL, shared by get_resumable_sessions and browse_dir.
+type resumableReadFailure struct {
+	sessions []history.ResumableSession
+	err      error
+}
+
+func (e *resumableReadFailure) Error() string { return e.err.Error() }
+func (e *resumableReadFailure) Unwrap() error { return e.err }
+
 func (h *Hub) coalescedResumable(limit int) []history.ResumableSession {
+	sessions, _ := h.coalescedResumableChecked(limit)
+	return sessions
+}
+
+func (h *Hub) coalescedResumableChecked(limit int) ([]history.ResumableSession, error) {
 	hr, ok := h.exec.(historyRouter)
 	if !ok {
-		return nil
+		return nil, nil
 	}
 	key := "resumable:" + itoa(limit)
 	v := h.coalesce(&h.storm.resumeSF, h.storm.resumeCache, key, resumableCacheTTL, func() any {
 		all := make([]history.ResumableSession, 0)
+		var failures []error
 		for _, p := range hr.AllProviders() {
-			if list, err := p.ResumableSessions(limit); err == nil {
-				for _, entry := range list {
-					if h.cwdInScope(entry.Cwd) {
-						all = append(all, entry)
-					}
+			list, err := p.ResumableSessions(limit)
+			if err != nil {
+				failures = append(failures, err)
+				continue
+			}
+			for _, entry := range list {
+				if h.cwdInScope(entry.Cwd) {
+					all = append(all, entry)
 				}
 			}
+		}
+		if len(failures) > 0 {
+			return &resumableReadFailure{sessions: all, err: errors.Join(failures...)}
 		}
 		return all
 	})
 	if v == nil {
-		return nil
+		return nil, nil
 	}
-	return v.([]history.ResumableSession)
+	if failure, ok := v.(*resumableReadFailure); ok {
+		return failure.sessions, failure.err
+	}
+	return v.([]history.ResumableSession), nil
 }
 
 func itoa(n int) string {

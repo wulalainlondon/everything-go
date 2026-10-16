@@ -175,6 +175,7 @@ func (st *codexState) touch(now time.Time) {
 
 // Codex implements executor.Executor over the codex app-server.
 type Codex struct {
+	appSandbox *codexAppSandbox
 	// Optional owned-fixture observer. Nil in production; never grants authority.
 	nativeFixtureObserver func(json.RawMessage)
 	mediaOrigins          mediaOriginState
@@ -445,10 +446,12 @@ func (c *Codex) ensureServer() error {
 
 func (c *Codex) startServerLocked() error {
 	log.Printf("[codex] connecting app-server mode=%s", c.appServerMode)
-	if changed, err := ensureBrowserElicitationRouting(filepath.Dir(c.sessionsRoot)); err != nil {
-		log.Printf("[codex] browser elicitation routing config failed: %v", err)
-	} else if changed {
-		log.Printf("[codex] Browser Use elicitations routed through bridge policy")
+	if c.appSandbox == nil {
+		if changed, err := ensureBrowserElicitationRouting(filepath.Dir(c.sessionsRoot)); err != nil {
+			log.Printf("[codex] browser elicitation routing config failed: %v", err)
+		} else if changed {
+			log.Printf("[codex] Browser Use elicitations routed through bridge policy")
+		}
 	}
 	codexHome := filepath.Dir(c.sessionsRoot)
 	if c.appServerMode == "daemon" {
@@ -466,8 +469,15 @@ func (c *Codex) startServerLocked() error {
 		return c.startRemoteServerLocked(codexHome)
 	}
 	args := []string{"app-server"}
+	if c.appSandbox != nil {
+		args = append(args, "-c", `cli_auth_credentials_store="ephemeral"`, "-c", "project_root_markers=[]")
+	}
 	cmd := exec.Command(c.codexBin, args...)
 	cmd.Env = append(os.Environ(), "CODEX_HOME="+codexHome)
+	if c.appSandbox != nil {
+		cmd.Env = c.appSandboxEnvironment()
+		cmd.Dir = c.appSandbox.workspace
+	}
 	stdinPipe, err := cmd.StdinPipe()
 	if err != nil {
 		return err
@@ -484,7 +494,7 @@ func (c *Codex) startServerLocked() error {
 		return err
 	}
 	authFingerprint := "shared-daemon"
-	if c.appServerMode != "daemon" {
+	if c.appServerMode != "daemon" && c.appSandbox == nil {
 		var err error
 		authFingerprint, err = codexAuthFingerprint(c.authPath)
 		if err != nil {
@@ -521,6 +531,13 @@ func (c *Codex) startServerLocked() error {
 
 	if err := c.initializeRPC(); err != nil {
 		return err
+	}
+	if c.appSandbox != nil {
+		if err := c.loginExternalChatGPT(); err != nil {
+			_ = c.stopServerLocked()
+			return err
+		}
+		return nil
 	}
 	c.startAuthWatcher()
 	return nil
@@ -766,6 +783,9 @@ func (c *Codex) startAuthWatcher() {
 }
 
 func (c *Codex) authCredentialsChanged() bool {
+	if c.appSandbox != nil {
+		return false
+	}
 	fingerprint, err := codexAuthFingerprint(c.authPath)
 	if err != nil {
 		return false
@@ -1731,6 +1751,9 @@ func (c *Codex) BuildAgentTree(resumeID string) (int, []*protocol.AgentNode) {
 }
 
 func (c *Codex) handleServerRequest(id any, method string, raw json.RawMessage) {
+	if c.handleExternalAuthRefresh(id, method, raw) {
+		return
+	}
 	if c.handleTaskAPIServerRequest(id, method, raw) {
 		return
 	}
@@ -2116,6 +2139,9 @@ func (c *Codex) Send(ctx context.Context, s *session.Session, reqID, content str
 		return err
 	}
 	sandboxOverride, _ := backend.SandboxOverride(ctx)
+	if err := c.validateAppSandbox(s, sandboxOverride); err != nil {
+		return err
+	}
 	if err := c.ensureServer(); err != nil {
 		c.sink.Emit(backend.NewError(s.ID, reqID, backend.ErrProcessDied, "codex app-server failed: "+err.Error()))
 		return err
@@ -2227,6 +2253,10 @@ func (c *Codex) Send(ctx context.Context, s *session.Session, reqID, content str
 // between the local snapshot and the RPC is safely rejected instead of being
 // attached to the next turn.
 func (c *Codex) Steer(ctx context.Context, s *session.Session, clientUserMessageID, content string, images []backend.ImageAttachment, files []backend.FileAttachment) (backend.SteerResult, error) {
+	override, _ := backend.SandboxOverride(ctx)
+	if err := c.validateAppSandbox(s, override); err != nil {
+		return backend.SteerResult{}, err
+	}
 	if _, err := c.validateAsyncReply(s, clientUserMessageID, content); err != nil {
 		return backend.SteerResult{}, fmt.Errorf("%w: %v", backend.ErrSteerRejected, err)
 	}
@@ -2870,6 +2900,9 @@ func codexTurnParams(threadID string, input []map[string]any, effort string) map
 func (c *Codex) codexTurnParamsForSession(threadID string, input []map[string]any, snap session.Snapshot, sandboxOverride string) map[string]any {
 	params := codexTurnParams(threadID, input, snap.Effort)
 	params["sandboxPolicy"] = codexTurnSandboxPolicy(snap, sandboxOverride)
+	if c.appSandbox != nil && snap.Sandbox == AppSandboxMode && sandboxOverride == "" {
+		params["sandboxPolicy"] = map[string]any{"type": "externalSandbox", "networkAccess": "enabled"}
+	}
 	if snap.ServiceTier != "" {
 		params["serviceTier"] = snap.ServiceTier
 	}
@@ -3206,6 +3239,9 @@ func (c *Codex) ensureThread(s *session.Session, st *codexState) error {
 }
 
 func (c *Codex) UpdateSessionSettings(ctx context.Context, s *session.Session) error {
+	if err := c.validateAppSandbox(s, ""); err != nil {
+		return err
+	}
 	if c.pmProvider != nil {
 		p, err := c.pmProvider.PMConfiguration(s.ID)
 		if err != nil {

@@ -16,7 +16,6 @@ import (
 	"log"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -26,6 +25,7 @@ import (
 	"everything-go/internal/protocol"
 	"everything-go/internal/runtime"
 	"everything-go/internal/session"
+	"everything-go/internal/sourcepolicy"
 	"everything-go/internal/taskapi"
 )
 
@@ -133,13 +133,14 @@ type claudeState struct {
 
 // Claude implements executor.Executor over the local `claude` CLI.
 type Claude struct {
-	taskProvider backend.TaskAPIProvider
-	taskMCP      *claudeTaskMCP
-	pmProvider   backend.PMProvider
-	sink         executor.Sink
-	tools        *toolEmitter
-	claudeBin    string
-	projectsDir  string
+	taskProvider      backend.TaskAPIProvider
+	taskMCP           *claudeTaskMCP
+	pmProvider        backend.PMProvider
+	sink              executor.Sink
+	tools             *toolEmitter
+	claudeBin         string
+	projectsDir       string
+	configDirOverride string
 
 	mu     sync.Mutex
 	procs  map[string]*proc // sessionID -> running subprocess
@@ -160,12 +161,13 @@ func NewClaude(sink executor.Sink, claudeBin string) *Claude {
 	if claudeBin == "" {
 		claudeBin = "claude"
 	}
-	projectsDir := ""
-	if home, err := os.UserHomeDir(); err == nil {
-		projectsDir = filepath.Join(home, ".claude", "projects")
+	projectsDir := sourcepolicy.ClaudeProjectsDir()
+	configOverride := ""
+	if strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR")) != "" {
+		configOverride = sourcepolicy.ClaudeConfigDir()
 	}
 	c := &Claude{
-		sink: sink, claudeBin: claudeBin, projectsDir: projectsDir,
+		sink: sink, claudeBin: claudeBin, projectsDir: projectsDir, configDirOverride: configOverride,
 		tools:   newToolEmitter(sink),
 		procs:   make(map[string]*proc),
 		states:  make(map[string]*claudeState),
@@ -510,6 +512,12 @@ func (c *Claude) spawn(s *session.Session) (*proc, error) {
 		cmd.Env = append(os.Environ(), "MCP_TOOL_TIMEOUT=1800000", "ENABLE_CLAUDEAI_MCP_SERVERS=false")
 	}
 	cmd.Env = addTaskEnvironment(cmd.Env, taskLease)
+	if c.configDirOverride != "" {
+		if cmd.Env == nil {
+			cmd.Env = os.Environ()
+		}
+		cmd.Env = append(cmd.Env, "CLAUDE_CONFIG_DIR="+c.configDirOverride)
+	}
 	stdinPipe, err := cmd.StdinPipe()
 	if err != nil {
 		cancel()
