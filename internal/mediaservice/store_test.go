@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"everything-go/internal/backend"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -42,6 +43,63 @@ func TestReceiptSurvivesRestartAndDoesNotReplayUnknown(t *testing.T) {
 	})
 	if e != nil || r.State != "unknown" || called.Load() != 1 {
 		t.Fatal(r, e, called.Load())
+	}
+}
+
+func TestPreDispatchRefusalSurvivesRestartStatusAndNewVoice(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := s.Execute(context.Background(), testOrigin(), testRequest(), func() (backend.VoiceMediaResult, error) {
+		return backend.VoiceMediaResult{}, &backend.VoiceMediaNotDispatchedError{Cause: errors.New("voice_media_player_not_ready")}
+	})
+	if err != nil || r.State != "failed" || r.Dispatched == nil || *r.Dispatched || r.SuggestedAction != "music_unavailable_for_this_call" {
+		t.Fatal(r, err)
+	}
+	s.Close()
+	s, err = Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	q := testRequest()
+	for _, status := range []bool{false, true} {
+		if status {
+			q.Method, q.Operation, q.ID, q.Input = "status", q.ID, "vop_status_query", backend.VoiceMediaRequest{}
+		}
+		o := testOrigin()
+		o.Generation, o.VoiceID = "new-generation", "new-voice"
+		r, err = s.Execute(context.Background(), o, q, func() (backend.VoiceMediaResult, error) {
+			t.Fatal("refused operation must not run or observe a later device command")
+			return backend.VoiceMediaResult{}, nil
+		})
+		if err != nil || r.State != "failed" || r.ErrorCode != "voice_media_player_not_ready" || r.Dispatched == nil || *r.Dispatched || !r.Historical {
+			t.Fatal(r, err)
+		}
+	}
+}
+
+func TestUnmarkedOrConflictingRefusalRemainsUnknown(t *testing.T) {
+	for _, markedWithCommand := range []bool{false, true} {
+		t.Run(fmt.Sprint(markedWithCommand), func(t *testing.T) {
+			s, err := Open(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			r, err := s.Execute(context.Background(), testOrigin(), testRequest(), func() (backend.VoiceMediaResult, error) {
+				e := errors.New("voice_media_player_not_ready")
+				if markedWithCommand {
+					return backend.VoiceMediaResult{CommandID: "possibly-sent"}, &backend.VoiceMediaNotDispatchedError{Cause: e}
+				}
+				return backend.VoiceMediaResult{}, e
+			})
+			if err == nil || r.State != "unknown" || r.Dispatched != nil {
+				t.Fatal(r, err)
+			}
+		})
 	}
 }
 func TestConcurrentDuplicateIntentHasOneEffectAndConflictFails(t *testing.T) {

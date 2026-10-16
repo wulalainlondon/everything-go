@@ -30,6 +30,15 @@ type VoiceMediaProvider interface {
 	VoiceMediaEnabled() bool
 	ExecuteVoiceMedia(context.Context, SessionControlCaller, string, VoiceMediaRequest) (any, error)
 }
+
+// VoiceMediaNotDispatchedError is issued only by the media executor before it
+// queues a device command. Ordinary errors (including lost delivery outcomes)
+// must never be interpreted as proof that no effect occurred.
+type VoiceMediaNotDispatchedError struct{ Cause error }
+
+func (e *VoiceMediaNotDispatchedError) Error() string { return e.Cause.Error() }
+func (e *VoiceMediaNotDispatchedError) Unwrap() error { return e.Cause }
+
 type VoiceMediaResult struct {
 	Endpoint          *MediaEndpoint           `json:"endpoint,omitempty"`
 	LastObservedState string                   `json:"last_observed_state,omitempty"`

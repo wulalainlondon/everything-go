@@ -80,3 +80,43 @@ func TestUnifiedMediaExactGenerationAndOriginalEventBinding(t *testing.T) {
 	default:
 	}
 }
+
+func TestUnifiedMediaUnavailablePlayerPersistsDefinitiveRefusal(t *testing.T) {
+	h, _, caller, _ := controllerFixture(t)
+	var owner *Client
+	for c, call := range h.voiceClients {
+		owner = c
+		call.mediaCapable = false
+		call.mediaGeneration = "gen-A"
+	}
+	store, err := mediaservice.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	o := backend.MediaOrigin{SessionID: caller.Parent.ID, ThreadID: caller.Parent.ResumeID(), TurnID: "turn-A", VoiceID: caller.VoiceID, Generation: "gen-A"}
+	u := &unifiedVoiceMedia{store: store}
+	q := mediaservice.Request{ID: "vop_unavailable_player", Thread: o.ThreadID, Method: "play_youtube", Input: backend.VoiceMediaRequest{URL: "https://youtu.be/M7lc1UVf-VE"}}
+	r, err := h.executeMediaWithOrigin(context.Background(), u, o, q, "local_user_socket")
+	if err != nil || r.State != "failed" || r.ErrorCode != "voice_media_player_not_ready" || r.Dispatched == nil || *r.Dispatched || r.PlaybackConfirmed || r.Endpoint == nil {
+		t.Fatalf("refusal lost: %+v, %v", r, err)
+	}
+	// A later capable endpoint must never execute this refused intent.
+	for _, call := range h.voiceClients {
+		call.mediaCapable = true
+	}
+	r, err = h.executeMediaWithOrigin(context.Background(), u, o, q, "native_tool")
+	if err != nil || r.State != "failed" || r.ErrorCode != "voice_media_player_not_ready" || r.Dispatched == nil || *r.Dispatched {
+		t.Fatalf("duplicate refusal lost: %+v, %v", r, err)
+	}
+	q.Method, q.Operation, q.ID, q.Input = "status", q.ID, "vop_unavailable_status", backend.VoiceMediaRequest{}
+	r, err = h.executeMediaWithOrigin(context.Background(), u, o, q, "local_user_socket")
+	if err != nil || r.State != "failed" || r.ErrorCode != "voice_media_player_not_ready" || r.CommandID != "" {
+		t.Fatalf("status refusal lost: %+v, %v", r, err)
+	}
+	select {
+	case <-owner.send:
+		t.Fatal("refused intent emitted a command")
+	default:
+	}
+}

@@ -71,6 +71,8 @@ func (s *Store) Close() error { return s.db.Close() }
 func decorate(r backend.VoiceMediaResult, id string, accepted, dispatched bool) Result {
 	x := Result{VoiceMediaResult: r, OperationID: id, Accepted: accepted, Dispatched: &dispatched, SuggestedAction: "none"}
 	switch {
+	case r.ErrorCode == "voice_media_player_not_ready":
+		x.SuggestedAction = "music_unavailable_for_this_call"
 	case r.ErrorCode == "autoplay_blocked":
 		x.SuggestedAction = "tap_official_play"
 	case r.ErrorCode == "foreground_required":
@@ -127,6 +129,11 @@ func (s *Store) Execute(ctx context.Context, o backend.MediaOrigin, q Request, r
 			return Result{}, errors.New("media_receipt_corrupt")
 		}
 		if q.Method != "status" {
+			return historical(old), nil
+		}
+		// A proven refusal has no device command to observe. Keep its exact
+		// cause even after a new track, voice generation or process restart.
+		if old.State == "failed" && old.Dispatched != nil && !*old.Dispatched {
 			return historical(old), nil
 		}
 		if generation != o.Generation || voice != o.VoiceID || time.Now().UnixMilli()-created > 24*time.Hour.Milliseconds() {
@@ -190,6 +197,18 @@ func (s *Store) Execute(ctx context.Context, o backend.MediaOrigin, q Request, r
 	}
 	r, e := run()
 	if e != nil {
+		var refused *backend.VoiceMediaNotDispatchedError
+		if errors.As(e, &refused) && r.CommandID == "" {
+			r.State = "failed"
+			r.ErrorCode = refused.Error()
+			r.Observed, r.PlaybackConfirmed, r.ActionConfirmed = false, false, false
+			result := decorate(r, id, true, false)
+			b, _ = json.Marshal(result)
+			if _, saveErr := s.db.ExecContext(ctx, `UPDATE media_operations SET result=? WHERE thread=? AND id=?`, b, q.Thread, id); saveErr != nil {
+				return unknown, saveErr
+			}
+			return result, nil
+		}
 		// An error can arrive after delivery. Preserve uncertainty, never replay.
 		return unknown, e
 	}

@@ -146,7 +146,8 @@ func (h *Hub) executeMediaWithOrigin(ctx context.Context, u *unifiedVoiceMedia, 
 		}
 		value, e := h.executeVoiceMedia(ctx, s, origin.VoiceID, call.requestID, q.ID, transport, call, q.Method, q.Input)
 		if e != nil {
-			return backend.VoiceMediaResult{}, e
+			result, _ := value.(backend.VoiceMediaResult)
+			return result, e
 		}
 		result, ok := value.(backend.VoiceMediaResult)
 		if !ok {

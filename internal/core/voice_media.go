@@ -159,50 +159,55 @@ func (h *Hub) ExecuteVoiceMedia(ctx context.Context, caller backend.SessionContr
 // local_user_socket authority is the private per-call OS-user channel, never a
 // fabricated SessionControlCaller. Both transports share the same scope checks.
 func (h *Hub) executeVoiceMedia(ctx context.Context, parent *session.Session, voiceID, requestID, operationID, transport string, expectedCall *clientVoiceCall, method string, input backend.VoiceMediaRequest) (any, error) {
+	// Use only on the validation path below. Once enqueueEvent is reached, an
+	// error cannot prove that the device did not receive the command.
+	refuse := func(err error) (any, error) {
+		return nil, &backend.VoiceMediaNotDispatchedError{Cause: err}
+	}
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return refuse(err)
 	}
 	s, ok := h.registry.Get(parent.ID)
 	if !ok || s != parent || !h.controls.MobileMayWrite(s.ID) {
-		return nil, errors.New("voice_media_caller_not_owned")
+		return refuse(errors.New("voice_media_caller_not_owned"))
 	}
 	action := input.Action
 	video := ""
 	switch method {
 	case "play_youtube":
 		if action != "" {
-			return nil, errors.New("voice_media_arguments_invalid")
+			return refuse(errors.New("voice_media_arguments_invalid"))
 		}
 		action = "play"
 		var err error
 		video, err = youtubeID(input.URL)
 		if err != nil {
-			return nil, err
+			return refuse(err)
 		}
 	case "control":
 		switch action {
 		case "pause", "resume", "stop", "volume":
 		default:
-			return nil, errors.New("voice_media_action_invalid")
+			return refuse(errors.New("voice_media_action_invalid"))
 		}
 		if input.URL != "" || input.Title != "" {
-			return nil, errors.New("voice_media_arguments_invalid")
+			return refuse(errors.New("voice_media_arguments_invalid"))
 		}
 	case "status":
 		if input.Action != "" || input.URL != "" || input.Title != "" || input.Volume != nil {
-			return nil, errors.New("voice_media_arguments_invalid")
+			return refuse(errors.New("voice_media_arguments_invalid"))
 		}
 	default:
-		return nil, errors.New("voice_media_tool_unknown")
+		return refuse(errors.New("voice_media_tool_unknown"))
 	}
 	if !utf8.ValidString(input.Title) || len([]rune(input.Title)) > 200 {
-		return nil, errors.New("voice_media_title_invalid")
+		return refuse(errors.New("voice_media_title_invalid"))
 	}
 	if input.Volume != nil && (*input.Volume < 0 || *input.Volume > 100) {
-		return nil, errors.New("voice_media_volume_invalid")
+		return refuse(errors.New("voice_media_volume_invalid"))
 	}
 	if action == "volume" && input.Volume == nil {
-		return nil, errors.New("voice_media_volume_required")
+		return refuse(errors.New("voice_media_volume_required"))
 	}
 	h.voiceMu.Lock()
 	var owner *Client
@@ -216,11 +221,12 @@ func (h *Hub) executeVoiceMedia(ctx context.Context, parent *session.Session, vo
 	}
 	if call == nil || call.stopping || call.kind == "line" || (expectedCall != nil && call != expectedCall) {
 		h.voiceMu.Unlock()
-		return nil, errors.New("voice_media_active_voice_required")
+		return refuse(errors.New("voice_media_active_voice_required"))
 	}
 	if !call.mediaCapable {
+		result := backend.VoiceMediaResult{Endpoint: h.mediaEndpoint(owner), State: "failed", AudioCheck: "unknown", ErrorCode: "voice_media_player_not_ready"}
 		h.voiceMu.Unlock()
-		return nil, errors.New("voice_media_player_not_ready")
+		return result, &backend.VoiceMediaNotDispatchedError{Cause: errors.New(result.ErrorCode)}
 	}
 	if call.media == nil {
 		call.media = &voiceMediaSession{receipts: map[string]*voiceMediaReceipt{}, state: "idle", volume: 35}
@@ -238,7 +244,7 @@ func (h *Hub) executeVoiceMedia(ctx context.Context, parent *session.Session, vo
 	if old := m.receipts[transport+"|"+operationID]; old != nil {
 		if old.fingerprint != fingerprint {
 			h.voiceMu.Unlock()
-			return nil, errors.New("voice_media_intent_conflict")
+			return refuse(errors.New("voice_media_intent_conflict"))
 		}
 		result := mediaResult(m, old)
 		h.voiceMu.Unlock()
@@ -246,11 +252,11 @@ func (h *Hub) executeVoiceMedia(ctx context.Context, parent *session.Session, vo
 	}
 	if len(m.receipts) >= 64 {
 		h.voiceMu.Unlock()
-		return nil, errors.New("voice_media_command_limit")
+		return refuse(errors.New("voice_media_command_limit"))
 	}
 	if action != "play" && action != "stop" && m.video == "" {
 		h.voiceMu.Unlock()
-		return nil, errors.New("voice_media_no_track")
+		return refuse(errors.New("voice_media_no_track"))
 	}
 	if old := m.current; old != nil {
 		old.result.State = "superseded"
