@@ -247,6 +247,10 @@ func (h *Hub) runQueuedMessage(s *session.Session, requestID string) {
 		h.Emit(backend.NewError(s.ID, requestID, "delegation_capacity_guard", guardErr.Error()))
 		return
 	}
+	if !h.eventAssignmentSendAllowed(s, payload) {
+		h.Emit(backend.NewError(s.ID, requestID, "event_target_scope_changed", "Event target is now managed or unavailable"))
+		return
+	}
 	sendContext := backend.WithVisualPresentation(context.Background(), payload.VisualPresentation)
 	if payload.ExternalReviewOnly {
 		grant, err := h.dispatches.Grant(context.Background(), "peer:"+payload.ExternalPeer)

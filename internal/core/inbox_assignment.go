@@ -133,7 +133,7 @@ func (h *Hub) serveInboxAPI(w http.ResponseWriter, r *http.Request, path string)
 			return true
 		}
 		s, ok := h.registry.Get(r.URL.Query().Get("session_id"))
-		if !ok || !h.controllerInScope(s) || s.Snapshot().Hidden || s.State() == session.Closed || !h.controls.MobileMayWrite(s.ID) {
+		if !ok || !h.eventSessionAllowed(s) {
 			http.Error(w, "target unavailable", 409)
 			return true
 		}
@@ -178,7 +178,7 @@ func (h *Hub) serveInboxAPI(w http.ResponseWriter, r *http.Request, path string)
 			}
 		} else {
 			s, ok := h.registry.Get(a.SessionID)
-			if !ok || !h.controllerInScope(s) || s.Snapshot().Hidden || s.State() == session.Closed || !h.controls.MobileMayWrite(s.ID) || s.ResumeID() != a.ThreadID || s.SettingsSnapshot().ConfigRevision != a.ConfigRevision {
+			if !ok || !h.eventSessionAllowed(s) || s.ResumeID() != a.ThreadID || s.SettingsSnapshot().ConfigRevision != a.ConfigRevision {
 				http.Error(w, "target changed or unavailable", 409)
 				return true
 			}
@@ -258,7 +258,7 @@ func (h *Hub) enqueueEventAssignment(ctx context.Context, a automation.EventAssi
 		return errors.New("assignment device no longer paired")
 	}
 	s, ok := h.registry.Get(a.SessionID)
-	if !ok || s.State() == session.Closed || s.Snapshot().Hidden || !h.controllerInScope(s) || !h.controls.MobileMayWrite(s.ID) {
+	if !ok || !h.eventSessionAllowed(s) {
 		return errors.New("target unavailable")
 	}
 	if s.ResumeID() != a.ThreadID || s.SettingsSnapshot().ConfigRevision != a.ConfigRevision {

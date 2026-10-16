@@ -99,3 +99,19 @@ func TestInboxOutboxDoesNotSubmitAcceptedIntentTwice(t *testing.T) {
 	case <-time.After(40 * time.Millisecond):
 	}
 }
+
+func TestInboxScopeRefusesManagedSessionIDs(t *testing.T) {
+	h, _ := newTestHub(t)
+	for _, id := range []string{"pm_managed", "s_dg_owned"} {
+		s := h.registry.Create(id, "Managed", h.cfg.RootDir, "codex", "", "read-only", "")
+		if h.eventSessionAllowed(s) {
+			t.Fatal("managed event target accepted")
+		}
+		if h.eventAssignmentSendAllowed(s, queuedPayload{ExternalEventIDs: []string{"event"}}) {
+			t.Fatal("managed event sent")
+		}
+		if !h.eventAssignmentSendAllowed(s, queuedPayload{}) {
+			t.Fatal("ordinary workflow changed")
+		}
+	}
+}

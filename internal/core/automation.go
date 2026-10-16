@@ -15,7 +15,6 @@ import (
 	"everything-go/internal/automation"
 	"everything-go/internal/eventinbox"
 	"everything-go/internal/relay"
-	"everything-go/internal/session"
 	"everything-go/internal/workitems"
 )
 
@@ -363,7 +362,7 @@ func (h *Hub) ServeAutomationAPI(w http.ResponseWriter, r *http.Request) {
 				policy.ConfigRevision = target.ConfigRevision
 			} else {
 				target, ok := h.registry.Get(input.Route.SessionID)
-				if !ok || !h.controllerInScope(target) || target.State() == session.Closed || target.Snapshot().Hidden || !h.controls.MobileMayWrite(target.ID) || target.ResumeID() == "" {
+				if !ok || !h.eventSessionAllowed(target) || target.ResumeID() == "" {
 					http.Error(w, "initialized local target required", 409)
 					return
 				}

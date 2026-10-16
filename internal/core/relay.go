@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"everything-go/internal/automation"
-	"everything-go/internal/session"
 	"io"
 	"net"
 	"net/http"
@@ -83,7 +82,7 @@ func (h *Hub) ServeRelayAPI(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		grant, err := h.dispatches.Grant(r.Context(), "peer:"+origin)
-		if err != nil || !grant.Allows(h.cfg.InstanceID, h.cfg.InstanceID, target.ID) || !h.controllerInScope(target) || !h.controls.MobileMayWrite(target.ID) || target.State() == session.Closed || target.Snapshot().Hidden {
+		if err != nil || !grant.Allows(h.cfg.InstanceID, h.cfg.InstanceID, target.ID) || !h.eventSessionAllowed(target) {
 			http.Error(w, "target not granted", 403)
 			return
 		}
