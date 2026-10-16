@@ -2,6 +2,8 @@ package core
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"everything-go/internal/voicemediaipc"
 	"log"
 	"regexp"
@@ -17,6 +19,7 @@ import (
 var voiceIdentifier = regexp.MustCompile(`^[A-Za-z0-9_-]{8,100}$`)
 
 type clientVoiceCall struct {
+	mediaGeneration    string
 	mediaIPC           *voicemediaipc.Channel
 	mediaCapable       bool
 	media              *voiceMediaSession
@@ -83,6 +86,13 @@ func (h *Hub) handleVoiceStart(c *Client, cmd clientproto.Command) {
 	}
 	ctx, cancel := context.WithTimeout(parent, 60*time.Second)
 	call := &clientVoiceCall{mediaCapable: cmd.VoiceMediaCapable, handoffCapable: cmd.LineHandoffCapable, session: s, voiceID: cmd.VoiceID, requestID: cmd.RequestID, cancel: cancel}
+	nonce := make([]byte, 16)
+	if _, err := rand.Read(nonce); err != nil {
+		cancel()
+		c.enqueueEvent(voiceEvent(cmd, "error", "無法建立媒體通話識別"))
+		return
+	}
+	call.mediaGeneration = hex.EncodeToString(nonce)
 	h.voiceMu.Lock()
 	if h.voiceClients == nil {
 		h.voiceClients = map[*Client]*clientVoiceCall{}
@@ -102,7 +112,7 @@ func (h *Hub) handleVoiceStart(c *Client, cmd clientproto.Command) {
 	c.enqueueEvent(voiceEvent(cmd, "starting", ""))
 	go func() {
 		defer cancel()
-		answer, err := exec.StartRealtimeVoice(ctx, s, backend.RealtimeVoiceStart{MediaInstructions: mediaInstructions, VoiceID: cmd.VoiceID, VoiceName: cmd.VoiceName, SDP: cmd.SDP, OnEvent: func(event backend.RealtimeVoiceEvent) {
+		answer, err := exec.StartRealtimeVoice(ctx, s, backend.RealtimeVoiceStart{MediaGeneration: call.mediaGeneration, MediaInstructions: mediaInstructions, VoiceID: cmd.VoiceID, VoiceName: cmd.VoiceName, SDP: cmd.SDP, OnEvent: func(event backend.RealtimeVoiceEvent) {
 			if !c.live() || !h.ownsVoice(c, call) {
 				return
 			}

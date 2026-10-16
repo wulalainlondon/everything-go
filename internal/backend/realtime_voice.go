@@ -7,6 +7,7 @@ import (
 
 // RealtimeVoice is separate from Send/Stop: ending audio must never interrupt a turn.
 type RealtimeVoiceStart struct {
+	MediaGeneration   string
 	MediaInstructions string
 	VoiceID           string
 	VoiceName         string

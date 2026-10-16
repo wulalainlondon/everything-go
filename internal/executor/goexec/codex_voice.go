@@ -16,6 +16,7 @@ import (
 )
 
 type codexVoiceCall struct {
+	mediaGeneration              string
 	voiceID, threadID, sessionID string
 	answer                       chan backend.RealtimeVoiceAnswer
 	failure                      chan error
@@ -117,7 +118,7 @@ func (c *Codex) StartRealtimeVoice(ctx context.Context, s *session.Session, inpu
 	if err := ctx.Err(); err != nil {
 		return backend.RealtimeVoiceAnswer{}, err
 	}
-	call := &codexVoiceCall{voiceID: input.VoiceID, threadID: id, sessionID: s.ID, answer: make(chan backend.RealtimeVoiceAnswer, 1), failure: make(chan error, 1), closed: make(chan struct{}), callback: input.OnEvent}
+	call := &codexVoiceCall{mediaGeneration: input.MediaGeneration, voiceID: input.VoiceID, threadID: id, sessionID: s.ID, answer: make(chan backend.RealtimeVoiceAnswer, 1), failure: make(chan error, 1), closed: make(chan struct{}), callback: input.OnEvent}
 	c.voiceMu.Lock()
 	if c.voiceCalls == nil {
 		c.voiceCalls = map[string]*codexVoiceCall{}
@@ -219,6 +220,9 @@ func (c *Codex) dispatchVoice(method string, raw json.RawMessage) bool {
 		return true
 	}
 	event := backend.RealtimeVoiceEvent{}
+	if method == "thread/realtime/itemAdded" {
+		c.observeMediaHandoff(call, raw)
+	}
 	switch method {
 	case "thread/realtime/sdp":
 		if len(p.SDP) > 64*1024 {

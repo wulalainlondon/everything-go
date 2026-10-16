@@ -41,6 +41,7 @@ import (
 	"everything-go/internal/handoff"
 	"everything-go/internal/inbox"
 	"everything-go/internal/media"
+	"everything-go/internal/mediaservice"
 	"everything-go/internal/netsvc"
 	"everything-go/internal/relay"
 	"everything-go/internal/search"
@@ -51,10 +52,14 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "media" {
+		os.Exit(mediaservice.RunCLI(os.Args[2:], os.Stdout, os.Stderr))
+	}
 	if len(os.Args) > 1 && os.Args[1] == "voice-media" {
 		os.Exit(voicemediaipc.RunCLI(os.Args[2:], os.Stdout, os.Stderr))
 	}
 	port := flag.Int("port", 8767, "WebSocket listen port (Python prod uses 8766)")
+	mediaControl := flag.Bool("media-control", false, "Enable fixed local media control after provider origin verification")
 	execName := flag.String("executor", "go", "AI executor: go | python")
 	claudeBin := flag.String("claude-bin", "claude", "path to the claude CLI binary")
 	codexBin := flag.String("codex-bin", "codex", "path to the codex CLI binary")
@@ -267,6 +272,13 @@ func main() {
 		mux := executor.NewReliableMux(backends, claude, terminal)
 		mux.SetTurnAdmission(hub)
 		hub.SetExecutor(mux)
+		if *mediaControl {
+			closeMedia, err := hub.StartUnifiedVoiceMedia(codex, mediaservice.DefaultManifest())
+			if err != nil {
+				log.Fatalf("initialize media control: %v", err)
+			}
+			defer closeMedia()
+		}
 		if err := hub.EnablePMCollaboration(context.Background()); err != nil {
 			log.Fatalf("initialize PM collaboration: %v", err)
 		}

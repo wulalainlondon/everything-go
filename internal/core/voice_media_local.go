@@ -14,6 +14,9 @@ func (h *Hub) openVoiceMediaLocal(c *Client, call *clientVoiceCall) (string, err
 	if !call.mediaCapable {
 		return "", nil
 	}
+	if h.unifiedMedia != nil {
+		return h.unifiedMedia.instructions(), nil
+	}
 	thread := call.session.ResumeID()
 	voice := call.voiceID
 	channel, err := voicemediaipc.Open(thread, voice, func(ctx context.Context, request voicemediaipc.Request) (any, error) {

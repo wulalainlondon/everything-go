@@ -175,7 +175,10 @@ func (st *codexState) touch(now time.Time) {
 
 // Codex implements executor.Executor over the codex app-server.
 type Codex struct {
-	metadataObserverBoot string
+	// Optional owned-fixture observer. Nil in production; never grants authority.
+	nativeFixtureObserver func(json.RawMessage)
+	mediaOrigins          mediaOriginState
+	metadataObserverBoot  string
 
 	taskProvider       backend.TaskAPIProvider
 	voiceMu            sync.Mutex
@@ -1097,6 +1100,9 @@ type codexTokenUsage struct {
 }
 
 func (c *Codex) dispatch(raw json.RawMessage) {
+	if c.nativeFixtureObserver != nil {
+		c.nativeFixtureObserver(raw)
+	}
 	var m codexMsg
 	if json.Unmarshal(raw, &m) != nil {
 		return
@@ -1257,6 +1263,9 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 		}
 	}
 	st.touch(time.Now())
+	if isRootThread {
+		c.observeMediaNative(s, m.Method, m.Params)
+	}
 
 	switch m.Method {
 	case "mcpServer/startupStatus/updated":

@@ -8,10 +8,23 @@ import (
 // Controls only the original caller's active voice endpoint. No caller/voice
 // identity is accepted in model arguments.
 type VoiceMediaRequest struct {
-	Action string `json:"action,omitempty"`
-	URL    string `json:"url,omitempty"`
-	Title  string `json:"title,omitempty"`
-	Volume *int   `json:"volume,omitempty"`
+	IntentID string `json:"intent,omitempty"`
+	Action   string `json:"action,omitempty"`
+	URL      string `json:"url,omitempty"`
+	Title    string `json:"title,omitempty"`
+	Volume   *int   `json:"volume,omitempty"`
+}
+
+// MediaOrigin is populated from provider events, never model arguments.
+type MediaOrigin struct {
+	SessionID, ThreadID, TurnID, RequestID, VoiceID, Generation string
+}
+type MediaOriginResolver interface {
+	ResolveMediaOrigin(thread, operation string) (MediaOrigin, error)
+}
+type UnifiedVoiceMediaProvider interface {
+	UnifiedVoiceMediaEnabled() bool
+	ExecuteScopedVoiceMedia(context.Context, SessionControlCaller, MediaOrigin, string, string, VoiceMediaRequest) (any, error)
 }
 type VoiceMediaProvider interface {
 	VoiceMediaEnabled() bool

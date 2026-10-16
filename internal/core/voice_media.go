@@ -139,6 +139,9 @@ func (h *Hub) ExecuteVoiceMedia(ctx context.Context, caller backend.SessionContr
 // local_user_socket authority is the private per-call OS-user channel, never a
 // fabricated SessionControlCaller. Both transports share the same scope checks.
 func (h *Hub) executeVoiceMedia(ctx context.Context, parent *session.Session, voiceID, requestID, operationID, transport string, expectedCall *clientVoiceCall, method string, input backend.VoiceMediaRequest) (any, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	s, ok := h.registry.Get(parent.ID)
 	if !ok || s != parent || !h.controls.MobileMayWrite(s.ID) {
 		return nil, errors.New("voice_media_caller_not_owned")
