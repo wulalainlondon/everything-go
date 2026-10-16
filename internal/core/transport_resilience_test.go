@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -227,5 +228,52 @@ func TestAppleBootstrapDoesNotNegotiateCompression(t *testing.T) {
 		if webSocketCompressionMode(ua) != websocket.CompressionNoContextTakeover {
 			t.Fatal("compatible transport lost compression")
 		}
+	}
+}
+
+type delayedControlPing struct {
+	nopConn
+	entered, release chan struct{}
+	writes           chan []byte
+	once             sync.Once
+}
+
+func (p *delayedControlPing) ConcurrentControlPing() {}
+func (p *delayedControlPing) Ping(ctx context.Context) error {
+	p.once.Do(func() { close(p.entered) })
+	select {
+	case <-p.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+func (p *delayedControlPing) Write(_ context.Context, b []byte) error {
+	p.writes <- append([]byte(nil), b...)
+	return nil
+}
+func TestPendingProtocolPingDoesNotBlockApplicationPong(t *testing.T) {
+	h, _ := newTestHub(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p := &delayedControlPing{entered: make(chan struct{}), release: make(chan struct{}), writes: make(chan []byte, 4)}
+	defer close(p.release)
+	c := newDeviceClient(h, "pending-probe", 4)
+	c.conn = p
+	c.urgent = make(chan []byte, 2)
+	defer c.shutdown()
+	go c.pingLoopEvery(ctx, time.Millisecond, time.Second)
+	<-p.entered
+	go c.writePump(ctx)
+	c.enqueuePong()
+	select {
+	case b := <-p.writes:
+		var event map[string]any
+		_ = json.Unmarshal(b, &event)
+		if event["type"] != "pong" {
+			t.Fatal("wrong event")
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("protocol ping blocked application heartbeat response")
 	}
 }
