@@ -854,7 +854,7 @@ func (s *Store) CompleteRelay(ctx context.Context, requestID, status, reason, re
 }
 
 func (s *Store) Snapshot(ctx context.Context) (Snapshot, error) {
-	var snapshot Snapshot
+	snapshot := Snapshot{Accounts: []Account{}, PollState: []PollState{}, Routes: []Route{}, Bindings: []Binding{}, Batches: []Batch{}, Proposals: []Proposal{}, Assignments: []EventAssignment{}}
 	if err := s.db.QueryRowContext(ctx, `SELECT revision FROM automation_meta WHERE singleton=1`).Scan(&snapshot.Revision); err != nil {
 		return snapshot, err
 	}
