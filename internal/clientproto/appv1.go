@@ -113,6 +113,7 @@ type Command struct {
 	MediaState         string
 	MediaErrorCode     string
 	MediaVideoID       string
+	MediaAudio         *protocol.MediaAudioInfo
 	MediaVolume        *int
 	VoiceID            string
 	VoiceName          string
@@ -283,7 +284,7 @@ func (AppV1) ParseCommand(in protocol.Inbound) Command {
 
 		SDP:               in.SDP,
 		VoiceID:           in.VoiceID,
-		VoiceMediaCapable: in.VoiceMediaCapable, MediaCommandID: in.MediaCommandID, MediaSequence: in.MediaSequence, MediaState: in.MediaState, MediaErrorCode: in.MediaErrorCode, MediaVideoID: in.MediaVideoID, MediaVolume: in.MediaVolume,
+		VoiceMediaCapable: in.VoiceMediaCapable, MediaCommandID: in.MediaCommandID, MediaSequence: in.MediaSequence, MediaState: in.MediaState, MediaErrorCode: in.MediaErrorCode, MediaVideoID: in.MediaVideoID, MediaVolume: in.MediaVolume, MediaAudio: in.MediaAudio,
 		VoiceName:          in.VoiceName,
 		VoiceMode:          in.VoiceMode,
 		LineHandoffCapable: in.LineHandoffCapable,

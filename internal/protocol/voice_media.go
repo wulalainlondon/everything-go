@@ -9,3 +9,12 @@ type VoiceMediaCommand struct {
 	Title     string `json:"title,omitempty"`
 	Volume    int    `json:"volume"`
 }
+
+// MediaAudioInfo separates player/system gain observations from human audibility.
+// VoiceRoute is the confirmed VOICE route, not a claim about WebView media routing.
+type MediaAudioInfo struct {
+	PlayerMuted       *bool  `json:"player_muted,omitempty"`
+	SystemMediaVolume *int   `json:"system_media_volume,omitempty"`
+	SystemMediaMuted  *bool  `json:"system_media_muted,omitempty"`
+	VoiceRoute        string `json:"voice_route,omitempty"`
+}

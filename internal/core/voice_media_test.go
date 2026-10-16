@@ -150,3 +150,57 @@ func TestVoiceMusicVolumeAcknowledgementMustMatchTarget(t *testing.T) {
 		t.Fatal(v)
 	}
 }
+
+func TestVoiceMusicAudioStateDoesNotConfusePlayingWithSound(t *testing.T) {
+	h, _, caller, _ := controllerFixture(t)
+	var owner *Client
+	for c, call := range h.voiceClients {
+		owner = c
+		call.mediaCapable = true
+	}
+	result := make(chan any, 1)
+	go func() {
+		v, e := h.ExecuteVoiceMedia(context.Background(), caller, "play_youtube", backend.VoiceMediaRequest{URL: "https://youtu.be/M7lc1UVf-VE"})
+		if e != nil {
+			result <- e
+		} else {
+			result <- v
+		}
+	}()
+	event := nextVoiceState(t, owner, "media")
+	var command protocol.VoiceMediaCommand
+	raw, _ := json.Marshal(event["media"])
+	json.Unmarshal(raw, &command)
+	yes, no := true, false
+	systemVolume, playerVolume := 30, 35
+	ack := protocol.Inbound{Type: "codex_voice_media_state", SessionID: caller.Parent.ID, ThreadID: caller.Parent.ResumeID(), VoiceID: caller.VoiceID, MediaCommandID: command.CommandID, MediaSequence: command.Sequence, MediaVideoID: command.VideoID, MediaState: "playing", MediaVolume: &playerVolume, MediaAudio: &protocol.MediaAudioInfo{PlayerMuted: &yes, SystemMediaVolume: &systemVolume, SystemMediaMuted: &no, VoiceRoute: "bluetooth"}}
+	raw, _ = json.Marshal(ack)
+	route(h, owner, string(raw))
+	got := (<-result).(backend.VoiceMediaResult)
+	if !got.PlaybackConfirmed || got.AudioCheck != "player_muted" || got.Audio == nil || got.Volume != 35 {
+		t.Fatalf("playing notaudible distinction lost:%+v", got)
+	}
+	systemVolume = 0
+	ack.MediaAudio.PlayerMuted = &no
+	raw, _ = json.Marshal(ack)
+	route(h, owner, string(raw))
+	status, e := h.ExecuteVoiceMedia(context.Background(), caller, "status", backend.VoiceMediaRequest{})
+	if e != nil || status.(backend.VoiceMediaResult).AudioCheck != "system_media_volume_zero" {
+		t.Fatal(status, e)
+	}
+	ack.MediaAudio.VoiceRoute = "untrusted-device-name"
+	systemVolume = 80
+	raw, _ = json.Marshal(ack)
+	route(h, owner, string(raw))
+	status, _ = h.ExecuteVoiceMedia(context.Background(), caller, "status", backend.VoiceMediaRequest{})
+	if status.(backend.VoiceMediaResult).Audio.VoiceRoute != "bluetooth" || *status.(backend.VoiceMediaResult).Audio.SystemMediaVolume != 0 {
+		t.Fatal("invaliddiagnostics accepted", status)
+	}
+	h.voiceMu.Lock()
+	h.voiceClients[owner].media.observedAt = time.Now().Add(-31 * time.Second).UnixMilli()
+	h.voiceMu.Unlock()
+	status, _ = h.ExecuteVoiceMedia(context.Background(), caller, "status", backend.VoiceMediaRequest{})
+	if status.(backend.VoiceMediaResult).Audio != nil || status.(backend.VoiceMediaResult).AudioCheck != "stale" {
+		t.Fatal("staleaudio reused", status)
+	}
+}

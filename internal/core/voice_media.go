@@ -62,6 +62,7 @@ type voiceMediaReceipt struct {
 	closed        bool
 }
 type voiceMediaSession struct {
+	audio                          *protocol.MediaAudioInfo
 	sequence                       uint64
 	current                        *voiceMediaReceipt
 	receipts                       map[string]*voiceMediaReceipt
@@ -79,8 +80,9 @@ func mediaResult(m *voiceMediaSession, r *voiceMediaReceipt) backend.VoiceMediaR
 		result.LastObservedMS = m.observedAt
 		result.Observed = m.observedAt > 0
 		result.ErrorCode = m.errorCode
+		result.Audio = m.audio
 	}
-	fresh := result.LastObservedMS > 0 && time.Now().UnixMilli()-result.LastObservedMS <= 30000
+	fresh := result.Observed && result.LastObservedMS > 0 && time.Now().UnixMilli()-result.LastObservedMS <= 30000
 	result.PlaybackConfirmed = result.State == "playing" && fresh && result.ErrorCode == ""
 	result.ActionConfirmed = false
 	if fresh && result.ErrorCode == "" {
@@ -96,8 +98,29 @@ func mediaResult(m *voiceMediaSession, r *voiceMediaReceipt) backend.VoiceMediaR
 		}
 	}
 
+	result.AudioCheck = "unknown"
+	if fresh && result.Audio != nil {
+		a := result.Audio
+		switch {
+		case a.PlayerMuted != nil && *a.PlayerMuted:
+			result.AudioCheck = "player_muted"
+		case result.Volume == 0:
+			result.AudioCheck = "player_volume_zero"
+		case a.SystemMediaMuted != nil && *a.SystemMediaMuted:
+			result.AudioCheck = "system_media_muted"
+		case a.SystemMediaVolume != nil && *a.SystemMediaVolume == 0:
+			result.AudioCheck = "system_media_volume_zero"
+		case a.PlayerMuted != nil && a.SystemMediaVolume != nil && a.SystemMediaMuted != nil:
+			result.AudioCheck = "enabled_output_unverified"
+		}
+	}
+	if !fresh {
+		result.Audio = nil
+	}
 	result.NeedsUserAction = result.ErrorCode == "autoplay_blocked" || result.ErrorCode == "foreground_required"
 	if result.Observed && !fresh {
+		result.Audio = nil
+		result.AudioCheck = "stale"
 		result.State = "unverified"
 		result.Observed = false
 	}
@@ -227,6 +250,7 @@ func (h *Hub) executeVoiceMedia(ctx context.Context, parent *session.Session, vo
 	m.state = "queued"
 	m.errorCode = ""
 	m.observedAt = 0
+	m.audio = nil
 	id := fmt.Sprintf("vm_%x", sha256.Sum256([]byte(h.cfg.InstanceID+"\x00"+s.ID+"\x00"+voiceID+"\x00"+transport+"\x00"+operationID)))
 	receipt := &voiceMediaReceipt{fingerprint: fingerprint, desiredVolume: m.volume, settled: make(chan struct{}), result: backend.VoiceMediaResult{Transport: transport, Action: action, CommandID: id, Sequence: m.sequence, State: "queued", Title: m.title, VideoURL: "https://www.youtube.com/watch?v=" + m.video, Volume: m.volume}}
 	if m.video == "" {
@@ -275,12 +299,23 @@ func (h *Hub) handleVoiceMediaState(c *Client, cmd clientproto.Command) {
 	default:
 		return
 	}
+	if a := cmd.MediaAudio; a != nil {
+		if a.SystemMediaVolume != nil && (*a.SystemMediaVolume < 0 || *a.SystemMediaVolume > 100) {
+			return
+		}
+		switch a.VoiceRoute {
+		case "", "speaker", "earpiece", "wired", "bluetooth", "unknown":
+		default:
+			return
+		}
+	}
 	if cmd.MediaVolume != nil && (*cmd.MediaVolume < 0 || *cmd.MediaVolume > 100) {
 		return
 	}
 	if cmd.MediaVolume != nil {
 		m.volume = *cmd.MediaVolume
 	}
+	m.audio = cmd.MediaAudio
 	m.state = cmd.MediaState
 	m.errorCode = cmd.MediaErrorCode
 	m.observedAt = time.Now().UnixMilli()
@@ -288,6 +323,7 @@ func (h *Hub) handleVoiceMediaState(c *Client, cmd clientproto.Command) {
 		m.video = ""
 		m.title = ""
 	}
+	r.result.Audio = m.audio
 	r.result.State = m.state
 	r.result.ErrorCode = m.errorCode
 	r.result.LastObservedMS = m.observedAt

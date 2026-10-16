@@ -24,7 +24,7 @@ func (c *Codex) applyVoiceMediaTools(s *session.Session, params map[string]any) 
 	}{
 		{"play_youtube", "Play user-requested YouTube music in the visible official player alongside this exact active voice call. First find a real video URL using web search if needed. queued is not playing: playback_confirmed=true requires a fresh device PLAYING report. For autoplay_blocked ask the user to tap Play once; do not blindly resend or claim it is audible. Stops/pause on background or voice end.", []string{"url", "title", "volume"}, []string{"url"}},
 		{"control", "Control music in the current voice call: pause, resume, stop or volume0-100. Changes music only, never the AI voice or another device. Observed status is authoritative; a queued instruction is not playback proof.", []string{"action", "volume"}, []string{"action"}},
-		{"status", "Read the exact active voice endpoint's current YouTube playback state. playback_confirmed means a fresh device PLAYING observation, not proof the human heard it. Stale observations are unverified. No playback effect.", nil, nil}}
+		{"status", "Read the exact active voice endpoint's current YouTube playback state. playback_confirmed means a fresh device PLAYING observation, not proof the human heard it. Stale observations are unverified. If the user hears no music, inspect audio_check and audio; player_muted and system media volume/mute are separate from PLAYING. enabled_output_unverified is not proof of human audibility. No playback effect.", nil, nil}}
 	tools := []map[string]any{}
 	for _, d := range defs {
 		props := map[string]any{}
