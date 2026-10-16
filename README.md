@@ -225,3 +225,10 @@ Deferred (round 2): #8 feed_list throttle (cheap + would starve reconnects).
 Per-session Goal state is now coalesced and replay is application-ACKed; generic
 terminal-event dedup remains covered by client request/seq dedup plus history
 reconciliation.
+
+
+### Realtime session permissions
+
+Realtime startup restores the exact original native thread, synchronizes its permission defaults from the owning Bridge session, and reads metadata back before starting audio. It uses the same sandbox mapping as text turns: explicit read-only and workspace-write restrictions are preserved, and full access is used only when that is the session setting. Permission changes made in session settings also update native thread defaults for subsequent realtime backing turns; an already running turn retains its original execution snapshot. No Android update or new per-call permission setting is required.
+
+A failed, mismatched, or concurrently changing permission synchronization refuses voice startup without forking a thread, interrupting active text work, or falling back to broader permissions. Native regression probes use an owned local mock provider, with no paid model or real voice/playback request.

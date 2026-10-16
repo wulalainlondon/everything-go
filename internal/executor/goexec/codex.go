@@ -184,6 +184,7 @@ type Codex struct {
 	taskProvider       backend.TaskAPIProvider
 	voiceMu            sync.Mutex
 	voiceCalls         map[string]*codexVoiceCall
+	voicePreparing     map[string]bool
 	recapStoreMu       sync.Mutex
 	recapStore         *recap.Store
 	recapSlots         chan struct{}
@@ -2899,10 +2900,7 @@ func codexTurnParams(threadID string, input []map[string]any, effort string) map
 
 func (c *Codex) codexTurnParamsForSession(threadID string, input []map[string]any, snap session.Snapshot, sandboxOverride string) map[string]any {
 	params := codexTurnParams(threadID, input, snap.Effort)
-	params["sandboxPolicy"] = codexTurnSandboxPolicy(snap, sandboxOverride)
-	if c.appSandbox != nil && snap.Sandbox == AppSandboxMode && sandboxOverride == "" {
-		params["sandboxPolicy"] = map[string]any{"type": "externalSandbox", "networkAccess": "enabled"}
-	}
+	params["sandboxPolicy"] = c.sessionSandboxPolicy(snap, sandboxOverride)
 	if snap.ServiceTier != "" {
 		params["serviceTier"] = snap.ServiceTier
 	}
@@ -3273,6 +3271,9 @@ func (c *Codex) UpdateSessionSettings(ctx context.Context, s *session.Session) e
 		return nil
 	}
 	snap := s.Snapshot()
+	if snap.ResumeID != "" && threadID != snap.ResumeID {
+		return errors.New("session_native_thread_mismatch")
+	}
 	params := map[string]any{
 		"threadId":          threadID,
 		"model":             nil,
@@ -3280,6 +3281,9 @@ func (c *Codex) UpdateSessionSettings(ctx context.Context, s *session.Session) e
 		"serviceTier":       nil,
 		"personality":       nil,
 		"collaborationMode": nil,
+	}
+	for key, value := range c.sessionPermissionSettings(threadID, snap) {
+		params[key] = value
 	}
 	if snap.Model != "" {
 		params["model"] = snap.Model

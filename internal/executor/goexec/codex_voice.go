@@ -25,8 +25,13 @@ type codexVoiceCall struct {
 	callback                     func(backend.RealtimeVoiceEvent)
 }
 
-// Exact resume only; no fork, new thread, config reset, or cancellation of active work.
+// Exact restoration plus owning-session permission synchronization. No fork,
+// unrelated settings reset, or cancellation of active work.
 func (c *Codex) voiceThread(s *session.Session) (string, error) {
+	return c.voiceThreadContext(context.Background(), s)
+}
+
+func (c *Codex) voiceThreadContext(ctx context.Context, s *session.Session) (string, error) {
 	if s.Backend() != backend.Codex || s.ResumeID() == "" {
 		return "", errors.New("此對話尚未建立 Codex thread，請先傳送一則文字訊息")
 	}
@@ -41,7 +46,14 @@ func (c *Codex) voiceThread(s *session.Session) (string, error) {
 	if version, _ := diagnostics["running_version"].(string); !taskapi.SupportedNativeProviderVersion("codex", version) {
 		return "", fmt.Errorf("共享 Codex app-server 為 %s；雙向語音需要已驗證的 CLI 介面版本", version)
 	}
-	return c.resumeExactControllerThread(s)
+	id, err := c.resumeExactControllerThread(s)
+	if err != nil {
+		return "", err
+	}
+	if err = c.syncVoiceSessionPermissions(ctx, s, id); err != nil {
+		return "", err
+	}
+	return id, nil
 }
 
 // Exact restoration shared by voice and pinned dispatches. Never rebuild a
@@ -111,9 +123,29 @@ func (c *Codex) StartRealtimeVoice(ctx context.Context, s *session.Session, inpu
 	if len(input.SDP) > 64*1024 || !strings.HasPrefix(input.SDP, "v=0") || input.VoiceID == "" {
 		return backend.RealtimeVoiceAnswer{}, errors.New("無效的語音協商資料")
 	}
-	id, err := c.voiceThread(s)
+	// Reserve the native identity before any settings mutation. Duplicate or
+	// concurrent starts must not reconfigure an already active voice.
+	original := s.ResumeID()
+	if original == "" {
+		return backend.RealtimeVoiceAnswer{}, errors.New("此對話尚未建立 Codex thread，請先傳送一則文字訊息")
+	}
+	c.voiceMu.Lock()
+	if c.voiceCalls[original] != nil || c.voicePreparing[original] {
+		c.voiceMu.Unlock()
+		return backend.RealtimeVoiceAnswer{}, errors.New("此對話已有語音連線，請先結束舊連線")
+	}
+	if c.voicePreparing == nil {
+		c.voicePreparing = map[string]bool{}
+	}
+	c.voicePreparing[original] = true
+	c.voiceMu.Unlock()
+	defer func() { c.voiceMu.Lock(); delete(c.voicePreparing, original); c.voiceMu.Unlock() }()
+	id, err := c.voiceThreadContext(ctx, s)
 	if err != nil {
 		return backend.RealtimeVoiceAnswer{}, err
+	}
+	if id != original {
+		return backend.RealtimeVoiceAnswer{}, errors.New("voice_session_configuration_changed")
 	}
 	if err := ctx.Err(); err != nil {
 		return backend.RealtimeVoiceAnswer{}, err
