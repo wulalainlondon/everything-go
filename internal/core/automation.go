@@ -5,14 +5,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
 	"everything-go/internal/automation"
 	"everything-go/internal/eventinbox"
 	"everything-go/internal/relay"
+	"everything-go/internal/session"
 	"everything-go/internal/workitems"
 )
 
@@ -32,6 +35,7 @@ func (h *Hub) StartAutomationScheduler(ctx context.Context) {
 		defer ticker.Stop()
 		for {
 			h.drainExternalAttachmentQueue(ctx)
+			h.drainEventAssignments(ctx)
 			h.drainAutomationQueue(ctx)
 			h.drainConnectorWork(ctx)
 			select {
@@ -113,8 +117,14 @@ func (h *Hub) drainAutomationQueue(ctx context.Context) {
 }
 
 func (h *Hub) dispatchAutomationBinding(ctx context.Context, binding automation.Binding) bool {
+	if binding.WorkItemID == "" && binding.TargetWorkItemID == "" {
+		return h.dispatchSessionBinding(ctx, binding)
+	}
 	if binding.TargetInstanceID != "" {
 		return h.dispatchRelayBinding(ctx, binding)
+	}
+	if binding.WorkItemID == "" {
+		return h.dispatchSessionBinding(ctx, binding)
 	}
 	item, err := h.work.GetItem(ctx, binding.WorkItemID)
 	if err != nil {
@@ -252,6 +262,23 @@ func (h *Hub) automationSnapshotEvent() map[string]any {
 	if err != nil {
 		return map[string]any{"type": "automation_error", "message": err.Error()}
 	}
+	assignments, _ := h.automation.EventAssignments(context.Background())
+	for i := range snapshot.Proposals {
+		p := &snapshot.Proposals[i]
+		for _, a := range assignments {
+			if p.RunID == a.ID && p.WorkItemID == "" {
+				p.SessionID = a.SessionID
+				p.OwnerInstanceID = a.OwnerInstanceID
+			}
+		}
+		if p.RunID == "" {
+			continue
+		}
+		if run, ok := h.findWorkRun(context.Background(), p.RunID); ok && run.WorkItemID == p.WorkItemID {
+			p.SessionID = run.SessionID
+			p.OwnerInstanceID = h.cfg.InstanceID
+		}
+	}
 	return map[string]any{"type": "automation_snapshot", "snapshot": snapshot}
 }
 
@@ -271,6 +298,9 @@ func (h *Hub) ServeAutomationAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/automation/v1/"), "/")
+	if h.serveInboxAPI(w, r, path) {
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	if r.Method == http.MethodGet && path == "snapshot" {
 		_ = json.NewEncoder(w).Encode(h.automationSnapshotEvent())
@@ -301,7 +331,68 @@ func (h *Hub) ServeAutomationAPI(w http.ResponseWriter, r *http.Request) {
 		if !decodeAutomationRequest(w, r, &input) {
 			return
 		}
-		route, revision, err := h.automation.UpsertRoute(r.Context(), input.Route, input.ExpectedVersion)
+		var sessionPolicy *automation.EventAssignment
+		if input.Route.WorkItemID == "" && input.Route.TargetWorkItemID == "" && input.Route.HandlingMode != automation.NotifyOnly {
+			device := h.inboxDevice(r)
+			if device == "" {
+				http.Error(w, "paired device required", 403)
+				return
+			}
+			policy := automation.EventAssignment{ID: input.Route.ID, OwnerDevice: device, Mode: "analyze", RuleID: input.Route.ID, RuleVersion: input.ExpectedVersion + 1, SourceInstanceID: h.cfg.InstanceID}
+			if input.Route.TargetInstanceID != "" {
+				peer, ok := h.relayPeers[input.Route.TargetInstanceID]
+				if !ok {
+					http.Error(w, "original peer unavailable", 409)
+					return
+				}
+				response, err := h.relayRequest(r.Context(), peer, http.MethodGet, "/api/relay/v1/session-target/"+url.PathEscape(input.Route.TargetSessionID), nil)
+				if err != nil {
+					http.Error(w, "peer target unavailable", 409)
+					return
+				}
+				var target automation.EventAssignment
+				decodeErr := json.NewDecoder(io.LimitReader(response.Body, 8192)).Decode(&target)
+				response.Body.Close()
+				if response.StatusCode != 200 || decodeErr != nil || target.ThreadID == "" {
+					http.Error(w, "peer target not granted or initialized", 409)
+					return
+				}
+				policy.SessionID = target.SessionID
+				policy.OwnerInstanceID = target.OwnerInstanceID
+				policy.ThreadID = target.ThreadID
+				policy.ConfigRevision = target.ConfigRevision
+			} else {
+				target, ok := h.registry.Get(input.Route.SessionID)
+				if !ok || !h.controllerInScope(target) || target.State() == session.Closed || target.Snapshot().Hidden || !h.controls.MobileMayWrite(target.ID) || target.ResumeID() == "" {
+					http.Error(w, "initialized local target required", 409)
+					return
+				}
+				if managed, err := h.PMConfiguration(target.ID); err != nil || managed != nil {
+					http.Error(w, "managed target unavailable", 409)
+					return
+				}
+				policy.SessionID = target.ID
+				policy.OwnerInstanceID = h.cfg.InstanceID
+				policy.ThreadID = target.ResumeID()
+				policy.ConfigRevision = target.SettingsSnapshot().ConfigRevision
+			}
+			if input.Route.HandlingMode == automation.DraftForReview {
+				policy.Mode = "draft"
+			}
+			if input.Route.HandlingMode == automation.ApprovedAction {
+				policy.Mode = "action_draft"
+			}
+			sessionPolicy = &policy
+		}
+
+		var route automation.Route
+		var revision uint64
+		var err error
+		if sessionPolicy != nil {
+			route, revision, err = h.automation.UpsertSessionRoute(r.Context(), input.Route, input.ExpectedVersion, *sessionPolicy)
+		} else {
+			route, revision, err = h.automation.UpsertRoute(r.Context(), input.Route, input.ExpectedVersion)
+		}
 		if err != nil {
 			writeAutomationError(w, err)
 			return
@@ -330,6 +421,27 @@ func (h *Hub) ServeAutomationAPI(w http.ResponseWriter, r *http.Request) {
 		}
 		if !decodeAutomationRequest(w, r, &input) {
 			return
+		}
+		if input.WorkItemID == "" {
+			assignments, err := h.automation.EventAssignments(r.Context())
+			if err != nil {
+				writeAutomationError(w, err)
+				return
+			}
+			verified := false
+			for _, assignment := range assignments {
+				if assignment.ID != input.RunID || assignment.OwnerInstanceID != h.cfg.InstanceID {
+					continue
+				}
+				target, ok := h.registry.Get(assignment.SessionID)
+				if ok && h.nativeTaskTurn(target, assignment.ID) != "" {
+					verified = true
+				}
+			}
+			if !verified {
+				http.Error(w, "original event native execution is unconfirmed", 409)
+				return
+			}
 		}
 		proposal, revision, err := h.automation.CreateProposal(r.Context(), automation.ProposalInput{
 			ID: input.ID, AccountID: input.AccountID, WorkItemID: input.WorkItemID, RunID: input.RunID,

@@ -252,18 +252,28 @@ func stableAttachmentID(eventID, externalID string, ordinal int) string {
 }
 
 func (s *Store) Snapshot(ctx context.Context, deviceID string, limit int) (Snapshot, error) {
-	return s.SnapshotForSources(ctx, deviceID, limit, "", nil)
+	return s.snapshot(ctx, deviceID, limit, false)
 }
-
-// SnapshotForSources applies the source grant before the global page limit,
-// so another account cannot crowd authorized events out of the page.
+func (s *Store) SnapshotIncludingArchived(ctx context.Context, deviceID string, limit int) (Snapshot, error) {
+	return s.snapshot(ctx, deviceID, limit, true)
+}
+func (s *Store) snapshot(ctx context.Context, deviceID string, limit int, archived bool) (Snapshot, error) {
+	return s.snapshotForSources(ctx, deviceID, limit, "", nil, archived)
+}
 func (s *Store) SnapshotForSources(ctx context.Context, deviceID string, limit int, reservedPrefix string, allowed []string) (Snapshot, error) {
+	return s.snapshotForSources(ctx, deviceID, limit, reservedPrefix, allowed, false)
+}
+func (s *Store) SnapshotForSourcesIncludingArchived(ctx context.Context, deviceID string, limit int, reservedPrefix string, allowed []string) (Snapshot, error) {
+	return s.snapshotForSources(ctx, deviceID, limit, reservedPrefix, allowed, true)
+}
+func (s *Store) snapshotForSources(ctx context.Context, deviceID string, limit int, reservedPrefix string, allowed []string, archived bool) (Snapshot, error) {
+
 	if limit <= 0 || limit > defaultListSize {
 		limit = defaultListSize
 	}
 	now := s.now().UnixMilli()
 	filter := ""
-	arguments := []any{deviceID, now}
+	arguments := []any{deviceID, now, archived}
 	if reservedPrefix != "" {
 		filter = " AND (substr(e.source,1,?)<>?"
 		arguments = append(arguments, len(reservedPrefix), reservedPrefix)
@@ -281,7 +291,7 @@ func (s *Store) SnapshotForSources(ctx context.Context, deviceID string, limit i
     COALESCE(d.read,0),COALESCE(d.dismissed,0)
     FROM external_events e
     LEFT JOIN external_event_device_state d ON d.event_id=e.id AND d.device_id=?
-    WHERE e.expires_at>? AND COALESCE(d.dismissed,0)=0
+    WHERE e.expires_at>? AND (? OR COALESCE(d.dismissed,0)=0)
     `+filter+` ORDER BY e.sequence DESC LIMIT ?`, arguments...)
 	if err != nil {
 		return Snapshot{}, err

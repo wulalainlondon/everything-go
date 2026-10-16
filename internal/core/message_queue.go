@@ -21,6 +21,9 @@ import (
 )
 
 type queuedPayload struct {
+	ExternalPeer        string                     `json:"external_peer,omitempty"`
+	ExternalReviewOnly  bool                       `json:"external_review_only,omitempty"`
+	ExternalEventIDs    []string                   `json:"external_event_ids,omitempty"`
 	VisualUserHash      string                     `json:"visual_user_hash,omitempty"`
 	VisualEffectiveHash string                     `json:"visual_effective_hash,omitempty"`
 	VisualPresentation  string                     `json:"visual_presentation,omitempty"`
@@ -244,7 +247,16 @@ func (h *Hub) runQueuedMessage(s *session.Session, requestID string) {
 		h.Emit(backend.NewError(s.ID, requestID, "delegation_capacity_guard", guardErr.Error()))
 		return
 	}
-	if err = h.exec.Send(backend.WithVisualPresentation(context.Background(), payload.VisualPresentation), s, requestID, payload.Content, payload.Images, payload.Files); err != nil {
+	sendContext := backend.WithVisualPresentation(context.Background(), payload.VisualPresentation)
+	if payload.ExternalReviewOnly {
+		grant, err := h.dispatches.Grant(context.Background(), "peer:"+payload.ExternalPeer)
+		if err != nil || !grant.Allows(h.cfg.InstanceID, h.cfg.InstanceID, s.ID) {
+			h.Emit(backend.NewError(s.ID, requestID, "external_peer_revoked", "Original peer permission revoked"))
+			return
+		}
+		sendContext = backend.WithSandboxOverride(sendContext, "read-only")
+	}
+	if err = h.exec.Send(sendContext, s, requestID, payload.Content, payload.Images, payload.Files); err != nil {
 		if errors.Is(err, backend.ErrNativeSubmissionBusy) {
 			h.deferUnsubmittedQueuedMessage(s, requestID)
 			return

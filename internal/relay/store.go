@@ -128,7 +128,7 @@ func (s *Store) insert(ctx context.Context, job Job, direction, status string) (
 
 func ValidateJob(job Job) error {
 	if job.SchemaVersion != 1 || job.ID == "" || job.OriginInstanceID == "" || job.TargetInstanceID == "" ||
-		job.EventID == "" || job.TargetWorkItemID == "" || job.TargetSessionID == "" || job.Instruction == "" {
+		job.EventID == "" || (job.TargetWorkItemID == "" && job.Metadata["session_assignment"] != "1") || job.TargetSessionID == "" || job.Instruction == "" {
 		return errors.New("invalid relay job identity or target")
 	}
 	if !job.ReviewOnly || len(job.Instruction) > 32000 || len(job.Attachments) > 10 || len(job.EventIDs) > 100 {

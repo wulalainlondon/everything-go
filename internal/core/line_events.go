@@ -163,6 +163,9 @@ func (h *Hub) publishLineEvent(event eventinbox.Event) {
 }
 
 func (h *Hub) externalSnapshot(ctx context.Context, device string) (eventinbox.Snapshot, error) {
+	return h.externalSnapshotMode(ctx, device, false)
+}
+func (h *Hub) externalSnapshotMode(ctx context.Context, device string, archived bool) (eventinbox.Snapshot, error) {
 	sources := []string{}
 	if h.lineService != nil {
 		store := h.lineService.Store()
@@ -177,7 +180,13 @@ func (h *Hub) externalSnapshot(ctx context.Context, device string) (eventinbox.S
 			}
 		}
 	}
-	snapshot, err := h.events.SnapshotForSources(ctx, device, 0, lineSourcePrefix, sources)
+	var snapshot eventinbox.Snapshot
+	var err error
+	if archived {
+		snapshot, err = h.events.SnapshotForSourcesIncludingArchived(ctx, device, 0, lineSourcePrefix, sources)
+	} else {
+		snapshot, err = h.events.SnapshotForSources(ctx, device, 0, lineSourcePrefix, sources)
+	}
 	if err != nil {
 		return snapshot, err
 	}

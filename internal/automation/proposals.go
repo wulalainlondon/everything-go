@@ -50,7 +50,7 @@ func proposalHash(actionType, targetID string, payload []byte) string {
 func (s *Store) CreateProposal(ctx context.Context, in ProposalInput) (Proposal, uint64, error) {
 	in.ID, in.AccountID, in.WorkItemID = strings.TrimSpace(in.ID), strings.TrimSpace(in.AccountID), strings.TrimSpace(in.WorkItemID)
 	in.ActionType, in.TargetID = strings.TrimSpace(in.ActionType), strings.TrimSpace(in.TargetID)
-	if in.ID == "" || in.AccountID == "" || in.WorkItemID == "" || !allowedActionTypes[in.ActionType] || in.TargetID == "" {
+	if in.ID == "" || in.AccountID == "" || (in.WorkItemID == "" && in.RunID == "") || !allowedActionTypes[in.ActionType] || in.TargetID == "" {
 		return Proposal{}, 0, errors.New("invalid typed action proposal")
 	}
 	payload, err := canonicalPayload(in.Payload)
@@ -85,11 +85,24 @@ func (s *Store) CreateProposal(ctx context.Context, in ProposalInput) (Proposal,
 		return Proposal{}, 0, errors.New("action type does not match connector provider")
 	}
 	var governed int
-	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM external_event_routes
-		WHERE enabled=1 AND connector_account_id=? AND work_item_id=? AND handling_mode='approved_action')`,
-		in.AccountID, in.WorkItemID).Scan(&governed); err != nil || governed != 1 {
-		return Proposal{}, 0, errors.New("work item is not governed by an approved-action route")
+	if in.WorkItemID != "" {
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM external_event_routes WHERE enabled=1 AND connector_account_id=? AND work_item_id=? AND handling_mode='approved_action')`, in.AccountID, in.WorkItemID).Scan(&governed); err != nil || governed != 1 {
+			return Proposal{}, 0, errors.New("work item is not governed by an approved-action route")
+		}
+	} else {
+		var raw []byte
+		if err := tx.QueryRowContext(ctx, "SELECT payload FROM event_session_assignments WHERE id=?", in.RunID).Scan(&raw); err != nil {
+			return Proposal{}, 0, errors.New("event execution unavailable")
+		}
+		var assignment EventAssignment
+		if json.Unmarshal(raw, &assignment) != nil || assignment.RuleID == "" || assignment.Mode != "action_draft" {
+			return Proposal{}, 0, errors.New("event assignment is not an action policy")
+		}
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM external_event_routes WHERE id=? AND version=? AND enabled=1 AND connector_account_id=? AND session_id=? AND handling_mode='approved_action')`, assignment.RuleID, assignment.RuleVersion, in.AccountID, assignment.SessionID).Scan(&governed); err != nil || governed != 1 {
+			return Proposal{}, 0, errors.New("original event action policy unavailable")
+		}
 	}
+
 	_, err = tx.ExecContext(ctx, `INSERT INTO outbound_action_proposals
 		(id,authority_instance_id,connector_account_id,work_item_id,run_id,action_type,target_id,payload_json,payload_hash,
 		display_preview,status,approved_by_device_id,approved_at,expires_at,executed_at,idempotency_key,provider_result_id,
