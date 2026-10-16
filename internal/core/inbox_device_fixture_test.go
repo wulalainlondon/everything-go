@@ -2,11 +2,14 @@ package core
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"everything-go/internal/automation"
 	"everything-go/internal/backend"
 	"everything-go/internal/eventinbox"
+	"everything-go/internal/feed"
 	"everything-go/internal/governance"
+	"everything-go/internal/inbox"
 	"everything-go/internal/protocol"
 	"everything-go/internal/session"
 	"everything-go/internal/workitems"
@@ -69,13 +72,16 @@ func TestInboxNativeDeviceFixture(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	type peer struct {
-		h          *Hub
-		exec       *inboxDeviceExecutor
-		events     []eventinbox.Event
-		server     *http.Server
-		permission atomic.Bool
-		begun      atomic.Bool
-		device     atomic.Value
+		h           *Hub
+		exec        *inboxDeviceExecutor
+		events      []eventinbox.Event
+		server      *http.Server
+		permission  atomic.Bool
+		begun       atomic.Bool
+		device      atomic.Value
+		paused      atomic.Bool
+		fileStarted atomic.Bool
+		downloads   atomic.Int32
 	}
 	peers := []*peer{}
 	for index, port := range []string{"18766", "18767"} {
@@ -97,6 +103,22 @@ func TestInboxNativeDeviceFixture(t *testing.T) {
 		fe := &fakeExec{sink: h}
 		executor := &inboxDeviceExecutor{fakeExec: fe, hub: h}
 		h.SetExecutor(executor)
+		h.SetInbox(inbox.New(dir))
+		feedDir := filepath.Join(dir, "feed")
+		_ = os.MkdirAll(filepath.Join(feedDir, "articles"), 0700)
+		title := "QA 同 ID 訂閱 A"
+		if index == 1 {
+			title = "QA 同 ID 訂閱 B"
+		}
+		indexBytes, _ := json.Marshal(map[string]feed.Meta{"qa-shared-feed": {FeedID: "qa-shared-feed", Title: title, Source: "fixture", ContentType: "markdown", CreatedAt: float64(time.Now().Unix()), Read: false, Deleted: false}})
+		if err := os.WriteFile(filepath.Join(feedDir, "index.json"), indexBytes, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(feedDir, "articles", "qa-shared-feed.html"), []byte("# "+title+"\n\n只有原來源的文章內容。"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		h.SetFeed(feed.New(dir))
+
 		fe.onSend = func(s *session.Session, id, content string) {
 			executor.calls.Add(1)
 			h.Emit(protocol.NewTextChunk(s.ID, id, "QA 事件已由隔離 provider 分析；沒有外部操作。"))
@@ -215,6 +237,62 @@ func TestInboxNativeDeviceFixture(t *testing.T) {
 			}
 			_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 		})
+
+		mux.HandleFunc("/fixture/lifecycle-event", func(w http.ResponseWriter, r *http.Request) {
+			phase := r.URL.Query().Get("phase")
+			switch phase {
+			case "background", "lock", "disconnect", "recreate":
+			default:
+				http.Error(w, "invalid phase", 400)
+				return
+			}
+			e, d, err := h.events.Insert(ctx, eventinbox.Input{Source: "fixture", EventKey: "qa-lifecycle-" + phase, Kind: "qa.lifecycle", Title: "QA lifecycle " + phase, Body: "隔離生命週期事件", Data: json.RawMessage(`{"subject_id":"lifecycle"}`)})
+			if err != nil {
+				http.Error(w, "insert failed", 500)
+				return
+			}
+			_ = h.publishExternalEvent(e, d)
+			w.WriteHeader(204)
+		})
+		mux.HandleFunc("/fixture/disconnect", func(w http.ResponseWriter, r *http.Request) {
+			p.paused.Store(true)
+			h.mu.RLock()
+			clients := []*Client{}
+			for c := range h.clients {
+				clients = append(clients, c)
+			}
+			h.mu.RUnlock()
+			for _, c := range clients {
+				c.conn.Close("explicit isolated reconnect test")
+			}
+			w.WriteHeader(204)
+		})
+		mux.HandleFunc("/fixture/reconnect", func(w http.ResponseWriter, r *http.Request) { p.paused.Store(false); w.WriteHeader(204) })
+		mux.HandleFunc("/fixture/file", func(w http.ResponseWriter, r *http.Request) {
+			if p.fileStarted.CompareAndSwap(false, true) {
+				data, _ := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aL1sAAAAASUVORK5CYII=")
+				path := filepath.Join(dir, "qa-note20-proof.png")
+				if err := os.WriteFile(path, data, 0600); err != nil {
+					http.Error(w, "write failed", 500)
+					return
+				}
+				if _, err := h.inbox.Push(path, "fixture-sender", []string{p.device.Load().(string)}); err != nil {
+					http.Error(w, "push failed", 500)
+					return
+				}
+				h.mu.RLock()
+				clients := []*Client{}
+				for c := range h.clients {
+					clients = append(clients, c)
+				}
+				h.mu.RUnlock()
+				for _, c := range clients {
+					h.sendInbox(c)
+				}
+			}
+			w.WriteHeader(204)
+		})
+		mux.HandleFunc(inbox.DownloadPrefix, func(w http.ResponseWriter, r *http.Request) { p.downloads.Add(1); h.ServeInboxDownload(w, r) })
 		mux.HandleFunc("/fixture/new-event", func(w http.ResponseWriter, r *http.Request) {
 			event, dedup, err := h.events.Insert(ctx, eventinbox.Input{Source: "github", EventKey: "qa-future-rule-event", Kind: "issue.updated", Title: "QA 規則後續事件", Body: "測試啟用後的新事件", Data: json.RawMessage(`{"subject_id":44}`)})
 			if err != nil {
@@ -227,12 +305,12 @@ func TestInboxNativeDeviceFixture(t *testing.T) {
 		mux.HandleFunc("/fixture/stats", func(w http.ResponseWriter, r *http.Request) {
 			assignments, _ := h.automation.EventAssignments(ctx)
 			snapshot, _ := h.events.SnapshotIncludingArchived(ctx, p.device.Load().(string), 0)
-			_ = json.NewEncoder(w).Encode(map[string]any{"session_count": len(h.registry.List()), "target_allowed": h.eventSessionAllowed(sessionObject), "target_state": int(sessionObject.State()), "provider_mock": true, "provider_calls": p.exec.calls.Load(), "answers": p.exec.answered.Load(), "permission_approved": p.permission.Load(), "assignments": assignments, "events": snapshot.Items})
+			_ = json.NewEncoder(w).Encode(map[string]any{"pending_files": len(h.inbox.Pending(p.device.Load().(string))), "file_downloads": p.downloads.Load(), "feed": h.feed.List(), "session_count": len(h.registry.List()), "target_allowed": h.eventSessionAllowed(sessionObject), "target_state": int(sessionObject.State()), "provider_mock": true, "provider_calls": p.exec.calls.Load(), "answers": p.exec.answered.Load(), "permission_approved": p.permission.Load(), "assignments": assignments, "events": snapshot.Items})
 		})
 		mux.HandleFunc("/fixture/stop", func(w http.ResponseWriter, r *http.Request) { stopOnce.Do(func() { close(stop) }); w.WriteHeader(204) })
 		mux.HandleFunc("/api/automation/v1/", h.ServeAutomationAPI)
 		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-			if p.device.Load() == nil {
+			if p.device.Load() == nil || p.paused.Load() {
 				http.Error(w, "fixture enrollment required before native bootstrap", 503)
 				return
 			}
