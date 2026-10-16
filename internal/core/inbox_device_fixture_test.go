@@ -187,10 +187,25 @@ func TestInboxNativeDeviceFixture(t *testing.T) {
 					Device string `json:"device_id"`
 				}
 				_ = json.NewDecoder(r.Body).Decode(&in)
-				p.h.perms = governance.NewPermissionManager(p.h.Emit, "enforce")
+				emitted := make(chan struct{}, 1)
+				p.h.perms = governance.NewPermissionManager(func(event any) {
+					p.h.Emit(event)
+					if _, ok := event.(protocol.PermissionRequest); ok {
+						select {
+						case emitted <- struct{}{}:
+						default:
+						}
+					}
+				}, "enforce")
 				go func() {
 					p.permission.Store(p.h.perms.Request(p.device.Load().(string), "fixture.no_effect", "QA 工具核准", "只驗證原來源回覆，不執行操作", "", "low", "same"))
 				}()
+				select {
+				case <-emitted:
+				case <-time.After(time.Second):
+					http.Error(w, "fixture permission did not reach emitter", 500)
+					return
+				}
 				blocking := true
 				p.exec.mu.Lock()
 				p.exec.question = backend.UserInputPayload{RequestID: "qa-question", SessionID: "same", Source: "fixture", Kind: "question", Header: "QA 待回答", Status: "pending", CreatedAt: time.Now().UnixMilli(), ExpiresAt: time.Now().Add(time.Minute).UnixMilli(), IsBlocking: &blocking, Questions: []protocol.UserInputQuestion{{QuestionID: "qa-option", Text: "QA 問題內容", Type: "single_select", Options: []protocol.UserInputOption{{ID: "yes", Label: "QA 選項", Recommended: true}}}}}
