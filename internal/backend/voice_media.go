@@ -43,6 +43,7 @@ func (e *VoiceMediaNotDispatchedError) Error() string { return e.Cause.Error() }
 func (e *VoiceMediaNotDispatchedError) Unwrap() error { return e.Cause }
 
 type VoiceMediaResult struct {
+	HandoffOpened     bool                         `json:"handoff_opened,omitempty"`
 	ExternalMusic     *protocol.ExternalMusicState `json:"external_music,omitempty"`
 	Provider          string                       `json:"provider,omitempty"`
 	Endpoint          *MediaEndpoint               `json:"endpoint,omitempty"`

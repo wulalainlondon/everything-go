@@ -43,6 +43,7 @@ type MediaAudioInfo struct {
 
 // ExternalMusicState is a native observation, never a routing address.
 type ExternalMusicState struct {
+	HandoffOpened     bool     `json:"handoffOpened,omitempty"`
 	Provider          string   `json:"provider"`
 	PackageName       string   `json:"packageName"`
 	BindingID         string   `json:"bindingId"`

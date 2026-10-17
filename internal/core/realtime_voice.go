@@ -27,6 +27,7 @@ type clientVoiceCall struct {
 	callbackSpoken        string
 	callbackSpeechSettled bool
 	externalMusicCapable  bool
+	externalMusicPlatform string
 	musicProvider         string
 	externalMusic         *externalMusicCall
 	mediaObserveCapable   bool
@@ -104,8 +105,16 @@ func (h *Hub) handleVoiceStart(c *Client, cmd clientproto.Command) {
 	call := &clientVoiceCall{callbackPolicy: cmd.CallbackID, mediaCapable: cmd.VoiceMediaCapable, handoffCapable: cmd.LineHandoffCapable, session: s, voiceID: cmd.VoiceID, requestID: cmd.RequestID, cancel: cancel}
 	call.mediaObserveCapable = cmd.VoiceMediaObserveCapable
 	call.externalMusicCapable = cmd.VoiceExternalMusicCapable
-	if call.externalMusicCapable && cmd.VoiceMusicProvider == "ytmusic_android" {
-		call.musicProvider = "ytmusic_android"
+	h.voiceMu.Lock()
+	call.externalMusicPlatform = h.mediaEndpoint(c).Platform
+	h.voiceMu.Unlock()
+	if call.externalMusicCapable {
+		if cmd.VoiceMusicProvider == "ytmusic_android" {
+			call.musicProvider = "ytmusic_android"
+		}
+		if cmd.VoiceMusicProvider == "ytmusic_ios" && call.externalMusicPlatform == "ios" {
+			call.musicProvider = "ytmusic_ios"
+		}
 	}
 	call.mediaDeviceModel = cmd.VoiceDeviceModel
 	nonce := make([]byte, 16)
