@@ -13,12 +13,14 @@ import (
 	"everything-go/internal/protocol"
 	"everything-go/internal/session"
 	"everything-go/internal/workitems"
+	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -72,16 +74,19 @@ func TestInboxNativeDeviceFixture(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	type peer struct {
-		h           *Hub
-		exec        *inboxDeviceExecutor
-		events      []eventinbox.Event
-		server      *http.Server
-		permission  atomic.Bool
-		begun       atomic.Bool
-		device      atomic.Value
-		paused      atomic.Bool
-		fileStarted atomic.Bool
-		downloads   atomic.Int32
+		h                *Hub
+		exec             *inboxDeviceExecutor
+		events           []eventinbox.Event
+		server           *http.Server
+		permission       atomic.Bool
+		permissionID     atomic.Value
+		terminals        atomic.Int32
+		unknownDecisions atomic.Int32
+		begun            atomic.Bool
+		device           atomic.Value
+		paused           atomic.Bool
+		fileStarted      atomic.Bool
+		downloads        atomic.Int32
 	}
 	peers := []*peer{}
 	for index, port := range []string{"18766", "18767"} {
@@ -212,7 +217,11 @@ func TestInboxNativeDeviceFixture(t *testing.T) {
 				emitted := make(chan struct{}, 1)
 				p.h.perms = governance.NewPermissionManager(func(event any) {
 					p.h.Emit(event)
-					if _, ok := event.(protocol.PermissionRequest); ok {
+					if _, ok := event.(protocol.PermissionResult); ok {
+						p.terminals.Add(1)
+					}
+					if req, ok := event.(protocol.PermissionRequest); ok {
+						p.permissionID.Store(req.RequestID)
 						select {
 						case emitted <- struct{}{}:
 						default:
@@ -302,13 +311,80 @@ func TestInboxNativeDeviceFixture(t *testing.T) {
 			_ = h.publishExternalEvent(event, dedup)
 			_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 		})
+		mux.HandleFunc("/fixture/attention", func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Query().Get("phase") {
+			case "replay":
+				q := map[string]any{"type": "user_input_request", "request_id": "closed-question", "session_id": "same", "source": "fixture", "kind": "question", "status": "pending", "created_at": time.Now().UnixMilli(), "questions": []any{map[string]any{"question_id": "q", "text": "QA 已處理問題", "type": "question", "free_form": true}}}
+				h.Emit(q)
+				h.Emit(map[string]any{"type": "interaction_resolved", "request_id": "closed-question", "session_id": "same"})
+				h.Emit(map[string]any{"type": "pending_interactions_list", "scope_session_id": "same", "snapshot_all": false, "interactions": []any{q}})
+				h.Emit(q)
+				permission := protocol.NewPermissionRequest("closed-permission", "same", "fixture.no_effect", "QA 已處理核准", "No effect", "", "low", time.Now().Add(time.Minute).UnixMilli())
+				h.Emit(permission)
+				h.Emit(protocol.NewPermissionResult("closed-permission", "same", "fixture.no_effect", "deny", ""))
+				h.Emit(permission)
+			case "completed":
+				now := time.Now().UnixMilli()
+				items := []any{}
+				for i := 0; i < 21; i++ {
+					q := map[string]any{"request_id": fmt.Sprintf("old-%d", i), "session_id": "same", "source": "fixture", "kind": "request_user_input_async", "status": "pending", "is_blocking": false, "created_at": now - 1000 - int64(i), "questions": []any{map[string]any{"question_id": "q", "text": "QA 歷史問題", "type": "question", "free_form": true}}}
+					items = append(items, q)
+				}
+				h.Emit(map[string]any{"type": "pending_interactions_list", "scope_session_id": "same", "snapshot_all": false, "interactions": items})
+				view, _ := h.runtimes.Update("same", "completed", "retained-terminal", 0, "completed", "")
+				h.broadcastRuntime(view)
+				h.Emit(map[string]any{"type": "user_input_request", "request_id": "fresh", "session_id": "same", "source": "fixture", "kind": "request_user_input_async", "status": "pending", "is_blocking": false, "created_at": now + 2000, "questions": []any{map[string]any{"question_id": "q", "text": "QA 完成後的新問題", "type": "question", "free_form": true}}})
+			case "proposals":
+				snap, _ := h.automation.Snapshot(ctx)
+				snap.Revision += 100000
+				prototype := automation.Proposal{ID: "qa-unknown", AuthorityInstanceID: instance, AccountID: "qa-account", ActionType: "fixture.no_effect", TargetID: "synthetic-only", Payload: json.RawMessage(`{}`), PayloadHash: "fixture-hash", DisplayPreview: "QA 未知決策", Status: "proposed", ExpiresAt: time.Now().Add(time.Minute).UnixMilli(), Version: 1, SessionID: "same", OwnerInstanceID: instance}
+				exp := prototype
+				exp.ID = "qa-expiry"
+				exp.DisplayPreview = "QA 即將到期"
+				exp.ExpiresAt = time.Now().Add(4 * time.Second).UnixMilli()
+				failed := prototype
+				failed.ID = "qa-orphan"
+				failed.DisplayPreview = "QA 孤立失敗"
+				failed.Status = "failed"
+				failed.SessionID = ""
+				failed.OwnerInstanceID = ""
+				snap.Proposals = []automation.Proposal{prototype, exp, failed}
+				h.Emit(map[string]any{"type": "automation_snapshot", "snapshot": snap})
+			default:
+				http.Error(w, "unknown phase", 400)
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+		})
+		mux.HandleFunc("/fixture/permission-probe", func(w http.ResponseWriter, r *http.Request) {
+			if p.permissionID.Load() == nil {
+				http.Error(w, "begin first", 409)
+				return
+			}
+			id := p.permissionID.Load().(string)
+			device := "synthetic-wrong-device"
+			decision := "approve"
+			if r.URL.Query().Get("duplicate") == "yes" {
+				device = p.device.Load().(string)
+				decision = "deny"
+			}
+			err := p.h.perms.Resolve(id, decision, device)
+			json.NewEncoder(w).Encode(map[string]any{"rejected": err != nil, "terminals": p.terminals.Load(), "approved": p.permission.Load()})
+		})
 		mux.HandleFunc("/fixture/stats", func(w http.ResponseWriter, r *http.Request) {
 			assignments, _ := h.automation.EventAssignments(ctx)
 			snapshot, _ := h.events.SnapshotIncludingArchived(ctx, p.device.Load().(string), 0)
-			_ = json.NewEncoder(w).Encode(map[string]any{"pending_files": len(h.inbox.Pending(p.device.Load().(string))), "file_downloads": p.downloads.Load(), "feed": h.feed.List(), "session_count": len(h.registry.List()), "target_allowed": h.eventSessionAllowed(sessionObject), "target_state": int(sessionObject.State()), "provider_mock": true, "provider_calls": p.exec.calls.Load(), "answers": p.exec.answered.Load(), "permission_approved": p.permission.Load(), "assignments": assignments, "events": snapshot.Items})
+			_ = json.NewEncoder(w).Encode(map[string]any{"pending_files": len(h.inbox.Pending(p.device.Load().(string))), "file_downloads": p.downloads.Load(), "feed": h.feed.List(), "session_count": len(h.registry.List()), "target_allowed": h.eventSessionAllowed(sessionObject), "target_state": int(sessionObject.State()), "provider_mock": true, "provider_calls": p.exec.calls.Load(), "answers": p.exec.answered.Load(), "permission_approved": p.permission.Load(), "permission_terminals": p.terminals.Load(), "unknown_decisions": p.unknownDecisions.Load(), "assignments": assignments, "events": snapshot.Items})
 		})
 		mux.HandleFunc("/fixture/stop", func(w http.ResponseWriter, r *http.Request) { stopOnce.Do(func() { close(stop) }); w.WriteHeader(204) })
-		mux.HandleFunc("/api/automation/v1/", h.ServeAutomationAPI)
+		mux.HandleFunc("/api/automation/v1/", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == "POST" && strings.Contains(r.URL.Path, "/proposals/qa-unknown/") {
+				p.unknownDecisions.Add(1)
+				http.Error(w, "synthetic unknown ACK; no effect", 503)
+				return
+			}
+			h.ServeAutomationAPI(w, r)
+		})
 		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 			if p.device.Load() == nil || p.paused.Load() {
 				http.Error(w, "fixture enrollment required before native bootstrap", 503)

@@ -851,7 +851,9 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		}
 
 	case "permission_response":
-		h.perms.Resolve(cmd.RequestID, cmd.Decision, c.deviceID)
+		if err := h.perms.Resolve(cmd.RequestID, cmd.Decision, c.deviceID); err != nil {
+			c.enqueueEvent(h.client.Error(cmd.SessionID, cmd.RequestID, err.Error()))
+		}
 
 	// --- WebRTC P2P signaling --------------------------------------------
 	// Bridge is the answerer: webrtc_offer → webrtc_answer (+ baked ICE),
