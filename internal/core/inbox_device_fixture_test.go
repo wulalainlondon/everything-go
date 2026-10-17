@@ -32,6 +32,7 @@ type inboxDeviceExecutor struct {
 	hub      *Hub
 	mu       sync.Mutex
 	question backend.UserInputPayload
+	pending  []backend.UserInputPayload
 	answered atomic.Int32
 	calls    atomic.Int32
 }
@@ -39,6 +40,9 @@ type inboxDeviceExecutor struct {
 func (f *inboxDeviceExecutor) PendingInteractions(id string) []backend.UserInputPayload {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.pending != nil && (id == "" || id == "same") {
+		return append([]backend.UserInputPayload(nil), f.pending...)
+	}
 	if f.question.RequestID != "" && (id == "" || id == "same") {
 		return []backend.UserInputPayload{f.question}
 	}
@@ -330,6 +334,19 @@ func TestInboxNativeDeviceFixture(t *testing.T) {
 					q := map[string]any{"request_id": fmt.Sprintf("old-%d", i), "session_id": "same", "source": "fixture", "kind": "request_user_input_async", "status": "pending", "is_blocking": false, "created_at": now - 1000 - int64(i), "questions": []any{map[string]any{"question_id": "q", "text": "QA 歷史問題", "type": "question", "free_form": true}}}
 					items = append(items, q)
 				}
+				var canonical []backend.UserInputPayload
+				for _, item := range items {
+					raw, _ := json.Marshal(item)
+					var q backend.UserInputPayload
+					_ = json.Unmarshal(raw, &q)
+					canonical = append(canonical, q)
+				}
+				blocking := false
+				fresh := backend.UserInputPayload{RequestID: "fresh", SessionID: "same", Source: "fixture", Kind: "request_user_input_async", Status: "pending", CreatedAt: now + 2000, IsBlocking: &blocking, Questions: []protocol.UserInputQuestion{{QuestionID: "q", Text: "QA 完成後的新問題", Type: "question", FreeForm: true}}}
+				canonical = append(canonical, fresh)
+				p.exec.mu.Lock()
+				p.exec.pending = canonical
+				p.exec.mu.Unlock()
 				h.Emit(map[string]any{"type": "pending_interactions_list", "scope_session_id": "same", "snapshot_all": false, "interactions": items})
 				view, _ := h.runtimes.Update("same", "completed", "retained-terminal", 0, "completed", "")
 				h.broadcastRuntime(view)
