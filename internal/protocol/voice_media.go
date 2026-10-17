@@ -2,12 +2,19 @@ package protocol
 
 // Ephemeral owner-only command. Never replayed into history or offline queues.
 type VoiceMediaCommand struct {
-	CommandID string `json:"command_id"`
-	Sequence  uint64 `json:"sequence"`
-	Action    string `json:"action"`
-	VideoID   string `json:"video_id,omitempty"`
-	Title     string `json:"title,omitempty"`
-	Volume    int    `json:"volume"`
+	Provider       string `json:"provider,omitempty"`
+	Query          string `json:"query,omitempty"`
+	URI            string `json:"uri,omitempty"`
+	ExpectedID     string `json:"expected_id,omitempty"`
+	ExpectedTitle  string `json:"expected_title,omitempty"`
+	ExpectedArtist string `json:"expected_artist,omitempty"`
+	PositionMS     *int64 `json:"position_ms,omitempty"`
+	CommandID      string `json:"command_id"`
+	Sequence       uint64 `json:"sequence"`
+	Action         string `json:"action"`
+	VideoID        string `json:"video_id,omitempty"`
+	Title          string `json:"title,omitempty"`
+	Volume         int    `json:"volume"`
 }
 
 // MediaAudioInfo separates player/system gain observations from human audibility.
@@ -32,4 +39,23 @@ type MediaAudioInfo struct {
 	SystemMediaVolume       *int     `json:"system_media_volume,omitempty"`
 	SystemMediaMuted        *bool    `json:"system_media_muted,omitempty"`
 	VoiceRoute              string   `json:"voice_route,omitempty"`
+}
+
+// ExternalMusicState is a native observation, never a routing address.
+type ExternalMusicState struct {
+	Provider          string   `json:"provider"`
+	PackageName       string   `json:"packageName"`
+	BindingID         string   `json:"bindingId"`
+	State             string   `json:"state"`
+	Error             string   `json:"error"`
+	Title             string   `json:"title"`
+	Artist            string   `json:"artist"`
+	MediaID           string   `json:"mediaId"`
+	SupportedActions  []string `json:"supportedActions"`
+	PositionMS        int64    `json:"positionMs"`
+	ObservationAgeMS  int64    `json:"observationAgeMs"`
+	ActionConfirmed   bool     `json:"actionConfirmed"`
+	PlaybackConfirmed bool     `json:"playbackConfirmed"`
+	TrackMatched      bool     `json:"trackMatched"`
+	OperationID       string   `json:"operationId"`
 }

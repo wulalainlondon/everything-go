@@ -50,7 +50,7 @@ func validMediaAudio(a *protocol.MediaAudioInfo) bool {
 		return false
 	}
 	switch a.AudioProfile {
-	case "", "standard", "car_media", "bluetooth_media":
+	case "", "standard", "car_media", "bluetooth_media", "phone_media":
 	default:
 		return false
 	}
@@ -71,8 +71,12 @@ func validMediaAudio(a *protocol.MediaAudioInfo) bool {
 	default:
 		return false
 	}
+	expectedRoute := "bluetooth_media"
+	if a.AudioProfile == "phone_media" {
+		expectedRoute = "speaker"
+	}
 	if a.SharedRouteVerified != nil && *a.SharedRouteVerified &&
-		((a.AudioProfile != "bluetooth_media" && a.AudioProfile != "car_media") || a.SpeechOutputObservation != "actual_track" || a.SpeechOutputRoute != "bluetooth_media" || a.MicrophoneObservation != "actual_track" || a.MicrophoneInput != "phone") {
+		((a.AudioProfile != "bluetooth_media" && a.AudioProfile != "car_media" && a.AudioProfile != "phone_media") || a.SpeechOutputObservation != "actual_track" || a.SpeechOutputRoute != expectedRoute || a.MicrophoneObservation != "actual_track" || a.MicrophoneInput != "phone") {
 		return false
 	}
 	switch a.CommunicationProfile {

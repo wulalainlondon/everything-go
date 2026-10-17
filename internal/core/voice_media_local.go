@@ -15,7 +15,16 @@ func (h *Hub) openVoiceMediaLocal(c *Client, call *clientVoiceCall) (string, err
 		return "", nil
 	}
 	if h.unifiedMedia != nil {
-		return h.unifiedMedia.instructions(), nil
+		instructions := h.unifiedMedia.instructions()
+		if call.externalMusicCapable {
+			instructions += `
+This Android call also supports official YouTube Music app control. Use the SAME installed bridge-media entry with --method play_music --query SONG_AND_ARTIST --title EXACT_EXPECTED_TITLE [--artist EXACT_EXPECTED_ARTIST], or --method play_music --url REAL_HTTPS_MUSIC_YOUTUBE_WATCH_URL. Do not supply --volume for this provider. For pause/resume/stop/next/previous use --method music_control --action ACTION. --method status [--operation ORIGINAL_INTENT] remains read-only and never replays. Official Music must expose a supported native media session and the user must grant notification-listener access. Unsupported, session unavailable or permission-required results are refusals, never playback. A match requires the correct track plus fresh native state; audibility remains unverified. Do not use private APIs, cookies, ADB or another endpoint as a fallback. The visible-player foreground rule applies to play_youtube only; official Music background support is owned by the official App and membership. No automatic route/system volume changes.
+`
+			if call.musicProvider == "ytmusic_android" {
+				instructions += "The user selected official YouTube Music for this call: prefer play_music for new music requests. Existing iframe play_youtube is a separate explicitly chosen source.\n"
+			}
+		}
+		return instructions, nil
 	}
 	thread := call.session.ResumeID()
 	voice := call.voiceID

@@ -19,23 +19,26 @@ import (
 var voiceIdentifier = regexp.MustCompile(`^[A-Za-z0-9_-]{8,100}$`)
 
 type clientVoiceCall struct {
-	mediaObserveCapable bool
-	mediaDeviceModel    string
-	mediaGeneration     string
-	mediaIPC            *voicemediaipc.Channel
-	mediaCapable        bool
-	media               *voiceMediaSession
-	handoffCapable      bool
-	handoffPeer         string
-	handoffAccount      string
-	handoffTarget       string
-	handoffID           string
-	session             *session.Session
-	voiceID, requestID  string
-	cancel              context.CancelFunc
-	stopping            bool
-	kind                string
-	line                *linevoice.Call
+	externalMusicCapable bool
+	musicProvider        string
+	externalMusic        *externalMusicCall
+	mediaObserveCapable  bool
+	mediaDeviceModel     string
+	mediaGeneration      string
+	mediaIPC             *voicemediaipc.Channel
+	mediaCapable         bool
+	media                *voiceMediaSession
+	handoffCapable       bool
+	handoffPeer          string
+	handoffAccount       string
+	handoffTarget        string
+	handoffID            string
+	session              *session.Session
+	voiceID, requestID   string
+	cancel               context.CancelFunc
+	stopping             bool
+	kind                 string
+	line                 *linevoice.Call
 }
 
 func voiceEvent(cmd clientproto.Command, state, message string) protocol.RealtimeVoiceEvent {
@@ -89,6 +92,10 @@ func (h *Hub) handleVoiceStart(c *Client, cmd clientproto.Command) {
 	ctx, cancel := context.WithTimeout(parent, 60*time.Second)
 	call := &clientVoiceCall{mediaCapable: cmd.VoiceMediaCapable, handoffCapable: cmd.LineHandoffCapable, session: s, voiceID: cmd.VoiceID, requestID: cmd.RequestID, cancel: cancel}
 	call.mediaObserveCapable = cmd.VoiceMediaObserveCapable
+	call.externalMusicCapable = cmd.VoiceExternalMusicCapable
+	if call.externalMusicCapable && cmd.VoiceMusicProvider == "ytmusic_android" {
+		call.musicProvider = "ytmusic_android"
+	}
 	call.mediaDeviceModel = cmd.VoiceDeviceModel
 	nonce := make([]byte, 16)
 	if _, err := rand.Read(nonce); err != nil {

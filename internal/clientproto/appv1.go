@@ -108,28 +108,31 @@ type Command struct {
 	MsgUUID          string
 	Around           int
 
-	SDP                      string
-	VoiceMediaCapable        bool
-	VoiceMediaObserveCapable bool
-	VoiceDeviceModel         string
-	MediaCommandID           string
-	MediaSequence            uint64
-	MediaState               string
-	MediaErrorCode           string
-	MediaVideoID             string
-	MediaAudio               *protocol.MediaAudioInfo
-	MediaVolume              *int
-	VoiceID                  string
-	VoiceName                string
-	VoiceMode                string
-	LineHandoffCapable       bool
-	LinePeerName             string
-	LineAccountRef           string
-	LineCallID               string
-	LineTargetRef            string
-	Candidate                string
-	SDPMid                   string
-	SDPMLineIndex            *int
+	SDP                       string
+	VoiceExternalMusicCapable bool
+	VoiceMusicProvider        string
+	ExternalMusic             *protocol.ExternalMusicState
+	VoiceMediaCapable         bool
+	VoiceMediaObserveCapable  bool
+	VoiceDeviceModel          string
+	MediaCommandID            string
+	MediaSequence             uint64
+	MediaState                string
+	MediaErrorCode            string
+	MediaVideoID              string
+	MediaAudio                *protocol.MediaAudioInfo
+	MediaVolume               *int
+	VoiceID                   string
+	VoiceName                 string
+	VoiceMode                 string
+	LineHandoffCapable        bool
+	LinePeerName              string
+	LineAccountRef            string
+	LineCallID                string
+	LineTargetRef             string
+	Candidate                 string
+	SDPMid                    string
+	SDPMLineIndex             *int
 
 	Answers   map[string]any
 	Cancelled *bool
@@ -288,9 +291,9 @@ func (AppV1) ParseCommand(in protocol.Inbound) Command {
 		MsgUUID:          in.MsgUUID,
 		Around:           in.Around,
 
-		SDP:               in.SDP,
-		VoiceID:           in.VoiceID,
-		VoiceMediaCapable: in.VoiceMediaCapable, VoiceMediaObserveCapable: in.VoiceMediaObserveCapable, VoiceDeviceModel: in.VoiceDeviceModel, MediaCommandID: in.MediaCommandID, MediaSequence: in.MediaSequence, MediaState: in.MediaState, MediaErrorCode: in.MediaErrorCode, MediaVideoID: in.MediaVideoID, MediaVolume: in.MediaVolume, MediaAudio: in.MediaAudio,
+		SDP:                       in.SDP,
+		VoiceID:                   in.VoiceID,
+		VoiceExternalMusicCapable: in.VoiceExternalMusicCapable, VoiceMusicProvider: in.VoiceMusicProvider, ExternalMusic: in.ExternalMusic, VoiceMediaCapable: in.VoiceMediaCapable, VoiceMediaObserveCapable: in.VoiceMediaObserveCapable, VoiceDeviceModel: in.VoiceDeviceModel, MediaCommandID: in.MediaCommandID, MediaSequence: in.MediaSequence, MediaState: in.MediaState, MediaErrorCode: in.MediaErrorCode, MediaVideoID: in.MediaVideoID, MediaVolume: in.MediaVolume, MediaAudio: in.MediaAudio,
 		VoiceName:          in.VoiceName,
 		VoiceMode:          in.VoiceMode,
 		LineHandoffCapable: in.LineHandoffCapable,

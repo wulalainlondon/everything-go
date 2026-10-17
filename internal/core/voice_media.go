@@ -163,6 +163,27 @@ func (h *Hub) ExecuteVoiceMedia(ctx context.Context, caller backend.SessionContr
 // local_user_socket authority is the private per-call OS-user channel, never a
 // fabricated SessionControlCaller. Both transports share the same scope checks.
 func (h *Hub) executeVoiceMedia(ctx context.Context, parent *session.Session, voiceID, requestID, operationID, transport string, expectedCall *clientVoiceCall, method string, input backend.VoiceMediaRequest) (any, error) {
+	if method == "play_music" || method == "music_control" {
+		return h.executeExternalMusic(ctx, parent, voiceID, requestID, operationID, transport, expectedCall, method, input)
+	}
+	if method == "status" || method == "control" {
+		h.voiceMu.Lock()
+		external := false
+		for c, v := range h.voiceClients {
+			if c.live() && v.session == parent && v.voiceID == voiceID && v.musicProvider == "ytmusic_android" {
+				external = true
+				break
+			}
+		}
+		h.voiceMu.Unlock()
+		if external {
+			mapped := method
+			if method == "control" {
+				mapped = "music_control"
+			}
+			return h.executeExternalMusic(ctx, parent, voiceID, requestID, operationID, transport, expectedCall, mapped, input)
+		}
+	}
 	// Use only on the validation path below. Once enqueueEvent is reached, an
 	// error cannot prove that the device did not receive the command.
 	refuse := func(err error) (any, error) {
@@ -174,6 +195,9 @@ func (h *Hub) executeVoiceMedia(ctx context.Context, parent *session.Session, vo
 	s, ok := h.registry.Get(parent.ID)
 	if !ok || s != parent || !h.controls.MobileMayWrite(s.ID) {
 		return refuse(errors.New("voice_media_caller_not_owned"))
+	}
+	if input.Query != "" || input.Artist != "" || input.PositionMS != nil {
+		return refuse(errors.New("voice_media_arguments_invalid"))
 	}
 	action := input.Action
 	video := ""
@@ -236,6 +260,13 @@ func (h *Hub) executeVoiceMedia(ctx context.Context, parent *session.Session, vo
 		call.media = &voiceMediaSession{receipts: map[string]*voiceMediaReceipt{}, state: "idle", volume: 35}
 	}
 	m := call.media
+	if method == "play_youtube" {
+		if call.musicProvider == "ytmusic_android" && call.externalMusic != nil && call.externalMusic.current != nil && call.externalMusic.current.result.State == "playing" {
+			h.voiceMu.Unlock()
+			return refuse(errors.New("media_provider_switch_requires_stop"))
+		}
+		call.musicProvider = "youtube"
+	}
 	if method == "status" {
 		if m.current == nil {
 			h.voiceMu.Unlock()
@@ -309,6 +340,10 @@ func (h *Hub) executeVoiceMedia(ctx context.Context, parent *session.Session, vo
 	return mediaResult(m, receipt), nil
 }
 func (h *Hub) handleVoiceMediaState(c *Client, cmd clientproto.Command) {
+	if cmd.ExternalMusic != nil {
+		h.handleExternalMusicState(c, cmd)
+		return
+	}
 	h.voiceMu.Lock()
 	defer h.voiceMu.Unlock()
 	call := h.voiceClients[c]
