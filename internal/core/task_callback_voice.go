@@ -8,6 +8,7 @@ import (
 	"everything-go/internal/clientproto"
 	"everything-go/internal/session"
 	"strings"
+	"time"
 )
 
 // A callback offer is accepted only under its original claimed invitation.
@@ -61,10 +62,11 @@ func (h *Hub) observeCallbackSpeech(call *clientVoiceCall, event backend.Realtim
 	policy, invitation := call.callbackPolicy, call.callbackReport
 	h.voiceMu.Unlock()
 	r, e := h.callbacks.Mutate(context.Background(), "transcript_"+invitation, "transcript_"+callbacks.Digest(got), policy, callbacks.AnyRevision, func(x *callbacks.Record, _ bool) error {
-		if x.Invite == nil || x.Invite.ID != invitation || x.Invite.Voice != call.voiceID {
+		if x.Invite == nil || x.Invite.ID != invitation || x.Invite.Voice != call.voiceID || x.Invite.ContentVerified || x.Invite.ContentMismatch {
 			return callbacks.ErrUnavailable
 		}
 		x.Invite.ContentVerified = verified
+		x.Invite.ContentMismatch = !verified
 		if verified {
 			x.State = "report_text_verified"
 			if x.Invite.AudioObserved {
@@ -74,11 +76,95 @@ func (h *Hub) observeCallbackSpeech(call *clientVoiceCall, event backend.Realtim
 			x.State = "report_delivery_mismatch"
 			x.Invite.Reason = "語音內容與封存結果不符，請以文字報告為準；不會自動重播"
 		}
-		x.Invite.State = x.State
+		if !callbacks.Terminal(x.Invite.State) {
+			x.Invite.State = x.State
+		}
+		if !x.Enabled {
+			x.State = "disabled"
+		}
 		return nil
 	})
 	if e == nil {
 		h.publishCallbackRecord(r)
+	}
+}
+
+func (h *Hub) readCallbackSpeech(c *Client, s *session.Session, r callbacks.Record, in callbackInput) {
+	if r.Invite == nil {
+		return
+	}
+	h.voiceMu.Lock()
+	call := h.voiceClients[c]
+	valid := call != nil && call.voiceID == in.Voice && call.callbackReport == r.Invite.ID
+	h.voiceMu.Unlock()
+	if !valid {
+		return
+	}
+	h.refreshCallbackSpeech(r)
+}
+
+// Readback also works after closure and across a service restart. Its only
+// effect is evidence for the original invitation, never another call or task.
+func (h *Hub) refreshCallbackSpeech(r callbacks.Record) {
+	if r.Invite == nil || r.Report == nil || r.Invite.Voice == "" || r.Invite.ReportOperation == "" || r.Invite.ContentVerified || r.Invite.ContentMismatch || r.State == "report_delivery_mismatch" {
+		return
+	}
+	s, exists := h.registry.Get(r.Session)
+	if !exists || s.ResumeID() != r.Report.Thread {
+		return
+	}
+	reader, ok := h.exec.(backend.RealtimeSpeechReader)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	since := r.Invite.ClaimedAt
+	if since == 0 {
+		since = r.Invite.Issued
+	}
+	for attempt := 0; attempt < 3; attempt++ {
+		proof, e := reader.ReadRealtimeVoiceSpeech(ctx, s, r.Invite.Voice, since)
+		if e != nil {
+			return
+		}
+		if proof.ThreadID == r.Thread && proof.VoiceID == r.Invite.Voice && proof.Text != "" {
+			want, got := callbacks.SpokenKey(callbacks.Speech(r.Name, r.Report.Status, r.Report.Text)), callbacks.SpokenKey(proof.Text)
+			if got == want || !strings.HasPrefix(want, got) {
+				updated, e := h.callbacks.Mutate(ctx, "readback_"+r.Invite.ID, "readback_"+callbacks.Digest(got+r.Report.Hash), r.ID, callbacks.AnyRevision, func(x *callbacks.Record, _ bool) error {
+					if x.Invite == nil || x.Report == nil || x.Invite.ID != r.Invite.ID || x.Invite.Voice != proof.VoiceID || x.Report.Hash != r.Report.Hash || x.Invite.ContentVerified || x.Invite.ContentMismatch {
+						return callbacks.ErrUnavailable
+					}
+					x.Invite.ContentVerified = got == want
+					x.Invite.ContentMismatch = got != want
+					if got == want {
+						x.State = "report_text_verified"
+						if x.Invite.AudioObserved {
+							x.State = "report_audio_observed"
+						}
+					} else {
+						x.State = "report_delivery_mismatch"
+						x.Invite.Reason = "語音內容未完全核對，請以文字結果為準；不會自動重播"
+					}
+					if !callbacks.Terminal(x.Invite.State) {
+						x.Invite.State = x.State
+					}
+					if !x.Enabled {
+						x.State = "disabled"
+					}
+					return nil
+				})
+				if e == nil {
+					h.publishCallbackRecord(updated)
+				}
+				return
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(200 * time.Millisecond):
+		}
 	}
 }
 func (h *Hub) cancelConnectingCallback(r callbacks.Record) {

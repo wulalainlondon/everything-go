@@ -160,6 +160,9 @@ func (h *Hub) executeTaskCallback(ctx context.Context, c *Client, in callbackInp
 			if (r.Requester == owner && r.RequesterBinding == callbackBinding(c)) || (r.Recipient.Device == owner && r.Recipient.Binding == callbackBinding(c)) {
 				r := *h.callbackView(c, &r)
 				out.Records = append(out.Records, r)
+				if len(out.Records) <= 4 {
+					go h.refreshCallbackSpeech(r)
+				}
 			}
 		}
 		if in.result != nil {
@@ -232,6 +235,9 @@ func (h *Hub) executeTaskCallback(ctx context.Context, c *Client, in callbackInp
 			r = callbacks.Record{ID: id, Authority: h.cfg.InstanceID, Session: s.ID, Request: in.Request, State: "disabled"}
 		}
 		h.callbackRespond(c, in, &r, e)
+		if found && e == nil {
+			go h.refreshCallbackSpeech(r)
+		}
 		return
 	}
 	var target callbacks.Recipient
@@ -399,6 +405,9 @@ func (h *Hub) executeTaskCallback(ctx context.Context, c *Client, in callbackInp
 						i.State = "report_output_unverified"
 						r.State = i.State
 					}
+					if !r.Enabled {
+						r.State = "disabled"
+					}
 				}
 				if in.Action == "report_finished" {
 					if i.ReportOperation == "" || !i.ContentVerified || !i.AudioObserved {
@@ -427,6 +436,9 @@ func (h *Hub) executeTaskCallback(ctx context.Context, c *Client, in callbackInp
 	}
 	if in.Action == "report" {
 		go h.speakCallback(c, s, r, in)
+	}
+	if in.Action == "audio_observed" {
+		go h.readCallbackSpeech(c, s, r, in)
 	}
 	if in.Action == "set" && r.Enabled && r.Report == nil {
 		go h.reconcileTaskCallbacks(context.Background(), s.ID, in.Request)

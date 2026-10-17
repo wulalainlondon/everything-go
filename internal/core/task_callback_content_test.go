@@ -5,6 +5,7 @@ import (
 	"everything-go/internal/backend"
 	"everything-go/internal/callbacks"
 	"everything-go/internal/clientproto"
+	"everything-go/internal/session"
 	"testing"
 	"time"
 )
@@ -101,6 +102,54 @@ func TestDisablingCallbackAfterConnectionDoesNotHangUpOrRestartWork(t *testing.T
 			current, _, _ := h.callbacks.Get(context.Background(), r.ID)
 			if current.Enabled || current.State != "disabled" || current.Invite.State == "revoked" || e.stops.Load() != 0 || e.cancels.Load() != 0 {
 				t.Fatal("policy cancellation affected live audio or work", current)
+			}
+		})
+	}
+}
+
+type callbackReadbackExec struct {
+	*callbackExec
+	proof backend.RealtimeSpeechEvidence
+	since int64
+}
+
+func (e *callbackReadbackExec) ReadRealtimeVoiceSpeech(_ context.Context, _ *session.Session, _ string, since int64) (backend.RealtimeSpeechEvidence, error) {
+	e.since = since
+	return e.proof, nil
+}
+func TestCallbackReadbackAfterClosureVerifiesWithoutResurrectingOrReplaying(t *testing.T) {
+	for _, correct := range []bool{true, false} {
+		t.Run(map[bool]string{true: "exact", false: "mismatch"}[correct], func(t *testing.T) {
+			h, _, exec, r := callbackReady(t)
+			r, err := h.callbacks.Mutate(context.Background(), "readback-fixture", "readback-fixture", r.ID, r.Revision, func(x *callbacks.Record, _ bool) error {
+				x.Invite.State = "ended"
+				x.Invite.Voice = "closed-voice"
+				x.Invite.ReportOperation = "original-report"
+				x.Invite.ClaimedAt = 1234
+				x.Invite.AudioObserved = true
+				x.State = "report_pending"
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			text := callbacks.Speech(r.Name, r.Report.Status, r.Report.Text)
+			if !correct {
+				text = "some other task"
+			}
+			reader := &callbackReadbackExec{callbackExec: exec, proof: backend.RealtimeSpeechEvidence{ThreadID: r.Thread, VoiceID: r.Invite.Voice, Text: text}}
+			h.SetExecutor(reader)
+			h.refreshCallbackSpeech(r)
+			got, _, err := h.callbacks.Get(context.Background(), r.ID)
+			if err != nil || got.Invite.State != "ended" || got.Invite.ContentVerified != correct || got.Invite.ContentMismatch == correct || reader.since != 1234 {
+				t.Fatal(got, err, reader.since)
+			}
+			rev := got.Revision
+			reader.proof.Text = "a later followup cannot rewrite evidence"
+			h.refreshCallbackSpeech(got)
+			got, _, _ = h.callbacks.Get(context.Background(), r.ID)
+			if got.Revision != rev || exec.starts.Load() != 0 || exec.appends.Load() != 0 || exec.cancels.Load() != 0 {
+				t.Fatal("readback caused an effect or rewrote proof", got)
 			}
 		})
 	}

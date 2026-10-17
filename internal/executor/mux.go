@@ -364,3 +364,10 @@ func (m *Mux) AppendRealtimeVoiceSpeech(ctx context.Context, s *session.Session,
 	}
 	return p.AppendRealtimeVoiceSpeech(ctx, s, voice, text)
 }
+func (m *Mux) ReadRealtimeVoiceSpeech(ctx context.Context, s *session.Session, voice string, since int64) (backend.RealtimeSpeechEvidence, error) {
+	p, ok := m.pick(s).(backend.RealtimeSpeechReader)
+	if !ok {
+		return backend.RealtimeSpeechEvidence{}, fmt.Errorf("原來源未提供逐通話播報回讀")
+	}
+	return p.ReadRealtimeVoiceSpeech(ctx, s, voice, since)
+}

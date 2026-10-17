@@ -16,7 +16,9 @@ type RealtimeVoiceStart struct {
 	OnEvent             func(RealtimeVoiceEvent)
 }
 type RealtimeVoiceAnswer struct{ ThreadID, VoiceID, SDP string }
-type RealtimeVoiceEvent struct{ State, Text, Role, Message, TranscriptVoiceID string }
+type RealtimeVoiceEvent struct {
+	State, Text, Role, Message, TranscriptVoiceID string
+}
 type RealtimeVoiceExecutor interface {
 	StartRealtimeVoice(context.Context, *session.Session, RealtimeVoiceStart) (RealtimeVoiceAnswer, error)
 	StopRealtimeVoice(context.Context, *session.Session, string) error
@@ -35,4 +37,11 @@ func ValidRealtimeVoiceName(name string) bool {
 // RealtimeSpeechExecutor speaks output text without admitting a new user task.
 type RealtimeSpeechExecutor interface {
 	AppendRealtimeVoiceSpeech(context.Context, *session.Session, string, string) error
+}
+
+type RealtimeSpeechEvidence struct{ ThreadID, VoiceID, Text string }
+
+// Generation-pinned provider readback; this never starts or repeats speech.
+type RealtimeSpeechReader interface {
+	ReadRealtimeVoiceSpeech(context.Context, *session.Session, string, int64) (RealtimeSpeechEvidence, error)
 }

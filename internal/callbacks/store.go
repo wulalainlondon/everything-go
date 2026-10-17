@@ -43,9 +43,11 @@ type Report struct {
 	Turn           string `json:"turn"`
 }
 type Invitation struct {
+	ClaimedAt       int64  `json:"claimed_at,omitempty"`
 	Manual          bool   `json:"manual,omitempty"`
 	AudioObserved   bool   `json:"audio_observed,omitempty"`
 	ContentVerified bool   `json:"content_verified,omitempty"`
+	ContentMismatch bool   `json:"content_mismatch,omitempty"`
 	ID              string `json:"id"`
 	Generation      uint64 `json:"generation"`
 	State           string `json:"state"`
@@ -263,6 +265,7 @@ func Claim(r *Record, device, binding, invitation, operation string, now int64) 
 		return ErrUnavailable
 	}
 	i.Claim = operation
+	i.ClaimedAt = now
 	i.State = "claimed"
 	r.State = "connecting"
 	return nil
