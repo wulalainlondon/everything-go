@@ -72,15 +72,25 @@ func TestAuditDuplicatePermissionResultMustMatchAcceptedGateDecision(t *testing.
 func TestPermissionDecisionTimeoutRaceHasOneMatchingTerminal(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		c := &capEmit{}
-		m := NewPermissionManager(c.emit, "enforce")
-		m.ttl = time.Millisecond
+		ready := make(chan string, 1)
+		m := NewPermissionManager(func(event any) {
+			c.emit(event)
+			if request, ok := event.(protocol.PermissionRequest); ok {
+				ready <- request.RequestID
+			}
+		}, "enforce")
+		m.ttl = 3 * time.Millisecond
 		done := make(chan bool, 1)
 		go func() { done <- m.Request("owner", "fixture.none", "t", "j", "", "low", "scope") }()
-		id := c.waitRequestID(t)
+		id := <-ready
 		var wg sync.WaitGroup
 		for _, decision := range []string{"approve", "deny"} {
 			wg.Add(1)
-			go func(d string) { defer wg.Done(); m.Resolve(id, d, "owner") }(decision)
+			go func(d string) {
+				defer wg.Done()
+				time.Sleep(time.Duration(i%4) * time.Millisecond)
+				m.Resolve(id, d, "owner")
+			}(decision)
 		}
 		accepted := <-done
 		wg.Wait()
