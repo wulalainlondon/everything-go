@@ -19,6 +19,9 @@ func RunCLI(args []string, out, stderr io.Writer) int {
 	operation := f.String("operation", "", "Original operation for status")
 	url := f.String("url", "", "Actual HTTPS YouTube video URL")
 	title := f.String("title", "", "Track label")
+	query := f.String("query", "", "Official Music search query")
+	artist := f.String("artist", "", "Expected Music artist")
+	position := f.Int64("position-ms", -1, "Music seek position")
 	action := f.String("action", "", "pause, resume, stop or volume")
 	volume := f.Int("volume", -1, "Player volume 0..100")
 	failure := func(e error) int { json.NewEncoder(out).Encode(Reply{Error: e.Error()}); return 1 }
@@ -34,6 +37,13 @@ func RunCLI(args []string, out, stderr io.Writer) int {
 	q.Input.URL = *url
 	q.Input.Title = *title
 	q.Input.Action = *action
+	q.Input.Query = *query
+	q.Input.Artist = *artist
+	f.Visit(func(v *flag.Flag) {
+		if v.Name == "position-ms" {
+			q.Input.PositionMS = position
+		}
+	})
 	provided := false
 	f.Visit(func(v *flag.Flag) {
 		if v.Name == "volume" {
