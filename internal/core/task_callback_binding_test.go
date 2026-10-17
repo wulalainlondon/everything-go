@@ -90,4 +90,8 @@ func TestCallbackWireSourceIsCanonicalAndAudienceIsPairGenerationBound(t *testin
 	}
 	h.publishCallbackRecord(r)
 	assertNoTypeWithin(t, c, "task_callback", 30*time.Millisecond)
+	response := callbackAction(t, h, c, callbackInput{Action: "sync", Operation: "callback_sync_repaired_device", Native: true})
+	if rows, ok := response["records"].([]any); ok && len(rows) > 0 {
+		t.Fatal("new pairing inherited old callback state", response)
+	}
 }

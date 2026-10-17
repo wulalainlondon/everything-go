@@ -157,7 +157,7 @@ func (h *Hub) executeTaskCallback(ctx context.Context, c *Client, in callbackInp
 		all, e := h.callbacks.List(ctx)
 		out := callbackEvent{Type: "task_callback", Authority: h.cfg.InstanceID, Operation: in.Operation, Accepted: e == nil, Devices: h.callbackDevices()}
 		for _, r := range all {
-			if r.Requester == owner || (r.Recipient.Device == owner && r.Recipient.Binding == callbackBinding(c)) {
+			if (r.Requester == owner && r.RequesterBinding == callbackBinding(c)) || (r.Recipient.Device == owner && r.Recipient.Binding == callbackBinding(c)) {
 				r := *h.callbackView(c, &r)
 				out.Records = append(out.Records, r)
 			}
@@ -274,6 +274,9 @@ func (h *Hub) executeTaskCallback(ctx context.Context, c *Client, in callbackInp
 		}
 		switch in.Action {
 		case "set", "request_now":
+			if (in.Action == "request_now" || in.Enabled) && r.Thread != "" && r.Thread != s.ResumeID() {
+				return errors.New("原任務的native thread已變更，不能轉接其他對話匯報")
+			}
 			if (in.Action == "request_now" || in.Enabled) && r.Invite != nil && r.Invite.Claim != "" && !callbacks.Terminal(r.Invite.State) {
 				return errors.New("匯報已接聽，請先結束目前通話")
 			}
@@ -284,10 +287,15 @@ func (h *Hub) executeTaskCallback(ctx context.Context, c *Client, in callbackInp
 			if in.Action == "request_now" && r.Report == nil {
 				return errors.New("正式結果尚未準備好")
 			}
+			if in.Action == "request_now" && !h.callbackReportCurrent(ctx, *r) {
+				return errors.New("來源或必要驗收條件已改變，請回原任務核對")
+			}
 			if r.Invite != nil && !callbacks.Terminal(r.Invite.State) {
 				r.Invite.State = "revoked"
 			}
 			r.Enabled = true
+			r.Thread = s.ResumeID()
+			r.Config = s.SettingsSnapshot().ConfigRevision
 			r.Failures = in.Failures
 			r.Requester = owner
 			r.RequesterBinding = callbackBinding(c)
