@@ -269,3 +269,6 @@ func ToolInputs() (map[string]any, error) {
 func CompilerTag() string {
 	return fmt.Sprintf("%s; github.com/santhosh-tekuri/jsonschema/v6@v6.0.2", "draft-2020-12")
 }
+
+// Shared transport integer constraint, independent of version definitions.
+func ValidateWireNumbers(value any) error { return wireNumbers(value) }

@@ -258,14 +258,14 @@ func (h *Hub) appendCapacityDelegation(ctx context.Context, c taskapi.Authorized
 	if e != nil {
 		return nil, e
 	}
-	proof, nativeAccepted, e := h.messageQueue.ExactNativeAcceptance(base.ChildSessionID, base.ChildRequestID)
+	proofThread, e := h.originalDelegationThread(ctx, base)
 	if e != nil {
 		return nil, e
 	}
-	if !nativeAccepted || proof.ThreadID != target.ResumeID() {
+	if proofThread != target.ResumeID() {
 		return nil, taskapi.Failure("stale_revision", "known_none", "refresh_identity")
 	}
-	if e = h.validateDelegationChild(ctx, base, target, proof.ThreadID, revision, true); e != nil {
+	if e = h.validateDelegationChild(ctx, base, target, proofThread, revision, true); e != nil {
 		return nil, taskapi.Failure("permission", "known_none", "request_scope_change")
 	}
 	if thread, rev, pinned, e := h.delegations.NativeThread(ctx, target.ID); e != nil {

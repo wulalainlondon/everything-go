@@ -2904,6 +2904,10 @@ func codexTurnParams(threadID string, input []map[string]any, effort string) map
 
 func (c *Codex) codexTurnParamsForSession(threadID string, input []map[string]any, snap session.Snapshot, sandboxOverride string) map[string]any {
 	params := codexTurnParams(threadID, input, snap.Effort)
+	if snap.Model != "" {
+		// Keep the admitted model explicit when resuming an older native thread.
+		params["model"] = snap.Model
+	}
 	params["sandboxPolicy"] = c.sessionSandboxPolicy(snap, sandboxOverride)
 	if snap.ServiceTier != "" {
 		params["serviceTier"] = snap.ServiceTier
@@ -3058,6 +3062,15 @@ func (c *Codex) ensureThread(s *session.Session, st *codexState) error {
 	if pinErr != nil {
 		return pinErr
 	}
+	if c.taskProvider != nil {
+		scope, e := c.taskProvider.TaskWorkerScope(s)
+		if e != nil {
+			return e
+		}
+		if scope != nil {
+			preserveContext = true
+		}
+	}
 	if preserveContext {
 		if fi, e := os.Stat(runtime.ExpandPath(snap.Cwd)); e != nil || !fi.IsDir() {
 			return errors.New("delegation_original_workspace_unavailable")
@@ -3069,13 +3082,22 @@ func (c *Codex) ensureThread(s *session.Session, st *codexState) error {
 			return err
 		}
 		if scope != nil {
+			if err := c.ValidateExistingTaskScope(s, *scope, s.Snapshot().Cwd); err != nil {
+				return err
+			}
 			params := map[string]any{"threadId": have, "excludeTurns": true}
 			if err = c.applyTaskAPIThreadTools(s, params); err != nil {
 				return err
 			}
-			if _, err = c.rpcCall("thread/resume", params, 15*time.Second); err != nil {
+			reply, err := c.rpcCall("thread/resume", params, 15*time.Second)
+			if err != nil {
 				return errors.New("unsupported: bounded task policy rebind failed")
 			}
+			var resumed struct{ Thread struct{ ID string } }
+			if json.Unmarshal(reply, &resumed) != nil || resumed.Thread.ID != have {
+				return errors.New("unsupported: bounded original thread changed")
+			}
+
 		}
 	}
 	if have != "" {
@@ -3228,7 +3250,11 @@ func (c *Codex) ensureThread(s *session.Session, st *codexState) error {
 	c.mu.Lock()
 	c.threadToSession[threadID] = s
 	c.mu.Unlock()
-	c.applyThreadRuntimeMetadata(s, threadMetadataRaw)
+	if !preserveContext {
+		c.applyThreadRuntimeMetadata(s, threadMetadataRaw)
+	}
+	// Retained task/owner profiles are immutable. Thread defaults are not the
+	// admitted turn configuration and must not disable its scoped toolset.
 
 	if recovery == nil {
 		s.SetResumeID(threadID)

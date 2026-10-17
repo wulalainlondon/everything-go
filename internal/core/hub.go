@@ -77,6 +77,7 @@ type Config struct {
 type Hub struct {
 	historySequence    atomic.Uint64
 	unifiedMedia       *unifiedVoiceMedia
+	nativeCapture      atomic.Pointer[NativeResponseCapture]
 	continuityCompatMu sync.Mutex
 
 	taskService         *taskapi.Service

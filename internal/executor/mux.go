@@ -356,3 +356,18 @@ func (m *Mux) TaskAPICapabilities() []taskapi.ProviderCapability {
 	}
 	return out
 }
+
+// Only a retained bounded task may use this enforcer; it grants no arbitrary
+// existing-target creation route and changes no provider/global settings.
+func (m *Mux) ExistingTaskScopeMode() string { return "retained_bounded_only" }
+func (m *Mux) ValidateExistingTaskScope(s *session.Session, scope taskapi.ChildScope, cwd string) error {
+	e, ok := m.byBackend[s.Backend()]
+	if !ok {
+		return taskapi.Failure("unsupported", "known_none", "read_capabilities")
+	}
+	guard, ok := e.(backend.ExistingTaskScopeEnforcer)
+	if !ok {
+		return taskapi.Failure("unsupported", "known_none", "read_capabilities")
+	}
+	return guard.ValidateExistingTaskScope(s, scope, cwd)
+}

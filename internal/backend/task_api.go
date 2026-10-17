@@ -2,6 +2,7 @@ package backend
 
 import (
 	"context"
+	"encoding/json"
 	"everything-go/internal/session"
 	"everything-go/internal/taskapi"
 )
@@ -51,4 +52,9 @@ type ExistingTaskScopeEnforcer interface {
 }
 type TaskCapabilitySource interface {
 	TaskAPICapabilities() []taskapi.ProviderCapability
+}
+
+// Original response owner only, optional default-off read evidence sink.
+type NativeTaskResponseCapture interface {
+	CaptureTaskResponse(context.Context, TaskCaller, json.RawMessage, taskapi.Response) error
 }
