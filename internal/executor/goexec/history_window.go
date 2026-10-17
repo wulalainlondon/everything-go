@@ -3,6 +3,7 @@ package goexec
 import (
 	"everything-go/internal/history"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 )
@@ -64,12 +65,7 @@ func (c *Codex) historyFileWindow(path string, cursor int) (history.FileWindow, 
 	if e != nil {
 		return history.FileWindow{}, e
 	}
-	reader, closeFn, e := openCodexRollout(path)
-	if e != nil {
-		return history.FileWindow{}, e
-	}
-	defer closeFn()
-	window, e := history.ReadStreamWindow(reader, cursor, history.LoadMaxBytes())
+	window, e := history.ReadStreamWindow(func() (io.Reader, func(), error) { return openCodexRollout(path) }, cursor, history.LoadMaxBytes())
 	if e != nil {
 		return window, e
 	}

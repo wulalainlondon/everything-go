@@ -142,12 +142,12 @@ func (h *Hub) buildHistoryRangeProof(provider backend.HistoryProvider, s *sessio
 		return nil, fmt.Errorf("history provider lacks scoped source generations")
 	}
 	generations := map[string]string{}
-	for id, readGeneration := range res.SourceGenerations {
+	for _, id := range ids {
 		gen, e := source.HistorySourceGeneration(id)
 		if e != nil {
 			return nil, e
 		}
-		if gen == "" || gen != readGeneration {
+		if gen == "" || res.SourceGenerations[id] != "" && gen != res.SourceGenerations[id] {
 			return nil, fmt.Errorf("history source generation changed while reading")
 		}
 		generations[id] = gen

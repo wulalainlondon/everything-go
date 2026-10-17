@@ -157,3 +157,31 @@ func TestHistoryFrameBudgetKeepsAdjacentBoundariesWithoutMutatingCachedResult(t 
 		t.Fatal("cache entry mutated")
 	}
 }
+
+func TestHistoryRangeProofRechecksEarlierLoadedGenerationDuringTailRefresh(t *testing.T) {
+	h, _ := newTestHub(t)
+	p := &historyRangeFixtureProvider{byID: map[string][]map[string]any{"old": {scopedHistoryRow("old", 1)}, "new": {scopedHistoryRow("new", 1)}}, generation: map[string]string{"old": "original-old", "new": "original-new"}}
+	s := h.registry.Create("range-old-refresh", "Synthetic", "/tmp", "codex", "", "read-only", "new")
+	s.AddHistoricalResumeID("old")
+	opts := history.Opts{Scoped: true, Mode: "continuation", KnownLast: "codex:new:line:1", Limit: 2}
+	result, e := loadScopedLogicalHistory(p, s.ResumeIDs(), opts)
+	if e != nil {
+		t.Fatal(e)
+	}
+	cmd := clientproto.Command{HistoryContinuity: true, HistoryRequestID: "same-tail-recheck", Mode: "continuation", KnownLast: opts.KnownLast}
+	proof, e := h.buildHistoryRangeProof(p, s, s.ResumeIDs(), "new", cmd, result)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if proof.Generations["old"] != "original-old" {
+		t.Fatal("tail refresh omitted earlier logical source generation")
+	}
+	p.generation["old"] = "rewritten-old"
+	next, e := h.buildHistoryRangeProof(p, s, s.ResumeIDs(), "new", cmd, result)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if next.Generations["old"] == proof.Generations["old"] {
+		t.Fatal("rewritten archive concealed by unchanged current tail")
+	}
+}

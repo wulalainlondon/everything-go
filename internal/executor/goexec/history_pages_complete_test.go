@@ -156,3 +156,76 @@ func TestCodexHistoryWindowPagesKeepCommentaryAndTurnOwnershipAtEdges(t *testing
 		}
 	}
 }
+
+func TestCodexGzipHistoryWindowPagesKeepCommentaryAndTurnOwnershipAtEdges(t *testing.T) {
+	root := t.TempDir()
+	thread := "00000000-0000-0000-0000-000000000982"
+	var raw strings.Builder
+	for turn := 1; turn <= 30; turn++ {
+		fmt.Fprintf(&raw, "{\"type\":\"turn_context\",\"payload\":{\"turn_id\":\"turn-%d\"}}\n", turn)
+		fmt.Fprintf(&raw, "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":\"human-%d\"}}\n", turn)
+		for j := 1; j <= 3; j++ {
+			fmt.Fprintf(&raw, "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"commentary\",\"content\":%q}}\n", fmt.Sprintf("progress-%d-%d %s", turn, j, strings.Repeat("x", 200+(turn%5)*400)))
+		}
+		fmt.Fprintf(&raw, "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"call_id\":\"call-%d\",\"name\":\"exec_command\",\"arguments\":\"{}\"}}\n", turn)
+		fmt.Fprintf(&raw, "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"call-%d\",\"output\":%q}}\n", turn, "tool-output"+strings.Repeat("o", 1100))
+		fmt.Fprintf(&raw, "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":\"final-%d\"}}\n", turn)
+		fmt.Fprintf(&raw, "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"turn-%d\"}}\n", turn)
+	}
+	path := filepath.Join(root, "rollout-2026-10-17T00-00-00-"+thread+".jsonl")
+	path += ".gz"
+	f, e := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0600)
+	if e != nil {
+		t.Fatal(e)
+	}
+	z := gzip.NewWriter(f)
+	z.Write([]byte(raw.String()))
+	z.Close()
+	f.Close()
+	c := NewCodex(&capSink{}, "codex")
+	c.sessionsRoot = root
+	c.SetDataDir(t.TempDir())
+	t.Setenv("EVERYTHING_GO_HISTORY_LOAD_MAX_BYTES", "1048576")
+	full, err := c.LoadHistory(thread, history.Opts{Mode: "snapshot", Limit: 1000, IncludeThinking: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(full.Messages) != 90 {
+		t.Fatalf("fixture must include30tool rows: got%d", len(full.Messages))
+	}
+	t.Setenv("EVERYTHING_GO_HISTORY_LOAD_MAX_BYTES", "4096")
+	anchored, err := c.LoadHistory(thread, history.Opts{Mode: "continuation", KnownLast: full.Messages[1]["source_message_id"].(string), Limit: 4, IncludeThinking: true, Scoped: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(anchored.Messages) == 0 || anchored.Messages[0]["content_hash"] != full.Messages[1]["content_hash"] {
+		t.Fatalf("cursor tool/commentary body changed at lookahead edge: got=%v expected=%v",anchored.Messages, full.Messages[1])
+	}
+	page, err := c.LoadHistory(thread, history.Opts{Mode: "snapshot", Limit: 4, IncludeThinking: true, Scoped: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	all := append([]map[string]any(nil), page.Messages...)
+	for n := 0; page.HasMoreBefore && n < 100; n++ {
+		if len(page.Messages) == 0 {
+			t.Fatal("no progress")
+		}
+		page, err = c.LoadHistory(thread, history.Opts{Mode: "snapshot", Before: page.Messages[0]["source_message_id"].(string), Limit: 4, IncludeThinking: true, Scoped: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !page.KnownIDFound {
+			t.Fatal("lost cursor")
+		}
+		all = append(append([]map[string]any(nil), page.Messages...), all...)
+	}
+	if len(all) != len(full.Messages) {
+		t.Fatalf("count %d !=%d", len(all), len(full.Messages))
+	}
+	for i, m := range all {
+		expected := full.Messages[i]
+		if m["source_message_id"] != expected["source_message_id"] || m["content_hash"] != expected["content_hash"] || m["source_turn_id"] != expected["source_turn_id"] {
+			t.Fatalf("row%d got source=%v hash=%v turn=%v;expected source=%v hash=%v turn=%v", i, m["source_message_id"], m["content_hash"], m["source_turn_id"], expected["source_message_id"], expected["content_hash"], expected["source_turn_id"])
+		}
+	}
+}
