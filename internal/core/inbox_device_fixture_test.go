@@ -339,10 +339,15 @@ func TestInboxNativeDeviceFixture(t *testing.T) {
 					raw, _ := json.Marshal(item)
 					var q backend.UserInputPayload
 					_ = json.Unmarshal(raw, &q)
+					for i := range q.Questions {
+						if q.Questions[i].Options == nil {
+							q.Questions[i].Options = []protocol.UserInputOption{}
+						}
+					}
 					canonical = append(canonical, q)
 				}
 				blocking := false
-				fresh := backend.UserInputPayload{RequestID: "fresh", SessionID: "same", Source: "fixture", Kind: "request_user_input_async", Status: "pending", CreatedAt: now + 2000, IsBlocking: &blocking, Questions: []protocol.UserInputQuestion{{QuestionID: "q", Text: "QA 完成後的新問題", Type: "question", FreeForm: true}}}
+				fresh := backend.UserInputPayload{RequestID: "fresh", SessionID: "same", Source: "fixture", Kind: "request_user_input_async", Status: "pending", CreatedAt: now + 2000, IsBlocking: &blocking, Questions: []protocol.UserInputQuestion{{QuestionID: "q", Text: "QA 完成後的新問題", Type: "question", Options: []protocol.UserInputOption{}, FreeForm: true}}}
 				canonical = append(canonical, fresh)
 				p.exec.mu.Lock()
 				p.exec.pending = canonical
