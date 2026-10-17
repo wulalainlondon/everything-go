@@ -68,15 +68,20 @@ func TestHistoryNativeDeviceFixture(t *testing.T) {
 	t.Setenv("EVERYTHING_GO_HISTORY_LOAD_MAX_BYTES", "65536")
 	const thread = "00000000-0000-0000-0000-000000000891"
 	path := filepath.Join(nativeDir, "rollout-2026-10-17T00-00-00-"+thread+".jsonl")
-	source, e := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-	if e != nil {
-		t.Fatal(e)
+	reuse := os.Getenv("HISTORY_NATIVE_DEVICE_REUSE") == "1"
+	if !reuse {
+		source, e := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+		if e != nil {
+			t.Fatal(e)
+		}
+		for i := 1; i <= 1000; i++ {
+			fmt.Fprintf(source, "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":%q}}\n", fmt.Sprintf("隔離歷史第%04d則：保留原始順序與來源，不是模型請求。這段內容用來驗證跨尾端預算的分頁與閱讀位置。", i))
+		}
+		source.WriteString("{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":\"隔離舊答案，永久只有一份\"}}\n")
+		source.Close()
+	} else if info, err := os.Stat(path); err != nil || info.Size() == 0 {
+		t.Fatal("exact fixture source unavailable for restart")
 	}
-	for i := 1; i <= 1000; i++ {
-		fmt.Fprintf(source, "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":%q}}\n", fmt.Sprintf("隔離歷史第%04d則：保留原始順序與來源，不是模型請求。這段內容用來驗證跨尾端預算的分頁與閱讀位置。", i))
-	}
-	source.WriteString("{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":\"隔離舊答案，永久只有一份\"}}\n")
-	source.Close()
 	dataDir := filepath.Join(root, "data")
 	os.MkdirAll(dataDir, 0700)
 	reg := session.NewRegistry()
@@ -89,7 +94,9 @@ func TestHistoryNativeDeviceFixture(t *testing.T) {
 	h.runtimes.Ensure("history", "idle", 0)
 	otherThread := "00000000-0000-0000-0000-000000000892"
 	otherPath := filepath.Join(nativeDir, "rollout-2026-10-17T00-00-00-"+otherThread+".jsonl")
-	os.WriteFile(otherPath, []byte("{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":\"隔離返回位置對話\"}}\n"), 0600)
+	if !reuse {
+		os.WriteFile(otherPath, []byte("{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":\"隔離返回位置對話\"}}\n"), 0600)
+	}
 	reg.Create("other", "返回位置測試", root, "codex", "", "read-only", otherThread)
 	h.runtimes.Ensure("other", "idle", 0)
 	provider := goexec.NewCodex(h, "disabled-no-model-fixture")
@@ -98,7 +105,14 @@ func TestHistoryNativeDeviceFixture(t *testing.T) {
 	exec := &historyDeviceExec{fakeExec: fakeExec{sink: h}, provider: hp}
 	exec.onSend = func(*session.Session, string, string) { exec.messages.Add(1) }
 	h.SetExecutor(exec)
-	listener, e := net.Listen("tcp", "127.0.0.1:0")
+	address := "127.0.0.1:0"
+	if reuse {
+		address = os.Getenv("HISTORY_NATIVE_DEVICE_ADDRESS")
+		if address != "127.0.0.1:65015" {
+			t.Fatal("restart only the original fixture listener")
+		}
+	}
+	listener, e := net.Listen("tcp", address)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -106,6 +120,7 @@ func TestHistoryNativeDeviceFixture(t *testing.T) {
 	stop := make(chan struct{})
 	var stopOnce sync.Once
 	var grown atomic.Bool
+	grown.Store(reuse)
 	state := func() map[string]any {
 		return map[string]any{"fixture": true, "real_native_parser": true, "paid_model_messages": 0, "unexpected_message_commands": exec.messages.Load(), "history_reads": hp.reads.Load(), "grown": grown.Load(), "port": port, "instance": "history-native-qa"}
 	}
