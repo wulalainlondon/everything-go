@@ -112,8 +112,8 @@ func (h *Hub) handleVoiceStart(c *Client, cmd clientproto.Command) {
 		if cmd.VoiceMusicProvider == "ytmusic_android" {
 			call.musicProvider = "ytmusic_android"
 		}
-		if cmd.VoiceMusicProvider == "ytmusic_ios" && call.externalMusicPlatform == "ios" {
-			call.musicProvider = "ytmusic_ios"
+		if (cmd.VoiceMusicProvider == "ytmusic_ios" || cmd.VoiceMusicProvider == "apple_music_ios") && call.externalMusicPlatform == "ios" {
+			call.musicProvider = cmd.VoiceMusicProvider
 		}
 	}
 	call.mediaDeviceModel = cmd.VoiceDeviceModel

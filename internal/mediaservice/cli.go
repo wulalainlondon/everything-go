@@ -15,14 +15,14 @@ func RunCLI(args []string, out, stderr io.Writer) int {
 	f.SetOutput(stderr)
 	manifest := f.String("manifest", DefaultManifest(), "Installed media service manifest")
 	id := f.String("id", "", "Unique vop_ intent or query ID")
-	method := f.String("method", "status", "play_youtube, control or status")
+	method := f.String("method", "status", "play_youtube, play_music, control, music_control or status")
 	operation := f.String("operation", "", "Original operation for status")
-	url := f.String("url", "", "Actual HTTPS YouTube video URL")
+	url := f.String("url", "", "Verified HTTPS video or selected Music service song URL")
 	title := f.String("title", "", "Track label")
 	query := f.String("query", "", "Official Music search query")
 	artist := f.String("artist", "", "Expected Music artist")
 	position := f.Int64("position-ms", -1, "Music seek position")
-	action := f.String("action", "", "pause, resume, stop or volume")
+	action := f.String("action", "", "pause, resume, stop, next, previous, seek or volume (provider-dependent)")
 	volume := f.Int("volume", -1, "Player volume 0..100")
 	failure := func(e error) int { json.NewEncoder(out).Encode(Reply{Error: e.Error()}); return 1 }
 	if f.Parse(args) != nil || f.NArg() != 0 {

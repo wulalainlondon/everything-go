@@ -170,7 +170,7 @@ func (h *Hub) executeVoiceMedia(ctx context.Context, parent *session.Session, vo
 		h.voiceMu.Lock()
 		external := false
 		for c, v := range h.voiceClients {
-			if c.live() && v.session == parent && v.voiceID == voiceID && (v.musicProvider == "ytmusic_android" || v.musicProvider == "ytmusic_ios") {
+			if c.live() && v.session == parent && v.voiceID == voiceID && (v.musicProvider == "ytmusic_android" || v.musicProvider == "ytmusic_ios" || v.musicProvider == "apple_music_ios") {
 				external = true
 				break
 			}
@@ -261,7 +261,7 @@ func (h *Hub) executeVoiceMedia(ctx context.Context, parent *session.Session, vo
 	}
 	m := call.media
 	if method == "play_youtube" {
-		if (call.musicProvider == "ytmusic_android" || call.musicProvider == "ytmusic_ios") && call.externalMusic != nil && call.externalMusic.current != nil && (call.externalMusic.current.result.State == "playing" || call.externalMusic.current.result.HandoffOpened) {
+		if (call.musicProvider == "ytmusic_android" || call.musicProvider == "ytmusic_ios" || call.musicProvider == "apple_music_ios") && call.externalMusic != nil && call.externalMusic.current != nil && (call.externalMusic.current.result.State == "playing" || call.externalMusic.current.result.HandoffOpened) {
 			h.voiceMu.Unlock()
 			return refuse(errors.New("media_provider_switch_requires_stop"))
 		}
