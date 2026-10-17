@@ -15,10 +15,14 @@ import (
 type historyRangeFixtureProvider struct {
 	byID       map[string][]map[string]any
 	generation map[string]string
+	loads      int
+	deferred   []string
 	afterLoad  func()
 }
 
 func (p *historyRangeFixtureProvider) LoadHistory(id string, opts history.Opts) (*history.Result, error) {
+	p.loads++
+	p.deferred = append(p.deferred, opts.DeferredAssistantRequestID)
 	r := history.Slice(p.byID[id], opts)
 	r.SourceGeneration = p.generation[id]
 	if p.afterLoad != nil {
@@ -183,5 +187,29 @@ func TestHistoryRangeProofRechecksEarlierLoadedGenerationDuringTailRefresh(t *te
 	}
 	if next.Generations["old"] == proof.Generations["old"] {
 		t.Fatal("rewritten archive concealed by unchanged current tail")
+	}
+}
+
+func TestHistoryRangeCacheSeparatesRunningRequestFromCompletedRead(t *testing.T) {
+	h, _ := newTestHub(t)
+	p := &historyRangeFixtureProvider{byID: map[string][]map[string]any{"physical": {scopedHistoryRow("physical", 1)}}, generation: map[string]string{"physical": "same-file"}}
+	h.SetExecutor(&historyRangeFixtureExec{fakeExec: fakeExec{sink: h}, provider: p})
+	s := h.registry.Create("active-cache", "Synthetic", "/tmp", "codex", "", "read-only", "physical")
+	h.runtimes.Ensure(s.ID, "idle", 0)
+	h.runtimes.Update(s.ID, "running", "r_exact_active", 0, "", "")
+	c := newDeviceClient(h, "active-cache-device", 16)
+	h.registerLatest(c)
+	cmd := clientproto.Command{HistoryContinuity: true, HistoryRequestID: "original-history-read", Mode: "snapshot", Limit: 80}
+	h.sendHistory(c, s, cmd)
+	_ = accessWire(t, c)
+	if p.loads != 1 || p.deferred[0] != "r_exact_active" {
+		t.Fatal("Exact running request not forwarded to native scoped history")
+	}
+	h.runtimes.Update(s.ID, "completed", "r_exact_active", 0, "completed", "")
+	cmd.HistoryRequestID = "same-scope-terminal-read"
+	h.sendHistory(c, s, cmd)
+	_ = accessWire(t, c)
+	if p.loads != 2 || p.deferred[1] != "" {
+		t.Fatal("Completed read reused the running request's deferred history cache")
 	}
 }

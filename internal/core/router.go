@@ -1139,14 +1139,25 @@ func (h *Hub) sendHistory(c *Client, s *session.Session, cmd clientproto.Command
 		thinkFlag = "1"
 	}
 	key := c.deviceID + "|" + s.ID + "|" + strings.Join(resumeIDs, ",") + "|" + cmd.Mode + "|" + cmd.Before + "|" + cmd.KnownLast + "|" + itoa(cmd.Limit) + "|" + thinkFlag + "|" + cmd.ReadEpoch + "|" + strconv.FormatUint(cmd.Revision, 10)
+	deferred := ""
 	if cmd.HistoryContinuity {
-		key += "|scoped-v1"
+		if views := h.runtimes.Snapshot("", []string{s.ID}); len(views) == 1 {
+			switch views[0].Phase {
+			case "completed", "failed", "cancelled", "idle":
+			default:
+				deferred = views[0].ActiveRequestID
+			}
+		}
+		// A terminal transition must not reuse a cache entry which intentionally
+		// left the exact running request's mutable tool output in the live feed.
+		key += "|scoped-v1|deferred:" + deferred
 	}
 	v := h.coalesce(&h.storm.histSF, h.storm.histCache, key, historyCacheTTL, func() any {
 		res, err := loadLogicalSessionHistory(provider, resumeIDs, history.Opts{
 			Limit: cmd.Limit, KnownLast: cmd.KnownLast, Mode: cmd.Mode, Before: cmd.Before,
-			IncludeThinking: cmd.IncludeThinking,
-			Scoped:          cmd.HistoryContinuity && cmd.HistoryRequestID != "",
+			IncludeThinking:            cmd.IncludeThinking,
+			Scoped:                     cmd.HistoryContinuity && cmd.HistoryRequestID != "",
+			DeferredAssistantRequestID: deferred,
 		})
 		if err != nil {
 			return err

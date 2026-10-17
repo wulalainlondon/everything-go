@@ -2,6 +2,9 @@ package goexec
 
 import (
 	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"everything-go/internal/history"
 	"fmt"
 	"os"
@@ -289,5 +292,59 @@ func TestScopedNativeHistoryRetainsClosedProgressWithoutInventingFinalAnswer(t *
 				t.Fatal("Exact closed progress must be retained without claiming a final answer")
 			}
 		})
+	}
+}
+
+func TestScopedHistoryDefersMutableParallelToolsUntilOriginalRequestCompletes(t *testing.T) {
+	root := t.TempDir()
+	data := t.TempDir()
+	thread := "00000000-0000-0000-0000-000000000985"
+	path := filepath.Join(root, "rollout-2026-10-17T00-00-00-"+thread+".jsonl")
+	raw := "{\"type\":\"turn_context\",\"payload\":{\"turn_id\":\"parallel-turn\"}}\n" +
+		"{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":\"original parallel question\"}}\n" +
+		"{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"call_id\":\"first\",\"name\":\"exec_command\",\"arguments\":\"{}\"}}\n" +
+		"{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"call_id\":\"second\",\"name\":\"exec_command\",\"arguments\":\"{}\"}}\n"
+	os.WriteFile(path, []byte(raw), 0600)
+	dir := filepath.Join(data, "codex-turn-requests")
+	os.MkdirAll(dir, 0700)
+	sum := sha256.Sum256([]byte(thread))
+	bytes, _ := json.Marshal(map[string]any{"version": 1, "thread_id": thread, "requests": map[string]string{"parallel-turn": "r_parallel_original"}})
+	os.WriteFile(filepath.Join(dir, hex.EncodeToString(sum[:])+".json"), bytes, 0600)
+	c := NewCodex(&capSink{}, "disabled-fixture")
+	c.sessionsRoot = root
+	c.SetDataDir(data)
+	initial, e := c.LoadHistory(thread, history.Opts{Scoped: true, Mode: "snapshot", Limit: 80, DeferredAssistantRequestID: "r_parallel_original"})
+	if e != nil {
+		t.Fatal(e)
+	}
+	if len(initial.Messages) != 1 || initial.Messages[0]["role"] != "user" {
+		t.Fatal("Mutable parallel tool rows must remain live, not frozen into an older canonical prefix")
+	}
+	legacy, e := c.LoadHistory(thread, history.Opts{Mode: "snapshot", Limit: 80, DeferredAssistantRequestID: "r_parallel_original"})
+	if e != nil || len(legacy.Messages) != 3 {
+		t.Fatal("Legacy reads must preserve their original snapshot behavior")
+	}
+	unrelated, e := c.LoadHistory(thread, history.Opts{Scoped: true, Mode: "snapshot", Limit: 80, DeferredAssistantRequestID: "r_other"})
+	if e != nil || len(unrelated.Messages) != 3 {
+		t.Fatal("Only the exact active request may be deferred")
+	}
+	f, _ := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0600)
+	f.WriteString("{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"first\",\"output\":\"first completed output\"}}\n" +
+		"{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"second\",\"output\":\"second completed output\"}}\n" +
+		"{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":\"one parallel final\"}}\n" +
+		"{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"parallel-turn\"}}\n")
+	f.Close()
+	finished, e := c.LoadHistory(thread, history.Opts{Scoped: true, Mode: "continuation", KnownLast: initial.Messages[0]["source_message_id"].(string), Limit: 80})
+	if e != nil {
+		t.Fatal(e)
+	}
+	if !finished.KnownIDFound || len(finished.Messages) != 4 {
+		t.Fatal("Stable user anchor must include both completed tools and one final")
+	}
+	for i, want := range []string{"first completed output", "second completed output"} {
+		blocks := finished.Messages[i+1]["blocks"].([]map[string]any)
+		if blocks[len(blocks)-1]["output"] != want {
+			t.Fatalf("Earlier parallel tool%d output was left stale", i)
+		}
 	}
 }

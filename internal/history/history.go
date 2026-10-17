@@ -26,8 +26,9 @@ type Opts struct {
 	// IncludeThinking keeps assistant thinking blocks in the reply. Off by
 	// default: legacy clients validate history blocks with a strict
 	// text/tool_call union and would reject the whole event otherwise.
-	IncludeThinking bool
-	Scoped          bool // opt-in authenticated continuity pages
+	IncludeThinking            bool
+	Scoped                     bool   // opt-in authenticated continuity pages
+	DeferredAssistantRequestID string // exact running request; native tool outputs can still append
 }
 
 // Result is the output of Slice — either a snapshot or a delta page.

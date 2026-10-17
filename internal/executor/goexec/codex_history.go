@@ -51,7 +51,18 @@ func (c *Codex) LoadHistory(resumeID string, opts history.Opts) (*history.Result
 				if !opts.IncludeThinking {
 					messages = history.StripThinkingBlocks(messages)
 				}
-				return c.withHistoryRequestIDs(messages, resumeID), nil
+				messages = c.withHistoryRequestIDs(messages, resumeID)
+				if opts.Scoped && opts.DeferredAssistantRequestID != "" {
+					committed := make([]map[string]any, 0, len(messages))
+					for _, message := range messages {
+						if message["role"] == "assistant" && message["request_id"] == opts.DeferredAssistantRequestID {
+							continue
+						}
+						committed = append(committed, message)
+					}
+					messages = committed
+				}
+				return messages, nil
 			})
 		}
 	}

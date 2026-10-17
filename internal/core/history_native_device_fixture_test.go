@@ -153,7 +153,9 @@ func TestHistoryNativeDeviceFixture(t *testing.T) {
 		}
 		f.WriteString("{\"type\":\"turn_context\",\"payload\":{\"turn_id\":\"qa-growth-turn\"}}\n" +
 			"{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":\"隔離分段串流驗收，沒有真模型請求\"}}\n" +
-			"{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"commentary\",\"content\":\"隔離尚未完成進度\"}}\n")
+			"{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"commentary\",\"content\":\"隔離尚未完成進度\"}}\n" +
+			"{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"call_id\":\"split-first\",\"name\":\"exec_command\",\"arguments\":\"{}\"}}\n" +
+			"{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"call_id\":\"split-second\",\"name\":\"exec_command\",\"arguments\":\"{}\"}}\n")
 		f.Sync()
 		f.Close()
 		sum := sha256.Sum256([]byte(thread))
@@ -164,6 +166,8 @@ func TestHistoryNativeDeviceFixture(t *testing.T) {
 		v, _ := h.runtimes.Update("history", "running", "r_fixture_split", 0, "", "")
 		h.broadcastRuntime(v)
 		h.Emit(protocol.NewTextChunk(sessionObject.ID, "r_fixture_split", "隔離尚未完成進度"))
+		h.Emit(protocol.NewToolStart(sessionObject.ID, "r_fixture_split", "split-first", "exec_command", "first fixture"))
+		h.Emit(protocol.NewToolStart(sessionObject.ID, "r_fixture_split", "split-second", "exec_command", "second fixture"))
 		json.NewEncoder(w).Encode(state())
 	})
 	mux.HandleFunc("/fixture/finish-turn", func(w http.ResponseWriter, r *http.Request) {
@@ -184,12 +188,14 @@ func TestHistoryNativeDeviceFixture(t *testing.T) {
 			http.Error(w, "source unavailable", 500)
 			return
 		}
-		f.WriteString("{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"call_id\":\"split-tool\",\"name\":\"exec_command\",\"arguments\":\"{}\"}}\n" +
-			"{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"split-tool\",\"output\":\"隔離工具已結束\"}}\n" +
+		f.WriteString("{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"split-first\",\"output\":\"第一個原工具的完整結果\"}}\n" +
+			"{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"split-second\",\"output\":\"第二個原工具的完整結果\"}}\n" +
 			"{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":\"隔離完成答案，只有一份\"}}\n" +
 			"{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"qa-growth-turn\"}}\n")
 		f.Sync()
 		f.Close()
+		h.Emit(protocol.NewToolResult(sessionObject.ID, "r_fixture_split", "split-first", "第一個原工具的完整結果"))
+		h.Emit(protocol.NewToolResult(sessionObject.ID, "r_fixture_split", "split-second", "第二個原工具的完整結果"))
 		h.Emit(protocol.NewDone(sessionObject.ID, "r_fixture_split"))
 		v, _ := h.runtimes.Update("history", "completed", "r_fixture_split", 0, "completed", "")
 		h.broadcastRuntime(v)
