@@ -334,6 +334,11 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 
 	case "request_runtime_snapshot":
 		c.enqueueEvent(h.runtimeSnapshotForClient(c))
+		// Android's native socket may outlive its WebView. A foreground refresh
+		// then has no new hello, so recover the source-scoped inbox snapshot too.
+		if h.automation != nil {
+			c.enqueueEvent(h.automationSnapshotEvent())
+		}
 
 	case "work_sync_request":
 		h.sendWorkSync(c, cmd.Revision)
