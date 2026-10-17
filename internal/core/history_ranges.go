@@ -1,6 +1,7 @@
 package core
 
 import (
+	"encoding/json"
 	"everything-go/internal/backend"
 	"everything-go/internal/clientproto"
 	"everything-go/internal/history"
@@ -195,4 +196,58 @@ func (h *Hub) supportsNativeHistoryRanges() bool {
 		}
 	}
 	return true
+}
+
+// Leave room below the native client's16MiB WebSocket frame ceiling for the
+// scoped envelope and projected IDs. Trimming moves only a page boundary;
+// no message body is truncated or silently skipped.
+func boundScopedHistoryFrame(input *history.Result, cmd clientproto.Command) (*history.Result, error) {
+	const budget = 12 << 20
+	result := *input
+	messages := input.Messages
+	size := 0
+	kept := 0
+	if cmd.Mode == "continuation" {
+		for _, m := range messages {
+			raw, e := json.Marshal(m)
+			if e != nil {
+				return nil, e
+			}
+			if len(raw) > budget {
+				return nil, fmt.Errorf("single history row exceeds bounded frame budget")
+			}
+			if size+len(raw) > budget {
+				break
+			}
+			size += len(raw)
+			kept++
+		}
+		if kept < len(messages) {
+			if kept < 2 {
+				return nil, fmt.Errorf("history anchor and next row exceed bounded frame budget")
+			}
+			result.Messages = messages[:kept]
+			result.HasMoreAfter = true
+		}
+	} else {
+		for i := len(messages) - 1; i >= 0; i-- {
+			raw, e := json.Marshal(messages[i])
+			if e != nil {
+				return nil, e
+			}
+			if len(raw) > budget {
+				return nil, fmt.Errorf("single history row exceeds bounded frame budget")
+			}
+			if size+len(raw) > budget {
+				break
+			}
+			size += len(raw)
+			kept++
+		}
+		if kept < len(messages) {
+			result.Messages = messages[len(messages)-kept:]
+			result.HasMoreBefore = true
+		}
+	}
+	return &result, nil
 }

@@ -8,6 +8,7 @@ import (
 	"everything-go/internal/protocol"
 	"everything-go/internal/session"
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -127,5 +128,32 @@ func TestHistoryRangeWireCorrelatesOriginalReadAndRejectsChangedSource(t *testin
 	rejected := accessWire(t, c)
 	if rejected["type"] != "error" || rejected["request_id"] != cmd.HistoryRequestID {
 		t.Fatal("scope refusal must correlate without fake history", rejected)
+	}
+}
+
+func TestHistoryFrameBudgetKeepsAdjacentBoundariesWithoutMutatingCachedResult(t *testing.T) {
+	rows := []map[string]any{}
+	for i := 1; i <= 4; i++ {
+		row := scopedHistoryRow("physical", i)
+		row["content"] = strings.Repeat("x", 5<<20)
+		rows = append(rows, row)
+	}
+	input := &history.Result{Kind: "snapshot", Messages: rows, KnownIDFound: true}
+	tail, e := boundScopedHistoryFrame(input, clientproto.Command{Mode: "snapshot", HistoryContinuity: true})
+	if e != nil {
+		t.Fatal(e)
+	}
+	if len(tail.Messages) != 2 || tail.Messages[0]["source_message_id"] != rows[2]["source_message_id"] || !tail.HasMoreBefore {
+		t.Fatal("tail page boundary changed", len(tail.Messages))
+	}
+	forward, e := boundScopedHistoryFrame(input, clientproto.Command{Mode: "continuation", HistoryContinuity: true})
+	if e != nil {
+		t.Fatal(e)
+	}
+	if len(forward.Messages) != 2 || forward.Messages[0]["source_message_id"] != rows[0]["source_message_id"] || !forward.HasMoreAfter {
+		t.Fatal("forward page lost original anchor")
+	}
+	if input.HasMoreAfter || input.HasMoreBefore || len(input.Messages) != 4 {
+		t.Fatal("cache entry mutated")
 	}
 }

@@ -1167,6 +1167,7 @@ func (h *Hub) sendHistory(c *Client, s *session.Session, cmd clientproto.Command
 		return
 	}
 	res := v.(*history.Result)
+
 	var rangeProof *protocol.HistoryRangeProof
 	if cmd.HistoryContinuity && cmd.HistoryRequestID != "" {
 		var proofErr error
@@ -1201,6 +1202,27 @@ func (h *Hub) sendHistory(c *Client, s *session.Session, cmd clientproto.Command
 		msgs = scoped
 	}
 	msgs = h.annotateDelegationHistory(s.ID, msgs)
+	if rangeProof != nil {
+		copy := *res
+		copy.Messages = msgs
+		bounded, e := boundScopedHistoryFrame(&copy, cmd)
+		if e != nil {
+			event := h.client.Error(s.ID, "history_frame_too_large", e.Error())
+			event.RequestID = cmd.HistoryRequestID
+			c.enqueueEvent(event)
+			return
+		}
+		res = bounded
+		msgs = res.Messages
+		rangeProof.First = ""
+		rangeProof.Last = ""
+		if len(msgs) > 0 {
+			rangeProof.First, _ = msgs[0]["source_message_id"].(string)
+			rangeProof.Last, _ = msgs[len(msgs)-1]["source_message_id"].(string)
+		}
+		rangeProof.HasMoreBefore = res.HasMoreBefore
+		rangeProof.HasMoreAfter = res.HasMoreAfter
+	}
 	latestAssistantAt := int64(0)
 	latestAssistantText := ""
 	toolOnlyPreviews := make(map[string]struct{})
