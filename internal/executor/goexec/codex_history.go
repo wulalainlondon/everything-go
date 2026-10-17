@@ -44,7 +44,7 @@ func (c *Codex) LoadHistory(resumeID string, opts history.Opts) (*history.Result
 	if opts.Scoped || opts.Before != "" || opts.Mode == "continuation" || opts.Mode == "beginning" {
 		if _, ok := physicalHistoryCursor("codex", resumeID, opts); ok {
 			return loadNativeWindowPage("codex", resumeID, opts, func(cursor int) (history.FileWindow, error) { return c.historyFileWindow(path, cursor) }, func(window history.FileWindow) ([]map[string]any, error) {
-				messages, _, e := parseCodexHistoryWindow(window.Lines, resumeID, window.MoreBefore, !window.MoreAfter)
+				messages, _, e := parseCodexHistoryWindow(window.Lines, resumeID, window.MoreBefore, !window.MoreAfter, opts.Scoped)
 				if e != nil {
 					return nil, e
 				}
@@ -299,9 +299,9 @@ func (c *Codex) readCodexHistory(path, resumeID string) ([]map[string]any, bool,
 }
 
 func parseCodexHistoryLines(lines []history.TailLine, resumeID string, truncated bool) ([]map[string]any, bool, error) {
-	return parseCodexHistoryWindow(lines, resumeID, truncated, true)
+	return parseCodexHistoryWindow(lines, resumeID, truncated, true, false)
 }
-func parseCodexHistoryWindow(lines []history.TailLine, resumeID string, truncated, completeTail bool) ([]map[string]any, bool, error) {
+func parseCodexHistoryWindow(lines []history.TailLine, resumeID string, truncated, completeTail, scoped bool) ([]map[string]any, bool, error) {
 
 	type rec struct {
 		lineNo int
@@ -312,6 +312,7 @@ func parseCodexHistoryWindow(lines []history.TailLine, resumeID string, truncate
 	toolOutputs := map[string]string{}
 	var messages []map[string]any
 	turnID := ""
+	tailClosed := false
 	turnBySource := map[string]string{}
 	// A bounded tail may begin inside a turn, before its exact closing marker.
 	unboundLeadingTail := truncated
@@ -329,6 +330,7 @@ func parseCodexHistoryWindow(lines []history.TailLine, resumeID string, truncate
 			if json.Unmarshal(row.Payload, &event) == nil {
 				if row.Type == "turn_context" || event.Type == "task_started" {
 					unboundLeadingTail = false
+					tailClosed = false
 					turnID = event.TurnID
 				} else if event.Type == "task_complete" || event.Type == "turn_aborted" {
 					if unboundLeadingTail && turnID == "" && event.Type == "task_complete" && event.TurnID != "" &&
@@ -350,6 +352,7 @@ func parseCodexHistoryWindow(lines []history.TailLine, resumeID string, truncate
 						}
 					}
 					unboundLeadingTail = false
+					tailClosed = true
 					turnID = ""
 				}
 			}
@@ -357,6 +360,7 @@ func parseCodexHistoryWindow(lines []history.TailLine, resumeID string, truncate
 		if row.Type != "response_item" {
 			continue
 		}
+		tailClosed = false
 		records = append(records, rec{lineNo: ln.LineNo, row: row, turnID: turnID})
 		turnBySource["codex:"+resumeID+":line:"+itoa(ln.LineNo)] = turnID
 		if id, out, ok := codexResponseToolOutput(row.Payload); ok {
@@ -440,7 +444,10 @@ func parseCodexHistoryWindow(lines []history.TailLine, resumeID string, truncate
 		message["history_read_result_verified"] = role == "assistant" && payload.Phase == "final_answer"
 		messages = append(messages, message)
 	}
-	if completeTail {
+	// Open progress may later attach to a tool/final with a different source
+	// ID. It remains in the live stream until an exact native close; never mint
+	// a transient canonical cursor that disappears at streaming -> done.
+	if completeTail && (!scoped || tailClosed) {
 		flushPendingCommentary()
 	}
 	for _, message := range messages {

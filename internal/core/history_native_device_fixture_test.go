@@ -135,6 +135,66 @@ func TestHistoryNativeDeviceFixture(t *testing.T) {
 		stopOnce.Do(func() { close(stop) })
 		json.NewEncoder(w).Encode(state())
 	})
+
+	var opened, finished atomic.Bool
+	mux.HandleFunc("/fixture/open-turn", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			http.Error(w, "POST required", 405)
+			return
+		}
+		if !opened.CompareAndSwap(false, true) {
+			json.NewEncoder(w).Encode(state())
+			return
+		}
+		f, e := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0600)
+		if e != nil {
+			http.Error(w, "source unavailable", 500)
+			return
+		}
+		f.WriteString("{\"type\":\"turn_context\",\"payload\":{\"turn_id\":\"qa-growth-turn\"}}\n" +
+			"{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":\"隔離分段串流驗收，沒有真模型請求\"}}\n" +
+			"{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"commentary\",\"content\":\"隔離尚未完成進度\"}}\n")
+		f.Sync()
+		f.Close()
+		sum := sha256.Sum256([]byte(thread))
+		journal := filepath.Join(root, "provider-data", "codex-turn-requests")
+		os.MkdirAll(journal, 0700)
+		data, _ := json.Marshal(map[string]any{"version": 1, "thread_id": thread, "requests": map[string]string{"qa-growth-turn": "r_fixture_split"}})
+		os.WriteFile(filepath.Join(journal, hex.EncodeToString(sum[:])+".json"), data, 0600)
+		v, _ := h.runtimes.Update("history", "running", "r_fixture_split", 0, "", "")
+		h.broadcastRuntime(v)
+		h.Emit(protocol.NewTextChunk(sessionObject.ID, "r_fixture_split", "隔離尚未完成進度"))
+		json.NewEncoder(w).Encode(state())
+	})
+	mux.HandleFunc("/fixture/finish-turn", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			http.Error(w, "POST required", 405)
+			return
+		}
+		if !opened.Load() {
+			http.Error(w, "original open required", 409)
+			return
+		}
+		if !finished.CompareAndSwap(false, true) {
+			json.NewEncoder(w).Encode(state())
+			return
+		}
+		f, e := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0600)
+		if e != nil {
+			http.Error(w, "source unavailable", 500)
+			return
+		}
+		f.WriteString("{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"call_id\":\"split-tool\",\"name\":\"exec_command\",\"arguments\":\"{}\"}}\n" +
+			"{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"split-tool\",\"output\":\"隔離工具已結束\"}}\n" +
+			"{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":\"隔離完成答案，只有一份\"}}\n" +
+			"{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"qa-growth-turn\"}}\n")
+		f.Sync()
+		f.Close()
+		h.Emit(protocol.NewDone(sessionObject.ID, "r_fixture_split"))
+		v, _ := h.runtimes.Update("history", "completed", "r_fixture_split", 0, "completed", "")
+		h.broadcastRuntime(v)
+		json.NewEncoder(w).Encode(state())
+	})
 	mux.HandleFunc("/fixture/grow", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
 			http.Error(w, "POST required", 405)
