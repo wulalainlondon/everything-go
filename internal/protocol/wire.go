@@ -70,10 +70,12 @@ type Inbound struct {
 	SizeBytes       int64  `json:"size_bytes"`
 
 	// request_history
-	Limit     int    `json:"limit"`
-	KnownLast string `json:"known_last_source_message_id"`
-	Mode      string `json:"mode"`
-	Before    string `json:"before_source_message_id"`
+	Limit             int    `json:"limit"`
+	KnownLast         string `json:"known_last_source_message_id"`
+	Mode              string `json:"mode"`
+	Before            string `json:"before_source_message_id"`
+	HistoryRequestID  string `json:"history_request_id,omitempty"`
+	HistoryContinuity bool   `json:"history_continuity,omitempty"`
 	// Client opt-in for thinking blocks in history messages. Legacy clients
 	// never send it and keep receiving the Python-era text/tool_call-only shape.
 	IncludeThinking bool `json:"include_thinking"`
@@ -1041,17 +1043,37 @@ func NewSessionInitInfo(sessionID, model, permissionMode string, tools, slashCom
 
 // --- History ----------------------------------------------------------------
 
+type HistoryRangeProof struct {
+	Version       int               `json:"version"`
+	RequestID     string            `json:"request_id"`
+	Authority     string            `json:"authority_instance_id"`
+	SessionID     string            `json:"session_id"`
+	NativeThread  string            `json:"native_thread_id"`
+	Threads       []string          `json:"logical_threads"`
+	Generations   map[string]string `json:"source_generations"`
+	ServerEpoch   string            `json:"server_epoch"`
+	Sequence      uint64            `json:"sequence"`
+	Kind          string            `json:"kind"`
+	Cursor        string            `json:"cursor,omitempty"`
+	First         string            `json:"first_source_message_id,omitempty"`
+	Last          string            `json:"last_source_message_id,omitempty"`
+	HasMoreBefore bool              `json:"has_more_before"`
+	HasMoreAfter  bool              `json:"has_more_after"`
+	KnownIDFound  bool              `json:"known_id_found"`
+}
+
 type HistorySnapshot struct {
-	Type                string           `json:"type"`
-	SessionID           string           `json:"session_id"`
-	Messages            []map[string]any `json:"messages"`
-	SourceCount         int              `json:"source_count"`
-	HasMoreBefore       bool             `json:"has_more_before"`
-	KnownIDFound        bool             `json:"known_id_found"`
-	SnapshotReason      string           `json:"snapshot_reason,omitempty"`
-	HistoryReadEpoch    string           `json:"history_read_epoch,omitempty"`
-	HistoryReadRevision uint64           `json:"history_read_revision,omitempty"`
-	HistoryReadToken    string           `json:"history_read_token,omitempty"`
+	Continuity          *HistoryRangeProof `json:"history_continuity,omitempty"`
+	Type                string             `json:"type"`
+	SessionID           string             `json:"session_id"`
+	Messages            []map[string]any   `json:"messages"`
+	SourceCount         int                `json:"source_count"`
+	HasMoreBefore       bool               `json:"has_more_before"`
+	KnownIDFound        bool               `json:"known_id_found"`
+	SnapshotReason      string             `json:"snapshot_reason,omitempty"`
+	HistoryReadEpoch    string             `json:"history_read_epoch,omitempty"`
+	HistoryReadRevision uint64             `json:"history_read_revision,omitempty"`
+	HistoryReadToken    string             `json:"history_read_token,omitempty"`
 }
 
 type HistoryDelta struct {

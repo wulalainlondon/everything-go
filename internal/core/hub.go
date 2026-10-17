@@ -75,6 +75,7 @@ type Config struct {
 // the executor.Sink (Emit broadcasts an event to connected clients, or buffers
 // it when none are connected so a reconnecting client can recover it).
 type Hub struct {
+	historySequence    atomic.Uint64
 	unifiedMedia       *unifiedVoiceMedia
 	continuityCompatMu sync.Mutex
 

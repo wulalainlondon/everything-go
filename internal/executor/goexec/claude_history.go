@@ -109,6 +109,22 @@ func (c *Claude) LoadHistory(resumeID string, opts history.Opts) (*history.Resul
 	if fi.IsDir() {
 		return history.Slice(nil, opts), nil
 	}
+	if opts.Scoped || opts.Before != "" || opts.Mode == "continuation" || opts.Mode == "beginning" {
+		if _, ok := physicalHistoryCursor("claude", resumeID, opts); ok {
+			return loadNativeWindowPage("claude", resumeID, opts, func(cursor int) (history.FileWindow, error) {
+				return history.ReadFileWindow(path, cursor, history.LoadMaxBytes())
+			}, func(window history.FileWindow) ([]map[string]any, error) {
+				messages, _, e := parseClaudeHistoryLines(window.Lines, resumeID, fi.ModTime().UnixMilli(), window.MoreBefore)
+				if e != nil {
+					return nil, e
+				}
+				if !opts.IncludeThinking {
+					messages = history.StripThinkingBlocks(messages)
+				}
+				return messages, nil
+			})
+		}
+	}
 	mtimeNS := fi.ModTime().UnixNano()
 	size := fi.Size()
 	key := history.FileKey{Path: path, MtimeNS: mtimeNS, Size: size}
@@ -130,7 +146,9 @@ func (c *Claude) LoadHistory(resumeID string, opts history.Opts) (*history.Resul
 	if !opts.IncludeThinking {
 		messages = history.StripThinkingBlocks(messages)
 	}
-	return history.Slice(messages, opts), nil
+	result := history.Slice(messages, opts)
+	result.HasMoreBefore = result.HasMoreBefore || truncated
+	return result, nil
 }
 
 // loadClaudeHistoryMessages parses the transcript and returns its wire messages
@@ -151,6 +169,10 @@ func loadClaudeHistoryMessagesChecked(path, resumeID string, fileMtimeMs int64) 
 	if err != nil {
 		return nil, truncated, err
 	}
+	return parseClaudeHistoryLines(lines, resumeID, fileMtimeMs, truncated)
+}
+
+func parseClaudeHistoryLines(lines []history.TailLine, resumeID string, fileMtimeMs int64, truncated bool) ([]map[string]any, bool, error) {
 	type rec struct {
 		lineNo int
 		row    claudeRow

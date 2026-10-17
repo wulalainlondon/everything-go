@@ -119,6 +119,9 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 			PairingOpen:  h.pairing.EnrollmentOpen(),
 			InstanceName: h.cfg.InstanceName,
 		}
+		if !c.enrollmentOnly && h.supportsNativeHistoryRanges() {
+			helloInput.Capabilities = append(helloInput.Capabilities, "history_continuity_v1")
+		}
 		if h.sharedReadAuthorized(c) {
 			helloInput.Capabilities = append(helloInput.Capabilities, "session_read_sync_v1")
 		}
@@ -1123,6 +1126,7 @@ func (h *Hub) sendHistory(c *Client, s *session.Session, cmd clientproto.Command
 	}
 	provider, ok := hr.ProviderFor(s)
 	resumeIDs := s.ResumeIDs()
+	activeHistoryThread := s.Snapshot().ResumeID
 	if !ok || len(resumeIDs) == 0 {
 		// No history backend or no resume id yet → empty snapshot.
 		c.enqueueEvent(h.client.HistorySnapshot(s.ID, []map[string]any{}, 0, false, cmd.KnownLast == "", ""))
@@ -1135,10 +1139,14 @@ func (h *Hub) sendHistory(c *Client, s *session.Session, cmd clientproto.Command
 		thinkFlag = "1"
 	}
 	key := c.deviceID + "|" + s.ID + "|" + strings.Join(resumeIDs, ",") + "|" + cmd.Mode + "|" + cmd.Before + "|" + cmd.KnownLast + "|" + itoa(cmd.Limit) + "|" + thinkFlag + "|" + cmd.ReadEpoch + "|" + strconv.FormatUint(cmd.Revision, 10)
+	if cmd.HistoryContinuity {
+		key += "|scoped-v1"
+	}
 	v := h.coalesce(&h.storm.histSF, h.storm.histCache, key, historyCacheTTL, func() any {
 		res, err := loadLogicalSessionHistory(provider, resumeIDs, history.Opts{
 			Limit: cmd.Limit, KnownLast: cmd.KnownLast, Mode: cmd.Mode, Before: cmd.Before,
 			IncludeThinking: cmd.IncludeThinking,
+			Scoped:          cmd.HistoryContinuity && cmd.HistoryRequestID != "",
 		})
 		if err != nil {
 			return err
@@ -1150,17 +1158,47 @@ func (h *Hub) sendHistory(c *Client, s *session.Session, cmd clientproto.Command
 	}
 	if err, failed := v.(error); failed {
 		if c.live() {
-			c.enqueueEvent(h.client.Error(s.ID, history.ErrorCode(err), err.Error()))
+			event := h.client.Error(s.ID, history.ErrorCode(err), err.Error())
+			if cmd.HistoryContinuity {
+				event.RequestID = cmd.HistoryRequestID
+			}
+			c.enqueueEvent(event)
 		}
 		return
 	}
 	res := v.(*history.Result)
+	var rangeProof *protocol.HistoryRangeProof
+	if cmd.HistoryContinuity && cmd.HistoryRequestID != "" {
+		var proofErr error
+		rangeProof, proofErr = h.buildHistoryRangeProof(provider, s, resumeIDs, activeHistoryThread, cmd, res)
+		if proofErr != nil {
+			event := h.client.Error(s.ID, "history_continuity_unavailable", proofErr.Error())
+			event.RequestID = cmd.HistoryRequestID
+			c.enqueueEvent(event)
+			return
+		}
+	}
 	if !c.live() {
 		return // client replaced/gone while loading → drop (#3)
 	}
 	msgs := res.Messages
 	if msgs == nil {
 		msgs = []map[string]any{}
+	}
+	if rangeProof != nil {
+		// source_session_id is a legacy field recursively projected as a Bridge
+		// SessionKey. Keep it byte-compatible and carry the actual native UUID
+		// in a distinct field whose meaning cannot be rewritten by projection.
+		scoped := make([]map[string]any, len(msgs))
+		for i, m := range msgs {
+			clone := make(map[string]any, len(m)+1)
+			for key, value := range m {
+				clone[key] = value
+			}
+			clone["native_source_thread_id"] = m["source_session_id"]
+			scoped[i] = clone
+		}
+		msgs = scoped
 	}
 	msgs = h.annotateDelegationHistory(s.ID, msgs)
 	latestAssistantAt := int64(0)
@@ -1195,7 +1233,7 @@ func (h *Hub) sendHistory(c *Client, s *session.Session, cmd clientproto.Command
 	// Pagination into older history must never move the canonical row backward.
 	// Snapshot/delta requests without a before cursor include the newest tail and
 	// are safe repair sources after a Bridge restart.
-	if latestAssistantAt > 0 && cmd.Before == "" {
+	if latestAssistantAt > 0 && cmd.Before == "" && (!cmd.HistoryContinuity || !res.HasMoreAfter) {
 		if preview := truncateGraphemes(normalizePreviewText(latestAssistantText), 160); preview != "" {
 			current := s.Snapshot()
 			_, invalidToolProjection := toolOnlyPreviews[current.PreviewText]
@@ -1229,7 +1267,8 @@ func (h *Hub) sendHistory(c *Client, s *session.Session, cmd clientproto.Command
 		return
 	}
 	event := h.client.HistorySnapshot(s.ID, msgs, res.SourceCount, res.HasMoreBefore, res.KnownIDFound, res.SnapshotReason)
-	if res.SnapshotReason != "before_page" && h.runtimes.HistoryMatchesReadBoundary(s.ID, cmd.ReadEpoch, cmd.Revision, msgs) {
+	event.Continuity = rangeProof
+	if res.SnapshotReason != "before_page" && (!cmd.HistoryContinuity || !res.HasMoreAfter) && h.runtimes.HistoryMatchesReadBoundary(s.ID, cmd.ReadEpoch, cmd.Revision, msgs) {
 		event.HistoryReadEpoch, event.HistoryReadRevision, event.HistoryReadToken = h.confirmHistoryReadBoundary(c, cmd)
 	}
 	c.enqueueEvent(event)
@@ -1243,6 +1282,9 @@ func (h *Hub) sendHistory(c *Client, s *session.Session, cmd clientproto.Command
 // once across the logical timeline. A single-generation session keeps the old
 // fast path.
 func loadLogicalSessionHistory(provider backend.HistoryProvider, resumeIDs []string, opts history.Opts) (*history.Result, error) {
+	if opts.Scoped || opts.Mode == "continuation" || len(resumeIDs) > 1 && opts.Before != "" && historySourceThread(opts.Before, resumeIDs) >= 0 {
+		return loadScopedLogicalHistory(provider, resumeIDs, opts)
+	}
 	if len(resumeIDs) == 1 {
 		return provider.LoadHistory(resumeIDs[0], opts)
 	}

@@ -41,6 +41,20 @@ func (c *Codex) LoadHistory(resumeID string, opts history.Opts) (*history.Result
 	if err := history.CheckFile("codex", path); err != nil {
 		return nil, err
 	}
+	if opts.Scoped || opts.Before != "" || opts.Mode == "continuation" || opts.Mode == "beginning" {
+		if _, ok := physicalHistoryCursor("codex", resumeID, opts); ok {
+			return loadNativeWindowPage("codex", resumeID, opts, func(cursor int) (history.FileWindow, error) { return c.historyFileWindow(path, cursor) }, func(window history.FileWindow) ([]map[string]any, error) {
+				messages, _, e := parseCodexHistoryWindow(window.Lines, resumeID, window.MoreBefore, !window.MoreAfter)
+				if e != nil {
+					return nil, e
+				}
+				if !opts.IncludeThinking {
+					messages = history.StripThinkingBlocks(messages)
+				}
+				return c.withHistoryRequestIDs(messages, resumeID), nil
+			})
+		}
+	}
 	if fi, err := os.Stat(path); err == nil && !fi.IsDir() {
 		key := history.FileKey{Path: path, MtimeNS: fi.ModTime().UnixNano(), Size: fi.Size()}
 		// v3 reparses persisted tails that v2 saved without their closing turn ID.
@@ -285,6 +299,9 @@ func (c *Codex) readCodexHistory(path, resumeID string) ([]map[string]any, bool,
 }
 
 func parseCodexHistoryLines(lines []history.TailLine, resumeID string, truncated bool) ([]map[string]any, bool, error) {
+	return parseCodexHistoryWindow(lines, resumeID, truncated, true)
+}
+func parseCodexHistoryWindow(lines []history.TailLine, resumeID string, truncated, completeTail bool) ([]map[string]any, bool, error) {
 
 	type rec struct {
 		lineNo int
@@ -423,7 +440,9 @@ func parseCodexHistoryLines(lines []history.TailLine, resumeID string, truncated
 		message["history_read_result_verified"] = role == "assistant" && payload.Phase == "final_answer"
 		messages = append(messages, message)
 	}
-	flushPendingCommentary()
+	if completeTail {
+		flushPendingCommentary()
+	}
 	for _, message := range messages {
 		sourceID, _ := message["source_message_id"].(string)
 		if turn := turnBySource[sourceID]; turn != "" {

@@ -76,11 +76,13 @@ type Command struct {
 	GoalStatus             string
 	TokenBudget            *int
 
-	Limit           int
-	KnownLast       string
-	Mode            string
-	Before          string
-	IncludeThinking bool
+	Limit             int
+	KnownLast         string
+	HistoryRequestID  string
+	HistoryContinuity bool
+	Mode              string
+	Before            string
+	IncludeThinking   bool
 
 	ShellID string
 	Data    string
@@ -254,11 +256,13 @@ func (AppV1) ParseCommand(in protocol.Inbound) Command {
 		GoalStatus:             in.Status,
 		TokenBudget:            in.TokenBudget,
 
-		Limit:           in.Limit,
-		KnownLast:       in.KnownLast,
-		Mode:            in.Mode,
-		Before:          in.Before,
-		IncludeThinking: in.IncludeThinking,
+		Limit:             in.Limit,
+		KnownLast:         in.KnownLast,
+		HistoryRequestID:  in.HistoryRequestID,
+		HistoryContinuity: in.HistoryContinuity,
+		Mode:              in.Mode,
+		Before:            in.Before,
+		IncludeThinking:   in.IncludeThinking,
 
 		ShellID: in.ShellID,
 		Data:    in.Data,
