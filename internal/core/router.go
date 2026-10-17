@@ -130,7 +130,7 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		}
 		if !c.enrollmentOnly {
 			if _, ok := h.exec.(backend.RealtimeVoiceExecutor); ok && h.cfg.CodexRemote != "" {
-				helloInput.Capabilities = append(helloInput.Capabilities, "codex_realtime_voice_v1", "codex_voice_selection_v1", "codex_voice_media_v1", "codex_voice_external_music_v1", "codex_voice_external_music_ios_v1")
+				helloInput.Capabilities = append(helloInput.Capabilities, "codex_realtime_voice_v1", "codex_voice_selection_v1", "codex_voice_media_v1", "codex_voice_external_music_v1", "codex_voice_external_music_ios_v1", "codex_voice_apple_music_ios_v1")
 			}
 			if h.LineVoiceEnabled() {
 				helloInput.Capabilities = append(helloInput.Capabilities, "line_voice_v2")

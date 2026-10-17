@@ -11,6 +11,8 @@ import (
 	"everything-go/internal/session"
 	"fmt"
 	"net/url"
+	"regexp"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -70,12 +72,17 @@ func (h *Hub) executeExternalMusic(ctx context.Context, parent *session.Session,
 		}
 		if input.URL != "" {
 			uri, e := url.Parse(input.URL)
-			if e != nil || uri.Scheme != "https" || uri.Host != "music.youtube.com" || uri.Path != "/watch" || uri.User != nil || uri.Fragment != "" || len(uri.RawQuery) != 13 || !youtubeVideoID.MatchString(uri.Query().Get("v")) {
+			appleID := appleMusicSongID(input.URL)
+			if appleID == "" && (e != nil || uri.Scheme != "https" || uri.Host != "music.youtube.com" || uri.Path != "/watch" || uri.User != nil || uri.Fragment != "" || len(uri.RawQuery) != 13 || !youtubeVideoID.MatchString(uri.Query().Get("v"))) {
 				return refuse("external_music_uri_invalid")
 			}
 			action = "play_uri"
 			command.URI = input.URL
-			command.ExpectedID = uri.Query().Get("v")
+			if appleID != "" {
+				command.ExpectedID = appleID
+			} else {
+				command.ExpectedID = uri.Query().Get("v")
+			}
 		} else {
 			action = "play_query"
 			command.Query = strings.TrimSpace(input.Query)
@@ -136,10 +143,20 @@ func (h *Hub) executeExternalMusic(ctx context.Context, parent *session.Session,
 	provider := "ytmusic_android"
 	if h.mediaEndpoint(owner).Platform == "ios" {
 		provider = "ytmusic_ios"
-		if method == "music_control" || (method == "play_music" && action != "play_uri") {
+		if call.musicProvider == "apple_music_ios" {
+			provider = "apple_music_ios"
+			if action == "play_query" || (action == "seek" && *command.PositionMS > 86400000) {
+				h.voiceMu.Unlock()
+				return refuse("external_music_action_unsupported")
+			}
+		} else if method == "music_control" || (method == "play_music" && action != "play_uri") {
 			h.voiceMu.Unlock()
 			return refuse("external_music_action_unsupported")
 		}
+	}
+	if action == "play_uri" && ((provider == "apple_music_ios") != (appleMusicSongID(command.URI) != "")) {
+		h.voiceMu.Unlock()
+		return refuse("external_music_provider_uri_mismatch")
 	}
 	command.Provider = provider
 	if method == "play_music" && call.media != nil && (call.media.state == "playing" || call.media.state == "buffering" || call.media.state == "queued") {
@@ -238,6 +255,24 @@ func validExternalMusic(x *protocol.ExternalMusicState) bool {
 		if x.PackageName != "com.google.android.apps.youtube.music" || x.HandoffOpened {
 			return false
 		}
+	case "apple_music_ios":
+		if x.PackageName != "com.apple.Music" || x.HandoffOpened || x.PositionMS < 0 || x.PositionMS > 86400000 {
+			return false
+		}
+		if x.PlaybackConfirmed && (x.State != "playing" || x.ObservationAgeMS < 0) {
+			return false
+		}
+		if (x.ActionConfirmed || x.PlaybackConfirmed) && (x.ObservationAgeMS < 0 || x.ObservationAgeMS > 5000) {
+			return false
+		}
+		if x.TrackMatched && !appleMusicIdentifier.MatchString(x.MediaID) {
+			return false
+		}
+		for _, action := range x.SupportedActions {
+			if !slices.Contains([]string{"play_uri", "pause", "resume", "stop", "next", "previous", "seek", "observe"}, action) {
+				return false
+			}
+		}
 	case "ytmusic_ios":
 		// Public iOS handoff acknowledges opening only. It cannot attest another
 		// app's now-playing state, track identity, position or successful playback.
@@ -283,6 +318,9 @@ func (h *Hub) handleExternalMusicState(c *Client, cmd clientproto.Command) {
 	if r == nil || r.command.CommandID != cmd.MediaCommandID || r.command.Sequence != cmd.MediaSequence || x.OperationID != cmd.MediaCommandID || x.Provider != r.command.Provider {
 		return
 	}
+	if x.Provider == "apple_music_ios" && r.command.Action == "play_uri" && x.TrackMatched && x.MediaID != r.command.ExpectedID {
+		return
+	}
 	if x.Provider == "ytmusic_ios" {
 		// The receipt is a handoff acknowledgement, never a fresh player sample.
 		if !r.closed {
@@ -319,8 +357,18 @@ func (h *Hub) handleExternalMusicState(c *Client, cmd clientproto.Command) {
 	r.result.LastObservedState = x.State
 	r.result.ErrorCode = x.Error
 	r.result.Title = x.Title
-	r.result.Observed = true
-	r.result.LastObservedMS = time.Now().UnixMilli()
+	if x.Provider == "apple_music_ios" {
+		r.result.Observed = x.ObservationAgeMS >= 0
+		if r.result.Observed {
+			r.result.LastObservedMS = time.Now().UnixMilli() - x.ObservationAgeMS
+		} else {
+			r.result.LastObservedMS = 0
+		}
+		r.result.NeedsUserAction = x.Error == "music_permission_required" || x.Error == "music_subscription_required"
+	} else {
+		r.result.Observed = true
+		r.result.LastObservedMS = time.Now().UnixMilli()
+	}
 	r.result.ActionConfirmed = x.ActionConfirmed
 	r.result.PlaybackConfirmed = x.PlaybackConfirmed && x.State == "playing"
 	if (r.command.Action == "play_query" || r.command.Action == "play_uri") && !x.TrackMatched {
@@ -335,4 +383,25 @@ func (h *Hub) handleExternalMusicState(c *Client, cmd clientproto.Command) {
 		r.closed = true
 		close(r.settled)
 	}
+}
+
+var appleMusicIdentifier = regexp.MustCompile(`^[1-9][0-9]{0,19}$`)
+
+func appleMusicSongID(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.Host != "music.apple.com" || u.User != nil || strings.Contains(raw, "#") {
+		return ""
+	}
+	parts := strings.Split(u.Path, "/")
+	if (len(parts) != 4 && len(parts) != 5) || parts[0] != "" || len(parts[1]) != 2 || parts[1][0] < 'a' || parts[1][0] > 'z' || parts[1][1] < 'a' || parts[1][1] > 'z' || parts[3] == "" || !appleMusicIdentifier.MatchString(parts[len(parts)-1]) {
+		return ""
+	}
+	if parts[2] == "song" && u.RawQuery == "" {
+		return parts[len(parts)-1]
+	}
+	query, e := url.ParseQuery(u.RawQuery)
+	if e == nil && !strings.Contains(u.RawQuery, "&") && parts[2] == "album" && len(query) == 1 && len(query["i"]) == 1 && appleMusicIdentifier.MatchString(query.Get("i")) {
+		return query.Get("i")
+	}
+	return ""
 }
