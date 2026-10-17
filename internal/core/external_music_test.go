@@ -104,3 +104,43 @@ func TestExternalMusicDoesNotAcceptForeignPackageOrLargePayload(t *testing.T) {
 		t.Fatal("oversized title")
 	}
 }
+
+func TestExternalMusicTerminalFailureSurvivesObservation(t *testing.T) {
+	h, _, caller, _ := controllerFixture(t)
+	var owner *Client
+	for c, call := range h.voiceClients {
+		owner = c
+		call.mediaCapable = true
+		call.externalMusicCapable = true
+	}
+	done := make(chan any, 1)
+	go func() {
+		v, e := h.ExecuteVoiceMedia(context.Background(), caller, "play_music", backend.VoiceMediaRequest{Query: "requested song", Title: "requested song"})
+		if e != nil {
+			done <- e
+		} else {
+			done <- v
+		}
+	}()
+	event := nextVoiceState(t, owner, "media")
+	var command protocol.VoiceMediaCommand
+	b, _ := json.Marshal(event["media"])
+	json.Unmarshal(b, &command)
+	x := &protocol.ExternalMusicState{Provider: "ytmusic_android", PackageName: "com.google.android.apps.youtube.music", BindingID: "original", State: "playing", Title: "old song", Error: "playback_unconfirmed", OperationID: command.CommandID, ObservationAgeMS: 0}
+	ack := clientproto.Command{SessionID: caller.Parent.ID, ThreadID: caller.Parent.ResumeID(), VoiceID: caller.VoiceID, MediaCommandID: command.CommandID, MediaSequence: command.Sequence, ExternalMusic: x}
+	h.handleVoiceMediaState(owner, ack)
+	first := <-done
+	if v, ok := first.(backend.VoiceMediaResult); !ok || v.ErrorCode != "playback_unconfirmed" {
+		t.Fatal(first)
+	}
+	fresh := *x
+	fresh.Error = ""
+	ack.ExternalMusic = &fresh
+	h.handleVoiceMediaState(owner, ack)
+	h.voiceMu.Lock()
+	out := externalResult(h.voiceClients[owner].externalMusic.current)
+	h.voiceMu.Unlock()
+	if out.ErrorCode != "playback_unconfirmed" || out.ExternalMusic.Error != "playback_unconfirmed" || out.PlaybackConfirmed {
+		t.Fatalf("terminal outcome erased: %+v", out)
+	}
+}

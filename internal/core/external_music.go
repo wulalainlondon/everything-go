@@ -247,6 +247,15 @@ func (h *Hub) handleExternalMusicState(c *Client, cmd clientproto.Command) {
 	if r == nil || r.command.CommandID != cmd.MediaCommandID || r.command.Sequence != cmd.MediaSequence || x.OperationID != cmd.MediaCommandID {
 		return
 	}
+	// Observing the old song cannot erase an already settled dispatch failure.
+	// Copy the snapshot so the caller-owned payload remains immutable.
+	if r.closed && r.result.ErrorCode != "" {
+		copy := *x
+		copy.Error = r.result.ErrorCode
+		copy.ActionConfirmed = false
+		copy.PlaybackConfirmed = false
+		x = &copy
+	}
 	r.result.ExternalMusic = x
 	r.result.State = x.State
 	r.result.LastObservedState = x.State
