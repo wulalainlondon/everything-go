@@ -852,7 +852,10 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 
 	case "permission_response":
 		if err := h.perms.Resolve(cmd.RequestID, cmd.Decision, c.deviceID); err != nil {
-			c.enqueueEvent(h.client.Error(cmd.SessionID, cmd.RequestID, err.Error()))
+			failure := h.client.Error(cmd.SessionID, "permission_response_rejected", err.Error())
+			failure.RequestID = cmd.RequestID
+			failure.CommandType = "permission_response"
+			c.enqueueEvent(failure)
 		}
 
 	// --- WebRTC P2P signaling --------------------------------------------
