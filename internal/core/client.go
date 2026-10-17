@@ -117,11 +117,13 @@ func (w wsConn) EnrollmentEligible() bool { return w.canEnroll }
 // Client is one logical connection (WS or WebRTC DataChannel). A single write
 // pump goroutine drains the send channel so conn writes are never concurrent.
 type Client struct {
-	hub     *Hub
-	conn    wireConn
-	send    chan []byte
-	urgent  chan []byte // small heartbeat replies must not queue behind snapshots
-	writeMu sync.Mutex  // a bounded data write must not race a shorter ping deadline
+	callbackCapable atomic.Bool
+	callbackNative  atomic.Bool
+	hub             *Hub
+	conn            wireConn
+	send            chan []byte
+	urgent          chan []byte // small heartbeat replies must not queue behind snapshots
+	writeMu         sync.Mutex  // a bounded data write must not race a shorter ping deadline
 	// quit is closed exactly once when the client is torn down. The send channel
 	// is deliberately NEVER closed: background goroutines (sendHistory, sendUsage,
 	// …) outlive the read loop and may call enqueue after disconnect, so closing
@@ -552,6 +554,10 @@ func (c *Client) dispatchFrame(ctx context.Context, data []byte) error {
 	}
 	var taskHeader struct {
 		Type string `json:"type"`
+	}
+	if json.Unmarshal(data, &taskHeader) == nil && taskHeader.Type == "task_callback_request" {
+		c.hub.handleTaskCallback(ctx, c, data)
+		return nil
 	}
 	if json.Unmarshal(data, &taskHeader) == nil && taskHeader.Type == "task_api_request" {
 		c.hub.handleTaskAPI(ctx, c, data)

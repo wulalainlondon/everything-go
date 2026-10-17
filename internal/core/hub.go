@@ -24,6 +24,7 @@ import (
 	"everything-go/internal/attachmentjournal"
 	"everything-go/internal/automation"
 	"everything-go/internal/backend"
+	"everything-go/internal/callbacks"
 	"everything-go/internal/clientproto"
 	"everything-go/internal/delegation"
 	"everything-go/internal/deviceinventory"
@@ -75,6 +76,7 @@ type Config struct {
 // the executor.Sink (Emit broadcasts an event to connected clients, or buffers
 // it when none are connected so a reconnecting client can recover it).
 type Hub struct {
+	callbacks          *callbacks.Store
 	historySequence    atomic.Uint64
 	unifiedMedia       *unifiedVoiceMedia
 	continuityCompatMu sync.Mutex
@@ -231,6 +233,11 @@ func NewHub(reg *session.Registry, cfg Config, pairing *governance.Pairing, port
 		automationWake:      make(chan struct{}, 1),
 		relayWake:           make(chan struct{}, 1),
 		relayNonces:         make(map[string]int64),
+	}
+	if store, err := callbacks.Open(cfg.DataDir); err != nil {
+		log.Printf("[callback] storage unavailable: %v", err)
+	} else {
+		h.callbacks = store
 	}
 	if store, err := messagequeue.Open(cfg.DataDir); err != nil {
 		log.Printf("[message-queue] storage unavailable: %v", err)

@@ -44,24 +44,26 @@ type Command struct {
 	ReadEpoch       string
 	ReadToken       string
 
-	Name               string
-	Cwd                string
-	Backend            string
-	Model              string
-	ModelSet           bool
-	Sandbox            string
-	ResumeClaudeID     string
-	MessagePurpose     string
-	TaskRequestIDs     []string
-	TaskTarget         *protocol.TaskTarget
-	TaskOrigin         *protocol.TaskOrigin
-	VisualPresentation string
-	Content            string
-	UploadRequestID    string
-	UploadID           string
-	UploadKind         string
-	MediaType          string
-	SizeBytes          int64
+	Name                                          string
+	Cwd                                           string
+	Backend                                       string
+	Model                                         string
+	ModelSet                                      bool
+	Sandbox                                       string
+	ResumeClaudeID                                string
+	MessagePurpose                                string
+	TaskRequestIDs                                []string
+	TaskTarget                                    *protocol.TaskTarget
+	TaskOrigin                                    *protocol.TaskOrigin
+	VisualPresentation                            string
+	CallbackID, CallbackInvitation, CallbackClaim string
+	CallbackOnComplete                            *bool
+	Content                                       string
+	UploadRequestID                               string
+	UploadID                                      string
+	UploadKind                                    string
+	MediaType                                     string
+	SizeBytes                                     int64
 
 	Effort                 string
 	EffortSet              bool
@@ -234,12 +236,12 @@ func (AppV1) ParseCommand(in protocol.Inbound) Command {
 		TaskTarget:         in.TaskTarget,
 		TaskOrigin:         in.TaskOrigin,
 		Content:            in.Content,
-		VisualPresentation: in.VisualPresentation,
-		UploadRequestID:    in.UploadRequestID,
-		UploadID:           in.UploadID,
-		UploadKind:         in.UploadKind,
-		MediaType:          in.MediaType,
-		SizeBytes:          in.SizeBytes,
+		VisualPresentation: in.VisualPresentation, CallbackOnComplete: in.CallbackOnComplete, CallbackID: in.CallbackID, CallbackInvitation: in.CallbackInvitation, CallbackClaim: in.CallbackClaim,
+		UploadRequestID: in.UploadRequestID,
+		UploadID:        in.UploadID,
+		UploadKind:      in.UploadKind,
+		MediaType:       in.MediaType,
+		SizeBytes:       in.SizeBytes,
 
 		Effort: func() string {
 			if in.Effort != nil {

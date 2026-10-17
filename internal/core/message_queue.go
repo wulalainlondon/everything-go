@@ -21,6 +21,8 @@ import (
 )
 
 type queuedPayload struct {
+	CallbackOnComplete  *bool                      `json:"callback_on_complete,omitempty"`
+	CallbackBinding     string                     `json:"callback_binding,omitempty"`
 	ExternalPeer        string                     `json:"external_peer,omitempty"`
 	ExternalReviewOnly  bool                       `json:"external_review_only,omitempty"`
 	ExternalEventIDs    []string                   `json:"external_event_ids,omitempty"`
@@ -126,13 +128,13 @@ func (h *Hub) enqueueChatMessageExpected(c *Client, cmd clientproto.Command, exp
 	if cmd.VisualPresentation != "" {
 		userHash, effectiveHash = backend.PresentationHashes(backend.WithVisualPresentation(context.Background(), cmd.VisualPresentation), content)
 	}
-	intent, err := json.Marshal(queuedPayload{VisualUserHash: userHash, VisualEffectiveHash: effectiveHash, VisualPresentation: cmd.VisualPresentation, MessagePurpose: cmd.MessagePurpose, Origin: cmd.TaskOrigin, Content: content, Images: cmd.Images, Files: files, ExpectedTarget: expected})
+	intent, err := json.Marshal(queuedPayload{CallbackOnComplete: cmd.CallbackOnComplete, VisualUserHash: userHash, VisualEffectiveHash: effectiveHash, VisualPresentation: cmd.VisualPresentation, MessagePurpose: cmd.MessagePurpose, Origin: cmd.TaskOrigin, Content: content, Images: cmd.Images, Files: files, ExpectedTarget: expected})
 	if err != nil {
 		h.queueError(c, cmd, "invalid_message", err.Error())
 		return false
 	}
 	intentHash := sha256.Sum256(intent)
-	payload, err := json.Marshal(queuedPayload{VisualUserHash: userHash, VisualEffectiveHash: effectiveHash, VisualPresentation: cmd.VisualPresentation, MessagePurpose: cmd.MessagePurpose, OwnerDevice: owner, Origin: cmd.TaskOrigin, Content: content, Images: cmd.Images, Files: files, Configuration: &config, ExpectedTarget: expected})
+	payload, err := json.Marshal(queuedPayload{CallbackOnComplete: cmd.CallbackOnComplete, VisualUserHash: userHash, VisualEffectiveHash: effectiveHash, VisualPresentation: cmd.VisualPresentation, MessagePurpose: cmd.MessagePurpose, OwnerDevice: owner, CallbackBinding: callbackBinding(c), Origin: cmd.TaskOrigin, Content: content, Images: cmd.Images, Files: files, Configuration: &config, ExpectedTarget: expected})
 	if err != nil {
 		h.queueError(c, cmd, "invalid_message", err.Error())
 		return false
@@ -159,6 +161,11 @@ func (h *Hub) enqueueChatMessageExpected(c *Client, cmd clientproto.Command, exp
 		}
 		h.queueError(c, cmd, "queue_persist_failed", err.Error())
 		return false
+	}
+	if inserted && cmd.CallbackOnComplete != nil && *cmd.CallbackOnComplete {
+		if err := h.armAdmittedCallback(context.Background(), c, s, e.RequestID); err != nil {
+			h.callbackRespond(c, callbackInput{Operation: "callback_admit_" + e.RequestID}, nil, err)
+		}
 	}
 	if inserted {
 		behind := s.State() != session.Idle || s.QueueLen() > 0

@@ -61,6 +61,10 @@ type Inbound struct {
 	// message
 	Content            string `json:"content"`
 	VisualPresentation string `json:"visual_presentation,omitempty"`
+	CallbackID         string `json:"callback_id,omitempty"`
+	CallbackInvitation string `json:"callback_invitation_id,omitempty"`
+	CallbackClaim      string `json:"callback_claim_operation,omitempty"`
+	CallbackOnComplete *bool  `json:"callback_on_complete,omitempty"`
 
 	// binary video upload control frames
 	UploadRequestID string `json:"upload_request_id"`

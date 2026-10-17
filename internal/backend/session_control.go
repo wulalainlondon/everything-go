@@ -29,3 +29,13 @@ type SessionControlProvider interface {
 type VoiceDelegationProvider interface {
 	DelegateVoiceSession(SessionControlCaller, DelegationSpec) (DelegationReceipt, error)
 }
+
+// Task callbacks are confined to the actual live voice caller's own source.
+type TaskCallbackControl struct {
+	Action        string `json:"action"`
+	TaskRequestID string `json:"task_request_id,omitempty"`
+	Enabled       *bool  `json:"enabled,omitempty"`
+}
+type TaskCallbackProvider interface {
+	ControlTaskCallback(context.Context, SessionControlCaller, TaskCallbackControl) (any, error)
+}

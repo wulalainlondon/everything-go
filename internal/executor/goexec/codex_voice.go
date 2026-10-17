@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -16,6 +17,7 @@ import (
 )
 
 type codexVoiceCall struct {
+	callbackSpeech               bool
 	mediaGeneration              string
 	voiceID, threadID, sessionID string
 	answer                       chan backend.RealtimeVoiceAnswer
@@ -150,7 +152,7 @@ func (c *Codex) StartRealtimeVoice(ctx context.Context, s *session.Session, inpu
 	if err := ctx.Err(); err != nil {
 		return backend.RealtimeVoiceAnswer{}, err
 	}
-	call := &codexVoiceCall{mediaGeneration: input.MediaGeneration, voiceID: input.VoiceID, threadID: id, sessionID: s.ID, answer: make(chan backend.RealtimeVoiceAnswer, 1), failure: make(chan error, 1), closed: make(chan struct{}), callback: input.OnEvent}
+	call := &codexVoiceCall{callbackSpeech: input.SpeakerInstructions != "", mediaGeneration: input.MediaGeneration, voiceID: input.VoiceID, threadID: id, sessionID: s.ID, answer: make(chan backend.RealtimeVoiceAnswer, 1), failure: make(chan error, 1), closed: make(chan struct{}), callback: input.OnEvent}
 	c.voiceMu.Lock()
 	if c.voiceCalls == nil {
 		c.voiceCalls = map[string]*codexVoiceCall{}
@@ -163,6 +165,9 @@ func (c *Codex) StartRealtimeVoice(ctx context.Context, s *session.Session, inpu
 	c.voiceMu.Unlock()
 	params := realtimeVoiceStartParams(id, input)
 	_, err = c.rpcCall("thread/realtime/start", params, 30*time.Second)
+	if call.callbackSpeech {
+		log.Printf("[callback] voice=%s stage=start_rpc_ack accepted=%t", call.voiceID, err == nil)
+	}
 
 	if err == nil && ctx.Err() != nil {
 		err = ctx.Err()
@@ -187,6 +192,9 @@ func (c *Codex) StartRealtimeVoice(ctx context.Context, s *session.Session, inpu
 	}
 	cleanup, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
+	if call.callbackSpeech && err != nil {
+		log.Printf("[callback] voice=%s stage=start_failed category=%s", call.voiceID, realtimeFailureCategory(err.Error()))
+	}
 	_ = c.StopRealtimeVoice(cleanup, s, input.VoiceID)
 	return backend.RealtimeVoiceAnswer{}, err
 }
@@ -241,6 +249,13 @@ func (c *Codex) dispatchVoice(method string, raw json.RawMessage) bool {
 		Text     string `json:"text"`
 		Delta    string `json:"delta"`
 		Role     string `json:"role"`
+		Message  string `json:"message"`
+		Item     struct {
+			Type  string `json:"type"`
+			Voice string `json:"realtimeSessionId"`
+			Role  string `json:"role"`
+			Text  string `json:"text"`
+		} `json:"item"`
 	}
 	if json.Unmarshal(raw, &p) != nil {
 		return true
@@ -251,11 +266,22 @@ func (c *Codex) dispatchVoice(method string, raw json.RawMessage) bool {
 	if call == nil || (p.VoiceID != "" && p.VoiceID != call.voiceID) {
 		return true
 	}
+	if call.callbackSpeech && (method == "thread/realtime/sdp" || method == "thread/realtime/started" || method == "thread/realtime/closed") {
+		log.Printf("[callback] voice=%s native_event=%s", call.voiceID, method)
+	}
 	event := backend.RealtimeVoiceEvent{}
 	if method == "thread/realtime/itemAdded" {
 		c.observeMediaHandoff(call, raw)
 	}
 	switch method {
+	case "thread/realtime/itemCompleted":
+		if p.Item.Type != "transcriptSegment" || p.Item.Voice != call.voiceID {
+			return true
+		}
+		event.State = "transcript_done"
+		event.Text = p.Item.Text
+		event.Role = p.Item.Role
+		event.TranscriptVoiceID = p.Item.Voice
 	case "thread/realtime/sdp":
 		if len(p.SDP) > 64*1024 {
 			return true
@@ -266,6 +292,9 @@ func (c *Codex) dispatchVoice(method string, raw json.RawMessage) bool {
 		}
 		return true
 	case "thread/realtime/error":
+		if call.callbackSpeech {
+			log.Printf("[callback] realtime failure voice=%s category=%s", call.voiceID, realtimeFailureCategory(p.Message))
+		}
 		event.State = "error"
 		event.Message = "Codex 語音服務中斷，請結束語音後重新連線"
 		select {
@@ -316,6 +345,12 @@ func (c *Codex) failVoiceCalls() {
 
 func realtimeVoiceStartParams(thread string, input backend.RealtimeVoiceStart) map[string]any {
 	params := map[string]any{"threadId": thread, "outputModality": "audio", "transport": map[string]any{"type": "webrtc", "sdp": input.SDP}, "version": "v3", "realtimeSessionId": input.VoiceID, "clientManagedHandoffs": false, "includeStartupContext": true, "flushTranscriptTailOnSessionEnd": false}
+	// prompt configures the realtime speaker. realtimeStartInstructions below
+	// configures the backing agent and cannot bootstrap proactive speech.
+	if input.SpeakerInstructions != "" {
+		params["prompt"] = input.SpeakerInstructions
+		params["includeStartupContext"] = false
+	}
 	if input.MediaInstructions != "" {
 		params["realtimeStartInstructions"] = input.MediaInstructions
 	}
