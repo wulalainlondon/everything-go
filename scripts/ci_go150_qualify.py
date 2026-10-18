@@ -17,7 +17,7 @@ def child_env():return {k:v for k,v in os.environ.items()if k in CHILD_ENV}
 def sha(path):return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 def run(args,timeout=45):
  r=sp.run(args,capture_output=True,timeout=timeout,env=child_env())
- if r.returncode:raise RuntimeError('QUALIFICATION_COMMAND_FAILED')
+ if r.returncode:raise RuntimeError('QUALIFICATION_COMMAND_FAILED_'+Path(args[0]).name+'_'+str(r.returncode))
  return r.stdout+r.stderr
 def save(path,value):
  fd=os.open(path,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)
@@ -89,7 +89,12 @@ def main():
   save(root/'go150-ci-receipt.json',{**receipt,'state':'HOLD','error_class':type(exc).__name__,'qualified':False});return 4
  receipt.update(result)
  if not result['qualified']:save(root/'go150-ci-receipt.json',receipt);return 4
- for args in [['xcrun','stapler','staple',str(app)],['xcrun','stapler','validate',str(app)],['codesign','--verify','--deep','--strict',str(app)],['spctl','--assess','--type','execute',str(app)]]:run(args)
+ receipt['post_checks']=[]
+ for name,args in [('staple',['xcrun','stapler','staple',str(app)]),('ticket_validate',['xcrun','stapler','validate',str(app)]),('signature',['codesign','--verify','--deep','--strict',str(app)]),('gatekeeper',['spctl','--assess','--type','execute',str(app)])]:
+  try:run(args)
+  except RuntimeError as exc:
+   save(root/'go150-ci-receipt.json',{**receipt,'qualified':False,'state':'POST_QUALIFICATION_HOLD','failed_check':name,'safe_error_code':str(exc)});raise
+  receipt['post_checks'].append(name)
  if sha(app/'Contents/MacOS/everything-go')!=BINARY_SHA:raise RuntimeError('POST_QUALIFICATION_BINARY_CHANGED')
  output=root/OUTPUT_NAME;run(['ditto','-c','-k','--sequesterRsrc','--keepParent',str(app),str(output)])
  receipt.update(state='CI_SIGNED_NOTARIZED_STAPLED_QUALIFIED',archive_sha256=sha(output),archive_name=output.name,qualified=True)
