@@ -9,7 +9,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   qualify:
-    runs-on: macos-15
+    runs-on: macos-15-intel
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
