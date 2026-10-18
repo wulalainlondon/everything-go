@@ -71,6 +71,7 @@ func main() {
 	dataDir := flag.String("data-dir", ".", "directory for everything-go's own persisted state")
 	sessionStore := flag.String("session-store", os.Getenv("EVERYTHING_GO_SESSION_STORE"), "canonical saved_sessions.json path (empty = DATA_DIR/everything_go_sessions.json)")
 	instanceName := flag.String("instance-name", "everything-go", "human label shown in the app")
+	nativeCapture := flag.String("native-task-capture-config", "", "operator-owned acceptance capture JSON; default off, no business authority")
 	delegationHandoff := flag.String("delegation-handoff-config", "", "operator-owned per-parent handoff JSON; off when omitted")
 	delegationCapacity := flag.String("delegation-capacity-config", "", "server-owned per-parent delegation capacity JSON (default 6 active, 64 waiting, 128 reserved results)")
 	rootDir := flag.String("root-dir", "", "filesystem jail root (\"\" = no jail)")
@@ -210,6 +211,10 @@ func main() {
 		CodexRemote:        codexRemoteEndpoint(),
 	}
 	hub := core.NewHub(reg, cfg, pairing, *port)
+	if err := hub.ConfigureNativeResponseCapture(*nativeCapture); err != nil {
+		log.Fatal("native task capture configuration refused")
+	}
+	defer hub.DisableNativeResponseCapture()
 	defer hub.CloseDelegations()
 	defer hub.CloseSessionDispatches()
 	remoteDesktopListener := startRemoteDesktop(cfg.TailscaleIP, cfg.DataDir, hub.HTTPAuthorized)

@@ -94,7 +94,7 @@ func (p *proc) currentReqID() string {
 
 func (p *proc) finishTurn() (reqID string, wasCompact bool) {
 	if p.taskLease != nil {
-		p.taskLease.revoke()
+		p.taskLease.endTurn()
 	}
 
 	p.mu.Lock()
@@ -103,6 +103,7 @@ func (p *proc) finishTurn() (reqID string, wasCompact bool) {
 	wasCompact = p.compactInProgress
 	p.reqID = ""
 	p.compactInProgress = false
+	p.inputUUID, p.acceptedUUID, p.finalMessageID, p.finalAssistantText = "", "", "", ""
 	return reqID, wasCompact
 }
 
@@ -200,9 +201,27 @@ func (c *Claude) state(sessionID string) *claudeState {
 // Send writes a user message to the session's claude process (spawning it on
 // first use) and lets the stdout reader stream the response.
 func (c *Claude) Send(ctx context.Context, s *session.Session, reqID, content string, images []backend.ImageAttachment, files []backend.FileAttachment) error {
+	if c.taskProvider != nil && s.ResumeID() != "" {
+		scope, err := c.taskProvider.TaskWorkerScope(s)
+		if err != nil {
+			return err
+		}
+		if scope != nil {
+			if err := c.ValidateExistingTaskScope(s, *scope, s.Snapshot().Cwd); err != nil {
+				return err
+			}
+		}
+	}
+
 	c.mu.Lock()
 	p := c.procs[s.ID]
-	if p != nil && p.taskLease != nil && p.currentReqID() == "" {
+	if p != nil && p.taskLease != nil {
+		if p.taskLease.hasTurn() {
+			c.mu.Unlock()
+			return fmt.Errorf("Claude task request already active; inspect its original receipt")
+		}
+		// A completed business turn may have an internal compact in progress.
+		// Never reuse its process credential for the next admitted request.
 		p.cancel()
 		delete(c.procs, s.ID)
 		p = nil

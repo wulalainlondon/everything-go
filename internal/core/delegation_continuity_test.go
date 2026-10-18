@@ -547,8 +547,26 @@ func TestContinuityAPINativeSteerRetainsFormalScopeButQueueUsesExistingAppend(t 
 		t.Fatal(e)
 	}
 	queue := continuityInput(original, p, h, "queued fix")
-	if _, e = h.ContinueDelegation(p, p.ActiveQueuedID(), "queue-native-rejected", queue); e == nil || e.Error() != "delegation_use_existing_task_append" {
+	if _, e = h.ContinueDelegation(p, p.ActiveQueuedID(), "queue-native-rejected", queue); e == nil || e.Error() != "unsupported" {
 		t.Fatal("duplicated formal append implementation", e)
+	}
+	roundsView, e := h.DelegationRounds(p, original.ID, 0)
+	if e != nil || roundsView.(map[string]any)["continuation_availability"] != "available" {
+		t.Fatal("misleading queue continuation availability", roundsView, e)
+	}
+	currentTarget := roundsView.(map[string]any)["current_target"].(map[string]any)
+	if currentTarget["config_revision"] != child.SettingsSnapshot().ConfigRevision || currentTarget["native_thread_id"] != child.ResumeID() {
+		t.Fatal("target configuration borrowed from source", currentTarget)
+	}
+	bad := queue
+	bad.ExpectedConfigRevision++
+	if _, e := h.ContinueDelegation(p, p.ActiveQueuedID(), "synthetic-wrong-cfg", bad); e == nil || e.Error() != "delegation_child_binding_changed" {
+		t.Fatal("wrong target revision admitted", e)
+	}
+	bad = queue
+	bad.ExpectedPreviousID = "wrong-predecessor"
+	if _, e := h.ContinueDelegation(p, p.ActiveQueuedID(), "synthetic-wrong-round", bad); e == nil || e.Error() != "delegation_stale_predecessor" {
+		t.Fatal("wrong predecessor admitted", e)
 	}
 	task, e := h.apiTask(ctx, intent)
 	if e != nil {

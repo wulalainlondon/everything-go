@@ -84,6 +84,10 @@ func Open(dataDir string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	if err := installContinuityEffectBinding(db); err != nil {
+		db.Close()
+		return nil, err
+	}
 	if err := taskapi.InstallJournal(db); err != nil {
 		db.Close()
 		return nil, err

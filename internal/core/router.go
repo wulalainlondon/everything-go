@@ -337,6 +337,11 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 
 	case "request_runtime_snapshot":
 		c.enqueueEvent(h.runtimeSnapshotForClient(c))
+		// Android's native socket may outlive its WebView. A foreground refresh
+		// then has no new hello, so recover the source-scoped inbox snapshot too.
+		if h.automation != nil {
+			c.enqueueEvent(h.automationSnapshotEvent())
+		}
 
 	case "work_sync_request":
 		h.sendWorkSync(c, cmd.Revision)
@@ -572,7 +577,7 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		}
 		// A newly connected reader has not seen the original session_uuid event.
 		// Publish the existing identity without resuming or starting its work.
-		if resumeID := s.ResumeID(); s.Backend() == "codex" && resumeID != "" {
+		if resumeID := s.ResumeID(); (s.Backend() == "codex" || s.Backend() == "claude") && resumeID != "" {
 			c.enqueueEvent(protocol.NewSessionUUID(s.ID, resumeID))
 		}
 		cmd = h.captureHistoryReadBoundary(c, cmd)
@@ -1428,6 +1433,7 @@ func (h *Hub) sessionSummaries() []protocol.SessionSummary {
 			lastActivity = float64(previewAt) / 1000
 		}
 		out = append(out, protocol.SessionSummary{
+			ClaudeUUID:  snap.ResumeID,
 			ContextUsed: knownContextUsed(snap), ContextMax: knownContextMax(snap),
 			ActiveModel: active.Model, ActiveEffort: active.Effort, ActiveServiceTier: active.ServiceTier, ActiveConfigRevision: active.ConfigRevision,
 			ConfigRevision: snap.ConfigRevision,

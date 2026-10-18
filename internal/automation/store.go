@@ -916,6 +916,13 @@ func (s *Store) Snapshot(ctx context.Context) (Snapshot, error) {
 		}
 		item.Enabled = enabled == 1
 		item.ReviewOnly = reviewOnly == 1
+		// Old persisted routes used "review" for analysis awaiting human review.
+		// Project the current wire spelling without rewriting the original policy,
+		// revision or routing target. One legacy row must not invalidate the phone's
+		// entire snapshot, including unrelated inbox capabilities and approvals.
+		if item.HandlingMode == "review" {
+			item.HandlingMode = AnalyzeForReview
+		}
 		snapshot.Routes = append(snapshot.Routes, item)
 	}
 	rows.Close()
