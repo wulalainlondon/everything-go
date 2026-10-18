@@ -3,7 +3,7 @@ on:
   push:
     branches: ['ci/go150-notary-20261018']
 permissions:
-  contents: read
+  contents: write
 concurrency:
   group: go150-original-notary-59efc049
   cancel-in-progress: false
