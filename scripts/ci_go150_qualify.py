@@ -9,6 +9,8 @@ BINARY_SHA='00b4c469ccc32743d4253009c48ffd12f2381fd4bc133b190ff04002a78125de'
 PREVIOUS_UNRESOLVED='59efc049-8feb-4f5b-a9d5-87347332f650'
 ORIGINAL='a65099a7-70da-4a61-b3ae-1836487c6702'
 TEAM='UPWLTJL6S2'
+ARCH='arm64'
+OUTPUT_NAME='Everything-Go-0.2.150-ci-qualified-arm64.zip'
 ACTIONS={'info','log'}
 CHILD_ENV={'PATH','HOME','TMPDIR','USER','LOGNAME','LANG','LC_ALL','DEVELOPER_DIR'}
 def child_env():return {k:v for k,v in os.environ.items()if k in CHILD_ENV}
@@ -31,7 +33,7 @@ def verify_input(archive,workspace):
  run(['codesign','--verify','--deep','--strict',str(app)])
  signature=run(['codesign','-d','--verbose=4',str(app)]).decode()
  if 'TeamIdentifier='+TEAM not in signature or 'Authority=Developer ID Application: YuDi Huang ('+TEAM+')' not in signature or '(runtime)'not in signature or 'Timestamp='not in signature:raise RuntimeError('SIGNATURE_IDENTITY_MISMATCH')
- if run(['lipo','-archs',str(binary)]).decode().strip()!='arm64':raise RuntimeError('ARCHITECTURE_MISMATCH')
+ if run(['lipo','-archs',str(binary)]).decode().strip()!=ARCH:raise RuntimeError('ARCHITECTURE_MISMATCH')
  build=run(['go','version','-m',str(binary)]).decode()
  if 'vcs.revision='+SOURCE not in build or 'vcs.modified=false'not in build:raise RuntimeError('BUILD_SOURCE_MISMATCH')
  return app
@@ -89,7 +91,7 @@ def main():
  if not result['qualified']:save(root/'go150-ci-receipt.json',receipt);return 4
  for args in [['xcrun','stapler','staple',str(app)],['xcrun','stapler','validate',str(app)],['codesign','--verify','--deep','--strict',str(app)],['spctl','--assess','--type','execute',str(app)]]:run(args)
  if sha(app/'Contents/MacOS/everything-go')!=BINARY_SHA:raise RuntimeError('POST_QUALIFICATION_BINARY_CHANGED')
- output=root/'Everything-Go-0.2.150-ci-qualified-arm64.zip';run(['ditto','-c','-k','--sequesterRsrc','--keepParent',str(app),str(output)])
+ output=root/OUTPUT_NAME;run(['ditto','-c','-k','--sequesterRsrc','--keepParent',str(app),str(output)])
  receipt.update(state='CI_SIGNED_NOTARIZED_STAPLED_QUALIFIED',archive_sha256=sha(output),archive_name=output.name,qualified=True)
  save(root/'go150-ci-receipt.json',receipt)
  return 0
