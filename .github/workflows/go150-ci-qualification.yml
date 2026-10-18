@@ -5,7 +5,7 @@ on:
 permissions:
   contents: write
 concurrency:
-  group: go150-original-notary-59efc049
+  group: go150-authorized-notary-a65099a7
   cancel-in-progress: false
 jobs:
   qualify:
@@ -28,7 +28,7 @@ jobs:
           gh release download apple-music-go150-ci-20261018 --repo "$GITHUB_REPOSITORY" --pattern Everything-Go-0.2.150-notary-input-arm64.zip --dir "$RUNNER_TEMP/go150-input"
       - name: Verify source, original Developer ID signature and exact input hash
         run: python3 scripts/ci_go150_qualify.py verify "$RUNNER_TEMP/go150-input/Everything-Go-0.2.150-notary-input-arm64.zip" "$RUNNER_TEMP/go150-safe-output"
-      - name: Read original Apple submission with existing CI credential; never submit
+      - name: Read authorized fresh Go150 submission with existing CI credential; never submit
         env:
           APPSTORE_CONNECT_API_KEY_ID: ${{ secrets.APPSTORE_CONNECT_API_KEY_ID }}
           APPSTORE_CONNECT_API_ISSUER_ID: ${{ secrets.APPSTORE_CONNECT_API_ISSUER_ID }}
