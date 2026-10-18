@@ -68,8 +68,8 @@ func (c *Codex) LoadHistory(resumeID string, opts history.Opts) (*history.Result
 	}
 	if fi, err := os.Stat(path); err == nil && !fi.IsDir() {
 		key := history.FileKey{Path: path, MtimeNS: fi.ModTime().UnixNano(), Size: fi.Size()}
-		// v3 reparses persisted tails that v2 saved without their closing turn ID.
-		cacheName := "codex:turns-v3:" + resumeID
+		// Reparse older tails whose typed tool-output parts were saved empty.
+		cacheName := "codex:turns-v4:" + resumeID
 		if messages, ok := history.DefaultCache().Load(cacheName, key); ok {
 			if !opts.IncludeThinking {
 				messages = history.StripThinkingBlocks(messages)

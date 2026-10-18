@@ -1173,6 +1173,7 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 			Type              string          `json:"type"`
 			Command           json.RawMessage `json:"command"`
 			Output            json.RawMessage `json:"output"`
+			AggregatedOutput  json.RawMessage `json:"aggregatedOutput"`
 			Status            string          `json:"status"`
 			Tool              string          `json:"tool"`
 			SenderThreadID    string          `json:"senderThreadId"`
@@ -1419,6 +1420,9 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 		rawOutput := p.Output
 		if len(rawOutput) == 0 || string(rawOutput) == "null" {
 			rawOutput = p.Item.Output
+		}
+		if len(rawOutput) == 0 || string(rawOutput) == "null" {
+			rawOutput = p.Item.AggregatedOutput
 		}
 		generatedPaths := codexGeneratedImagePaths(rawOutput)
 		output := rawToString(rawOutput)

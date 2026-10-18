@@ -30,7 +30,7 @@ type codexToolPayload struct {
 	CallID    string          `json:"call_id"`
 	CallID2   string          `json:"callId"`
 	ID        string          `json:"id"`
-	Output    string          `json:"output"`
+	Output    json.RawMessage `json:"output"`
 }
 
 func normalizeCodexResponseTool(payload json.RawMessage, output string) (codexToolCall, bool) {
@@ -68,7 +68,35 @@ func codexResponseToolOutput(payload json.RawMessage) (string, string, bool) {
 	if id == "" {
 		return "", "", false
 	}
-	return id, p.Output, true
+	return id, codexResponseOutputText(p.Output), true
+}
+
+// Rollouts may store tool output as typed text parts instead of a string.
+// Preserve each text part and its ordering; unfamiliar structured content
+// keeps its original JSON rather than silently disappearing.
+func codexResponseOutputText(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var text string
+	if json.Unmarshal(raw, &text) == nil {
+		return text
+	}
+	var parts []struct {
+		Type string  `json:"type"`
+		Text *string `json:"text"`
+	}
+	if json.Unmarshal(raw, &parts) == nil {
+		texts := make([]string, 0, len(parts))
+		for _, part := range parts {
+			if part.Text == nil || (part.Type != "input_text" && part.Type != "output_text" && part.Type != "text") {
+				return string(raw)
+			}
+			texts = append(texts, *part.Text)
+		}
+		return strings.Join(texts, "\n")
+	}
+	return string(raw)
 }
 
 func normalizeCodexLiveTool(params json.RawMessage) (codexToolCall, bool) {
