@@ -6,7 +6,8 @@ from ci_ram_key_volume import RamKeyVolume
 SOURCE='3cd2283a77ed630bbf61ec8d1ca35cf78e82880f'
 INPUT_SHA='ed0e9231bb21464577bc313204dd732eeae58282826b8a03e0f976d12ad429c1'
 BINARY_SHA='00b4c469ccc32743d4253009c48ffd12f2381fd4bc133b190ff04002a78125de'
-ORIGINAL='59efc049-8feb-4f5b-a9d5-87347332f650'
+PREVIOUS_UNRESOLVED='59efc049-8feb-4f5b-a9d5-87347332f650'
+ORIGINAL='a65099a7-70da-4a61-b3ae-1836487c6702'
 TEAM='UPWLTJL6S2'
 ACTIONS={'info','log'}
 CHILD_ENV={'PATH','HOME','TMPDIR','USER','LOGNAME','LANG','LC_ALL','DEVELOPER_DIR'}
@@ -80,7 +81,7 @@ def main():
  if mode!='qualify':raise RuntimeError('UNKNOWN_MODE')
  # Repeat the non-secret identity gate before even reading CI credential inputs.
  app=verify_input(archive,root/'qualification-input')
- receipt={'submission_id':ORIGINAL,'input_sha256':INPUT_SHA,'source':SOURCE,'binary_sha256':BINARY_SHA,'resubmitted':False,'runtime_changed':False}
+ receipt={'submission_id':ORIGINAL,'previous_unresolved_submission_id':PREVIOUS_UNRESOLVED,'user_authorized_distinct_submission':True,'ci_submitted':False,'input_sha256':INPUT_SHA,'source':SOURCE,'binary_sha256':BINARY_SHA,'runtime_changed':False}
  try:result=read_with_ci_credential()
  except Exception as exc:
   save(root/'go150-ci-receipt.json',{**receipt,'state':'HOLD','error_class':type(exc).__name__,'qualified':False});return 4
