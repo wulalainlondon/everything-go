@@ -49,42 +49,54 @@ Dependencies are pinned to LINEJS 3.4.2, types 3.5.0, undici 7.30.0 and thrift
 dependencies from lockfiles and hashes all regular runtime files plus the Node
 binary. `LINE_SERVICE_MANIFEST` enables Go verification before a child starts.
 
-## Configuration and packaging
+## Durable operator configuration and fixed entry
 
-Feature admission is off until `LINE_SERVICE_ENTRY` is configured. Paths are
-host configuration; they cannot be supplied by a model tool.
+The primary local configuration is DATA_DIR/line-service.json, owned by the
+operator (0600, no symlink), outside every versioned release. It contains no
+credentials. The actual executable resolves its own signed Resources/line bundle
+and verifies its manifest and pinned Node before accessing the existing store.
 
-```sh
-LINEJS_NODE=/absolute/path/to/node
-LINE_SERVICE_ENTRY=/absolute/runtime/line/account/dist/server.js
-LINEJS_SHARED_DIR=/absolute/runtime/line/voice
-LINEJS_VOICE_WORKER=/absolute/runtime/line/voice/route-worker.mjs
-LINE_SERVICE_MANIFEST=/absolute/runtime/line/manifest.json
-LINEJS_KEYCHAIN_HELPER=/existing/approved/keychain-helper
-LINE_LEGACY_DATA_DIR=/existing/encrypted/account/directory
-LINE_SERVICE_ALLOW_WRITE=1
-LINE_SERVICE_ALLOW_EVENTS=1
-LINE_SERVICE_ALLOW_SCHEDULES=1
-LINE_SERVICE_ALLOW_RESOURCES=1
-LINEJS_ALLOW_CALLS=0
-```
+Example (operator paths must be the original verified paths):
 
-Individual feature gates default to disabled. Calls are separately gated. New
-profiles use separate directories and Keychain items. Adopting the existing
-profile preserves its absolute directory, Keychain service derivation and
-encrypted login file. Read-only LINE probes can still persist normal SDK token
-rotation and request-sequence state. A missing key never creates a replacement
-key for an existing encrypted database.
+    {"version":1,"enabled":true,"node":"/pinned/node",
+     "keychain_helper":"/existing/approved/helper","legacy_dir":"/original/profile",
+     "allow_write":true,"allow_events":true,"allow_schedules":true,
+     "allow_resources":true,"allow_calls":false}
 
-```sh
-node scripts/stage_line_runtime.mjs /new/staging/line
-```
+Existing account grants, encrypted store and profile ownership remain separate.
+No profile/key/login or grant is recreated. If an existing store loses its
+configuration, startup fails visibly; explicit enabled:false is the supported
+disable operation. Explicit older environment deployments remain supported when
+no stable config exists. A retired release's line.env.sh is not authoritative.
 
-The output must not already exist. `EVERYTHING_GO_INCLUDE_LINE=1` adds this
-runtime under `Contents/Resources/line` through the existing signed macOS package
-script. Its existing clean-source and signing-identity gates remain in force.
-The external Node executable must match the staged manifest. This first rollout
-retains the existing approved Keychain helper path.
+Before promoting any local Go candidate, run scripts/check_release_services.py
+with --candidate, --expected-binary-sha256 and the original --data-dir. It invokes
+--check-line-config, not an unknown positional command that could start an old
+server. This preflight checks resources and config only, with no account network
+operation or Keychain access. An older binary or a candidate ignoring enabled
+LINE fails the gate. Recheck on the exact signed staged executable.
+
+When the service is enabled, ~/.local/bin/bridge-line is atomically installed.
+Use through exec_command as one literal command, including older native threads:
+
+    /Users/USER/.local/bin/bridge-line --id lop_UNIQUE_QUERY --method accounts --params '{}'
+
+Use actual returned account_ref/target_ref only. Supported account/message,
+receipt, attachment, subscription and schedule operations use the existing
+conversation grants. No grant/pair/management, shell transport overrides or
+phone-call handoff is exposed by the fixed entry. Sends require explicit user
+authorization. Only a real provider-observed exact command authorizes the same
+thread/active request/payload. Environment IDs alone, shell chains, copied
+commands, another conversation and retired voice owners cannot authorize it.
+CLI write intents remain bound to the original conversation plus --id across
+native-command changes/restarts; changed payload cannot reuse an existing intent.
+After uncertainty, query intent_status with original_intent and account_ref under a new query ID to locate the exact receipt; never guess the latest operation. A missing row is not definitive pre-execution refusal. Do not blindly replay.
+Read-only health may perform ordinary SDK refresh; accounts/status alone does not
+prove live connectivity. No messages/calls are sent to test access.
+
+LINE remains separate from bridge-media and its playback ledger. Phone LINE
+retirement and the call feature flag remain unchanged. Voice startup instructions
+provide the fixed entry without requiring old native dynamic-tool hot reload.
 
 ## User and tool surfaces
 

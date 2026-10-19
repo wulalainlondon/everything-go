@@ -132,6 +132,7 @@ type Hub struct {
 	work                *workitems.Service
 	events              *eventinbox.Store
 	lineService         *linebridge.Service
+	lineControl         *lineLocalControl
 	automation          *automation.Store
 	automationManager   *automation.Manager
 	relay               *relay.Store

@@ -179,6 +179,7 @@ type Codex struct {
 	// Optional owned-fixture observer. Nil in production; never grants authority.
 	nativeFixtureObserver func(json.RawMessage)
 	mediaOrigins          mediaOriginState
+	lineOrigins           lineOriginState
 	metadataObserverBoot  string
 
 	taskProvider           backend.TaskAPIProvider
@@ -1291,6 +1292,7 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 	st.touch(time.Now())
 	if isRootThread {
 		c.observeMediaNative(s, m.Method, m.Params)
+		c.observeLineNative(s, m.Method, m.Params)
 	}
 
 	switch m.Method {
