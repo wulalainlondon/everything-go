@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"everything-go/internal/backend"
+	"everything-go/internal/callbacks"
 	"everything-go/internal/clientproto"
 	"everything-go/internal/linevoice"
 	"everything-go/internal/protocol"
@@ -19,6 +20,12 @@ import (
 var voiceIdentifier = regexp.MustCompile(`^[A-Za-z0-9_-]{8,100}$`)
 
 type clientVoiceCall struct {
+	callbackPolicy        string
+	callbackReport        string
+	callbackReporting     bool
+	callbackExpected      string
+	callbackSpoken        string
+	callbackSpeechSettled bool
 	externalMusicCapable  bool
 	externalMusicPlatform string
 	musicProvider         string
@@ -86,12 +93,16 @@ func (h *Hub) handleVoiceStart(c *Client, cmd clientproto.Command) {
 		c.enqueueEvent(voiceEvent(cmd, "error", "此 Bridge 不支援雙向語音"))
 		return
 	}
+	if err := h.bindCallbackVoice(context.Background(), c, s, cmd); err != nil {
+		c.enqueueEvent(voiceEvent(cmd, "error", err.Error()))
+		return
+	}
 	parent := c.ctx
 	if parent == nil {
 		parent = context.Background()
 	}
 	ctx, cancel := context.WithTimeout(parent, 60*time.Second)
-	call := &clientVoiceCall{mediaCapable: cmd.VoiceMediaCapable, handoffCapable: cmd.LineHandoffCapable, session: s, voiceID: cmd.VoiceID, requestID: cmd.RequestID, cancel: cancel}
+	call := &clientVoiceCall{callbackPolicy: cmd.CallbackID, mediaCapable: cmd.VoiceMediaCapable, handoffCapable: cmd.LineHandoffCapable, session: s, voiceID: cmd.VoiceID, requestID: cmd.RequestID, cancel: cancel}
 	call.mediaObserveCapable = cmd.VoiceMediaObserveCapable
 	call.externalMusicCapable = cmd.VoiceExternalMusicCapable
 	h.voiceMu.Lock()
@@ -129,22 +140,34 @@ func (h *Hub) handleVoiceStart(c *Client, cmd clientproto.Command) {
 	if mediaError != nil {
 		log.Printf("[voice-media] private local control unavailable")
 	}
+	speakerInstructions := ""
+	if call.callbackPolicy != "" {
+		r, found, e := h.callbacks.Get(context.Background(), call.callbackPolicy)
+		if e != nil || !found || r.Report == nil {
+			h.stopClientVoice(c, call)
+			return
+		}
+		call.callbackExpected = callbacks.Speech(r.Name, r.Report.Status, r.Report.Text)
+		speakerInstructions = callbacks.SpeakerPrompt(call.callbackExpected)
+	}
 	if h.lineControl != nil {
 		mediaInstructions += "\n" + h.lineControl.instructions()
 	}
 	c.enqueueEvent(voiceEvent(cmd, "starting", ""))
 	go func() {
 		defer cancel()
-		answer, err := exec.StartRealtimeVoice(ctx, s, backend.RealtimeVoiceStart{MediaGeneration: call.mediaGeneration, MediaInstructions: mediaInstructions, VoiceID: cmd.VoiceID, VoiceName: cmd.VoiceName, SDP: cmd.SDP, OnEvent: func(event backend.RealtimeVoiceEvent) {
+		answer, err := exec.StartRealtimeVoice(ctx, s, backend.RealtimeVoiceStart{SpeakerInstructions: speakerInstructions, MediaGeneration: call.mediaGeneration, MediaInstructions: mediaInstructions, VoiceID: cmd.VoiceID, VoiceName: cmd.VoiceName, SDP: cmd.SDP, OnEvent: func(event backend.RealtimeVoiceEvent) {
 			if !c.live() || !h.ownsVoice(c, call) {
 				return
 			}
 			out := voiceEvent(cmd, event.State, event.Message)
+			h.observeCallbackSpeech(call, event)
 			out.Text = event.Text
 			out.Role = event.Role
 			out.ThreadID = s.ResumeID()
 			c.enqueueEvent(out)
 			if event.State == "closed" {
+				go h.callbackVoiceClosed(call)
 				h.closeVoiceMediaLocal(call)
 				h.voiceMu.Lock()
 				if h.voiceClients[c] == call {
@@ -160,6 +183,7 @@ func (h *Hub) handleVoiceStart(c *Client, cmd clientproto.Command) {
 			return
 		}
 		if err != nil {
+			go h.callbackVoiceFailed(call)
 			h.closeVoiceMediaLocal(call)
 			h.voiceMu.Lock()
 			if h.voiceClients[c] == call {
@@ -217,6 +241,9 @@ func (h *Hub) stopClientVoice(c *Client, call *clientVoiceCall) {
 			delete(h.voiceClients, c)
 		}
 		h.voiceMu.Unlock()
+		if err == nil {
+			go h.callbackVoiceClosed(call)
+		}
 		if c.live() {
 			cmd := clientproto.Command{SessionID: call.session.ID, RequestID: call.requestID, VoiceID: call.voiceID}
 			if err != nil {

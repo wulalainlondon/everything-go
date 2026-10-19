@@ -356,3 +356,18 @@ func (m *Mux) TaskAPICapabilities() []taskapi.ProviderCapability {
 	}
 	return out
 }
+
+func (m *Mux) AppendRealtimeVoiceSpeech(ctx context.Context, s *session.Session, voice, text string) error {
+	p, ok := m.pick(s).(backend.RealtimeSpeechExecutor)
+	if !ok {
+		return fmt.Errorf("原語音來源尚未支援直接匯報")
+	}
+	return p.AppendRealtimeVoiceSpeech(ctx, s, voice, text)
+}
+func (m *Mux) ReadRealtimeVoiceSpeech(ctx context.Context, s *session.Session, voice string, since int64) (backend.RealtimeSpeechEvidence, error) {
+	p, ok := m.pick(s).(backend.RealtimeSpeechReader)
+	if !ok {
+		return backend.RealtimeSpeechEvidence{}, fmt.Errorf("原來源未提供逐通話播報回讀")
+	}
+	return p.ReadRealtimeVoiceSpeech(ctx, s, voice, since)
+}

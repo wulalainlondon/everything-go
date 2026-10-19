@@ -66,6 +66,8 @@ func main() {
 		os.Exit(voicemediaipc.RunCLI(os.Args[2:], os.Stdout, os.Stderr))
 	}
 	lineConfigCheck := flag.Bool("check-line-config", false, "Read-only LINE private-config and signed-runtime preflight; no account network actions")
+	pairingWindow := flag.Duration("pairing-window", 0, "Explicit short pairing window for a loopback-only local acceptance instance")
+	listenHost := flag.String("listen-host", "", "IP to bind (empty = all interfaces; use 127.0.0.1 for isolated local acceptance)")
 	port := flag.Int("port", 8767, "WebSocket listen port (Python prod uses 8766)")
 	mediaControl := flag.Bool("media-control", false, "Enable fixed local media control after provider origin verification")
 	execName := flag.String("executor", "go", "AI executor: go | python")
@@ -170,7 +172,10 @@ func main() {
 	}
 	// Claim the port before opening durable stores. A second launchd job must
 	// fail without running message-queue recovery against the live process.
-	addr := fmt.Sprintf(":%d", *port)
+	if *listenHost != "" && net.ParseIP(*listenHost) == nil {
+		log.Fatal("listen-host must be an IP address")
+	}
+	addr := net.JoinHostPort(*listenHost, fmt.Sprint(*port))
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		log.Fatalf("listen tcp %s before state initialization: %v", addr, err)
@@ -191,6 +196,13 @@ func main() {
 	}
 
 	pairing := governance.NewPairing(filepath.Join(*dataDir, "pairing.json"))
+	if *pairingWindow > 0 {
+		ip := net.ParseIP(*listenHost)
+		if ip == nil || !ip.IsLoopback() || *pairingWindow > 2*time.Minute {
+			log.Fatal("pairing-window requires loopback bind and at most two minutes")
+		}
+		pairing.OpenEnrollment(*pairingWindow)
+	}
 	instanceID, err := governance.LoadOrCreateInstanceID(filepath.Join(*dataDir, "instance_id"))
 	if err != nil {
 		log.Fatalf("load instance id: %v", err)
@@ -312,6 +324,9 @@ func main() {
 	// the heap-heavy parse of every transcript lands in a process that exits and
 	// returns its memory to the OS (see runSearchIndexerLoop).
 	ctx := context.Background()
+	callbackCtx, stopCallbacks := context.WithCancel(ctx)
+	defer stopCallbacks()
+	hub.StartTaskCallbacks(callbackCtx)
 	hub.StartDeviceInventoryAdmin(ctx)
 	hub.StartWorkScheduler(ctx)
 	hub.StartMaintenanceRecovery(ctx)
