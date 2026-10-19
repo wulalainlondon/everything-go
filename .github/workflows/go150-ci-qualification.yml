@@ -1,11 +1,11 @@
-name: go150-exact-artifact-qualification
+name: wulala153-exact-artifact-qualification
 on:
   push:
     branches: ['ci/go150-notary-20261018']
 permissions:
   contents: write
 concurrency:
-  group: go150-authorized-notary-a65099a7
+  group: go153-authorized-notary-5500a305
   cancel-in-progress: false
 jobs:
   qualify:
@@ -20,28 +20,28 @@ jobs:
           go-version: '1.26'
       - name: Check no-submit and credential-isolation guards
         run: python3 -m unittest discover -s scripts -p test_ci_go150_qualify.py -v
-      - name: Download fixed already-signed Go150 input from private draft
+      - name: Download fixed already-signed Go153 input from private draft
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p "$RUNNER_TEMP/go150-input"
-          gh release download apple-music-go150-ci-20261018 --repo "$GITHUB_REPOSITORY" --pattern Everything-Go-0.2.150-notary-input-arm64.zip --dir "$RUNNER_TEMP/go150-input"
+          gh release download wulala-go153-ci-20261019 --repo "$GITHUB_REPOSITORY" --pattern Everything-Go-0.2.153-applemusic-notary-input-arm64.zip --dir "$RUNNER_TEMP/go150-input"
       - name: Verify source, original Developer ID signature and exact input hash
-        run: python3 scripts/ci_go150_qualify.py verify "$RUNNER_TEMP/go150-input/Everything-Go-0.2.150-notary-input-arm64.zip" "$RUNNER_TEMP/go150-safe-output"
-      - name: Read authorized fresh Go150 submission with existing CI credential; never submit
+        run: python3 scripts/ci_go150_qualify.py verify "$RUNNER_TEMP/go150-input/Everything-Go-0.2.153-applemusic-notary-input-arm64.zip" "$RUNNER_TEMP/go150-safe-output"
+      - name: Read authorized fresh Go153 submission with existing CI credential; never submit
         env:
           APPSTORE_CONNECT_API_KEY_ID: ${{ secrets.APPSTORE_CONNECT_API_KEY_ID }}
           APPSTORE_CONNECT_API_ISSUER_ID: ${{ secrets.APPSTORE_CONNECT_API_ISSUER_ID }}
           APPSTORE_CONNECT_API_KEY_P8_BASE64: ${{ secrets.APPSTORE_CONNECT_API_KEY_P8_BASE64 }}
-        run: python3 scripts/ci_go150_qualify.py qualify "$RUNNER_TEMP/go150-input/Everything-Go-0.2.150-notary-input-arm64.zip" "$RUNNER_TEMP/go150-safe-output"
+        run: python3 scripts/ci_go150_qualify.py qualify "$RUNNER_TEMP/go150-input/Everything-Go-0.2.153-applemusic-notary-input-arm64.zip" "$RUNNER_TEMP/go150-safe-output"
       - name: Return only allowlisted receipt and qualified package
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: go150-ci-qualification
+          name: go153-ci-qualification
           path: |
             ${{ runner.temp }}/go150-safe-output/input-verified.json
             ${{ runner.temp }}/go150-safe-output/go150-ci-receipt.json
-            ${{ runner.temp }}/go150-safe-output/Everything-Go-0.2.150-ci-qualified-arm64.zip
+            ${{ runner.temp }}/go150-safe-output/Everything-Go-0.2.153-ci-qualified-arm64.zip
           if-no-files-found: error
           retention-days: 7
