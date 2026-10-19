@@ -16,21 +16,23 @@ import (
 // Operator intent belongs to the data directory, never a disposable release.
 // Paths to the signed runtime are resolved from the actual executable.
 type lineDiskConfig struct {
-	Version              int    `json:"version"`
-	Enabled              bool   `json:"enabled"`
-	RequireExistingStore bool   `json:"require_existing_store"`
-	Node                 string `json:"node"`
-	KeychainHelper       string `json:"keychain_helper"`
-	LegacyDir            string `json:"legacy_dir"`
-	AllowWrite           bool   `json:"allow_write"`
-	AllowEvents          bool   `json:"allow_events"`
-	AllowSchedules       bool   `json:"allow_schedules"`
-	AllowResources       bool   `json:"allow_resources"`
-	AllowCalls           bool   `json:"allow_calls"`
+	Version                 int    `json:"version"`
+	Enabled                 bool   `json:"enabled"`
+	RequireExistingStore    bool   `json:"require_existing_store"`
+	Node                    string `json:"node"`
+	KeychainHelper          string `json:"keychain_helper"`
+	LegacyDir               string `json:"legacy_dir"`
+	AllowWrite              bool   `json:"allow_write"`
+	AllowEvents             bool   `json:"allow_events"`
+	AllowSchedules          bool   `json:"allow_schedules"`
+	AllowResources          bool   `json:"allow_resources"`
+	AllowCalls              bool   `json:"allow_calls"`
+	RestoreExistingAccounts bool   `json:"restore_existing_accounts"`
 }
 type lineRuntimeConfig struct {
 	Node, Entry, Shared, Manifest, Helper, Legacy string
 	Blocked                                       map[string]bool
+	RestoreExisting                               bool
 }
 
 func readLineConfig(dataDir, executable string) (*lineRuntimeConfig, error) {
@@ -73,6 +75,36 @@ func readLineConfig(dataDir, executable string) (*lineRuntimeConfig, error) {
 	if e != nil || len(raw) > 16384 {
 		return nil, errors.New("line_configuration_invalid")
 	}
+	// Reject missing/null enablement and duplicate flat operator fields. Neither
+	// should silently turn an existing service off after an edited config.
+	header := map[string]json.RawMessage{}
+	scan := json.NewDecoder(bytes.NewReader(raw))
+	token, e := scan.Token()
+	if e != nil || token != json.Delim('{') {
+		return nil, errors.New("line_configuration_invalid")
+	}
+	for scan.More() {
+		token, e = scan.Token()
+		if e != nil {
+			return nil, errors.New("line_configuration_invalid")
+		}
+		name, ok := token.(string)
+		if !ok {
+			return nil, errors.New("line_configuration_invalid")
+		}
+		if _, seen := header[name]; seen {
+			return nil, errors.New("line_configuration_ambiguous")
+		}
+		var value json.RawMessage
+		if scan.Decode(&value) != nil {
+			return nil, errors.New("line_configuration_invalid")
+		}
+		header[name] = value
+	}
+	enable := bytes.TrimSpace(header["enabled"])
+	if !bytes.Equal(enable, []byte("true")) && !bytes.Equal(enable, []byte("false")) {
+		return nil, errors.New("line_configuration_invalid")
+	}
 	var config lineDiskConfig
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
@@ -92,7 +124,7 @@ func readLineConfig(dataDir, executable string) (*lineRuntimeConfig, error) {
 		return nil, errors.New("line_configuration_invalid")
 	}
 	root := filepath.Clean(filepath.Join(filepath.Dir(executable), "..", "Resources", "line"))
-	x := &lineRuntimeConfig{Node: config.Node, Helper: config.KeychainHelper, Legacy: config.LegacyDir, Entry: filepath.Join(root, "account", "dist", "server.js"), Shared: filepath.Join(root, "voice"), Manifest: filepath.Join(root, "manifest.json"), Blocked: map[string]bool{"messages.send": !config.AllowWrite, "events": !config.AllowEvents, "schedule": !config.AllowSchedules, "resources": !config.AllowResources, "call": !config.AllowCalls}}
+	x := &lineRuntimeConfig{RestoreExisting: config.RestoreExistingAccounts, Node: config.Node, Helper: config.KeychainHelper, Legacy: config.LegacyDir, Entry: filepath.Join(root, "account", "dist", "server.js"), Shared: filepath.Join(root, "voice"), Manifest: filepath.Join(root, "manifest.json"), Blocked: map[string]bool{"messages.send": !config.AllowWrite, "events": !config.AllowEvents, "schedule": !config.AllowSchedules, "resources": !config.AllowResources, "call": !config.AllowCalls}}
 	return x, validateLineRuntime(x, true)
 }
 func validateLineRuntime(x *lineRuntimeConfig, requireBundle bool) error {

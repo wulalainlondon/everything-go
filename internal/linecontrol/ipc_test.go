@@ -58,3 +58,27 @@ func TestLINECLIRejectsAbsentOriginManagementAndMalformedPayload(t *testing.T) {
 		t.Fatal(out.String())
 	}
 }
+
+func TestLINECLIProofSurvivesJSONTransportEscapingWithoutWeakeningIdentity(t *testing.T) {
+	q := Request{ID: "lop_escaped_payload", Thread: "native", Method: "send_message", Params: json.RawMessage(`{"content":{"text":"<tag> & 文字"},"expected_revision":9007199254740993}`)}
+	before := q.Fingerprint()
+	encoded, e := json.Marshal(q)
+	if e != nil {
+		t.Fatal(e)
+	}
+	var decoded Request
+	if e = json.Unmarshal(encoded, &decoded); e != nil {
+		t.Fatal(e)
+	}
+	if !q.Valid() || !decoded.Valid() || before != decoded.Fingerprint() {
+		t.Fatal("JSON transport altered source proof")
+	}
+	decoded.Params = json.RawMessage(`{"content":{"text":"<tag> & 文字"},"expected_revision":9007199254740992}`)
+	if before == decoded.Fingerprint() {
+		t.Fatal("large numeric identity rounded")
+	}
+	decoded.Params = json.RawMessage(`{"content":{"text":"first","text":"second"}}`)
+	if decoded.Valid() {
+		t.Fatal("ambiguous JSON accepted")
+	}
+}

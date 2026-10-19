@@ -144,3 +144,13 @@ func TestLineEnabledRecoveryCannotCreateAReplacementEmptyStore(t *testing.T) {
 		t.Fatal(e)
 	}
 }
+
+func TestLineCorruptEnablementCannotSilentlyDisableExistingService(t *testing.T) {
+	for _, raw := range []string{`{"version":1}`, `{"version":1,"enabled":null}`, `{"version":1,"enabled":true,"enabled":false}`} {
+		data, exe, _ := lineConfigFixture(t)
+		os.WriteFile(filepath.Join(data, "line-service.json"), []byte(raw), 0600)
+		if _, e := readLineConfig(data, exe); e == nil {
+			t.Fatal("ambiguous enablement accepted")
+		}
+	}
+}

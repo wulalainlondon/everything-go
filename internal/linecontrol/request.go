@@ -27,13 +27,91 @@ type Result struct {
 
 var methods = map[string]bool{"accounts": true, "intent_status": true, "status": true, "health": true, "find_targets": true, "find_openchats": true, "get_messages": true, "send_message": true, "schedule_message": true, "get_operation": true, "list_operations": true, "reschedule_operation": true, "cancel_operation": true, "subscribe": true, "list_attachments": true, "import_resource": true, "download_resource": true}
 
+func canonicalParams(raw []byte) ([]byte, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var parse func(int) (any, error)
+	parse = func(depth int) (any, error) {
+		if depth > 32 {
+			return nil, errors.New("line_request_invalid")
+		}
+		token, e := decoder.Token()
+		if e != nil {
+			return nil, e
+		}
+		switch t := token.(type) {
+		case json.Delim:
+			if t == '{' {
+				value := map[string]any{}
+				for decoder.More() {
+					k, e := decoder.Token()
+					if e != nil {
+						return nil, e
+					}
+					key, ok := k.(string)
+					if !ok {
+						return nil, errors.New("line_request_invalid")
+					}
+					if _, duplicate := value[key]; duplicate {
+						return nil, errors.New("line_request_ambiguous")
+					}
+					item, e := parse(depth + 1)
+					if e != nil {
+						return nil, e
+					}
+					value[key] = item
+				}
+				end, e := decoder.Token()
+				if e != nil || end != json.Delim('}') {
+					return nil, errors.New("line_request_invalid")
+				}
+				return value, nil
+			}
+			if t == '[' {
+				value := []any{}
+				for decoder.More() {
+					item, e := parse(depth + 1)
+					if e != nil {
+						return nil, e
+					}
+					value = append(value, item)
+				}
+				end, e := decoder.Token()
+				if e != nil || end != json.Delim(']') {
+					return nil, errors.New("line_request_invalid")
+				}
+				return value, nil
+			}
+			return nil, errors.New("line_request_invalid")
+		default:
+			return token, nil
+		}
+	}
+	value, e := parse(0)
+	if e != nil {
+		return nil, e
+	}
+	if _, ok := value.(map[string]any); !ok {
+		return nil, errors.New("line_request_invalid")
+	}
+	if decoder.Decode(new(any)) != io.EOF {
+		return nil, errors.New("line_request_invalid")
+	}
+	return json.Marshal(value)
+}
 func (q Request) Valid() bool {
-	return methods[q.Method] && len(q.Params) <= 60000 && json.Valid(q.Params) && len(q.Params) > 1 && q.Params[0] == '{'
+	if !methods[q.Method] || len(q.Params) > 60000 {
+		return false
+	}
+	value, e := canonicalParams(q.Params)
+	return e == nil && len(value) <= 60000
 }
 func (q Request) Fingerprint() string {
-	var b bytes.Buffer
-	json.Compact(&b, q.Params)
-	sum := sha256.Sum256(append([]byte(q.Method+"\x00"), b.Bytes()...))
+	value, e := canonicalParams(q.Params)
+	if e != nil {
+		return ""
+	}
+	sum := sha256.Sum256(append([]byte(q.Method+"\x00"), value...))
 	return hex.EncodeToString(sum[:])
 }
 func ParseInvocation(argv []string) (Request, error) {

@@ -49,6 +49,13 @@ func configuredLineService(hub *core.Hub, dataDir, authority string, transfers *
 	}, SubjectAllowed: hub.LineSubjectAllowed}
 	service := linebridge.NewService(store, linebridge.ExecFactory{Node: runtimeConfig.Node, Entry: runtimeConfig.Entry, Shared: runtimeConfig.Shared, Manifest: runtimeConfig.Manifest}, config)
 	hub.SetLineService(service)
+	if runtimeConfig.RestoreExisting {
+		if e := service.StartRestoreReport(filepath.Join(dataDir, "line-service-health.json")); e != nil {
+			service.Close()
+			store.Close()
+			return nil, e
+		}
+	}
 	service.StartScheduler()
 	return service, nil
 }
