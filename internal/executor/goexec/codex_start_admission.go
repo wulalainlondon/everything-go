@@ -51,6 +51,16 @@ func (c *Codex) QueuedSubmissionReady(ctx context.Context, s *session.Session, r
 	epoch := c.rpc.transportEpoch.Load()
 	raw, err := c.rpc.requestAtEpoch("thread/read", map[string]any{"threadId": threadID, "includeTurns": false}, 5*time.Second, &epoch)
 	if err != nil {
+		// An unloaded thread is not a busy turn. Let Send resume the exact
+		// existing thread (or publish its terminal failure if no rollout exists).
+		// Keep this local to admission: unloaded is not evidence for stale-thread
+		// recovery, a replacement thread, or a replay of previously accepted input.
+		if isQueuedThreadUnloaded(err, threadID) {
+			if ctx.Err() != nil || c.rpc.transportEpoch.Load() != epoch {
+				return &codexAcceptanceError{Reason: "native_idle_unverified"}
+			}
+			return nil
+		}
 		if isStaleThreadError(err) {
 			return nil
 		} // Existing Send recovery owns this case.
@@ -74,6 +84,20 @@ func (c *Codex) QueuedSubmissionReady(ctx context.Context, s *session.Session, r
 	// this read only prevents a known-active thread from being dequeued.
 	return nil
 }
+
+// Accept only the provider's exact RPC error for the requested thread.
+// Transport failures, malformed replies and another thread's error stay queued.
+func isQueuedThreadUnloaded(err error, threadID string) bool {
+	if err == nil || threadID == "" {
+		return false
+	}
+	var reply struct {
+		Message string `json:"message"`
+	}
+	return json.Unmarshal([]byte(err.Error()), &reply) == nil &&
+		reply.Message == "thread not loaded: "+threadID
+}
+
 func codexCorrelationReason(err error) string {
 	var e *codexAcceptanceError
 	if errors.As(err, &e) {
