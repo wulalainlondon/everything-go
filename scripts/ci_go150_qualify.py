@@ -3,19 +3,22 @@ from pathlib import Path
 import base64, hashlib, json, os, plistlib, re, subprocess as sp, sys, time
 from ci_ram_key_volume import RamKeyVolume
 
-SOURCE='3cd2283a77ed630bbf61ec8d1ca35cf78e82880f'
-INPUT_SHA='ed0e9231bb21464577bc313204dd732eeae58282826b8a03e0f976d12ad429c1'
-BINARY_SHA='00b4c469ccc32743d4253009c48ffd12f2381fd4bc133b190ff04002a78125de'
-PREVIOUS_UNRESOLVED='59efc049-8feb-4f5b-a9d5-87347332f650'
-ORIGINAL='a65099a7-70da-4a61-b3ae-1836487c6702'
+SOURCE='b1dd779074c9a00e2aa9fca320558741320174b0'
+INPUT_SHA='085c3c7db64b535b740e45aa0e5152451b7be4ca2b827cce824523c525468d06'
+BINARY_SHA='354034bee209266cae83d2e887cae9975484c047ffba0dec3e439a47770ca9eb'
+PREVIOUS_UNRESOLVED=None
+ORIGINAL='5500a305-22a9-4a79-a5cc-b58f698d41e6'
 TEAM='UPWLTJL6S2'
+VERSION='0.2.153'
+ARCH='arm64'
+OUTPUT_NAME='Everything-Go-0.2.153-ci-qualified-arm64.zip'
 ACTIONS={'info','log'}
 CHILD_ENV={'PATH','HOME','TMPDIR','USER','LOGNAME','LANG','LC_ALL','DEVELOPER_DIR'}
 def child_env():return {k:v for k,v in os.environ.items()if k in CHILD_ENV}
 def sha(path):return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 def run(args,timeout=45):
  r=sp.run(args,capture_output=True,timeout=timeout,env=child_env())
- if r.returncode:raise RuntimeError('QUALIFICATION_COMMAND_FAILED')
+ if r.returncode:raise RuntimeError('QUALIFICATION_COMMAND_FAILED_'+Path(args[0]).name+'_'+str(r.returncode))
  return r.stdout+r.stderr
 def save(path,value):
  fd=os.open(path,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)
@@ -27,11 +30,11 @@ def verify_input(archive,workspace):
  app=workspace/'Everything Go.app';binary=app/'Contents/MacOS/everything-go'
  if sha(binary)!=BINARY_SHA:raise RuntimeError('BINARY_HASH_MISMATCH')
  info=plistlib.loads((app/'Contents/Info.plist').read_bytes())
- if (info.get('CFBundleIdentifier'),info.get('CFBundleShortVersionString'),info.get('BridgeSourceRevision'))!=('com.everything-go.app','0.2.150',SOURCE):raise RuntimeError('APP_IDENTITY_MISMATCH')
+ if (info.get('CFBundleIdentifier'),info.get('CFBundleShortVersionString'),info.get('BridgeSourceRevision'))!=('com.everything-go.app',VERSION,SOURCE):raise RuntimeError('APP_IDENTITY_MISMATCH')
  run(['codesign','--verify','--deep','--strict',str(app)])
  signature=run(['codesign','-d','--verbose=4',str(app)]).decode()
  if 'TeamIdentifier='+TEAM not in signature or 'Authority=Developer ID Application: YuDi Huang ('+TEAM+')' not in signature or '(runtime)'not in signature or 'Timestamp='not in signature:raise RuntimeError('SIGNATURE_IDENTITY_MISMATCH')
- if run(['lipo','-archs',str(binary)]).decode().strip()!='arm64':raise RuntimeError('ARCHITECTURE_MISMATCH')
+ if run(['lipo','-archs',str(binary)]).decode().strip()!=ARCH:raise RuntimeError('ARCHITECTURE_MISMATCH')
  build=run(['go','version','-m',str(binary)]).decode()
  if 'vcs.revision='+SOURCE not in build or 'vcs.modified=false'not in build:raise RuntimeError('BUILD_SOURCE_MISMATCH')
  return app
@@ -87,9 +90,14 @@ def main():
   save(root/'go150-ci-receipt.json',{**receipt,'state':'HOLD','error_class':type(exc).__name__,'qualified':False});return 4
  receipt.update(result)
  if not result['qualified']:save(root/'go150-ci-receipt.json',receipt);return 4
- for args in [['xcrun','stapler','staple',str(app)],['xcrun','stapler','validate',str(app)],['codesign','--verify','--deep','--strict',str(app)],['spctl','--assess','--type','execute',str(app)]]:run(args)
+ receipt['post_checks']=[]
+ for name,args in [('staple',['xcrun','stapler','staple',str(app)]),('ticket_validate',['xcrun','stapler','validate',str(app)]),('signature',['codesign','--verify','--deep','--strict',str(app)]),('gatekeeper',['spctl','--assess','--type','execute',str(app)])]:
+  try:run(args)
+  except RuntimeError as exc:
+   save(root/'go150-ci-receipt.json',{**receipt,'qualified':False,'state':'POST_QUALIFICATION_HOLD','failed_check':name,'safe_error_code':str(exc)});raise
+  receipt['post_checks'].append(name)
  if sha(app/'Contents/MacOS/everything-go')!=BINARY_SHA:raise RuntimeError('POST_QUALIFICATION_BINARY_CHANGED')
- output=root/'Everything-Go-0.2.150-ci-qualified-arm64.zip';run(['ditto','-c','-k','--sequesterRsrc','--keepParent',str(app),str(output)])
+ output=root/OUTPUT_NAME;run(['ditto','-c','-k','--sequesterRsrc','--keepParent',str(app),str(output)])
  receipt.update(state='CI_SIGNED_NOTARIZED_STAPLED_QUALIFIED',archive_sha256=sha(output),archive_name=output.name,qualified=True)
  save(root/'go150-ci-receipt.json',receipt)
  return 0
