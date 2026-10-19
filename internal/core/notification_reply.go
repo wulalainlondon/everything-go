@@ -32,6 +32,7 @@ type notificationReplyResponse struct {
 	ReplyID       string `json:"reply_id"`
 	SessionID     string `json:"session_id"`
 	Status        string `json:"status"`
+	RequestID     string `json:"request_id,omitempty"`
 	QueuePosition int    `json:"queue_position,omitempty"`
 	Error         string `json:"error,omitempty"`
 }
@@ -108,6 +109,19 @@ func (h *Hub) ServeNotificationReplyAPI(w http.ResponseWriter, r *http.Request) 
 		writeNotificationReply(w, http.StatusInternalServerError, notificationReplyResponse{ReplyID: input.ReplyID, SessionID: input.SessionID, Status: "rejected", Error: "persistence_failed"})
 		return
 	}
+	if record.Status == notificationreply.StatusUncertain {
+		// Same-ID retry is a status observation, never a new provider Send.
+		writeNotificationReply(w, http.StatusAccepted, notificationReplyResponse{ReplyID: record.ID, SessionID: record.SessionID, RequestID: "notification-reply-" + record.ID, Status: notificationreply.StatusUncertain, Error: "acceptance_unknown_lookup_original"})
+		return
+	}
+	if !created && (record.Status == notificationreply.StatusSent || record.Status == notificationreply.StatusFailed || record.Status == notificationreply.StatusDispatching) {
+		errorCode := ""
+		if record.Status == notificationreply.StatusFailed {
+			errorCode = "previous_reply_failed_lookup_original"
+		}
+		writeNotificationReply(w, http.StatusAccepted, notificationReplyResponse{ReplyID: record.ID, SessionID: record.SessionID, RequestID: "notification-reply-" + record.ID, Status: record.Status, Error: errorCode})
+		return
+	}
 	queuePosition := 0
 	if created || record.Status == notificationreply.StatusPending {
 		queuePosition, err = h.dispatchNotificationReply(input.ReplyID)
@@ -129,6 +143,9 @@ func writeNotificationReply(w http.ResponseWriter, status int, value notificatio
 func (h *Hub) dispatchNotificationReply(id string) (int, error) {
 	record, claimed := h.notificationReplies.Claim(id)
 	if !claimed {
+		if record.Status == notificationreply.StatusUncertain {
+			return 0, errors.New("acceptance_unknown_lookup_original")
+		}
 		if record.Status == notificationreply.StatusFailed {
 			return 0, errors.New(record.Error)
 		}

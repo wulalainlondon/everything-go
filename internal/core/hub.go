@@ -79,6 +79,7 @@ type Hub struct {
 	callbacks          *callbacks.Store
 	historySequence    atomic.Uint64
 	unifiedMedia       *unifiedVoiceMedia
+	nativeCapture      atomic.Pointer[NativeResponseCapture]
 	continuityCompatMu sync.Mutex
 
 	taskService         *taskapi.Service

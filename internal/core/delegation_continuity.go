@@ -13,6 +13,7 @@ import (
 	"everything-go/internal/delegation"
 	"everything-go/internal/messagequeue"
 	"everything-go/internal/session"
+	"everything-go/internal/taskapi"
 )
 
 // This scope is the original parent's own delegation facts, not a controller
@@ -123,12 +124,9 @@ func (h *Hub) continuityBaseAt(parent *session.Session, id string, expectedSourc
 		return root, round, nil, e
 	}
 	base := root
-	proof, accepted, e := h.messageQueue.ExactNativeAcceptance(root.ChildSessionID, root.ChildRequestID)
+	proofThread, e := h.originalDelegationThread(ctx, root)
 	if e != nil {
 		return base, round, nil, e
-	}
-	if !accepted {
-		return base, round, nil, errors.New("delegation_native_binding_missing")
 	}
 	thread, rev, pinned, e := h.delegations.NativeThread(ctx, root.ChildSessionID)
 	if e != nil {
@@ -141,12 +139,12 @@ func (h *Hub) continuityBaseAt(parent *session.Session, id string, expectedSourc
 		if e != nil {
 			return base, round, nil, e
 		}
-		thread = proof.ThreadID
+		thread = proofThread
 		if e = h.delegations.PinNativeThread(ctx, root.ChildSessionID, thread, rev); e != nil {
 			return base, round, nil, e
 		}
 	}
-	if pinned && thread != proof.ThreadID {
+	if pinned && thread != proofThread {
 		return base, round, nil, errors.New("delegation_native_binding_changed")
 	}
 	child, ok := h.registry.Get(root.ChildSessionID)
@@ -183,6 +181,28 @@ func (h *Hub) ContinueDelegation(parent *session.Session, request, call string, 
 		}
 		return h.continuityReceipt(ctx, old)
 	}
+	// Formal bounded workers retain the existing TaskAPI append enforcer.
+	// This legacy native continuation route cannot silently replace it.
+	original, originalRound, e := h.continuitySourceAt(ctx, parent, in.DelegationID, nil)
+	if e != nil {
+		return nil, e
+	}
+	if _, formal, e := h.delegations.APIBackend(ctx, original.ChildSessionID); e != nil {
+		return nil, e
+	} else if formal && in.Mode == "queue" {
+		latest, e := h.delegations.LatestRound(ctx, originalRound.LogicalID)
+		if e != nil {
+			return nil, e
+		}
+		if latest.ID != in.ExpectedPreviousID {
+			return nil, errors.New("delegation_stale_predecessor")
+		}
+		child, found := h.registry.Get(original.ChildSessionID)
+		if !found || child.ResumeID() != in.ExpectedThreadID || child.SettingsSnapshot().ConfigRevision != in.ExpectedConfigRevision {
+			return nil, errors.New("delegation_child_binding_changed")
+		}
+		return nil, taskapi.Failure("unsupported", "known_none", "read_capabilities")
+	}
 	root, round, child, e := h.continuityBase(parent, in.DelegationID)
 	if e != nil {
 		return nil, e
@@ -190,7 +210,7 @@ func (h *Hub) ContinueDelegation(parent *session.Session, request, call string, 
 	if _, api, e := h.delegations.APIBackend(ctx, child.ID); e != nil {
 		return nil, e
 	} else if api && in.Mode == "queue" {
-		return nil, errors.New("delegation_use_existing_task_append")
+		return nil, taskapi.Failure("unsupported", "known_none", "read_capabilities")
 	}
 	// The serialized store checks predecessor freshness AFTER same-key lookup,
 	// so concurrent retries receive the original receipt instead of stale errors.
@@ -322,6 +342,21 @@ func (h *Hub) DelegationRounds(parent *session.Session, id string, after uint64)
 	} else if child.State() == session.Closed || child.SettingsSnapshot().Hidden {
 		availability, reason = "successor_required", "original_session_closed_or_archived"
 	}
+	if _, formal, e := h.delegations.APIBackend(ctx, root.ChildSessionID); e != nil {
+		return nil, e
+	} else if formal && availability == "available" {
+		retained, _, child, e := h.continuityBase(parent, root.ID)
+		if e != nil {
+			availability, reason = "unsupported", "original_provider_binding_unverified"
+		} else {
+			raw, _, e := h.delegations.APIChildMetadata(ctx, child.ID)
+			var meta apiMetadata
+			var input apiInput
+			if e != nil || json.Unmarshal(raw, &meta) != nil || json.Unmarshal(meta.Request.Input, &input) != nil || h.enforceExistingScope(child, input) != nil || retained.ExpectedThread != child.ResumeID() {
+				availability, reason = "unsupported", "retained_task_scope_unqualified"
+			}
+		}
+	}
 	for _, r := range rounds {
 		record, _, _ := h.delegations.ByID(ctx, r.ID)
 		if strings.Contains(record.Error, "delegation_original_thread_unavailable_successor_required") {
@@ -344,7 +379,12 @@ func (h *Hub) DelegationRounds(parent *session.Session, id string, after uint64)
 		effectiveRevision = epoch.ToRevision
 	}
 	sourceAuthorization := map[string]any{"original_source_revision": originalRevision, "effective_source_revision": effectiveRevision, "authorization_epoch": epoch.Epoch, "source_thread_id": sourceThread, "matches_current_parent": sourceBound && sourceThread == parent.ResumeID() && effectiveRevision == parent.SettingsSnapshot().ConfigRevision}
-	return map[string]any{"source_authorization": sourceAuthorization, "continuation_availability": availability, "successor_reason": reason, "has_more": next < latest.Version, "next_version": next, "logical_task_id": round.LogicalID, "session_id": root.ChildSessionID, "native_thread_id": root.ExpectedThread, "owner_logical_task_id": owner, "qa_logical_task_id": qa, "rounds": out}, nil
+	var currentTarget any
+	if child, found := h.registry.Get(root.ChildSessionID); found {
+		snapshot := child.SettingsSnapshot()
+		currentTarget = map[string]any{"instance_id": h.cfg.InstanceID, "session_id": child.ID, "native_thread_id": child.ResumeID(), "config_revision": snapshot.ConfigRevision}
+	}
+	return map[string]any{"current_target": currentTarget, "source_authorization": sourceAuthorization, "continuation_availability": availability, "successor_reason": reason, "has_more": next < latest.Version, "next_version": next, "logical_task_id": round.LogicalID, "session_id": root.ChildSessionID, "native_thread_id": root.ExpectedThread, "owner_logical_task_id": owner, "qa_logical_task_id": qa, "rounds": out}, nil
 }
 func (h *Hub) BindDelegationQA(parent *session.Session, request, call, ownerID, qaID string) (any, error) {
 	if e := h.continuityCaller(parent, request, call); e != nil {

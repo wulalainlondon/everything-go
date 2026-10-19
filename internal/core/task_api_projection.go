@@ -23,6 +23,56 @@ import (
 	"everything-go/internal/taskapi"
 )
 
+// Public logical-task reads select the current canonical round. Keep apiTask
+// itself exact-request: result collection and original receipt recovery must
+// never jump ahead to a later queued round.
+func (h *Hub) currentTaskProjectionRecord(ctx context.Context, r taskapi.IntentRecord) (taskapi.IntentRecord, error) {
+	if r.Path != "delegation" || h.delegations == nil {
+		return r, nil
+	}
+	_, formal, err := h.delegations.APIBackend(ctx, r.SessionID)
+	if err != nil || !formal {
+		return r, err
+	}
+	root, found, err := h.delegations.ByID(ctx, r.NativeID)
+	if err != nil {
+		return r, err
+	}
+	if !found || root.ChildSessionID != r.SessionID || r.TaskID != apiID(h.cfg.InstanceID, "delegation", root.ID) {
+		return r, taskapi.Failure("permission", "known_none", "lookup_original")
+	}
+	round, found, err := h.delegations.Round(ctx, root.ID)
+	if err != nil {
+		return r, err
+	}
+	if !found || round.LogicalID != root.ID || round.Authority != "" && round.Authority != h.cfg.InstanceID {
+		return r, taskapi.Failure("permission", "known_none", "lookup_original")
+	}
+	latest, err := h.delegations.LatestRound(ctx, root.ID)
+	if err != nil {
+		return r, err
+	}
+	selected, found, err := h.delegations.ByID(ctx, latest.ID)
+	if err != nil {
+		return r, err
+	}
+	if !found || latest.LogicalID != root.ID || latest.Authority != "" && latest.Authority != h.cfg.InstanceID || selected.ChildSessionID != root.ChildSessionID || selected.ParentSessionID != root.ParentSessionID || selected.ChildRequestID == "" {
+		return r, taskapi.Failure("permission", "known_none", "lookup_original")
+	}
+	// Preserve the immutable logical task ID, original source/scope metadata
+	// and definition. Only the projected execution/result request changes.
+	r.RequestID = selected.ChildRequestID
+	return r, nil
+}
+
+func (h *Hub) apiCurrentTask(ctx context.Context, r taskapi.IntentRecord) (map[string]any, error) {
+	selected, err := h.currentTaskProjectionRecord(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+	return h.apiTask(ctx, selected)
+}
+
 func (h *Hub) apiTask(ctx context.Context, r taskapi.IntentRecord) (map[string]any, error) {
 	var legacy struct{ LegacyLinkID string }
 	json.Unmarshal(r.Metadata, &legacy)
@@ -355,6 +405,9 @@ func (h *Hub) apiTask(ctx context.Context, r taskapi.IntentRecord) (map[string]a
 					out = append(out, map[string]any{"delegation_id": round.ID, "round_version": round.Version, "previous_round_id": round.PreviousID, "request_id": record.ChildRequestID, "execution": record.State, "terminal_status": record.TerminalStatus, "delivery": record.DeliveryState, "dispatcher_session_id": record.ParentSessionID, "dispatcher_request_id": record.OriginRequestID, "qa_round_id": qa, "qa_verdict": verdict, "successor_reason": ""})
 				}
 				task["continuity"] = map[string]any{"logical_task_id": m.LogicalID, "current_round_id": latest.ID, "current_round_version": latest.Version, "rounds": out, "earlier_rounds_omitted": after > 0}
+				if err := h.projectCanonicalDelegationQA(ctx, d.ID, task, axes); err != nil {
+					return nil, err
+				}
 			}
 		}
 	}
@@ -390,7 +443,7 @@ func (h *Hub) apiList(ctx context.Context, c taskapi.VerifiedContext, sessionID,
 			if e := h.checkAPIRecord(ctx, c, record); e != nil {
 				continue
 			}
-			task, err := h.apiTask(ctx, record)
+			task, err := h.apiCurrentTask(ctx, record)
 			if err != nil {
 				return nil, err
 			}
@@ -504,11 +557,11 @@ func (h *Hub) Read(ctx context.Context, c taskapi.AuthorizedCommand) (any, error
 	case "capabilities":
 		ops := []string{"capabilities", "create_dispatch", "list", "get", "read_result", "append", "cancel", "snapshot", "events"}
 		routes := map[string]string{}
-		if _, ok := h.exec.(backend.ExistingTaskScopeEnforcer); ok {
+		if h.existingTargetCreationAvailable() {
 			routes["existing_target"] = "ordinary"
 		}
 		if c.Caller.SourceSessionID != "" {
-			if _, ok := h.exec.(backend.ExistingTaskScopeEnforcer); ok {
+			if h.existingTargetCreationAvailable() {
 				routes["existing_target"] = "controller"
 			}
 			routes["new_worker"] = "delegation"
@@ -577,7 +630,7 @@ func (h *Hub) Read(ctx context.Context, c taskapi.AuthorizedCommand) (any, error
 		if err != nil {
 			return nil, err
 		}
-		return h.apiTask(ctx, r)
+		return h.apiCurrentTask(ctx, r)
 	case "list":
 		scope, err := h.apiReadScope(ctx, c.Caller, in)
 		if err != nil {
@@ -649,6 +702,10 @@ func (h *Hub) Read(ctx context.Context, c taskapi.AuthorizedCommand) (any, error
 
 	case "read_result":
 		r, err := h.apiRecord(ctx, c.Caller, in.TaskID)
+		if err != nil {
+			return nil, err
+		}
+		r, err = h.currentTaskProjectionRecord(ctx, r)
 		if err != nil {
 			return nil, err
 		}
