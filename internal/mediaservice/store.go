@@ -87,6 +87,8 @@ func decorate(r backend.VoiceMediaResult, id string, accepted, dispatched bool) 
 		x.SuggestedAction = "music_unavailable_for_this_call"
 	case r.ErrorCode == "autoplay_blocked":
 		x.SuggestedAction = "tap_official_play"
+	case r.ErrorCode == "music_open_required":
+		x.SuggestedAction = "tap_official_open"
 	case r.ErrorCode == "foreground_required":
 		x.SuggestedAction = "bring_app_foreground"
 	case r.AudioCheck == "system_media_volume_zero" || r.AudioCheck == "system_media_muted":
@@ -242,6 +244,7 @@ func historical(r Result) Result {
 	r.PlaybackConfirmed = false
 	r.ActionConfirmed = false
 	r.Audio = nil
+	r.VoiceAudio = nil
 	r.AudioCheck = "stale"
 	if r.LastObservedMS > 0 && time.Now().UnixMilli()-r.LastObservedMS > 30000 {
 		r.Observed = false

@@ -163,6 +163,9 @@ func (h *Hub) ExecuteVoiceMedia(ctx context.Context, caller backend.SessionContr
 // local_user_socket authority is the private per-call OS-user channel, never a
 // fabricated SessionControlCaller. Both transports share the same scope checks.
 func (h *Hub) executeVoiceMedia(ctx context.Context, parent *session.Session, voiceID, requestID, operationID, transport string, expectedCall *clientVoiceCall, method string, input backend.VoiceMediaRequest) (any, error) {
+	if method == "voice_volume" {
+		return h.executeVoiceVolume(ctx, parent, voiceID, requestID, operationID, transport, expectedCall, input)
+	}
 	if method == "play_music" || method == "music_control" {
 		return h.executeExternalMusic(ctx, parent, voiceID, requestID, operationID, transport, expectedCall, method, input)
 	}
@@ -196,7 +199,7 @@ func (h *Hub) executeVoiceMedia(ctx context.Context, parent *session.Session, vo
 	if !ok || s != parent || !h.controls.MobileMayWrite(s.ID) {
 		return refuse(errors.New("voice_media_caller_not_owned"))
 	}
-	if input.Query != "" || input.Artist != "" || input.PositionMS != nil {
+	if input.Query != "" || input.Artist != "" || input.PositionMS != nil || input.Delta != nil {
 		return refuse(errors.New("voice_media_arguments_invalid"))
 	}
 	action := input.Action
@@ -340,6 +343,10 @@ func (h *Hub) executeVoiceMedia(ctx context.Context, parent *session.Session, vo
 	return mediaResult(m, receipt), nil
 }
 func (h *Hub) handleVoiceMediaState(c *Client, cmd clientproto.Command) {
+	if cmd.VoiceAudio != nil {
+		h.handleVoiceAudioState(c, cmd)
+		return
+	}
 	if cmd.ExternalMusic != nil {
 		h.handleExternalMusicState(c, cmd)
 		return

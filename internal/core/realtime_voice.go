@@ -20,6 +20,9 @@ import (
 var voiceIdentifier = regexp.MustCompile(`^[A-Za-z0-9_-]{8,100}$`)
 
 type clientVoiceCall struct {
+	voiceAudioCapable     bool
+	voiceAudioSequence    uint64
+	voiceAudioReceipts    map[string]*voiceAudioReceipt
 	callbackPolicy        string
 	callbackReport        string
 	callbackReporting     bool
@@ -105,6 +108,7 @@ func (h *Hub) handleVoiceStart(c *Client, cmd clientproto.Command) {
 	call := &clientVoiceCall{callbackPolicy: cmd.CallbackID, mediaCapable: cmd.VoiceMediaCapable, handoffCapable: cmd.LineHandoffCapable, session: s, voiceID: cmd.VoiceID, requestID: cmd.RequestID, cancel: cancel}
 	call.mediaObserveCapable = cmd.VoiceMediaObserveCapable
 	call.externalMusicCapable = cmd.VoiceExternalMusicCapable
+	call.voiceAudioCapable = cmd.VoiceAudioCapable
 	h.voiceMu.Lock()
 	call.externalMusicPlatform = h.mediaEndpoint(c).Platform
 	h.voiceMu.Unlock()

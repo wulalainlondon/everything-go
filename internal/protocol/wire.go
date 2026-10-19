@@ -135,6 +135,8 @@ type Inbound struct {
 	VoiceMusicProvider        string              `json:"voice_music_provider,omitempty"`
 	ExternalMusic             *ExternalMusicState `json:"external_music,omitempty"`
 	VoiceMediaCapable         bool                `json:"voice_media_capable,omitempty"`
+	VoiceAudioCapable         bool                `json:"voice_audio_capable,omitempty"`
+	VoiceAudio                *VoiceAudioState    `json:"voice_audio,omitempty"`
 	VoiceMediaObserveCapable  bool                `json:"voice_media_observe_capable,omitempty"`
 	VoiceDeviceModel          string              `json:"voice_device_model,omitempty"`
 	MediaCommandID            string              `json:"media_command_id,omitempty"`
