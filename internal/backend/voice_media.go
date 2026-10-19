@@ -8,6 +8,7 @@ import (
 // Controls only the original caller's active voice endpoint. No caller/voice
 // identity is accepted in model arguments.
 type VoiceMediaRequest struct {
+	Delta      *int   `json:"delta,omitempty"`
 	Query      string `json:"query,omitempty"`
 	Artist     string `json:"artist,omitempty"`
 	PositionMS *int64 `json:"position_ms,omitempty"`
@@ -43,6 +44,7 @@ func (e *VoiceMediaNotDispatchedError) Error() string { return e.Cause.Error() }
 func (e *VoiceMediaNotDispatchedError) Unwrap() error { return e.Cause }
 
 type VoiceMediaResult struct {
+	VoiceAudio        *protocol.VoiceAudioState    `json:"voice_audio,omitempty"`
 	HandoffOpened     bool                         `json:"handoff_opened,omitempty"`
 	ExternalMusic     *protocol.ExternalMusicState `json:"external_music,omitempty"`
 	Provider          string                       `json:"provider,omitempty"`

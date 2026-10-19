@@ -60,7 +60,7 @@ func (h *Hub) executeExternalMusic(ctx context.Context, parent *session.Session,
 	if !ok || s != parent || !h.controls.MobileMayWrite(s.ID) {
 		return refuse("voice_media_caller_not_owned")
 	}
-	if input.Volume != nil {
+	if input.Volume != nil || input.Delta != nil {
 		return refuse("external_music_player_gain_unsupported")
 	}
 	action := input.Action
@@ -216,8 +216,15 @@ func (h *Hub) executeExternalMusic(ctx context.Context, parent *session.Session,
 		return refuse("voice_media_command_limit")
 	}
 	if old := m.current; old != nil && !old.closed && method != "status" {
-		h.voiceMu.Unlock()
-		return refuse("external_music_operation_pending")
+		if old.result.NeedsUserAction && old.result.ErrorCode == "music_open_required" {
+			old.result.State = "superseded"
+			old.result.NeedsUserAction = false
+			old.closed = true
+			close(old.settled)
+		} else {
+			h.voiceMu.Unlock()
+			return refuse("external_music_operation_pending")
+		}
 	}
 	m.sequence++
 	command.Action = action
@@ -248,6 +255,9 @@ func (h *Hub) executeExternalMusic(ctx context.Context, parent *session.Session,
 }
 func validExternalMusic(x *protocol.ExternalMusicState) bool {
 	if x == nil || len(x.BindingID) > 100 || len(x.OperationID) > 100 || len(x.SupportedActions) > 16 {
+		return false
+	}
+	if x.NeedsUserAction && (x.Provider != "ytmusic_android" || x.Error != "music_open_required" || x.ActionConfirmed || x.PlaybackConfirmed) {
 		return false
 	}
 	switch x.Provider {
@@ -352,6 +362,7 @@ func (h *Hub) handleExternalMusicState(c *Client, cmd clientproto.Command) {
 		copy.PlaybackConfirmed = false
 		x = &copy
 	}
+	r.result.NeedsUserAction = x.NeedsUserAction
 	r.result.ExternalMusic = x
 	r.result.State = x.State
 	r.result.LastObservedState = x.State
@@ -379,7 +390,7 @@ func (h *Hub) handleExternalMusicState(c *Client, cmd clientproto.Command) {
 		close(m.observation)
 		m.observation = nil
 	}
-	if !r.closed && (x.ActionConfirmed || x.Error != "" || r.command.Action == "observe") {
+	if !r.closed && !x.NeedsUserAction && (x.ActionConfirmed || x.Error != "" || r.command.Action == "observe") {
 		r.closed = true
 		close(r.settled)
 	}

@@ -133,7 +133,7 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 				if h.callbacks != nil {
 					helloInput.Capabilities = append(helloInput.Capabilities, "task_callback_v1")
 				}
-				helloInput.Capabilities = append(helloInput.Capabilities, "codex_realtime_voice_v1", "codex_voice_selection_v1", "codex_voice_media_v1", "codex_voice_external_music_v1", "codex_voice_external_music_ios_v1", "codex_voice_apple_music_ios_v1")
+				helloInput.Capabilities = append(helloInput.Capabilities, "codex_realtime_voice_v1", "codex_voice_selection_v1", "codex_voice_media_v1", "codex_voice_external_music_v1", "codex_voice_external_music_ios_v1", "codex_voice_apple_music_ios_v1", "codex_voice_audio_control_v1", "codex_voice_music_launch_v1")
 			}
 			if h.LineVoiceEnabled() {
 				helloInput.Capabilities = append(helloInput.Capabilities, "line_voice_v2")
