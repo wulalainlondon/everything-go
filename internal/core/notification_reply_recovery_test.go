@@ -52,6 +52,17 @@ func TestNotificationUncertainPublicProjectionDoesNotResend(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("pending failed to resume")
 	}
+	// The provider callback precedes MarkSent and its durable write. Keep the
+	// store and queue alive until that actor work finishes before TempDir cleanup.
+	for deadline := time.Now().Add(time.Second); ; time.Sleep(time.Millisecond) {
+		record, found := h.notificationReplies.Get("genuine-pending")
+		if found && record.Status == notificationreply.StatusSent {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("resumed reply did not durably finish", record.Status)
+		}
+	}
 }
 func TestNotificationClaimDiskFailureBlocksProvider(t *testing.T) {
 	h, e := newTestHub(t)
