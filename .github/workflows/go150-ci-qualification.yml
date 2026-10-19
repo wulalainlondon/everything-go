@@ -1,11 +1,11 @@
-name: wulala153-exact-artifact-qualification
+name: wulala153-v2-exact-artifact-qualification
 on:
   push:
     branches: ['ci/go150-notary-20261018']
 permissions:
   contents: write
 concurrency:
-  group: go153-authorized-notary-5500a305
+  group: go153-v2-authorized-notary-f641faa0
   cancel-in-progress: false
 jobs:
   qualify:
@@ -25,23 +25,23 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p "$RUNNER_TEMP/go150-input"
-          gh release download wulala-go153-ci-20261019 --repo "$GITHUB_REPOSITORY" --pattern Everything-Go-0.2.153-applemusic-notary-input-arm64.zip --dir "$RUNNER_TEMP/go150-input"
+          gh release download wulala-go153-ci-20261019 --repo "$GITHUB_REPOSITORY" --pattern Everything-Go-0.2.153-applemusic-line152-v2-notary-input-arm64.zip --dir "$RUNNER_TEMP/go150-input"
       - name: Verify source, original Developer ID signature and exact input hash
-        run: python3 scripts/ci_go150_qualify.py verify "$RUNNER_TEMP/go150-input/Everything-Go-0.2.153-applemusic-notary-input-arm64.zip" "$RUNNER_TEMP/go150-safe-output"
+        run: python3 scripts/ci_go150_qualify.py verify "$RUNNER_TEMP/go150-input/Everything-Go-0.2.153-applemusic-line152-v2-notary-input-arm64.zip" "$RUNNER_TEMP/go150-safe-output"
       - name: Read authorized fresh Go153 submission with existing CI credential; never submit
         env:
           APPSTORE_CONNECT_API_KEY_ID: ${{ secrets.APPSTORE_CONNECT_API_KEY_ID }}
           APPSTORE_CONNECT_API_ISSUER_ID: ${{ secrets.APPSTORE_CONNECT_API_ISSUER_ID }}
           APPSTORE_CONNECT_API_KEY_P8_BASE64: ${{ secrets.APPSTORE_CONNECT_API_KEY_P8_BASE64 }}
-        run: python3 scripts/ci_go150_qualify.py qualify "$RUNNER_TEMP/go150-input/Everything-Go-0.2.153-applemusic-notary-input-arm64.zip" "$RUNNER_TEMP/go150-safe-output"
+        run: python3 scripts/ci_go150_qualify.py qualify "$RUNNER_TEMP/go150-input/Everything-Go-0.2.153-applemusic-line152-v2-notary-input-arm64.zip" "$RUNNER_TEMP/go150-safe-output"
       - name: Return only allowlisted receipt and qualified package
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: go153-ci-qualification
+          name: go153-v2-ci-qualification
           path: |
             ${{ runner.temp }}/go150-safe-output/input-verified.json
             ${{ runner.temp }}/go150-safe-output/go150-ci-receipt.json
-            ${{ runner.temp }}/go150-safe-output/Everything-Go-0.2.153-ci-qualified-arm64.zip
+            ${{ runner.temp }}/go150-safe-output/Everything-Go-0.2.153-line152-v2-ci-qualified-arm64.zip
           if-no-files-found: error
           retention-days: 7
