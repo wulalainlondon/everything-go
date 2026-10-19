@@ -473,3 +473,37 @@ func (s *Store) BindIdentity(ctx context.Context, id string, identity Identity) 
 	_, err := s.db.ExecContext(ctx, "UPDATE line_accounts SET profile_name=? WHERE id=?", string(name), id)
 	return err
 }
+
+// Read a CLI intent under its original account/subject. It does not resume an
+// account, dispatch work or assume a missing row means definite non-execution.
+func (s *Store) IntentReceipt(ctx context.Context, c Caller, account, intent string) (Operation, bool, error) {
+	if !s.Allowed(ctx, c, account, "status") {
+		return Operation{}, false, Fail("line_forbidden")
+	}
+	rows, e := s.db.QueryContext(ctx, "SELECT id FROM line_ops WHERE account=? AND subject=? AND intent=? LIMIT 2", account, c.Subject, intent)
+	if e != nil {
+		return Operation{}, false, e
+	}
+	ids := []string{}
+	for rows.Next() {
+		var id string
+		if e = rows.Scan(&id); e != nil {
+			rows.Close()
+			return Operation{}, false, e
+		}
+		ids = append(ids, id)
+	}
+	e = rows.Err()
+	rows.Close()
+	if e != nil {
+		return Operation{}, false, e
+	}
+	if len(ids) == 0 {
+		return Operation{}, false, nil
+	}
+	if len(ids) != 1 {
+		return Operation{}, false, Fail("line_intent_ambiguous")
+	}
+	op, e := s.Operation(ctx, ids[0])
+	return op, e == nil, e
+}

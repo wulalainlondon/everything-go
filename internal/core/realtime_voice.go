@@ -129,6 +129,9 @@ func (h *Hub) handleVoiceStart(c *Client, cmd clientproto.Command) {
 	if mediaError != nil {
 		log.Printf("[voice-media] private local control unavailable")
 	}
+	if h.lineControl != nil {
+		mediaInstructions += "\n" + h.lineControl.instructions()
+	}
 	c.enqueueEvent(voiceEvent(cmd, "starting", ""))
 	go func() {
 		defer cancel()

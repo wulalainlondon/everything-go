@@ -136,7 +136,10 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 				helloInput.Capabilities = append(helloInput.Capabilities, "line_voice_v2")
 			}
 			if h.LineServiceEnabled() {
-				helloInput.Capabilities = append(helloInput.Capabilities, "line_accounts_v1")
+				helloInput.Capabilities = append(helloInput.Capabilities, "line_accounts_v1", "line_service_config_v1")
+				if h.lineControl != nil {
+					helloInput.Capabilities = append(helloInput.Capabilities, "line_control_cli_v1")
+				}
 			}
 			if _, ok := h.exec.(backend.RecapExecutor); ok {
 				helloInput.Capabilities = append(helloInput.Capabilities, "session_recap_v1")

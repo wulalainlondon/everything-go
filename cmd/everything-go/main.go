@@ -40,6 +40,7 @@ import (
 	"everything-go/internal/governance"
 	"everything-go/internal/handoff"
 	"everything-go/internal/inbox"
+	"everything-go/internal/linecontrol"
 	"everything-go/internal/media"
 	"everything-go/internal/mediaservice"
 	"everything-go/internal/netsvc"
@@ -52,12 +53,19 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "line" {
+		os.Exit(linecontrol.RunCLI(os.Args[2:], os.Stdout, os.Stderr))
+	}
+	if len(os.Args) > 1 && os.Args[1] == "line-check" {
+		os.Exit(runLineCheck(os.Args[2:], os.Stdout))
+	}
 	if len(os.Args) > 1 && os.Args[1] == "media" {
 		os.Exit(mediaservice.RunCLI(os.Args[2:], os.Stdout, os.Stderr))
 	}
 	if len(os.Args) > 1 && os.Args[1] == "voice-media" {
 		os.Exit(voicemediaipc.RunCLI(os.Args[2:], os.Stdout, os.Stderr))
 	}
+	lineConfigCheck := flag.Bool("check-line-config", false, "Read-only LINE private-config and signed-runtime preflight; no account network actions")
 	port := flag.Int("port", 8767, "WebSocket listen port (Python prod uses 8766)")
 	mediaControl := flag.Bool("media-control", false, "Enable fixed local media control after provider origin verification")
 	execName := flag.String("executor", "go", "AI executor: go | python")
@@ -87,6 +95,9 @@ func main() {
 	mode := flag.String("mode", "bridge", "run mode: bridge | index | devices (read-only local device inventory)")
 	indexPathsStdin := flag.Bool("index-paths-stdin", false, "index only newline-delimited transcript paths read from stdin")
 	flag.Parse()
+	if *lineConfigCheck {
+		os.Exit(runLineCheck([]string{"--data-dir", *dataDir}, os.Stdout))
+	}
 	var capacity *delegation.CapacityConfig
 	if *delegationCapacity != "" {
 		f, e := os.Open(*delegationCapacity)
@@ -232,7 +243,7 @@ func main() {
 		log.Fatalf("initialize file transfer: %v", err)
 	}
 	if lineService, lineErr := configuredLineService(hub, *dataDir, instanceID, transfers); lineErr != nil {
-		log.Printf("LINE service unavailable: %s", lineErr.Error())
+		log.Fatalf("LINE service configuration failed: %s", lineErr.Error())
 	} else if lineService != nil {
 		defer func() { lineService.Close(); _ = lineService.Store().Close() }()
 	}
@@ -272,6 +283,13 @@ func main() {
 		mux := executor.NewReliableMux(backends, claude, terminal)
 		mux.SetTurnAdmission(hub)
 		hub.SetExecutor(mux)
+		if hub.LineServiceEnabled() {
+			closeLine, err := hub.StartLineControl(codex)
+			if err != nil {
+				log.Fatalf("LINE control initialization failed: %s", err)
+			}
+			defer closeLine()
+		}
 		if *mediaControl {
 			closeMedia, err := hub.StartUnifiedVoiceMedia(codex, mediaservice.DefaultManifest())
 			if err != nil {
