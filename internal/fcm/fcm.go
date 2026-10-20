@@ -574,6 +574,7 @@ type v1apnsPayload struct {
 }
 
 type v1aps struct {
+	Sound             string          `json:"sound,omitempty"`
 	Alert             *v1notification `json:"alert,omitempty"`
 	Category          string          `json:"category,omitempty"`
 	ThreadID          string          `json:"thread-id,omitempty"`
