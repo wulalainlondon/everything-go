@@ -210,7 +210,11 @@ func (h *Hub) callbackVoiceOutcome(call *clientVoiceCall, outcome, reason string
 		if !x.Enabled {
 			x.State = "disabled"
 		} else if x.State != "report_audio_observed" && x.State != "report_delivery_mismatch" {
-			x.State = "report_pending"
+			if x.Invite.ContentVerified {
+				x.State = "report_text_verified"
+			} else {
+				x.State = "report_pending"
+			}
 		}
 		return nil
 	})
