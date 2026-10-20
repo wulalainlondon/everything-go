@@ -31,16 +31,17 @@ type Recipient struct {
 
 // DiskRecipient avoids exposing a pairing fingerprint on the public wire.
 type Report struct {
-	SourceKind     string `json:"source_kind,omitempty"`
-	SourceID       string `json:"source_id,omitempty"`
-	SourceRevision uint64 `json:"source_revision,omitempty"`
-	ID             string `json:"id"`
-	Hash           string `json:"hash"`
-	Text           string `json:"text"`
-	Status         string `json:"status"`
-	At             int64  `json:"at"`
-	Thread         string `json:"thread"`
-	Turn           string `json:"turn"`
+	ExecutionRequest string `json:"execution_request_id,omitempty"`
+	SourceKind       string `json:"source_kind,omitempty"`
+	SourceID         string `json:"source_id,omitempty"`
+	SourceRevision   uint64 `json:"source_revision,omitempty"`
+	ID               string `json:"id"`
+	Hash             string `json:"hash"`
+	Text             string `json:"text"`
+	Status           string `json:"status"`
+	At               int64  `json:"at"`
+	Thread           string `json:"thread"`
+	Turn             string `json:"turn"`
 }
 type Invitation struct {
 	ClaimedAt       int64  `json:"claimed_at,omitempty"`
@@ -113,7 +114,8 @@ func Open(dir string) (*Store, error) {
 	_, e = db.Exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;
  CREATE TABLE IF NOT EXISTS callbacks(id TEXT PRIMARY KEY,session TEXT NOT NULL,request TEXT NOT NULL,record BLOB NOT NULL);
  CREATE INDEX IF NOT EXISTS callbacks_source ON callbacks(session,request);
- CREATE TABLE IF NOT EXISTS callback_operations(id TEXT PRIMARY KEY,fingerprint TEXT NOT NULL,response BLOB NOT NULL);`)
+ CREATE TABLE IF NOT EXISTS callback_operations(id TEXT PRIMARY KEY,fingerprint TEXT NOT NULL,response BLOB NOT NULL);
+ CREATE TABLE IF NOT EXISTS callback_delivery_history(group_key TEXT PRIMARY KEY,invitation TEXT NOT NULL);`)
 	if e != nil {
 		db.Close()
 		return nil, e
@@ -230,6 +232,9 @@ func (s *Store) Mutate(ctx context.Context, op, fingerprint, id string, expected
 		return r, e
 	}
 	r.ID = id
+	if e = groupAutomaticInvitation(ctx, tx, &r); e != nil {
+		return r, e
+	}
 	r.Revision++
 	r.Updated = s.now().UnixMilli()
 	b = encode(r)
@@ -261,6 +266,9 @@ func Claim(r *Record, device, binding, invitation, operation string, now int64) 
 		return ErrUnavailable
 	}
 	i := r.Invite
+	if i.State != "delivery_pending" && i.State != "ringing" {
+		return ErrUnavailable
+	}
 	if now >= i.Expires || Terminal(i.State) || i.Claim != "" {
 		return ErrUnavailable
 	}

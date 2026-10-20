@@ -79,17 +79,64 @@ func (h *Hub) callbackWorkSource(ctx context.Context, session, request string) (
 	}
 	return h.work.CallbackSource(ctx, session, request)
 }
+
+// callbackExecution follows only a persisted strict native steering proof. It
+// never derives a root from the latest busy session or commentary.
+func (h *Hub) callbackExecution(r callbacks.Record) (callbacks.Record, messagequeue.Entry, bool) {
+	entry, found, e := h.messageQueue.Get(r.Session, r.Request)
+	if e != nil || !found {
+		return r, entry, false
+	}
+	if entry.State != messagequeue.Steered {
+		return r, entry, true
+	}
+	if !h.messageQueue.StrictSteerProven(entry) {
+		return r, entry, false
+	}
+	s, ok := h.registry.Get(r.Session)
+	if !ok || entry.ActiveRequestID == "" || entry.TurnID == "" || s.ResumeID() != r.Thread || s.SettingsSnapshot().ConfigRevision != r.Config {
+		return r, entry, false
+	}
+	if h.nativeTaskTurn(s, entry.ActiveRequestID) != entry.TurnID {
+		return r, entry, false
+	}
+	active, found, e := h.messageQueue.Get(r.Session, entry.ActiveRequestID)
+	if e != nil || !found || active.State == messagequeue.Steered {
+		return r, entry, false
+	}
+	if !h.taskAdmission(entry).ExpectedTarget.matches(s) || !h.taskAdmission(active).ExpectedTarget.matches(s) {
+		return r, entry, false
+	}
+	r.Request = entry.ActiveRequestID
+	return r, active, true
+}
 func (h *Hub) callbackReportCurrent(ctx context.Context, r callbacks.Record) bool {
-	if !h.callbackRootReady(ctx, r) {
+	effective, _, found := h.callbackExecution(r)
+	if r.Report != nil && r.Report.ExecutionRequest != "" {
+		if !found || effective.Request != r.Report.ExecutionRequest {
+			return false
+		}
+		if s, ok := h.registry.Get(r.Session); !ok || (r.Report.Turn != "" && h.nativeTaskTurn(s, effective.Request) != r.Report.Turn) {
+			return false
+		}
+	}
+	if !h.callbackRootReady(ctx, effective) {
 		return false
 	}
 	if r.Report != nil && r.Report.SourceKind == "workitem" {
-		w, found, e := h.callbackWorkSource(ctx, r.Session, r.Request)
+		w, found, e := h.callbackWorkSource(ctx, r.Session, effective.Request)
 		return e == nil && found && w.Latest && w.Lifecycle == "review" && w.ItemID == r.Report.SourceID && w.Revision == r.Report.SourceRevision
 	}
 	return true
 }
 func (h *Hub) callbackResult(ctx context.Context, r callbacks.Record, entry messagequeue.Entry, found bool) (status, text string, ready bool) {
+	if found && entry.State == messagequeue.Steered {
+		var valid bool
+		r, entry, valid = h.callbackExecution(r)
+		if !valid {
+			return "", "", false
+		}
+	}
 	if !h.callbackRootReady(ctx, r) {
 		return "", "", false
 	}

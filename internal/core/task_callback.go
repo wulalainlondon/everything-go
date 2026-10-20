@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"strings"
 	"time"
@@ -34,10 +35,11 @@ type callbackInput struct {
 	Native     bool   `json:"native_support"`
 }
 type callbackTaskSource struct {
-	Request string `json:"task_request_id"`
-	Title   string `json:"title"`
-	State   string `json:"state"`
-	Created int64  `json:"created_at"`
+	ExecutionRequest string `json:"execution_request_id,omitempty"`
+	Request          string `json:"task_request_id"`
+	Title            string `json:"title"`
+	State            string `json:"state"`
+	Created          int64  `json:"created_at"`
 }
 type callbackEvent struct {
 	Tasks     []callbackTaskSource  `json:"tasks,omitempty"`
@@ -197,7 +199,32 @@ func (h *Hub) executeTaskCallback(ctx context.Context, c *Client, in callbackInp
 				if admission.MessagePurpose != "instruction" || admission.Origin != nil {
 					continue
 				}
-				out.Tasks = append(out.Tasks, callbackTaskSource{Request: entry.RequestID, Title: truncateGraphemes(entry.Content, 80), State: string(entry.State), Created: entry.CreatedAt})
+				projected := h.projectSessionTask(s, entry, owner, nil)
+				state := string(entry.State)
+				if projected.Transport == "ordinary_steer" {
+					state = projected.State
+				}
+				out.Tasks = append(out.Tasks, callbackTaskSource{ExecutionRequest: projected.ExecutionRequestID, Request: entry.RequestID, Title: truncateGraphemes(entry.Content, 80), State: state, Created: entry.CreatedAt})
+			}
+		}
+		// An explicitly queried active root must not disappear behind twenty
+		// newer queued inputs. This is a read of the same scoped instruction.
+		if in.Request != "" && e == nil {
+			entry, found, err := h.messageQueue.Get(s.ID, in.Request)
+			seen := false
+			for _, row := range out.Tasks {
+				if row.Request == in.Request {
+					seen = true
+				}
+			}
+			admission := h.taskAdmission(entry)
+			if err == nil && found && !seen && admission.MessagePurpose == "instruction" && admission.Origin == nil {
+				projected := h.projectSessionTask(s, entry, owner, nil)
+				state := string(entry.State)
+				if projected.Transport == "ordinary_steer" {
+					state = projected.State
+				}
+				out.Tasks = append([]callbackTaskSource{{ExecutionRequest: projected.ExecutionRequestID, Request: entry.RequestID, Title: truncateGraphemes(entry.Content, 80), State: state, Created: entry.CreatedAt}}, out.Tasks...)
 			}
 		}
 		if h.work != nil && e == nil {
@@ -521,7 +548,7 @@ func (h *Hub) reconcileTaskCallbacks(ctx context.Context, sessionID, requestID s
 		return
 	}
 	for _, r := range all {
-		if !r.Enabled || r.Report != nil || r.Session != sessionID || r.Request != requestID {
+		if !r.Enabled || r.Report != nil || r.Session != sessionID {
 			continue
 		}
 		s, ok := h.registry.Get(r.Session)
@@ -536,9 +563,17 @@ func (h *Hub) reconcileTaskCallbacks(ctx context.Context, sessionID, requestID s
 		if !ready {
 			continue
 		}
+		effective, _, executionFound := h.callbackExecution(r)
+		if status == "result_ready" && !executionFound {
+			continue
+		}
 		turn := ""
+		executionRequest := ""
+		if executionFound {
+			executionRequest = effective.Request
+			turn = h.nativeTaskTurn(s, effective.Request)
+		}
 		if status == "result_ready" {
-			turn = h.nativeTaskTurn(s, r.Request)
 			if turn == "" {
 				continue
 			}
@@ -548,12 +583,12 @@ func (h *Hub) reconcileTaskCallbacks(ctx context.Context, sessionID, requestID s
 			if !ok {
 				continue
 			}
-			text, found, e = reader.FinalAnswerForSession(s, r.Request)
+			text, found, e = reader.FinalAnswerForSession(s, effective.Request)
 			if e != nil || !found || strings.TrimSpace(text) == "" {
 				continue
 			}
 		}
-		work, workFound, _ := h.callbackWorkSource(ctx, r.Session, r.Request)
+		work, workFound, _ := h.callbackWorkSource(ctx, r.Session, effective.Request)
 		hash := callbacks.Digest(text)
 		updated, e := h.callbacks.Mutate(ctx, "seal_"+r.ID+hash, "seal_"+hash, r.ID, r.Revision, func(x *callbacks.Record, _ bool) error {
 			if !x.Enabled || x.Report != nil {
@@ -566,7 +601,7 @@ func (h *Hub) reconcileTaskCallbacks(ctx context.Context, sessionID, requestID s
 				return errors.New("callback_configuration_changed")
 			}
 			x.Thread = s.ResumeID()
-			x.Report = &callbacks.Report{ID: callbacks.ID(x.ID, turn, hash), Hash: hash, Text: text, Thread: s.ResumeID(), Turn: turn, Status: status, At: time.Now().UnixMilli()}
+			x.Report = &callbacks.Report{ExecutionRequest: executionRequest, ID: callbacks.ID(x.ID, turn, hash), Hash: hash, Text: text, Thread: s.ResumeID(), Turn: turn, Status: status, At: time.Now().UnixMilli()}
 			if workFound {
 				x.Report.SourceKind = "workitem"
 				x.Report.SourceID = work.ItemID
@@ -595,6 +630,26 @@ func (h *Hub) publishCallbackInvitations(ctx context.Context) {
 			continue
 		}
 		i := r.Invite
+		if i.State == "group_waiting" {
+			attempted, checkErr := h.callbacks.DeliveryAttempted(ctx, r)
+			if checkErr != nil || attempted || callbacks.GroupBlocked(r, all) {
+				continue
+			}
+			updated, err := h.callbacks.Mutate(ctx, "group_promote_"+i.ID+fmt.Sprint(r.Revision), "group_promote", r.ID, r.Revision, func(x *callbacks.Record, _ bool) error {
+				if !x.Enabled || x.Invite == nil || x.Invite.ID != i.ID || x.Invite.State != "group_waiting" {
+					return callbacks.ErrUnavailable
+				}
+				x.Invite.State = "delivery_pending"
+				x.Invite.Reason = ""
+				x.Invite.Expires = now + 60000
+				x.State = "invitation_pending"
+				return nil
+			})
+			if err == nil {
+				h.publishCallbackRecord(updated)
+			}
+			continue
+		}
 		if i.Claim == "" && !callbacks.Terminal(i.State) && now >= i.Expires {
 			updated, e := h.callbacks.Mutate(ctx, "expire_"+i.ID, "expire", r.ID, r.Revision, func(x *callbacks.Record, _ bool) error {
 				x.Invite.State = "expired"
