@@ -384,7 +384,8 @@ func (h *Hub) DelegationRounds(parent *session.Session, id string, after uint64)
 		snapshot := child.SettingsSnapshot()
 		currentTarget = map[string]any{"instance_id": h.cfg.InstanceID, "session_id": child.ID, "native_thread_id": child.ResumeID(), "config_revision": snapshot.ConfigRevision}
 	}
-	return map[string]any{"current_target": currentTarget, "source_authorization": sourceAuthorization, "continuation_availability": availability, "successor_reason": reason, "has_more": next < latest.Version, "next_version": next, "logical_task_id": round.LogicalID, "session_id": root.ChildSessionID, "native_thread_id": root.ExpectedThread, "owner_logical_task_id": owner, "qa_logical_task_id": qa, "rounds": out}, nil
+	questions := h.parentInteractionInbox(parent, root.ChildSessionID)
+	return map[string]any{"needs_input": len(questions) > 0, "pending_interactions": questions, "current_target": currentTarget, "source_authorization": sourceAuthorization, "continuation_availability": availability, "successor_reason": reason, "has_more": next < latest.Version, "next_version": next, "logical_task_id": round.LogicalID, "session_id": root.ChildSessionID, "native_thread_id": root.ExpectedThread, "owner_logical_task_id": owner, "qa_logical_task_id": qa, "rounds": out}, nil
 }
 func (h *Hub) BindDelegationQA(parent *session.Session, request, call, ownerID, qaID string) (any, error) {
 	if e := h.continuityCaller(parent, request, call); e != nil {

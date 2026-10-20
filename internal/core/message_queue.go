@@ -70,6 +70,10 @@ func (e *dispatchTargetExpectation) matches(s *session.Session) bool {
 }
 
 func (h *Hub) enqueueChatMessageExpected(c *Client, cmd clientproto.Command, expected *dispatchTargetExpectation) bool {
+	if interactionControlID(cmd.RequestID) && !c.interactionControl {
+		h.queueError(c, cmd, "interaction_control_reserved", "This request belongs to the original question delivery")
+		return false
+	}
 	if h.messageQueue == nil {
 		h.queueError(c, cmd, "queue_unavailable", "Message queue storage is unavailable")
 		return false

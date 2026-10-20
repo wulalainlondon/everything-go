@@ -330,6 +330,9 @@ func (h *Hub) delegationMessageRevision(ctx context.Context, task string) (uint6
 // Bare messages must not turn a one-turn child into an unbudgeted worker.
 // Authenticated API append owns the durable continuation reservation.
 func (h *Hub) delegationExecutionGuard(ctx context.Context, target *session.Session, request string, active bool) error {
+	if handled, e := h.interactionControlGuard(ctx, target, request); handled {
+		return e
+	}
 	child := target.ID
 	if h.delegations == nil {
 		return nil

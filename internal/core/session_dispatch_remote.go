@@ -15,9 +15,10 @@ import (
 )
 
 type controllerEnvelope struct {
-	ParentID string                        `json:"parent_session_id"`
-	Input    backend.SessionControlRequest `json:"input"`
-	Record   sessiondispatch.Record        `json:"dispatch"`
+	Interaction *interactionPeerPayload       `json:"interaction,omitempty"`
+	ParentID    string                        `json:"parent_session_id"`
+	Input       backend.SessionControlRequest `json:"input"`
+	Record      sessiondispatch.Record        `json:"dispatch"`
 }
 type controllerRemoteFailure struct {
 	Status  int
@@ -44,6 +45,10 @@ func (h *Hub) ServeSessionControlAPI(w http.ResponseWriter, r *http.Request) {
 	origin, ok := h.authorizeRelayRequest(r, body)
 	if !ok {
 		http.Error(w, "unauthorized", 401)
+		return
+	}
+	if r.URL.Path == "/api/session-control/v1/interaction" {
+		h.serveInteractionPeer(w, r, origin, body)
 		return
 	}
 	grant, e := h.dispatches.Grant(r.Context(), "peer:"+origin)

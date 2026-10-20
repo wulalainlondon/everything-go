@@ -117,13 +117,14 @@ func (w wsConn) EnrollmentEligible() bool { return w.canEnroll }
 // Client is one logical connection (WS or WebRTC DataChannel). A single write
 // pump goroutine drains the send channel so conn writes are never concurrent.
 type Client struct {
-	callbackCapable atomic.Bool
-	callbackNative  atomic.Bool
-	hub             *Hub
-	conn            wireConn
-	send            chan []byte
-	urgent          chan []byte // small heartbeat replies must not queue behind snapshots
-	writeMu         sync.Mutex  // a bounded data write must not race a shorter ping deadline
+	interactionControl bool // server-owned question delivery; never parsed from client input
+	callbackCapable    atomic.Bool
+	callbackNative     atomic.Bool
+	hub                *Hub
+	conn               wireConn
+	send               chan []byte
+	urgent             chan []byte // small heartbeat replies must not queue behind snapshots
+	writeMu            sync.Mutex  // a bounded data write must not race a shorter ping deadline
 	// quit is closed exactly once when the client is torn down. The send channel
 	// is deliberately NEVER closed: background goroutines (sendHistory, sendUsage,
 	// …) outlive the read loop and may call enqueue after disconnect, so closing

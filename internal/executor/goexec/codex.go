@@ -1845,6 +1845,7 @@ func (c *Codex) emitUnsupportedCodexTool(raw json.RawMessage) string {
 
 func (c *Codex) createUserInputRequest(rpcID any, raw json.RawMessage) bool {
 	var p struct {
+		TurnID           string                     `json:"turnId"`
 		ThreadID         string                     `json:"threadId"`
 		ItemID           string                     `json:"itemId"`
 		CallID           string                     `json:"callId"`
@@ -1908,7 +1909,19 @@ func (c *Codex) createUserInputRequest(rpcID any, raw json.RawMessage) bool {
 	c.interactions[reqID] = codexInteraction{payload: payload, rpcID: rpcID, responseKind: responseKind}
 	c.interMu.Unlock()
 	c.sink.Emit(backend.NewUserInputRequest(payload))
+	c.observeOwnedQuestion(s, threadID, p.TurnID, toolID, payload)
 	return true
+}
+
+func (c *Codex) observeOwnedQuestion(s *session.Session, threadID, turnID, callID string, payload backend.UserInputPayload) {
+	st := c.state(s.ID)
+	st.mu.Lock()
+	request, currentTurn := st.reqID, st.currentTurnID
+	owned := st.turnActive && !st.turnStartPending && st.threadID == threadID && turnID != "" && turnID == currentTurn
+	st.mu.Unlock()
+	if observer, ok := c.taskProvider.(backend.TaskQuestionObserver); ok && owned {
+		observer.ObserveTaskQuestion(context.Background(), backend.TaskQuestionEvidence{Session: s, RequestID: request, ThreadID: threadID, TurnID: currentTurn, CallID: callID, Payload: payload})
+	}
 }
 
 func rpcIDKey(value any) string {
@@ -1970,6 +1983,7 @@ func (c *Codex) createMcpElicitationRequest(rpcID any, raw json.RawMessage) bool
 	c.interactions[reqID] = codexInteraction{payload: payload, rpcID: rpcID, responseKind: "mcp", mcpParams: append(json.RawMessage(nil), raw...)}
 	c.interMu.Unlock()
 	c.sink.Emit(backend.NewUserInputRequest(payload))
+	c.observeOwnedQuestion(s, p.ThreadID, p.TurnID, p.ElicitationID, payload)
 	return true
 }
 
@@ -2000,6 +2014,7 @@ func (c *Codex) createDynamicToolRequest(rpcID any, raw json.RawMessage) bool {
 	c.interMu.Unlock()
 	c.tools.Start(s.ID, c.state(s.ID).reqID, p.CallID, name, codexJSON(p.Arguments))
 	c.sink.Emit(backend.NewUserInputRequest(payload))
+	c.observeOwnedQuestion(s, p.ThreadID, p.TurnID, p.CallID, payload)
 	return true
 }
 

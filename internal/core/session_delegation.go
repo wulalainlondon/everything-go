@@ -219,6 +219,7 @@ func (h *Hub) wakeDelegations() {
 // terminal result capture, and parent delivery. It never resends an accepted
 // message under a new request ID after an ambiguous failure.
 func (h *Hub) StartDelegationScheduler(ctx context.Context) {
+	h.StartInteractionScheduler(ctx)
 	if h.delegations == nil || !h.delegationScheduler.CompareAndSwap(false, true) {
 		return
 	}

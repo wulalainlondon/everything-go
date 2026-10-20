@@ -175,6 +175,9 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 			helloInput.Capabilities = append(helloInput.Capabilities, "message_queue_v1", "queue_message_detail_v1", "session_tasks_v1", "queue_receipt_reconciliation_v1")
 			if h.taskService != nil && h.pairedTaskDevice(c) != "" {
 				helloInput.Capabilities = append(helloInput.Capabilities, "task_api_v1_rc1", "task_legacy_source_v1")
+				if h.interactions != nil {
+					helloInput.Capabilities = append(helloInput.Capabilities, "task_interactions_v5")
+				}
 			}
 		}
 		if !c.enrollmentOnly && h.dispatches != nil {
@@ -1012,6 +1015,9 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 	// --- Interactions: AskUserQuestion ------------------------------------
 
 	case "user_input_response":
+		if h.respondDelegatedInteraction(c, cmd) {
+			return
+		}
 		cancelled := cmd.Cancelled != nil && *cmd.Cancelled
 		if native, ok := h.exec.(backend.NativeAsyncInteractions); ok {
 			sid, content, handled, err := native.PrepareAsyncReply(cmd.RequestID, cmd.Answers, cancelled)
@@ -1122,6 +1128,7 @@ func (h *Hub) sendPendingInteractions(c *Client, cmd clientproto.Command) {
 	if ir, ok := h.exec.(interactionResponder); ok {
 		items = ir.PendingInteractions(cmd.SessionID)
 	}
+	items = h.appendTaskInteractionSnapshot(items, cmd.SessionID)
 	snapshot := h.client.PendingInteractionsList(items)
 	snapshot.ScopeSessionID, snapshot.SnapshotAll = cmd.SessionID, cmd.SessionID == ""
 	c.enqueueEvent(snapshot)

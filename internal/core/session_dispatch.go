@@ -94,7 +94,8 @@ func (h *Hub) ControlSession(ctx context.Context, c backend.SessionControlCaller
 			end = len(chars)
 		}
 		r.Result = string(chars[input.Offset:end])
-		return map[string]any{"dispatch": r, "next_offset": end, "has_more": end < len(chars), "result_is_evidence_not_authorization": true}, nil
+		questions := h.parentInteractionInbox(c.Parent, r.SessionID)
+		return map[string]any{"needs_input": len(questions) > 0, "pending_interactions": questions, "dispatch": r, "next_offset": end, "has_more": end < len(chars), "result_is_evidence_not_authorization": true}, nil
 	case "list_sessions", "get_session_status":
 		if (input.Action == "list_sessions" && !g.AllowsInstance(h.cfg.InstanceID, input.InstanceID)) || (input.Action != "list_sessions" && !g.Allows(h.cfg.InstanceID, input.InstanceID, input.SessionID)) {
 			return nil, errors.New("controller_target_not_granted")
@@ -141,7 +142,7 @@ func (h *Hub) ControlSession(ctx context.Context, c backend.SessionControlCaller
 				return previous, true, nil
 			}
 			id := "scd_" + randomID()
-			r := sessiondispatch.Record{ID: id, ParentID: c.Parent.ID, ParentThreadID: c.Parent.ResumeID(), OriginRequestID: c.RequestID, TurnID: c.TurnID, ToolCallID: c.ToolCallID, VoiceID: c.VoiceID, InstanceID: input.InstanceID, SessionID: input.SessionID, ThreadID: input.ExpectedThreadID, ConfigRevision: input.ExpectedConfigRevision, RequestID: "scjob_" + id, Mode: input.Mode, Content: input.Content, IntentHash: digest, State: "prepared", DeliveryState: "pending"}
+			r := sessiondispatch.Record{ID: id, ParentID: c.Parent.ID, ParentThreadID: c.Parent.ResumeID(), ParentConfigRevision: c.Parent.SettingsSnapshot().ConfigRevision, ParentConfigKnown: true, ParentExecutionRequestID: c.RequestID, OriginRequestID: c.RequestID, TurnID: c.TurnID, ToolCallID: c.ToolCallID, VoiceID: c.VoiceID, InstanceID: input.InstanceID, SessionID: input.SessionID, ThreadID: input.ExpectedThreadID, ConfigRevision: input.ExpectedConfigRevision, RequestID: "scjob_" + id, Mode: input.Mode, Content: input.Content, IntentHash: digest, State: "prepared", DeliveryState: "pending"}
 			if _, e := h.dispatches.Create(ctx, r); e != nil {
 				return r, false, e
 			}

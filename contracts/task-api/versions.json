@@ -26,6 +26,14 @@
         "read_artifact_bytes"
       ],
       "status": "candidate-only artifact family; explicit owner request selector"
+    },
+    {
+      "version": "1.0.0-rc.5",
+      "schema_sha256": "3e78613002191eb5e4080da40cd94adbd4c870a6e8c2c6ecf8fa1a1834bb8892",
+      "operations": [
+        "interactions"
+      ],
+      "status": "candidate-only original-parent interaction extension"
     }
   ]
 }

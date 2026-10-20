@@ -413,7 +413,7 @@ func validTaskWorkerTools(tools []string) bool {
 		switch tool {
 		case "mcp__bridge_tasks__task_read_input":
 			found = true
-		case "mcp__bridge_tasks__task_capabilities", "ToolSearch", "EndConversation":
+		case "mcp__bridge_tasks__task_capabilities", "mcp__bridge_tasks__task_interactions", "ToolSearch", "EndConversation":
 		default:
 			return false
 		}

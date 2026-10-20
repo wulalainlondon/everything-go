@@ -48,6 +48,7 @@ import (
 	"everything-go/internal/session"
 	"everything-go/internal/sessiondispatch"
 	"everything-go/internal/taskapi"
+	"everything-go/internal/taskinteraction"
 	"everything-go/internal/toolenv"
 	"everything-go/internal/widgetaccess"
 	"everything-go/internal/workitems"
@@ -76,6 +77,11 @@ type Config struct {
 // the executor.Sink (Emit broadcasts an event to connected clients, or buffers
 // it when none are connected so a reconnecting client can recover it).
 type Hub struct {
+	interactionScheduler atomic.Bool
+	interactionWake      chan struct{}
+
+	interactions *taskinteraction.Store
+
 	callbacks          *callbacks.Store
 	historySequence    atomic.Uint64
 	unifiedMedia       *unifiedVoiceMedia
@@ -231,10 +237,16 @@ func NewHub(reg *session.Registry, cfg Config, pairing *governance.Pairing, port
 		notificationReplies: notificationreply.NewStore(cfg.DataDir),
 		attachmentReplays:   make(map[string]*attachmentReplayLease),
 		delegationWake:      make(chan struct{}, 1),
+		interactionWake:     make(chan struct{}, 1),
 		workWake:            make(chan struct{}, 1),
 		automationWake:      make(chan struct{}, 1),
 		relayWake:           make(chan struct{}, 1),
 		relayNonces:         make(map[string]int64),
+	}
+	if store, err := taskinteraction.Open(cfg.DataDir); err != nil {
+		log.Printf("[interaction] storage unavailable")
+	} else {
+		h.interactions = store
 	}
 	if store, err := callbacks.Open(cfg.DataDir); err != nil {
 		log.Printf("[callback] storage unavailable: %v", err)
@@ -541,6 +553,9 @@ func (h *Hub) connectedDeviceIDs(exclude string) []string {
 // event for replay on the next reconnect (the offline-recovery path). Safe for
 // concurrent use.
 func (h *Hub) Emit(event any) {
+	if e, ok := event.(protocol.InteractionResolved); ok {
+		h.observeInteractionResolution(e)
+	}
 	if unknown, ok := event.(backend.NativeSubmissionUncertain); ok {
 		persisted := false
 		h.messageQueueMu.Lock()
@@ -568,7 +583,9 @@ func (h *Hub) Emit(event any) {
 		h.messageQueueMu.Lock()
 		defer h.messageQueueMu.Unlock()
 		if h.messageQueue != nil {
-			_ = h.messageQueue.RecordProviderEvidence(messagequeue.ProviderEvidence{SessionID: proof.SessionID, RequestID: proof.RequestID, Backend: proof.Backend, ConversationID: proof.ConversationID, Token: proof.Token, TokenKind: proof.TokenKind, MessageID: proof.MessageID, Text: proof.Text, Status: proof.Status})
+			if err := h.messageQueue.RecordProviderEvidence(messagequeue.ProviderEvidence{SessionID: proof.SessionID, RequestID: proof.RequestID, Backend: proof.Backend, ConversationID: proof.ConversationID, Token: proof.Token, TokenKind: proof.TokenKind, MessageID: proof.MessageID, Text: proof.Text, Status: proof.Status}); err == nil {
+				h.pinInteractionProviderThread(proof)
+			}
 		}
 		return
 	}

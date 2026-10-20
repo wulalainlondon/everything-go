@@ -144,7 +144,7 @@ func (c *Codex) handleSessionControlServerRequest(id any, method string, raw jso
 }
 
 func controllerBoundRequest(id string) bool {
-	return strings.HasPrefix(id, "scjob_") || strings.HasPrefix(id, "screturn_")
+	return strings.HasPrefix(id, "scjob_") || strings.HasPrefix(id, "screturn_") || strings.HasPrefix(id, "tiwake_") || strings.HasPrefix(id, "tianswer_")
 }
 func codexPinnedRequest(id string) bool {
 	return controllerBoundRequest(id) || strings.HasPrefix(id, "ui_async_")

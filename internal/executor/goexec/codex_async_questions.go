@@ -3,6 +3,7 @@ package goexec
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -208,12 +209,31 @@ func (c *Codex) resolveAsyncReplies(s *session.Session, thread, text string) {
 
 func (c *Codex) observeAsyncItem(s *session.Session, thread string, params json.RawMessage) {
 	var p struct {
-		Item nativeAsyncItem `json:"item"`
+		TurnID string          `json:"turnId"`
+		Item   nativeAsyncItem `json:"item"`
 	}
 	if json.Unmarshal(params, &p) != nil {
 		return
 	}
 	c.applyAsyncItem(s, thread, p.Item, time.Now().UnixMilli())
+	st := c.state(s.ID)
+	st.mu.Lock()
+	request, turn := st.reqID, st.currentTurnID
+	owned := st.turnActive && !st.turnStartPending && st.threadID == thread && p.TurnID != "" && p.TurnID == turn
+	st.mu.Unlock()
+	observer, ok := c.taskProvider.(backend.TaskQuestionObserver)
+	if !ok || !owned || p.Item.Delivery != "async" {
+		return
+	}
+	for index := range p.Item.Questions {
+		id := asyncRequestID(thread, asyncQuestionID(p.Item.ID, index))
+		c.interMu.Lock()
+		pending, exists := c.interactions[id]
+		c.interMu.Unlock()
+		if exists {
+			observer.ObserveTaskQuestion(context.Background(), backend.TaskQuestionEvidence{Session: s, RequestID: request, ThreadID: thread, TurnID: turn, CallID: p.Item.ID, Payload: pending.payload})
+		}
+	}
 }
 
 func (c *Codex) applyAsyncItem(s *session.Session, thread string, item nativeAsyncItem, createdAt int64) {

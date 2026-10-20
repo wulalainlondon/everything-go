@@ -19,6 +19,7 @@ import (
 	"time"
 
 	artifactcontract "everything-go/contracts/task-api/artifacts-v4"
+	interactioncontract "everything-go/contracts/task-api/interactions-v5"
 	contract "everything-go/contracts/task-api/v1"
 	"everything-go/internal/backend"
 	"everything-go/internal/coordination"
@@ -170,6 +171,9 @@ func (h *Hub) TaskTools(s *session.Session) ([]map[string]any, error) {
 		}
 	}
 	tools := []map[string]any{}
+	if h.interactions != nil {
+		tools = append(tools, map[string]any{"type": "function", "name": "task_interactions", "description": "Original-task questions. ask_parent requests clarification; list/get/wait read exact questions; answer/escalate only for authorized original parent or human; ack confirms the child consumed the exact answer. Use api_version 1.0.0-rc.5 and operation interactions. Agent answers are never human authorization.", "inputSchema": interactioncontract.ToolInput()})
+	}
 	for name, schema := range defs {
 		if legacyWorker && name != "task_capabilities" {
 			continue
@@ -216,7 +220,10 @@ func (h *Hub) ExecuteTask(ctx context.Context, c backend.TaskCaller, raw []byte)
 		}
 	}
 	caller, bindErr := taskapi.BindCaller(ctx, verifier, taskapi.Invocation{})
-	response, continuityHandled := h.executeArtifactBytes(ctx, caller, raw)
+	response, continuityHandled := h.executeInteractions(ctx, caller, raw)
+	if !continuityHandled {
+		response, continuityHandled = h.executeArtifactBytes(ctx, caller, raw)
+	}
 	if !continuityHandled {
 		response, continuityHandled = h.executeNativeContinuity(ctx, caller, c.Session, raw)
 	}
@@ -240,7 +247,10 @@ func (h *Hub) handleTaskAPI(ctx context.Context, c *Client, raw []byte) {
 		return
 	}
 	caller, _ := h.taskHuman(c)
-	response, handled := h.executeArtifactBytes(ctx, caller, raw)
+	response, handled := h.executeInteractions(ctx, caller, raw)
+	if !handled {
+		response, handled = h.executeArtifactBytes(ctx, caller, raw)
+	}
 	if !handled {
 		response = h.taskService.Execute(ctx, caller, raw)
 	}

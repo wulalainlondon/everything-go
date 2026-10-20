@@ -58,3 +58,14 @@ type TaskCapabilitySource interface {
 type NativeTaskResponseCapture interface {
 	CaptureTaskResponse(context.Context, TaskCaller, json.RawMessage, taskapi.Response) error
 }
+
+// TaskQuestionObserver receives provider-observed, source-bound questions.
+// It is an internal port, never a client-supplied authority envelope.
+type TaskQuestionEvidence struct {
+	Session                             *session.Session
+	RequestID, ThreadID, TurnID, CallID string
+	Payload                             UserInputPayload
+}
+type TaskQuestionObserver interface {
+	ObserveTaskQuestion(context.Context, TaskQuestionEvidence)
+}
