@@ -1187,11 +1187,7 @@ func (h *Hub) sendHistory(c *Client, s *session.Session, cmd clientproto.Command
 	}
 	if err, failed := v.(error); failed {
 		if c.live() {
-			event := h.client.Error(s.ID, history.ErrorCode(err), err.Error())
-			if cmd.HistoryContinuity {
-				event.RequestID = cmd.HistoryRequestID
-			}
-			c.enqueueEvent(event)
+			h.historyReadError(c, s.ID, cmd, history.ErrorCode(err), err.Error())
 		}
 		return
 	}
@@ -1202,9 +1198,7 @@ func (h *Hub) sendHistory(c *Client, s *session.Session, cmd clientproto.Command
 		var proofErr error
 		rangeProof, proofErr = h.buildHistoryRangeProof(provider, s, resumeIDs, activeHistoryThread, cmd, res)
 		if proofErr != nil {
-			event := h.client.Error(s.ID, "history_continuity_unavailable", proofErr.Error())
-			event.RequestID = cmd.HistoryRequestID
-			c.enqueueEvent(event)
+			h.historyReadError(c, s.ID, cmd, "history_continuity_unavailable", proofErr.Error())
 			return
 		}
 	}
@@ -1236,9 +1230,7 @@ func (h *Hub) sendHistory(c *Client, s *session.Session, cmd clientproto.Command
 		copy.Messages = msgs
 		bounded, e := boundScopedHistoryFrame(&copy, cmd)
 		if e != nil {
-			event := h.client.Error(s.ID, "history_frame_too_large", e.Error())
-			event.RequestID = cmd.HistoryRequestID
-			c.enqueueEvent(event)
+			h.historyReadError(c, s.ID, cmd, "history_frame_too_large", e.Error())
 			return
 		}
 		res = bounded
@@ -1251,6 +1243,15 @@ func (h *Hub) sendHistory(c *Client, s *session.Session, cmd clientproto.Command
 		}
 		rangeProof.HasMoreBefore = res.HasMoreBefore
 		rangeProof.HasMoreAfter = res.HasMoreAfter
+	} else {
+		copy := *res
+		copy.Messages = msgs
+		bounded, err := boundOrdinaryHistoryFrame(&copy, cmd)
+		if err != nil {
+			h.historyReadError(c, s.ID, cmd, "history_frame_too_large", err.Error())
+			return
+		}
+		res, msgs = bounded, bounded.Messages
 	}
 	latestAssistantAt := int64(0)
 	latestAssistantText := ""
@@ -1311,7 +1312,7 @@ func (h *Hub) sendHistory(c *Client, s *session.Session, cmd clientproto.Command
 		if h.runtimes.HistoryMatchesReadBoundary(s.ID, cmd.ReadEpoch, cmd.Revision, msgs) {
 			event.HistoryReadEpoch, event.HistoryReadRevision, event.HistoryReadToken = h.confirmHistoryReadBoundary(c, cmd)
 		}
-		c.enqueueEvent(event)
+		h.enqueueHistoryFrame(c, s.ID, cmd, event)
 		if previewProjectionChanged {
 			h.BroadcastSessionSummaries()
 		}
@@ -1322,7 +1323,7 @@ func (h *Hub) sendHistory(c *Client, s *session.Session, cmd clientproto.Command
 	if res.SnapshotReason != "before_page" && (!cmd.HistoryContinuity || !res.HasMoreAfter) && h.runtimes.HistoryMatchesReadBoundary(s.ID, cmd.ReadEpoch, cmd.Revision, msgs) {
 		event.HistoryReadEpoch, event.HistoryReadRevision, event.HistoryReadToken = h.confirmHistoryReadBoundary(c, cmd)
 	}
-	c.enqueueEvent(event)
+	h.enqueueHistoryFrame(c, s.ID, cmd, event)
 	if previewProjectionChanged {
 		h.BroadcastSessionSummaries()
 	}
