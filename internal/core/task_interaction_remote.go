@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"unicode/utf8"
 )
 
 type interactionPeerPayload struct {
@@ -144,7 +145,7 @@ func (h *Hub) serveInteractionPeer(w http.ResponseWriter, r *http.Request, origi
 	ctx := r.Context()
 	var result interactionPeerResult
 	if in.Action == "sync" {
-		if in.Record == nil || in.Record.Binding.Authority != origin || in.Record.Binding.Parent != envelope.ParentID || in.Record.Binding.ParentAuthority != h.cfg.InstanceID || in.Record.ID == "" || len(in.Record.Question) > 8000 {
+		if in.Record == nil || in.Record.Binding.Authority != origin || in.Record.Binding.Parent != envelope.ParentID || in.Record.Binding.ParentAuthority != h.cfg.InstanceID || in.Record.ID == "" || utf8.RuneCountInString(in.Record.Question) > 8000 {
 			fail("interaction_remote_binding_mismatch", 403)
 			return
 		}

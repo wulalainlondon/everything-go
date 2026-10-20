@@ -11,6 +11,7 @@ import (
 	ti "everything-go/internal/taskinteraction"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -74,7 +75,7 @@ func TestInteractionCrossInstanceAnswerUnknownReceiptAndNoReplay(t *testing.T) {
 	outbound := value.(sessiondispatch.Record)
 	request := "scjob_" + remoteControllerID("i1", outbound.ID)
 	waitActor(t, child, request)
-	q := resultRecord(t, interactionCall(t, childHub, child, request, "ask", map[string]any{"action": "ask_parent", "question": "Which fixture?", "kind": "task_clarification", "blocking": false}))
+	q := resultRecord(t, interactionCall(t, childHub, child, request, "ask", map[string]any{"action": "ask_parent", "question": strings.Repeat("問", 3000), "kind": "task_clarification", "blocking": false}))
 	childHub.reconcileInteractions(ctx)
 	imported, e := parentHub.interactions.Get(ctx, q.ID)
 	if e != nil {
