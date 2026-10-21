@@ -40,6 +40,7 @@ import (
 	"everything-go/internal/messagequeue"
 	"everything-go/internal/nativewatch"
 	"everything-go/internal/notificationreply"
+	"everything-go/internal/partners"
 	"everything-go/internal/protocol"
 	"everything-go/internal/relay"
 	"everything-go/internal/runtime"
@@ -77,6 +78,7 @@ type Config struct {
 // the executor.Sink (Emit broadcasts an event to connected clients, or buffers
 // it when none are connected so a reconnecting client can recover it).
 type Hub struct {
+	partners             *partners.Store
 	interactionScheduler atomic.Bool
 	interactionWake      chan struct{}
 
@@ -242,6 +244,11 @@ func NewHub(reg *session.Registry, cfg Config, pairing *governance.Pairing, port
 		automationWake:      make(chan struct{}, 1),
 		relayWake:           make(chan struct{}, 1),
 		relayNonces:         make(map[string]int64),
+	}
+	if store, err := partners.Open(cfg.DataDir); err == nil {
+		h.partners = store
+	} else {
+		log.Printf("[partners] storage unavailable: %v", err)
 	}
 	if store, err := taskinteraction.Open(cfg.DataDir); err != nil {
 		log.Printf("[interaction] storage unavailable")
@@ -716,6 +723,13 @@ func (h *Hub) Emit(event any) {
 	// persist-on-turn-complete trigger.
 	switch event.(type) {
 	case protocol.SessionUUID:
+		if observed, ok := event.(protocol.SessionUUID); ok && h.partners != nil {
+			if current, found := h.registry.Get(observed.SessionID); found && current.ResumeID() == observed.ClaudeUUID {
+				if err := h.partners.PinInitialThread(observed.SessionID, observed.ClaudeUUID); err != nil {
+					log.Printf("[partners] native identity pin refused: %v", err)
+				}
+			}
+		}
 		// A changed physical thread is the durable identity of a logical
 		// session. Persist synchronously before the executor can accept another
 		// turn or the service can restart; otherwise a crash can revive the old

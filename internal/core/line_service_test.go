@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"everything-go/internal/backend"
 	"everything-go/internal/linebridge"
+	"everything-go/internal/session"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -76,8 +77,11 @@ func TestLineToolUsesRegisteredConversationGrantAndRejectsControlArguments(t *te
 	if _, err = h.ExecuteLineTool(ctx, caller, "accounts", json.RawMessage(`{"method":"send_message"}`)); err == nil {
 		t.Fatal("method smuggling accepted")
 	}
-	copy := *s
-	caller.Parent = &copy
+	// Reconstruct an equal-looking identity instead of copying Session's mutex.
+	// A different object with the same logical/native IDs must still be refused.
+	snap := s.Snapshot()
+	copy := session.NewRegistry().Create(s.ID, snap.Name, snap.Cwd, snap.Backend, snap.Model, snap.Sandbox, snap.ResumeID)
+	caller.Parent = copy
 	if _, err = h.ExecuteLineTool(ctx, caller, "accounts", json.RawMessage(`{}`)); err == nil {
 		t.Fatal("copied caller authorized")
 	}

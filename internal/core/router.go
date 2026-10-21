@@ -77,6 +77,8 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		}
 	}
 	switch cmd.Kind {
+	case "partner_profile_request":
+		h.handlePartnerProfile(c, cmd)
 	case "task_api_request":
 		return // Strict original frame handled by Client before legacy ParseCommand.
 	case "codex_voice_start":
@@ -121,6 +123,9 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		}
 		if !c.enrollmentOnly && h.supportsNativeHistoryRanges() {
 			helloInput.Capabilities = append(helloInput.Capabilities, "history_continuity_v1")
+		}
+		if h.partners != nil && h.pairedTaskDevice(c) != "" {
+			helloInput.Capabilities = append(helloInput.Capabilities, "teammate_profile_v1")
 		}
 		if h.sharedReadAuthorized(c) {
 			helloInput.Capabilities = append(helloInput.Capabilities, "session_read_sync_v1")

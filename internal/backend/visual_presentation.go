@@ -43,6 +43,7 @@ func PresentationContent(ctx context.Context, original string) string {
 	if strings.HasPrefix(strings.TrimSpace(original), "/") {
 		return original
 	}
+	original = partnerRoleContent(ctx, original)
 	switch mode {
 	case "auto-v1":
 		return visualPrompt + original
@@ -62,12 +63,12 @@ func PresentationHashes(ctx context.Context, original string) (string, string) {
 // The provider transcript and durable request payload must retain their bytes.
 func OriginalPresentationContent(text string) string {
 	if !strings.HasPrefix(text, "[Averything presentation context: conversation-visual.v1]\n") && !strings.HasPrefix(text, "[Averything presentation context: text-v1]\n") {
-		return text
+		return OriginalPartnerRoleContent(text)
 	}
 	const end = "[/Averything presentation context]\n\n"
 	index := strings.Index(text, end)
 	if index < 0 || index > 12000 {
 		return text
 	}
-	return text[index+len(end):]
+	return OriginalPartnerRoleContent(text[index+len(end):])
 }

@@ -6,6 +6,7 @@ import (
 	"everything-go/internal/backend"
 	"everything-go/internal/coordination"
 	"everything-go/internal/eventinbox"
+	"everything-go/internal/partners"
 	"everything-go/internal/protocol"
 	"everything-go/internal/session"
 	"everything-go/internal/toolenv"
@@ -21,6 +22,7 @@ func NewAppV1() AppV1 { return AppV1{} }
 
 // Command is the protocol-neutral shape the core router consumes.
 type Command struct {
+	Partner         *partners.Request
 	PM              *coordination.Command
 	Collaboration   *coordination.CollaborationCommand
 	ToolEnvironment *toolenv.Request
@@ -204,6 +206,7 @@ type Command struct {
 
 func (AppV1) ParseCommand(in protocol.Inbound) Command {
 	return Command{
+		Partner:         in.Partner,
 		ToolEnvironment: in.ToolEnvironment,
 		PM:              in.PM,
 		Collaboration:   in.Collaboration,

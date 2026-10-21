@@ -15,12 +15,14 @@ import (
 	"everything-go/internal/backend"
 	"everything-go/internal/clientproto"
 	"everything-go/internal/messagequeue"
+	"everything-go/internal/partners"
 	"everything-go/internal/protocol"
 	"everything-go/internal/runtimejournal"
 	"everything-go/internal/session"
 )
 
 type queuedPayload struct {
+	PartnerRole         *partners.RoleSnapshot     `json:"partner_role,omitempty"`
 	CallbackOnComplete  *bool                      `json:"callback_on_complete,omitempty"`
 	CallbackBinding     string                     `json:"callback_binding,omitempty"`
 	ExternalPeer        string                     `json:"external_peer,omitempty"`
@@ -123,22 +125,30 @@ func (h *Hub) enqueueChatMessageExpected(c *Client, cmd clientproto.Command, exp
 		h.queueError(c, cmd, "message_purpose_invalid", "Unknown message purpose")
 		return false
 	}
+	role, roleErr := h.partnerRoleForMessage(c, cmd, s)
+	if roleErr != nil {
+		h.queueError(c, cmd, "partner_role_rejected", roleErr.Error())
+		return false
+	}
+	if role != nil && expected == nil {
+		expected = &dispatchTargetExpectation{ThreadID: s.ResumeID(), Revision: config.Revision}
+	}
 	owner, admissionErr := h.admitTaskOrigin(c, cmd)
 	if admissionErr != nil {
 		h.queueError(c, cmd, "task_origin_rejected", admissionErr.Error())
 		return false
 	}
 	userHash, effectiveHash := "", ""
-	if cmd.VisualPresentation != "" {
-		userHash, effectiveHash = backend.PresentationHashes(backend.WithVisualPresentation(context.Background(), cmd.VisualPresentation), content)
+	if cmd.VisualPresentation != "" || role != nil {
+		userHash, effectiveHash = backend.PresentationHashes(backend.WithPartnerRole(backend.WithVisualPresentation(context.Background(), cmd.VisualPresentation), role), content)
 	}
-	intent, err := json.Marshal(queuedPayload{CallbackOnComplete: cmd.CallbackOnComplete, VisualUserHash: userHash, VisualEffectiveHash: effectiveHash, VisualPresentation: cmd.VisualPresentation, MessagePurpose: cmd.MessagePurpose, Origin: cmd.TaskOrigin, Content: content, Images: cmd.Images, Files: files, ExpectedTarget: expected})
+	intent, err := json.Marshal(queuedPayload{PartnerRole: role, CallbackOnComplete: cmd.CallbackOnComplete, VisualUserHash: userHash, VisualEffectiveHash: effectiveHash, VisualPresentation: cmd.VisualPresentation, MessagePurpose: cmd.MessagePurpose, Origin: cmd.TaskOrigin, Content: content, Images: cmd.Images, Files: files, ExpectedTarget: expected})
 	if err != nil {
 		h.queueError(c, cmd, "invalid_message", err.Error())
 		return false
 	}
 	intentHash := sha256.Sum256(intent)
-	payload, err := json.Marshal(queuedPayload{CallbackOnComplete: cmd.CallbackOnComplete, VisualUserHash: userHash, VisualEffectiveHash: effectiveHash, VisualPresentation: cmd.VisualPresentation, MessagePurpose: cmd.MessagePurpose, OwnerDevice: owner, CallbackBinding: callbackBinding(c), Origin: cmd.TaskOrigin, Content: content, Images: cmd.Images, Files: files, Configuration: &config, ExpectedTarget: expected})
+	payload, err := json.Marshal(queuedPayload{PartnerRole: role, CallbackOnComplete: cmd.CallbackOnComplete, VisualUserHash: userHash, VisualEffectiveHash: effectiveHash, VisualPresentation: cmd.VisualPresentation, MessagePurpose: cmd.MessagePurpose, OwnerDevice: owner, CallbackBinding: callbackBinding(c), Origin: cmd.TaskOrigin, Content: content, Images: cmd.Images, Files: files, Configuration: &config, ExpectedTarget: expected})
 	if err != nil {
 		h.queueError(c, cmd, "invalid_message", err.Error())
 		return false
@@ -218,6 +228,12 @@ func (h *Hub) runQueuedMessage(s *session.Session, requestID string) {
 		h.Emit(backend.NewError(s.ID, requestID, "dispatch_target_changed", "Target thread or configuration changed while waiting; this instruction was not sent"))
 		return
 	}
+	if payload.PartnerRole != nil {
+		if err := h.intakeWritePolicy(s); err != nil {
+			h.Emit(backend.NewError(s.ID, requestID, "partner_role_scope_changed", "Role scope changed before native consumption"))
+			return
+		}
+	}
 	if payload.FormalIntake {
 		if err := h.intakeWritePolicy(s); err != nil {
 			h.Emit(backend.NewError(s.ID, requestID, "intake_scope_changed", "Original task intake permission changed before native consumption"))
@@ -262,7 +278,7 @@ func (h *Hub) runQueuedMessage(s *session.Session, requestID string) {
 		h.Emit(backend.NewError(s.ID, requestID, "event_target_scope_changed", "Event target is now managed or unavailable"))
 		return
 	}
-	sendContext := backend.WithVisualPresentation(context.Background(), payload.VisualPresentation)
+	sendContext := backend.WithPartnerRole(backend.WithVisualPresentation(context.Background(), payload.VisualPresentation), payload.PartnerRole)
 	if payload.ExternalReviewOnly {
 		grant, err := h.dispatches.Grant(context.Background(), "peer:"+payload.ExternalPeer)
 		if err != nil || !grant.Allows(h.cfg.InstanceID, h.cfg.InstanceID, s.ID) {
@@ -598,7 +614,7 @@ func (h *Hub) promoteQueuedMessage(c *Client, cmd clientproto.Command) {
 			}
 		}
 		if decodeErr == nil && steerErr == nil {
-			result, steerErr = steerer.Steer(backend.WithVisualPresentation(context.Background(), payload.VisualPresentation), s, cmd.RequestID, payload.Content, payload.Images, payload.Files)
+			result, steerErr = steerer.Steer(backend.WithPartnerRole(backend.WithVisualPresentation(context.Background(), payload.VisualPresentation), payload.PartnerRole), s, cmd.RequestID, payload.Content, payload.Images, payload.Files)
 			if steerErr == nil && !result.StrictACK {
 				steerErr = errors.New("native steer acceptance unverified")
 			}
