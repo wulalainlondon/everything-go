@@ -5,6 +5,23 @@ import (
 	"time"
 )
 
+// HasRegisteredTaskCallbackDevice checks current notification registration,
+// including the pairing filter. It does not imply successful push delivery or
+// permission to acquire audio. Only supported native platforms qualify.
+func (n *Notifier) HasRegisteredTaskCallbackDevice(device string) bool {
+	if n == nil || device == "" {
+		return false
+	}
+	for _, platform := range []string{"ios", "android"} {
+		for _, dst := range n.targetsForPlatform(platform) {
+			if dst.deviceID == device {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // NotifyTaskCallback addresses exactly one enrolled device. Stable event IDs
 // retain the broker's idempotency receipt across uncertain network delivery.
 func (n *Notifier) NotifyTaskCallback(authority, session, request, callback, invitation, device string, expires int64) {

@@ -132,6 +132,48 @@ func (h *Hub) callbackTarget(c *Client, inventory string) (callbacks.Recipient, 
 	return callbacks.Recipient{}, errors.New("接收裝置未連線或尚未支援來電")
 }
 
+// A socket is not a prerequisite for notifying a previously enrolled recipient.
+// Only the same policy's server-resolved recipient may be reused offline; a
+// caller-supplied inventory ID or push token alone never establishes support.
+func (h *Hub) callbackTargetForRecord(ctx context.Context, c *Client, inventory, id string) (callbacks.Recipient, error) {
+	target, liveErr := h.callbackTarget(c, inventory)
+	if liveErr == nil {
+		return target, nil
+	}
+	if inventory == "" || h.callbacks == nil || h.fcm == nil {
+		return callbacks.Recipient{}, liveErr
+	}
+	// An explicitly unsupported current client is not an offline client.
+	if h.callbackRecipient(c).Inventory == inventory {
+		return callbacks.Recipient{}, liveErr
+	}
+	h.mu.RLock()
+	connected := false
+	for other := range h.clients {
+		if h.callbackRecipient(other).Inventory == inventory {
+			connected = true
+			break
+		}
+	}
+	h.mu.RUnlock()
+	if connected {
+		return callbacks.Recipient{}, liveErr
+	}
+	r, found, err := h.callbacks.Get(ctx, id)
+	if err != nil {
+		return callbacks.Recipient{}, err
+	}
+	if !found || r.Recipient.Inventory != inventory || r.Recipient.Device == "" || r.Recipient.Binding == "" {
+		return callbacks.Recipient{}, liveErr
+	}
+	for _, binding := range h.pairing.DeviceBindings() {
+		if binding.DeviceID == r.Recipient.Device && callbacks.Digest(binding.Token) == r.Recipient.Binding && h.fcm.HasRegisteredTaskCallbackDevice(binding.DeviceID) {
+			return r.Recipient, nil
+		}
+	}
+	return callbacks.Recipient{}, liveErr
+}
+
 // This negotiated extension is parsed before the legacy frame union, just as
 // TaskAPI is. Every action still requires the original paired transport.
 func (h *Hub) handleTaskCallback(ctx context.Context, c *Client, raw []byte) {
@@ -269,7 +311,7 @@ func (h *Hub) executeTaskCallback(ctx context.Context, c *Client, in callbackInp
 	}
 	var target callbacks.Recipient
 	if in.Action == "set" || in.Action == "request_now" {
-		target, e = h.callbackTarget(c, in.Recipient)
+		target, e = h.callbackTargetForRecord(ctx, c, in.Recipient, id)
 		if e != nil {
 			h.callbackRespond(c, in, nil, e)
 			return

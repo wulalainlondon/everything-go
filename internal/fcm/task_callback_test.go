@@ -9,6 +9,28 @@ import (
 	"time"
 )
 
+func TestCallbackRegistrationEligibilityIsNotDelivery(t *testing.T) {
+	var absent *Notifier
+	if absent.HasRegisteredTaskCallbackDevice("ios") {
+		t.Fatal("nil notifier eligible")
+	}
+	n := testNotifier("", "http://unused.invalid", http.DefaultClient)
+	n.SetToken("ios", "ios-token", "ios")
+	n.SetToken("android", "android-token", "android")
+	n.SetToken("unknown-platform", "legacy-token", "")
+	if !n.HasRegisteredTaskCallbackDevice("ios") || !n.HasRegisteredTaskCallbackDevice("android") || n.HasRegisteredTaskCallbackDevice("unknown-platform") || n.HasRegisteredTaskCallbackDevice("absent") || n.HasRegisteredTaskCallbackDevice("") {
+		t.Fatal("registration eligibility is not exact supported device")
+	}
+	n.SetDeviceFilter(func(id string) bool { return id != "ios" })
+	if n.HasRegisteredTaskCallbackDevice("ios") {
+		t.Fatal("revoked device eligible")
+	}
+	n.RemoveDevice("android")
+	if n.HasRegisteredTaskCallbackDevice("android") {
+		t.Fatal("withdrawn registration eligible")
+	}
+}
+
 func TestCallbackPushTargetsOneDeviceAndCarriesNoResultOrCredentials(t *testing.T) {
 	var messages []v1message
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
