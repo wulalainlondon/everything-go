@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -63,14 +64,14 @@ func (f *fixture) LoadHistory(thread string, opts history.Opts) (*history.Result
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	rows := make([]map[string]any, 0, len(f.rows[thread]))
-	for _, row := range f.rows[thread] {
+	for i, row := range f.rows[thread] {
 		copy := make(map[string]any, len(row)+2)
 		for k, v := range row {
 			copy[k] = v
 		}
 		copy["source_session_id"] = thread
 		copy["source"] = "codex"
-		copy["source_message_id"] = "codex:" + thread + ":" + row["source_message_id"].(string)
+		copy["source_message_id"] = "codex:" + thread + ":line:" + strconv.Itoa(i+1)
 		rows = append(rows, copy)
 	}
 	r := history.Slice(rows, opts)
