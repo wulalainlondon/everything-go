@@ -59,10 +59,26 @@ func (f *fixture) Clear(context.Context, *session.Session) error                
 func (f *fixture) Close(context.Context, *session.Session) error                { return nil }
 func (f *fixture) AllProviders() []backend.HistoryProvider                      { return []backend.HistoryProvider{f} }
 func (f *fixture) ProviderFor(*session.Session) (backend.HistoryProvider, bool) { return f, true }
-func (f *fixture) LoadHistory(thread string, _ history.Opts) (*history.Result, error) {
+func (f *fixture) LoadHistory(thread string, opts history.Opts) (*history.Result, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return &history.Result{Kind: "snapshot", Messages: append([]map[string]any{}, f.rows[thread]...), SourceCount: len(f.rows[thread])}, nil
+	rows := make([]map[string]any, 0, len(f.rows[thread]))
+	for _, row := range f.rows[thread] {
+		copy := make(map[string]any, len(row)+2)
+		for k, v := range row {
+			copy[k] = v
+		}
+		copy["source_session_id"] = thread
+		copy["source"] = "codex"
+		copy["source_message_id"] = "codex:" + thread + ":" + row["source_message_id"].(string)
+		rows = append(rows, copy)
+	}
+	r := history.Slice(rows, opts)
+	r.SourceGeneration = "fixture-generation:" + thread
+	return r, nil
+}
+func (f *fixture) HistorySourceGeneration(thread string) (string, error) {
+	return "fixture-generation:" + thread, nil
 }
 func (f *fixture) ResumableSessions(int) ([]history.ResumableSession, error) { return nil, nil }
 func main() {
