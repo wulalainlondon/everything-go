@@ -220,6 +220,10 @@ func (s *Service) Status(ctx context.Context, c Caller, id string) (Status, erro
 		return Status{}, err
 	}
 	status := Status{Account: a, RuntimeState: "stopped", CheckedAt: nowMS(), Connectivity: "not_checked", Capabilities: map[string]string{"messages": "available_after_login", "events": "experimental", "voice": "pending_live_validation", "openchat": "joined_rooms_only"}}
+	status.LastHealth, err = s.store.healthObservation(ctx, id)
+	if err != nil {
+		return Status{}, err
+	}
 	for _, scope := range []string{"messages.send", "schedule", "events", "resources", "call"} {
 		if s.config.BlockedScopes[scope] {
 			status.Capabilities[scope] = "disabled"
@@ -642,6 +646,14 @@ type Request struct {
 
 func (s *Service) Execute(ctx context.Context, c Caller, r Request) (any, error) {
 	switch r.Method {
+	case "access":
+		return s.Access(ctx, c, r.Account)
+	case "list_grants":
+		return s.Grants(ctx, c, r.Account)
+	case "set_grants":
+		return s.SetGrants(ctx, c, r)
+	case "list_subscriptions":
+		return s.ListSubscriptions(ctx, c, r.Account)
 	case "download_resource":
 		return s.DownloadResource(ctx, c, r.Account, r.Target, r.Message)
 	case "read_resource":
@@ -685,20 +697,7 @@ func (s *Service) Execute(ctx context.Context, c Caller, r Request) (any, error)
 	case "resume":
 		return s.Resume(ctx, c, r.Account)
 	case "health":
-		_, d, err := s.driver(ctx, c, r.Account, "status")
-		if err != nil {
-			return nil, err
-		}
-		var identity Identity
-		if err = d.Invoke(ctx, "health", nil, &identity); err != nil {
-			return nil, err
-		}
-		if err = s.store.BindIdentity(ctx, r.Account, identity); err != nil {
-			return nil, err
-		}
-		status, err := s.Status(ctx, c, r.Account)
-		status.Connectivity = "verified"
-		return status, err
+		return s.Health(ctx, c, r.Account)
 	case "reauthenticate":
 		return s.pairMode(ctx, c, r.Account, true, true)
 	case "pair":

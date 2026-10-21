@@ -365,6 +365,12 @@
       "type": "user_input_request"
     },
     {
+      "type": "voice_prepared"
+    },
+    {
+      "type": "voice_transfer"
+    },
+    {
       "type": "webrtc_answer"
     },
     {
@@ -695,6 +701,12 @@
     },
     {
       "type": "user_input_response"
+    },
+    {
+      "type": "voice_call_prepare"
+    },
+    {
+      "type": "voice_transfer_control"
     },
     {
       "type": "webrtc_answer"

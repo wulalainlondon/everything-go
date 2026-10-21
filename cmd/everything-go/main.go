@@ -48,11 +48,15 @@ import (
 	"everything-go/internal/search"
 	"everything-go/internal/session"
 	"everything-go/internal/sourcepolicy"
+	"everything-go/internal/voicecontrol"
 	"everything-go/internal/voicemediaipc"
 	"everything-go/internal/workitems"
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "voice-control" {
+		os.Exit(voicecontrol.RunCLI(os.Args[2:], os.Stdout, os.Stderr))
+	}
 	if len(os.Args) > 1 && os.Args[1] == "line" {
 		os.Exit(linecontrol.RunCLI(os.Args[2:], os.Stdout, os.Stderr))
 	}
@@ -307,6 +311,11 @@ func main() {
 			}
 			defer closeLine()
 		}
+		closeVoiceControl, err := hub.StartVoiceControl(codex)
+		if err != nil {
+			log.Fatalf("initialize voice control: %v", err)
+		}
+		defer closeVoiceControl()
 		if *mediaControl {
 			closeMedia, err := hub.StartUnifiedVoiceMedia(codex, mediaservice.DefaultManifest())
 			if err != nil {

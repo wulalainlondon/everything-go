@@ -81,6 +81,10 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		h.handlePartnerProfile(c, cmd)
 	case "task_api_request":
 		return // Strict original frame handled by Client before legacy ParseCommand.
+	case "voice_call_prepare":
+		h.handleVoicePrepare(c, cmd)
+	case "voice_transfer_control":
+		h.handleVoiceTransfer(c, cmd)
 	case "codex_voice_start":
 		h.handleVoiceStart(c, cmd)
 	case "codex_voice_stop":
@@ -138,13 +142,16 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 				if h.callbacks != nil {
 					helloInput.Capabilities = append(helloInput.Capabilities, "task_callback_v1", "task_callback_execution_v1", "task_callback_ios_notifications_v1")
 				}
-				helloInput.Capabilities = append(helloInput.Capabilities, "codex_realtime_voice_v1", "codex_voice_selection_v1", "codex_voice_media_v1", "codex_voice_external_music_v1", "codex_voice_external_music_ios_v1", "codex_voice_apple_music_ios_v1", "codex_voice_audio_control_v1", "codex_voice_music_launch_v1")
+				if h.transfers != nil && h.pairedTaskDevice(c) != "" {
+					helloInput.Capabilities = append(helloInput.Capabilities, "codex_voice_transfer_confirmation_v1")
+				}
+				helloInput.Capabilities = append(helloInput.Capabilities, "codex_voice_prepare_v1", "codex_realtime_voice_v1", "codex_voice_selection_v1", "codex_voice_media_v1", "codex_voice_external_music_v1", "codex_voice_external_music_ios_v1", "codex_voice_apple_music_ios_v1", "codex_voice_audio_control_v1", "codex_voice_music_launch_v1")
 			}
 			if h.LineVoiceEnabled() {
 				helloInput.Capabilities = append(helloInput.Capabilities, "line_voice_v2")
 			}
 			if h.LineServiceEnabled() {
-				helloInput.Capabilities = append(helloInput.Capabilities, "line_accounts_v1", "line_service_config_v1")
+				helloInput.Capabilities = append(helloInput.Capabilities, "line_accounts_v1", "line_service_config_v1", "line_owner_management_v1")
 				if h.lineControl != nil {
 					helloInput.Capabilities = append(helloInput.Capabilities, "line_control_cli_v1")
 				}

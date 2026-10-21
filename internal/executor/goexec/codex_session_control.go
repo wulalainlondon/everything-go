@@ -34,6 +34,8 @@ func (c *Codex) applySessionControlThreadTools(s *session.Session, params map[st
 		name, description string
 		fields, required  []string
 	}{
+		{"voice_transfer", "Prepare a user-requested same-device voice transfer to an existing granted Codex thread. This does not hang up or connect calls: the original device must display the target and obtain a human tap. Never claim completed from acceptance; no text dispatch or context copying.", []string{"instance_id", "session_id", "expected_thread_id", "expected_config_revision"}, []string{"session_id", "expected_thread_id", "expected_config_revision"}},
+		{"get_voice_transfer", "Read the exact transfer receipt on your current live source call. Never replay an uncertain transfer as a new intent.", []string{"dispatch_id"}, []string{"dispatch_id"}},
 		{"list_instances", "Discover exact Bridge instance IDs explicitly granted by the human, including this computer and configured peers. Display names are not routing keys; never infer credentials or guess IDs.", nil, nil},
 		{"list_sessions", "Read sessions allowed by the human-enabled controller grant. Names are display-only; use returned instance/session/thread IDs. Page with offset/limit until has_more is false.", []string{"instance_id", "query", "offset", "limit"}, nil},
 		{"get_session_status", "Read exact current runtime and pending queue; this creates no AI turn.", []string{"instance_id", "session_id", "expected_thread_id"}, []string{"session_id"}},

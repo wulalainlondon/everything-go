@@ -51,6 +51,7 @@ import (
 	"everything-go/internal/taskapi"
 	"everything-go/internal/taskinteraction"
 	"everything-go/internal/toolenv"
+	"everything-go/internal/voicetransfer"
 	"everything-go/internal/widgetaccess"
 	"everything-go/internal/workitems"
 )
@@ -79,6 +80,7 @@ type Config struct {
 // it when none are connected so a reconnecting client can recover it).
 type Hub struct {
 	partners             *partners.Store
+	transfers            *voicetransfer.Store
 	interactionScheduler atomic.Bool
 	interactionWake      chan struct{}
 
@@ -99,6 +101,7 @@ type Hub struct {
 	dispatchScheduler   atomic.Bool
 	voiceMu             sync.Mutex
 	voiceClients        map[*Client]*clientVoiceCall
+	voicePermits        map[string]voiceStartPermit
 	pushSetupMu         sync.Mutex
 	pushSetupCSRF       string
 	pushSetupChallenges map[string]pushSetupPending
@@ -254,6 +257,11 @@ func NewHub(reg *session.Registry, cfg Config, pairing *governance.Pairing, port
 		log.Printf("[interaction] storage unavailable")
 	} else {
 		h.interactions = store
+	}
+	if store, err := voicetransfer.Open(cfg.DataDir); err == nil {
+		h.transfers = store
+	} else {
+		log.Printf("[voice-transfer] storage unavailable: %v", err)
 	}
 	if store, err := callbacks.Open(cfg.DataDir); err != nil {
 		log.Printf("[callback] storage unavailable: %v", err)

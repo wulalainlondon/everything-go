@@ -44,6 +44,9 @@ func (h *Hub) controllerCaller(c backend.SessionControlCaller) error {
 	return errors.New("controller_voice_expired")
 }
 func (h *Hub) ControlSession(ctx context.Context, c backend.SessionControlCaller, input backend.SessionControlRequest) (any, error) {
+	if input.Action == "voice_transfer" || input.Action == "get_voice_transfer" {
+		return h.requestVoiceTransfer(ctx, c, input)
+	}
 	if e := h.controllerCaller(c); e != nil {
 		return nil, e
 	}

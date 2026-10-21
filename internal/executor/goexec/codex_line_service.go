@@ -33,6 +33,8 @@ func (c *Codex) applyLineServiceTools(s *session.Session, params map[string]any)
 		{"handoff_call", "Use only for a user-authorized LINE call through the current active voice connection, using the exact account and target. A handoff request is not ringing or connected evidence. Phone audio ends the AI leg before acquiring the LINE leg.", []string{"account_ref", "target_ref"}, []string{"account_ref", "target_ref"}},
 		{"cancel_call", "Cancel the exact user-authorized pending or active LINE call. Cancellation request is not proof the child has stopped; query the original receipt.", []string{"operation_id"}, []string{"operation_id"}},
 		{"get_call", "Read the exact durable LINE call receipt. Never replay an existing call intent.", []string{"operation_id"}, []string{"operation_id"}},
+		{"access", "Read your actual account role, allowed scopes and per-method limits. This grants no new permissions.", []string{"account_ref"}, []string{"account_ref"}},
+		{"list_subscriptions", "List passive subscriptions belonging to this caller; owners may inspect their account subscriptions. No subscription is enabled by this query.", []string{"account_ref"}, []string{"account_ref"}},
 		{"accounts", "List only LINE accounts explicitly granted to this conversation. Account metadata is not a live connectivity test.", nil, nil},
 		{"status", "Read separate account login/runtime/capability states.", []string{"account_ref"}, []string{"account_ref"}},
 		{"health", "Perform a live read-only LINE connectivity and principal check. Listing metadata or a running process alone is not connectivity evidence.", []string{"account_ref"}, []string{"account_ref"}},
@@ -55,6 +57,13 @@ func (c *Codex) applyLineServiceTools(s *session.Session, params map[string]any)
 		properties := map[string]any{}
 		for _, field := range d.properties {
 			properties[field] = fields[field]
+		}
+		if _, ok := properties["limit"]; ok && (d.name == "find_targets" || d.name == "find_openchats" || d.name == "list_attachments") {
+			maximum := 50
+			if d.name == "find_openchats" {
+				maximum = 20
+			}
+			properties["limit"] = map[string]any{"type": "integer", "minimum": 1, "maximum": maximum}
 		}
 		required := d.required
 		if required == nil {

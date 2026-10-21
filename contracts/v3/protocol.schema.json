@@ -235,6 +235,8 @@
         "unclaim_ack",
         "usage_report",
         "user_input_request",
+        "voice_prepared",
+        "voice_transfer",
         "webrtc_answer",
         "webrtc_ice",
         "webrtc_ready",
@@ -349,6 +351,8 @@
         "tunnel_url_ack",
         "unclaim_bridge",
         "user_input_response",
+        "voice_call_prepare",
+        "voice_transfer_control",
         "webrtc_answer",
         "webrtc_ice",
         "webrtc_offer",
@@ -393,13 +397,6 @@
         "failed",
         "interrupted",
         "closed"
-      ]
-    },
-    "sourceRelationCoverage": {
-      "const": [
-        "trusted_relations_only",
-        "unavailable",
-        "not_requested"
       ]
     }
   },

@@ -96,6 +96,10 @@ func (h *Hub) handleVoiceStart(c *Client, cmd clientproto.Command) {
 		c.enqueueEvent(voiceEvent(cmd, "error", "此 Bridge 不支援雙向語音"))
 		return
 	}
+	if !h.consumeVoicePermit(c, s, cmd) {
+		c.enqueueEvent(voiceEvent(cmd, "error", "通話準備已失效，請從原對話重新開始"))
+		return
+	}
 	if err := h.bindCallbackVoice(context.Background(), c, s, cmd); err != nil {
 		c.enqueueEvent(voiceEvent(cmd, "error", err.Error()))
 		return
@@ -141,6 +145,9 @@ func (h *Hub) handleVoiceStart(c *Client, cmd clientproto.Command) {
 	h.voiceClients[c] = call
 	h.voiceMu.Unlock()
 	mediaInstructions, mediaError := h.openVoiceMediaLocal(c, call)
+	if call.externalMusicPlatform == "android" {
+		mediaInstructions += voiceControlInstructions()
+	}
 	if mediaError != nil {
 		log.Printf("[voice-media] private local control unavailable")
 	}
@@ -169,7 +176,6 @@ func (h *Hub) handleVoiceStart(c *Client, cmd clientproto.Command) {
 			out.Text = event.Text
 			out.Role = event.Role
 			out.ThreadID = s.ResumeID()
-			c.enqueueEvent(out)
 			if event.State == "closed" {
 				go h.callbackVoiceClosed(call)
 				h.closeVoiceMediaLocal(call)
@@ -179,6 +185,8 @@ func (h *Hub) handleVoiceStart(c *Client, cmd clientproto.Command) {
 				}
 				h.voiceMu.Unlock()
 			}
+			// Publish terminal only after releasing the exact server voice owner.
+			c.enqueueEvent(out)
 		}})
 		if !h.ownsVoice(c, call) {
 			cleanup, cancel := context.WithTimeout(context.Background(), 8*time.Second)

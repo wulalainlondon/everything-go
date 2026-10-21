@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"everything-go/internal/backend"
 	"everything-go/internal/linebridge"
+	"everything-go/internal/session"
 	"net/http"
 	"strings"
 )
@@ -32,6 +33,13 @@ func (h *Hub) LineSubjects() []linebridge.Subject {
 		}
 		seen[binding.DeviceID] = true
 		out = append(out, linebridge.Subject{Ref: "device:" + binding.DeviceID, Name: binding.DeviceID, Kind: "paired_device"})
+	}
+	for _, item := range h.registry.List() {
+		snap := item.Snapshot()
+		policy, err := h.PMConfiguration(item.ID)
+		if h.LineSessionAllowed(item.ID) && h.controllerInScope(item) && !snap.Hidden && item.State() != session.Closed && !strings.HasPrefix(item.ID, "pm_") && err == nil && policy == nil {
+			out = append(out, linebridge.Subject{Ref: "session:" + item.ID, Name: snap.Name, Kind: "session"})
+		}
 	}
 	return out
 }
@@ -62,7 +70,7 @@ func (h *Hub) ExecuteLineTool(ctx context.Context, caller backend.SessionControl
 	if !ok || registered != caller.Parent || strings.HasPrefix(registered.ID, "s_dg_") || !h.controls.MobileMayWrite(registered.ID) {
 		return nil, linebridge.Fail("line_caller_not_owned")
 	}
-	allowed := map[string]bool{"list_attachments": true, "download_resource": true, "import_resource": true, "reschedule_operation": true, "handoff_call": true, "cancel_call": true, "get_call": true, "subscribe": true, "accounts": true, "status": true, "health": true, "find_openchats": true, "find_targets": true, "get_messages": true, "send_message": true, "get_operation": true, "list_operations": true, "schedule_message": true, "cancel_operation": true}
+	allowed := map[string]bool{"access": true, "list_subscriptions": true, "list_attachments": true, "download_resource": true, "import_resource": true, "reschedule_operation": true, "handoff_call": true, "cancel_call": true, "get_call": true, "subscribe": true, "accounts": true, "status": true, "health": true, "find_openchats": true, "find_targets": true, "get_messages": true, "send_message": true, "get_operation": true, "list_operations": true, "schedule_message": true, "cancel_operation": true}
 	if !allowed[method] {
 		return nil, linebridge.Fail("line_tool_unavailable")
 	}

@@ -76,6 +76,42 @@ func OpenStore(dir, authority string, key []byte) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	if _, err = db.Exec(`CREATE TABLE IF NOT EXISTS line_health_observations(account TEXT PRIMARY KEY,checked_at INTEGER NOT NULL,state TEXT NOT NULL,code TEXT NOT NULL,binding_revision INTEGER NOT NULL DEFAULT 0);
+ CREATE TABLE IF NOT EXISTS line_grant_revisions(account TEXT PRIMARY KEY,revision INTEGER NOT NULL);`); err != nil {
+		db.Close()
+		return nil, err
+	}
+	healthColumns, healthErr := db.Query("PRAGMA table_info(line_health_observations)")
+	if healthErr != nil {
+		db.Close()
+		return nil, healthErr
+	}
+	hasHealthBinding := false
+	for healthColumns.Next() {
+		var cid, notnull, pk int
+		var name, kind string
+		var value any
+		if healthErr = healthColumns.Scan(&cid, &name, &kind, &notnull, &value, &pk); healthErr != nil {
+			break
+		}
+		if name == "binding_revision" {
+			hasHealthBinding = true
+		}
+	}
+	if healthErr == nil {
+		healthErr = healthColumns.Err()
+	}
+	healthColumns.Close()
+	if healthErr != nil {
+		db.Close()
+		return nil, healthErr
+	}
+	if !hasHealthBinding {
+		if _, healthErr = db.Exec("ALTER TABLE line_health_observations ADD COLUMN binding_revision INTEGER NOT NULL DEFAULT 0"); healthErr != nil {
+			db.Close()
+			return nil, healthErr
+		}
+	}
 	columns, e := db.Query("PRAGMA table_info(line_accounts)")
 	if e != nil {
 		db.Close()
@@ -272,6 +308,9 @@ func (s *Store) Grant(ctx context.Context, c Caller, account, subject string, al
 		if _, err = tx.ExecContext(ctx, "INSERT INTO line_grants VALUES(?,?,?)", account, subject, scope); err != nil {
 			return err
 		}
+	}
+	if _, err = tx.ExecContext(ctx, "INSERT INTO line_grant_revisions VALUES(?,2) ON CONFLICT(account) DO UPDATE SET revision=revision+1", account); err != nil {
+		return err
 	}
 	return tx.Commit()
 }

@@ -25,7 +25,7 @@ type Result struct {
 	Code   string `json:"code,omitempty"`
 }
 
-var methods = map[string]bool{"accounts": true, "intent_status": true, "status": true, "health": true, "find_targets": true, "find_openchats": true, "get_messages": true, "send_message": true, "schedule_message": true, "get_operation": true, "list_operations": true, "reschedule_operation": true, "cancel_operation": true, "subscribe": true, "list_attachments": true, "import_resource": true, "download_resource": true}
+var methods = map[string]bool{"access": true, "list_subscriptions": true, "accounts": true, "intent_status": true, "status": true, "health": true, "find_targets": true, "find_openchats": true, "get_messages": true, "send_message": true, "schedule_message": true, "get_operation": true, "list_operations": true, "reschedule_operation": true, "cancel_operation": true, "subscribe": true, "list_attachments": true, "import_resource": true, "download_resource": true}
 
 func canonicalParams(raw []byte) ([]byte, error) {
 	decoder := json.NewDecoder(bytes.NewReader(raw))

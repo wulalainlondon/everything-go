@@ -132,6 +132,7 @@ type Inbound struct {
 	// candidate. SDPMLineIndex is a pointer because 0 is a valid index distinct
 	// from "absent" (the app sends null when unknown).
 	SDP                       string              `json:"sdp"`
+	VoiceStartPermit          string              `json:"voice_start_permit,omitempty"`
 	VoiceID                   string              `json:"voice_id,omitempty"`
 	VoiceExternalMusicCapable bool                `json:"voice_external_music_capable,omitempty"`
 	VoiceMusicProvider        string              `json:"voice_music_provider,omitempty"`

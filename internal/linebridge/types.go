@@ -91,12 +91,13 @@ type EventSink interface {
 	Cursor(context.Context, string, string) (string, error)
 }
 type Status struct {
-	Account      Account           `json:"account"`
-	RuntimeState string            `json:"runtime_state"`
-	Epoch        string            `json:"runtime_epoch,omitempty"`
-	Capabilities map[string]string `json:"capabilities"`
-	CheckedAt    int64             `json:"checked_at"`
-	Connectivity string            `json:"connectivity"`
+	LastHealth   *HealthObservation `json:"last_health,omitempty"`
+	Account      Account            `json:"account"`
+	RuntimeState string             `json:"runtime_state"`
+	Epoch        string             `json:"runtime_epoch,omitempty"`
+	Capabilities map[string]string  `json:"capabilities"`
+	CheckedAt    int64              `json:"checked_at"`
+	Connectivity string             `json:"connectivity"`
 }
 type Failure struct {
 	Code         string

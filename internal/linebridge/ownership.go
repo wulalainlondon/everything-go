@@ -40,6 +40,9 @@ func (s *Store) TransferOwner(ctx context.Context, c Caller, id, subject string,
 	if _, err = tx.ExecContext(ctx, "UPDATE line_subscriptions SET enabled=0 WHERE account=?", id); err != nil {
 		return Account{}, err
 	}
+	if _, err = tx.ExecContext(ctx, "INSERT INTO line_grant_revisions VALUES(?,2) ON CONFLICT(account) DO UPDATE SET revision=revision+1", id); err != nil {
+		return Account{}, err
+	}
 	if err = tx.Commit(); err != nil {
 		return Account{}, err
 	}

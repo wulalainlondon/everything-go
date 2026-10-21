@@ -128,6 +128,7 @@ type Command struct {
 	MediaVideoID              string
 	MediaAudio                *protocol.MediaAudioInfo
 	MediaVolume               *int
+	VoiceStartPermit          string
 	VoiceID                   string
 	VoiceName                 string
 	VoiceMode                 string
@@ -299,6 +300,7 @@ func (AppV1) ParseCommand(in protocol.Inbound) Command {
 		Around:           in.Around,
 
 		SDP:                       in.SDP,
+		VoiceStartPermit:          in.VoiceStartPermit,
 		VoiceID:                   in.VoiceID,
 		VoiceExternalMusicCapable: in.VoiceExternalMusicCapable, VoiceMusicProvider: in.VoiceMusicProvider, ExternalMusic: in.ExternalMusic, VoiceMediaCapable: in.VoiceMediaCapable, VoiceMediaObserveCapable: in.VoiceMediaObserveCapable, VoiceAudioCapable: in.VoiceAudioCapable, VoiceAudio: in.VoiceAudio, VoiceDeviceModel: in.VoiceDeviceModel, MediaCommandID: in.MediaCommandID, MediaSequence: in.MediaSequence, MediaState: in.MediaState, MediaErrorCode: in.MediaErrorCode, MediaVideoID: in.MediaVideoID, MediaVolume: in.MediaVolume, MediaAudio: in.MediaAudio,
 		VoiceName:          in.VoiceName,
