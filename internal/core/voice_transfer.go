@@ -9,6 +9,7 @@ import (
 	"everything-go/internal/session"
 	"everything-go/internal/voicetransfer"
 	"strings"
+	"time"
 )
 
 func transferTarget(s *session.Session) voicetransfer.Target {
@@ -78,7 +79,7 @@ func (h *Hub) requestVoiceTransferWithID(ctx context.Context, caller backend.Ses
 	if busy {
 		return nil, errors.New("voice_transfer_target_has_call")
 	}
-	r, err := h.transfers.Create(ctx, voicetransfer.Record{ID: intentID, Authority: h.cfg.InstanceID, Source: transferTarget(caller.Parent), Target: transferTarget(target), SourceVoice: caller.VoiceID, Device: h.pairedTaskDevice(c), Request: caller.RequestID, Turn: caller.TurnID, Tool: caller.ToolCallID})
+	r, err := h.transfers.Create(ctx, voicetransfer.Record{ID: intentID, Authority: h.cfg.InstanceID, Source: transferTarget(caller.Parent), Target: transferTarget(target), SourceVoice: caller.VoiceID, Authorization: "voice_command", Device: h.pairedTaskDevice(c), Request: caller.RequestID, Turn: caller.TurnID, Tool: caller.ToolCallID})
 	if err == nil {
 		h.transferEvent(c, r, "")
 	}
@@ -117,6 +118,7 @@ func (h *Hub) handleVoiceTransfer(c *Client, cmd clientproto.Command) {
 		BeforeStop      bool   `json:"before_stop"`
 		LocalReleased   bool   `json:"native_release_confirmed"`
 		NativeConnected bool   `json:"native_connected"`
+		Automatic       bool   `json:"automatic"`
 	}
 	if len(cmd.Data) > 4096 || json.Unmarshal([]byte(cmd.Data), &input) != nil {
 		c.enqueueEvent(h.client.Error(cmd.SessionID, "voice_transfer_request_invalid", "轉接參數無效"))
@@ -157,7 +159,9 @@ func (h *Hub) handleVoiceTransfer(c *Client, cmd clientproto.Command) {
 		h.voiceMu.Unlock()
 		switch input.Action {
 		case "confirm":
-			if r.State != "confirmation_required" || !aLive || bOther {
+			if input.Automatic && !r.DirectAuthorized(time.Now()) {
+				err = errors.New("voice_transfer_direct_authorization_expired")
+			} else if r.State != "confirmation_required" || !aLive || bOther {
 				err = errors.New("voice_transfer_call_changed")
 			} else {
 				next = "confirmed"

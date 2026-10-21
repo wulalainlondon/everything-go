@@ -22,21 +22,29 @@ type Target struct {
 	Revision uint64 `json:"config_revision"`
 }
 type Record struct {
-	ID          string `json:"transfer_id"`
-	Authority   string `json:"authority_instance_id"`
-	Source      Target `json:"source"`
-	Target      Target `json:"target"`
-	SourceVoice string `json:"source_voice_id"`
-	State       string `json:"state"`
-	Revision    uint64 `json:"revision"`
-	CreatedAt   int64  `json:"created_at"`
-	UpdatedAt   int64  `json:"updated_at"`
-	TargetVoice string `json:"target_voice_id,omitempty"`
-	Device      string `json:"-"`
-	Request     string `json:"-"`
-	Turn        string `json:"-"`
-	Tool        string `json:"-"`
+	ID            string `json:"transfer_id"`
+	Authority     string `json:"authority_instance_id"`
+	Source        Target `json:"source"`
+	Target        Target `json:"target"`
+	SourceVoice   string `json:"source_voice_id"`
+	Authorization string `json:"authorization,omitempty"`
+	State         string `json:"state"`
+	Revision      uint64 `json:"revision"`
+	CreatedAt     int64  `json:"created_at"`
+	UpdatedAt     int64  `json:"updated_at"`
+	TargetVoice   string `json:"target_voice_id,omitempty"`
+	Device        string `json:"-"`
+	Request       string `json:"-"`
+	Turn          string `json:"-"`
+	Tool          string `json:"-"`
 }
+
+// DirectAuthorized is only for a fresh, provider-verified spoken transfer intent.
+// A receipt read, legacy confirmation, or recovered operation cannot grant a new effect.
+func (r Record) DirectAuthorized(now time.Time) bool {
+	return r.Authorization == "voice_command" && r.State == "confirmation_required" && r.Revision == 1 && r.CreatedAt > 0 && now.UnixMilli() >= r.CreatedAt && now.Sub(time.UnixMilli(r.CreatedAt)) <= 30*time.Second
+}
+
 type Store struct{ db *sql.DB }
 
 func Open(dir string) (*Store, error) {
@@ -92,7 +100,7 @@ func (s *Store) Get(ctx context.Context, id, device string) (Record, error) {
 }
 func (s *Store) Create(ctx context.Context, r Record) (Record, error) {
 	if old, err := s.Get(ctx, r.ID, r.Device); err == nil {
-		if old.Source != r.Source || old.Target != r.Target || old.SourceVoice != r.SourceVoice || old.Request != r.Request || old.Tool != r.Tool {
+		if old.Source != r.Source || old.Target != r.Target || old.SourceVoice != r.SourceVoice || old.Request != r.Request || old.Tool != r.Tool || old.Authorization != r.Authorization {
 			return Record{}, errors.New("voice_transfer_intent_conflict")
 		}
 		return old, nil

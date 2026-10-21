@@ -35,7 +35,7 @@ func transferAction(t *testing.T, h *Hub, c *Client, r voicetransfer.Record, act
 	}
 	return v
 }
-func TestTransferRequiresHumanTapExactRemoteReleaseAndNativeConnected(t *testing.T) {
+func TestLegacyTransferRequiresConfirmationExactRemoteReleaseAndNativeConnected(t *testing.T) {
 	h, c, caller, input := transferFixture(t)
 	value, err := h.ControlSession(context.Background(), caller, input)
 	if err != nil {
@@ -78,6 +78,40 @@ func TestTransferRequiresHumanTapExactRemoteReleaseAndNativeConnected(t *testing
 	r = transferAction(t, h, c, r, "connected", true, true, "new-voice")
 	if r.State != "completed" || r.TargetVoice != "new-voice" {
 		t.Fatal(r)
+	}
+}
+func TestDirectSpokenTransferUsesOriginalLiveCallWithoutSecondHumanTap(t *testing.T) {
+	h, c, caller, input := transferFixture(t)
+	value, err := h.ControlSession(context.Background(), caller, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := value.(voicetransfer.Record)
+	if r.Authorization != "voice_command" {
+		t.Fatal("explicit live intent not identified")
+	}
+	data, _ := json.Marshal(map[string]any{"transfer_id": r.ID, "action": "confirm", "revision": r.Revision, "automatic": true})
+	h.handleVoiceTransfer(c, clientproto.Command{SessionID: r.Source.Session, RequestID: "native-direct", Data: string(data)})
+	got, err := h.transfers.Get(context.Background(), r.ID, h.pairedTaskDevice(c))
+	if err != nil || got.State != "confirmed" || h.voiceClients[c] == nil {
+		t.Fatal("native authorization lost original call", got, err)
+	}
+	if next := transferAction(t, h, c, got, "released", true, false, ""); next.State != "confirmed" {
+		t.Fatal("direct authorization skipped actual A release")
+	}
+}
+func TestLegacyReceiptCannotAutoConfirmEvenOnOriginalDevice(t *testing.T) {
+	h, c, caller, input := transferFixture(t)
+	target, _ := h.registry.Get(input.SessionID)
+	r, err := h.transfers.Create(context.Background(), voicetransfer.Record{ID: voicetransfer.ID("legacy", "request", "tool"), Authority: h.cfg.InstanceID, Source: transferTarget(caller.Parent), Target: transferTarget(target), SourceVoice: caller.VoiceID, Device: h.pairedTaskDevice(c)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ := json.Marshal(map[string]any{"transfer_id": r.ID, "action": "confirm", "revision": r.Revision, "automatic": true})
+	h.handleVoiceTransfer(c, clientproto.Command{SessionID: r.Source.Session, RequestID: "legacy-auto", Data: string(data)})
+	got, _ := h.transfers.Get(context.Background(), r.ID, h.pairedTaskDevice(c))
+	if got.State != "confirmation_required" {
+		t.Fatal("legacy receipt became direct permission", got)
 	}
 }
 func TestTransferRejectsScopeDriftRevocationAndForgedCaller(t *testing.T) {

@@ -138,7 +138,7 @@ func ParseInvocation(argv []string) (Request, error) {
 }
 func RunCLI(args []string, out, stderr io.Writer) int {
 	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
-		io.WriteString(stderr, "Usage: bridge-voice --id vtr_UNIQUE_INTENT --method list_sessions|voice_transfer|get_voice_transfer --params JSON\nOriginal provider-observed command, live Android call and existing controller grants are required. Transfer only creates a confirmation offer; no automatic hangup or text dispatch.\n")
+		io.WriteString(stderr, "Usage: bridge-voice --id vtr_UNIQUE_INTENT --method list_sessions|voice_transfer|get_voice_transfer --params JSON\nOriginal provider-observed command, live Android call and existing controller grants are required. An explicit voice request authorizes capable Android clients to transfer without another tap; receipt acceptance is not connected. No text dispatch.\n")
 		return 0
 	}
 	q, e := ParseInvocation(args)
