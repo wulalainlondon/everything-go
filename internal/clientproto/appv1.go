@@ -117,6 +117,9 @@ type Command struct {
 	VoiceMusicProvider        string
 	ExternalMusic             *protocol.ExternalMusicState
 	VoiceMediaCapable         bool
+	VoiceContext              bool
+	VoiceSystemVolumeCapable  bool
+	SystemMediaAudio          *protocol.SystemMediaAudioState
 	VoiceAudioCapable         bool
 	VoiceAudio                *protocol.VoiceAudioState
 	VoiceMediaObserveCapable  bool
@@ -302,7 +305,7 @@ func (AppV1) ParseCommand(in protocol.Inbound) Command {
 		SDP:                       in.SDP,
 		VoiceStartPermit:          in.VoiceStartPermit,
 		VoiceID:                   in.VoiceID,
-		VoiceExternalMusicCapable: in.VoiceExternalMusicCapable, VoiceMusicProvider: in.VoiceMusicProvider, ExternalMusic: in.ExternalMusic, VoiceMediaCapable: in.VoiceMediaCapable, VoiceMediaObserveCapable: in.VoiceMediaObserveCapable, VoiceAudioCapable: in.VoiceAudioCapable, VoiceAudio: in.VoiceAudio, VoiceDeviceModel: in.VoiceDeviceModel, MediaCommandID: in.MediaCommandID, MediaSequence: in.MediaSequence, MediaState: in.MediaState, MediaErrorCode: in.MediaErrorCode, MediaVideoID: in.MediaVideoID, MediaVolume: in.MediaVolume, MediaAudio: in.MediaAudio,
+		VoiceExternalMusicCapable: in.VoiceExternalMusicCapable, VoiceMusicProvider: in.VoiceMusicProvider, ExternalMusic: in.ExternalMusic, VoiceMediaCapable: in.VoiceMediaCapable, VoiceMediaObserveCapable: in.VoiceMediaObserveCapable, VoiceContext: in.VoiceContext, VoiceSystemVolumeCapable: in.VoiceSystemVolumeCapable, SystemMediaAudio: in.SystemMediaAudio, VoiceAudioCapable: in.VoiceAudioCapable, VoiceAudio: in.VoiceAudio, VoiceDeviceModel: in.VoiceDeviceModel, MediaCommandID: in.MediaCommandID, MediaSequence: in.MediaSequence, MediaState: in.MediaState, MediaErrorCode: in.MediaErrorCode, MediaVideoID: in.MediaVideoID, MediaVolume: in.MediaVolume, MediaAudio: in.MediaAudio,
 		VoiceName:          in.VoiceName,
 		VoiceMode:          in.VoiceMode,
 		LineHandoffCapable: in.LineHandoffCapable,

@@ -2,21 +2,23 @@ package protocol
 
 // Ephemeral owner-only command. Never replayed into history or offline queues.
 type VoiceMediaCommand struct {
-	AssistantVolume *int   `json:"assistant_volume,omitempty"`
-	AssistantDelta  *int   `json:"assistant_delta,omitempty"`
-	Provider        string `json:"provider,omitempty"`
-	Query           string `json:"query,omitempty"`
-	URI             string `json:"uri,omitempty"`
-	ExpectedID      string `json:"expected_id,omitempty"`
-	ExpectedTitle   string `json:"expected_title,omitempty"`
-	ExpectedArtist  string `json:"expected_artist,omitempty"`
-	PositionMS      *int64 `json:"position_ms,omitempty"`
-	CommandID       string `json:"command_id"`
-	Sequence        uint64 `json:"sequence"`
-	Action          string `json:"action"`
-	VideoID         string `json:"video_id,omitempty"`
-	Title           string `json:"title,omitempty"`
-	Volume          int    `json:"volume"`
+	SystemMediaVolume *int   `json:"system_media_volume,omitempty"`
+	SystemMediaDelta  *int   `json:"system_media_delta,omitempty"`
+	AssistantVolume   *int   `json:"assistant_volume,omitempty"`
+	AssistantDelta    *int   `json:"assistant_delta,omitempty"`
+	Provider          string `json:"provider,omitempty"`
+	Query             string `json:"query,omitempty"`
+	URI               string `json:"uri,omitempty"`
+	ExpectedID        string `json:"expected_id,omitempty"`
+	ExpectedTitle     string `json:"expected_title,omitempty"`
+	ExpectedArtist    string `json:"expected_artist,omitempty"`
+	PositionMS        *int64 `json:"position_ms,omitempty"`
+	CommandID         string `json:"command_id"`
+	Sequence          uint64 `json:"sequence"`
+	Action            string `json:"action"`
+	VideoID           string `json:"video_id,omitempty"`
+	Title             string `json:"title,omitempty"`
+	Volume            int    `json:"volume"`
 }
 
 // MediaAudioInfo separates player/system gain observations from human audibility.
@@ -74,4 +76,19 @@ type VoiceAudioState struct {
 	OutputMuted bool   `json:"outputMuted"`
 	MediaIndex  int    `json:"mediaIndex"`
 	ObservedAt  int64  `json:"observedAtMs"`
+}
+
+// SystemMediaAudioState reports Android STREAM_MUSIC, never earbud-private hardware gain.
+type SystemMediaAudioState struct {
+	MediaMuted    bool   `json:"mediaMuted"`
+	MediaFixed    bool   `json:"mediaFixed"`
+	Previous      int    `json:"previous"`
+	State         string `json:"state"`
+	Error         string `json:"error,omitempty"`
+	Configured    int    `json:"configured"`
+	Applied       int    `json:"applied"`
+	MediaIndex    int    `json:"mediaIndex"`
+	MediaMax      int    `json:"mediaMax"`
+	AssistantGain int    `json:"assistantGain"`
+	ObservedAt    int64  `json:"observedAtMs"`
 }
