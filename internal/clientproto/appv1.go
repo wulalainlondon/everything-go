@@ -22,6 +22,8 @@ func NewAppV1() AppV1 { return AppV1{} }
 
 // Command is the protocol-neutral shape the core router consumes.
 type Command struct {
+	// Internal admission hint; never populated by the wire adapter.
+	AutoVoicePhoto  bool
 	Partner         *partners.Request
 	PM              *coordination.Command
 	Collaboration   *coordination.CollaborationCommand

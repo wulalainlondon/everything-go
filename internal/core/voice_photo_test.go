@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"everything-go/internal/backend"
+	"everything-go/internal/clientproto"
 	"everything-go/internal/messagequeue"
 	"everything-go/internal/protocol"
 	"everything-go/internal/session"
@@ -74,8 +75,7 @@ func TestVoicePhotoDirectDeliveryUsesOriginalDurableImageExactlyOnce(t *testing.
 	case <-time.After(time.Second):
 		t.Fatal("normal Send did not deliver image")
 	}
-	waitForType(t, c, "queue_action_result")
-	expectState(t, h, "photo", messagequeue.Steered)
+	waitVoicePhotoState(t, h, messagequeue.Steered)
 
 	select {
 	case <-f.notices:
@@ -131,8 +131,7 @@ func TestVoicePhotoUnknownAcceptanceNeverReplays(t *testing.T) {
 	wire := `{"type":"message","session_id":"s1","request_id":"photo","content":"x","voice_context":true,"voice_id":"voice-original","thread_id":"thread-original","images":[{"media_type":"image/png","data":"eA=="}]}`
 	route(h, c, wire)
 	waitForType(t, c, "message_ack")
-	waitForType(t, c, "queue_action_result")
-	expectState(t, h, "photo", messagequeue.Uncertain)
+	waitVoicePhotoState(t, h, messagequeue.Uncertain)
 	route(h, c, wire)
 	waitForType(t, c, "message_ack")
 	close(release)
@@ -141,4 +140,29 @@ func TestVoicePhotoUnknownAcceptanceNeverReplays(t *testing.T) {
 		t.Fatal("unknown image replayed")
 	}
 	expectState(t, h, "photo", messagequeue.Uncertain)
+}
+
+func waitVoicePhotoState(t *testing.T, h *Hub, want messagequeue.State) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		e, ok, _ := h.messageQueue.Get("s1", "photo")
+		if ok && e.State == want {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	expectState(t, h, "photo", want)
+}
+func TestVoicePhotoInternalDeliveryDoesNotExposeManualQueueControls(t *testing.T) {
+	h, _ := newTestHub(t)
+	c := newTestClient(h)
+	h.queueResult(c, clientproto.Command{SessionID: "s1", RequestID: "photo", AutoVoicePhoto: true}, "promote", "rejected", "no longer waiting", messagequeue.Entry{})
+	select {
+	case <-c.send:
+		t.Fatal("internal steering exposed a manual action banner")
+	default:
+	}
+	h.queueResult(c, clientproto.Command{SessionID: "s1", RequestID: "photo"}, "promote", "rejected", "no longer waiting", messagequeue.Entry{})
+	waitForType(t, c, "queue_action_result")
 }

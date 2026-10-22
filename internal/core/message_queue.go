@@ -211,7 +211,7 @@ func (h *Hub) enqueueChatMessageExpected(c *Client, cmd clientproto.Command, exp
 	c.enqueueEvent(protocol.NewMessageAck(cmd.SessionID, e.RequestID, "queued"))
 	h.publishMessageQueue(cmd.SessionID)
 	if inserted && cmd.VoiceContext {
-		go h.promoteQueuedMessage(c, clientproto.Command{Kind: "promote_queued_message", SessionID: cmd.SessionID, RequestID: cmd.RequestID})
+		go h.promoteQueuedMessage(c, clientproto.Command{Kind: "promote_queued_message", SessionID: cmd.SessionID, RequestID: cmd.RequestID, AutoVoicePhoto: true})
 	}
 	return true
 }
@@ -442,6 +442,10 @@ func (h *Hub) sendMessageQueue(c *Client, cmd clientproto.Command) {
 	c.enqueueEvent(snapshot)
 }
 func (h *Hub) queueResult(c *Client, cmd clientproto.Command, action, status, message string, e messagequeue.Entry) {
+	// Automatic photo intake projects its durable message state, not manual queue controls.
+	if cmd.AutoVoicePhoto {
+		return
+	}
 	if cmd.Kind == "steer_message" {
 		if status == "pending" {
 			return
