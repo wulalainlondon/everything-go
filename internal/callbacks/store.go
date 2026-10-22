@@ -114,6 +114,9 @@ func Open(dir string) (*Store, error) {
 	_, e = db.Exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;
  CREATE TABLE IF NOT EXISTS callbacks(id TEXT PRIMARY KEY,session TEXT NOT NULL,request TEXT NOT NULL,record BLOB NOT NULL);
  CREATE INDEX IF NOT EXISTS callbacks_source ON callbacks(session,request);
+ CREATE INDEX IF NOT EXISTS callbacks_active_recipient ON callbacks(
+ json_extract(record,'$.recipient.device'),json_extract(record,'$.recipient_binding'),
+ json_extract(record,'$.enabled'),json_extract(record,'$.invitation.state'),json_extract(record,'$.invitation.expires_at'),id);
  CREATE TABLE IF NOT EXISTS callback_operations(id TEXT PRIMARY KEY,fingerprint TEXT NOT NULL,response BLOB NOT NULL);
  CREATE TABLE IF NOT EXISTS callback_delivery_history(group_key TEXT PRIMARY KEY,invitation TEXT NOT NULL);`)
 	if e != nil {
@@ -189,6 +192,42 @@ func (s *Store) List(ctx context.Context) ([]Record, error) {
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// ActiveInvitationPage omits report bodies in SQL before copying rows into Go.
+// Historical policies never consume this reconnect page. The recipient and
+// pairing-generation binding are server-derived, not caller-supplied grants.
+const activeInvitationPageQuery = `SELECT json_remove(record,'$.report') FROM callbacks
+ WHERE id > ? AND json_extract(record,'$.enabled')=1
+ AND json_extract(record,'$.recipient.device')=? AND json_extract(record,'$.recipient_binding')=?
+ AND json_extract(record,'$.invitation.state') IN ('delivery_pending','ringing')
+ AND json_extract(record,'$.invitation.expires_at') > ? ORDER BY id LIMIT ?`
+
+func (s *Store) ActiveInvitationPage(ctx context.Context, device, binding, after string, limit int, now int64) ([]Record, string, error) {
+	if device == "" || binding == "" || len(after) > 200 || limit < 1 || limit > 64 {
+		return nil, "", errors.New("invalid_callback_page")
+	}
+	rows, err := s.db.QueryContext(ctx, activeInvitationPageQuery, after, device, binding, now, limit+1)
+	if err != nil {
+		return nil, "", err
+	}
+	defer rows.Close()
+	out := make([]Record, 0, limit)
+	for rows.Next() {
+		var raw []byte
+		if err = rows.Scan(&raw); err != nil {
+			return nil, "", err
+		}
+		if len(out) == limit {
+			return out, out[len(out)-1].ID, nil
+		}
+		r, err := decode(raw)
+		if err != nil {
+			return nil, "", err
+		}
+		out = append(out, r)
+	}
+	return out, "", rows.Err()
 }
 
 // Mutate commits the receipt and state together. Duplicate operation IDs return

@@ -140,7 +140,7 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		if !c.enrollmentOnly {
 			if _, ok := h.exec.(backend.RealtimeVoiceExecutor); ok && h.cfg.CodexRemote != "" {
 				if h.callbacks != nil {
-					helloInput.Capabilities = append(helloInput.Capabilities, "task_callback_v1", "task_callback_execution_v1", "task_callback_ios_notifications_v1")
+					helloInput.Capabilities = append(helloInput.Capabilities, "task_callback_v1", "task_callback_execution_v1", "task_callback_ios_notifications_v1", "task_callback_compact_sync_v1")
 				}
 				if h.transfers != nil && h.pairedTaskDevice(c) != "" {
 					helloInput.Capabilities = append(helloInput.Capabilities, "codex_voice_transfer_confirmation_v1", "codex_voice_transfer_direct_v1")

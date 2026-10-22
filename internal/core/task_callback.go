@@ -33,6 +33,17 @@ type callbackInput struct {
 	Voice      string `json:"voice_id,omitempty"`
 	State      string `json:"state,omitempty"`
 	Native     bool   `json:"native_support"`
+	Compact    bool   `json:"compact,omitempty"`
+	Cursor     string `json:"cursor,omitempty"`
+	Limit      int    `json:"limit,omitempty"`
+}
+type callbackInvitationSummary struct {
+	ID         string `json:"id"`
+	Session    string `json:"session_id"`
+	Request    string `json:"task_request_id"`
+	Revision   uint64 `json:"revision"`
+	Invitation string `json:"invitation_id"`
+	Expires    int64  `json:"expires_at"`
 }
 type callbackTaskSource struct {
 	ExecutionRequest string `json:"execution_request_id,omitempty"`
@@ -42,15 +53,17 @@ type callbackTaskSource struct {
 	Created          int64  `json:"created_at"`
 }
 type callbackEvent struct {
-	Tasks     []callbackTaskSource  `json:"tasks,omitempty"`
-	Type      string                `json:"type"`
-	Authority string                `json:"authority_instance_id"`
-	Operation string                `json:"operation_id"`
-	Accepted  bool                  `json:"accepted"`
-	Error     string                `json:"error,omitempty"`
-	Record    *callbacks.Record     `json:"record,omitempty"`
-	Records   []callbacks.Record    `json:"records,omitempty"`
-	Devices   []callbacks.Recipient `json:"devices,omitempty"`
+	Tasks       []callbackTaskSource        `json:"tasks,omitempty"`
+	Type        string                      `json:"type"`
+	Authority   string                      `json:"authority_instance_id"`
+	Operation   string                      `json:"operation_id"`
+	Accepted    bool                        `json:"accepted"`
+	Error       string                      `json:"error,omitempty"`
+	Record      *callbacks.Record           `json:"record,omitempty"`
+	Records     []callbacks.Record          `json:"records,omitempty"`
+	Devices     []callbacks.Recipient       `json:"devices,omitempty"`
+	Invitations []callbackInvitationSummary `json:"invitations,omitempty"`
+	NextCursor  string                      `json:"next_cursor,omitempty"`
 }
 
 func callbackBinding(c *Client) string {
@@ -197,6 +210,32 @@ func (h *Hub) executeTaskCallback(ctx context.Context, c *Client, in callbackInp
 	c.callbackCapable.Store(true)
 	if in.Action == "sync" {
 		c.callbackNative.Store(in.Native)
+		if in.Compact {
+			limit := in.Limit
+			if limit == 0 {
+				limit = 64
+			}
+			rows, next, err := h.callbacks.ActiveInvitationPage(ctx, owner, callbackBinding(c), in.Cursor, limit, time.Now().UnixMilli())
+			out := callbackEvent{Type: "task_callback", Authority: h.cfg.InstanceID, Operation: in.Operation, Accepted: err == nil, NextCursor: next}
+			if err != nil {
+				out.Error = err.Error()
+			} else {
+				for _, r := range rows {
+					source, exists := h.registry.Get(r.Session)
+					if !exists || source.Snapshot().Hidden || source.State() == session.Closed || !h.cwdInScope(source.Cwd()) || !h.controls.MobileMayWrite(source.ID) {
+						continue
+					}
+					out.Invitations = append(out.Invitations, callbackInvitationSummary{ID: r.ID, Session: r.Session, Request: r.Request, Revision: r.Revision, Invitation: r.Invite.ID, Expires: r.Invite.Expires})
+				}
+			}
+			if in.result != nil {
+				*in.result = out
+			}
+			c.enqueueEvent(out)
+			// Each full record is retrieved with the original get request. Do not
+			// embed report bodies or replay a whole history in this registration ACK.
+			return
+		}
 		go h.recoverCallbackAdmissions(context.Background())
 		all, e := h.callbacks.List(ctx)
 		out := callbackEvent{Type: "task_callback", Authority: h.cfg.InstanceID, Operation: in.Operation, Accepted: e == nil, Devices: h.callbackDevices()}
