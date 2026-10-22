@@ -15,7 +15,7 @@ func RunCLI(args []string, out, stderr io.Writer) int {
 	f.SetOutput(stderr)
 	manifest := f.String("manifest", DefaultManifest(), "Installed media service manifest")
 	id := f.String("id", "", "Unique vop_ intent or query ID")
-	method := f.String("method", "status", "play_youtube, play_music, control, music_control, voice_volume or status")
+	method := f.String("method", "status", "play_youtube, play_music, control, music_control, voice_volume, media_volume or status")
 	operation := f.String("operation", "", "Original operation for status")
 	url := f.String("url", "", "Verified HTTPS video or selected Music service song URL")
 	title := f.String("title", "", "Track label")
@@ -23,8 +23,8 @@ func RunCLI(args []string, out, stderr io.Writer) int {
 	artist := f.String("artist", "", "Expected Music artist")
 	position := f.Int64("position-ms", -1, "Music seek position")
 	action := f.String("action", "", "pause, resume, stop, next, previous, seek or volume (provider-dependent)")
-	volume := f.Int("volume", -1, "Player or assistant volume 0..100")
-	delta := f.Int("delta", 0, "Assistant gain change in percentage points; voice_volume only")
+	volume := f.Int("volume", -1, "Player, assistant or explicitly requested phone media volume 0..100")
+	delta := f.Int("delta", 0, "Assistant gain or explicit phone media volume change in percentage points")
 	failure := func(e error) int { json.NewEncoder(out).Encode(Reply{Error: e.Error()}); return 1 }
 	if f.Parse(args) != nil || f.NArg() != 0 {
 		return 2

@@ -22,6 +22,9 @@ import (
 )
 
 type queuedPayload struct {
+	VoiceContext        bool                       `json:"voice_context,omitempty"`
+	VoiceID             string                     `json:"voice_id,omitempty"`
+	VoiceThread         string                     `json:"voice_thread,omitempty"`
 	PartnerRole         *partners.RoleSnapshot     `json:"partner_role,omitempty"`
 	CallbackOnComplete  *bool                      `json:"callback_on_complete,omitempty"`
 	CallbackBinding     string                     `json:"callback_binding,omitempty"`
@@ -72,6 +75,11 @@ func (e *dispatchTargetExpectation) matches(s *session.Session) bool {
 }
 
 func (h *Hub) enqueueChatMessageExpected(c *Client, cmd clientproto.Command, expected *dispatchTargetExpectation) bool {
+	if cmd.VoiceContext && (len(cmd.Images) == 0 || !h.voicePhotoOwner(c, cmd.SessionID, cmd.VoiceID, cmd.ThreadID)) {
+		h.queueError(c, cmd, "voice_context_retired", "原通話或圖片來源已改變，草稿已保留，未改送其他對話")
+		return false
+	}
+
 	if interactionControlID(cmd.RequestID) && !c.interactionControl {
 		h.queueError(c, cmd, "interaction_control_reserved", "This request belongs to the original question delivery")
 		return false
@@ -142,13 +150,13 @@ func (h *Hub) enqueueChatMessageExpected(c *Client, cmd clientproto.Command, exp
 	if cmd.VisualPresentation != "" || role != nil {
 		userHash, effectiveHash = backend.PresentationHashes(backend.WithPartnerRole(backend.WithVisualPresentation(context.Background(), cmd.VisualPresentation), role), content)
 	}
-	intent, err := json.Marshal(queuedPayload{PartnerRole: role, CallbackOnComplete: cmd.CallbackOnComplete, VisualUserHash: userHash, VisualEffectiveHash: effectiveHash, VisualPresentation: cmd.VisualPresentation, MessagePurpose: cmd.MessagePurpose, Origin: cmd.TaskOrigin, Content: content, Images: cmd.Images, Files: files, ExpectedTarget: expected})
+	intent, err := json.Marshal(queuedPayload{VoiceContext: cmd.VoiceContext, VoiceID: cmd.VoiceID, VoiceThread: cmd.ThreadID, PartnerRole: role, CallbackOnComplete: cmd.CallbackOnComplete, VisualUserHash: userHash, VisualEffectiveHash: effectiveHash, VisualPresentation: cmd.VisualPresentation, MessagePurpose: cmd.MessagePurpose, Origin: cmd.TaskOrigin, Content: content, Images: cmd.Images, Files: files, ExpectedTarget: expected})
 	if err != nil {
 		h.queueError(c, cmd, "invalid_message", err.Error())
 		return false
 	}
 	intentHash := sha256.Sum256(intent)
-	payload, err := json.Marshal(queuedPayload{PartnerRole: role, CallbackOnComplete: cmd.CallbackOnComplete, VisualUserHash: userHash, VisualEffectiveHash: effectiveHash, VisualPresentation: cmd.VisualPresentation, MessagePurpose: cmd.MessagePurpose, OwnerDevice: owner, CallbackBinding: callbackBinding(c), Origin: cmd.TaskOrigin, Content: content, Images: cmd.Images, Files: files, Configuration: &config, ExpectedTarget: expected})
+	payload, err := json.Marshal(queuedPayload{VoiceContext: cmd.VoiceContext, VoiceID: cmd.VoiceID, VoiceThread: cmd.ThreadID, PartnerRole: role, CallbackOnComplete: cmd.CallbackOnComplete, VisualUserHash: userHash, VisualEffectiveHash: effectiveHash, VisualPresentation: cmd.VisualPresentation, MessagePurpose: cmd.MessagePurpose, OwnerDevice: owner, CallbackBinding: callbackBinding(c), Origin: cmd.TaskOrigin, Content: content, Images: cmd.Images, Files: files, Configuration: &config, ExpectedTarget: expected})
 	if err != nil {
 		h.queueError(c, cmd, "invalid_message", err.Error())
 		return false
@@ -202,6 +210,9 @@ func (h *Hub) enqueueChatMessageExpected(c *Client, cmd clientproto.Command, exp
 	// ACK is durable ownership, independent of how far execution has advanced.
 	c.enqueueEvent(protocol.NewMessageAck(cmd.SessionID, e.RequestID, "queued"))
 	h.publishMessageQueue(cmd.SessionID)
+	if inserted && cmd.VoiceContext {
+		go h.promoteQueuedMessage(c, clientproto.Command{Kind: "promote_queued_message", SessionID: cmd.SessionID, RequestID: cmd.RequestID, AutoVoicePhoto: true})
+	}
 	return true
 }
 
@@ -287,6 +298,10 @@ func (h *Hub) runQueuedMessage(s *session.Session, requestID string) {
 		}
 		sendContext = backend.WithSandboxOverride(sendContext, "read-only")
 	}
+	if payload.VoiceContext && !h.voicePhotoStillCurrent(s.ID, payload.VoiceID, payload.VoiceThread) {
+		h.Emit(backend.NewError(s.ID, requestID, "voice_context_retired", "原通話已結束，圖片不會自動轉交新的通話"))
+		return
+	}
 	if err = h.exec.Send(sendContext, s, requestID, payload.Content, payload.Images, payload.Files); err != nil {
 		if errors.Is(err, backend.ErrNativeSubmissionBusy) {
 			h.deferUnsubmittedQueuedMessage(s, requestID)
@@ -307,6 +322,9 @@ func (h *Hub) runQueuedMessage(s *session.Session, requestID string) {
 			}
 			h.Emit(backend.NewError(s.ID, requestID, code, err.Error()))
 		}
+	}
+	if err == nil && payload.VoiceContext {
+		go h.notifyVoicePhoto(s, payload.VoiceID, payload.VoiceThread, requestID)
 	}
 }
 
@@ -424,6 +442,10 @@ func (h *Hub) sendMessageQueue(c *Client, cmd clientproto.Command) {
 	c.enqueueEvent(snapshot)
 }
 func (h *Hub) queueResult(c *Client, cmd clientproto.Command, action, status, message string, e messagequeue.Entry) {
+	// Automatic photo intake projects its durable message state, not manual queue controls.
+	if cmd.AutoVoicePhoto {
+		return
+	}
 	if cmd.Kind == "steer_message" {
 		if status == "pending" {
 			return
@@ -613,6 +635,9 @@ func (h *Hub) promoteQueuedMessage(c *Client, cmd clientproto.Command) {
 				steerErr = fmt.Errorf("%w: %v", backend.ErrSteerRejected, e)
 			}
 		}
+		if payload.VoiceContext && !h.voicePhotoStillCurrent(s.ID, payload.VoiceID, payload.VoiceThread) {
+			steerErr = fmt.Errorf("%w: original voice ended", backend.ErrSteerRejected)
+		}
 		if decodeErr == nil && steerErr == nil {
 			result, steerErr = steerer.Steer(backend.WithPartnerRole(backend.WithVisualPresentation(context.Background(), payload.VisualPresentation), payload.PartnerRole), s, cmd.RequestID, payload.Content, payload.Images, payload.Files)
 			if steerErr == nil && !result.StrictACK {
@@ -638,6 +663,9 @@ func (h *Hub) promoteQueuedMessage(c *Client, cmd clientproto.Command) {
 			finish(true)
 			h.queueResult(c, cmd, "promote", "uncertain", "Result could not be saved; this item will not be resent automatically", e)
 			return
+		}
+		if next == messagequeue.Steered && payload.VoiceContext {
+			go h.notifyVoicePhoto(s, payload.VoiceID, payload.VoiceThread, e.RequestID)
 		}
 		finish(remove)
 		h.updateRuntimeQueueLength(cmd.SessionID, s.QueueLen())

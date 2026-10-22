@@ -163,6 +163,9 @@ func (h *Hub) ExecuteVoiceMedia(ctx context.Context, caller backend.SessionContr
 // local_user_socket authority is the private per-call OS-user channel, never a
 // fabricated SessionControlCaller. Both transports share the same scope checks.
 func (h *Hub) executeVoiceMedia(ctx context.Context, parent *session.Session, voiceID, requestID, operationID, transport string, expectedCall *clientVoiceCall, method string, input backend.VoiceMediaRequest) (any, error) {
+	if method == "media_volume" {
+		return h.executeSystemMediaVolume(ctx, parent, voiceID, requestID, operationID, transport, expectedCall, input)
+	}
 	if method == "voice_volume" {
 		return h.executeVoiceVolume(ctx, parent, voiceID, requestID, operationID, transport, expectedCall, input)
 	}
@@ -343,6 +346,10 @@ func (h *Hub) executeVoiceMedia(ctx context.Context, parent *session.Session, vo
 	return mediaResult(m, receipt), nil
 }
 func (h *Hub) handleVoiceMediaState(c *Client, cmd clientproto.Command) {
+	if cmd.SystemMediaAudio != nil {
+		h.handleSystemMediaState(c, cmd)
+		return
+	}
 	if cmd.VoiceAudio != nil {
 		h.handleVoiceAudioState(c, cmd)
 		return
