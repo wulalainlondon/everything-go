@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"everything-go/internal/callbacks"
+	"everything-go/internal/messagequeue"
 )
 
 func TestCallbackCompactSyncPaginatesInvitationsWithoutReportBodiesOrVoice(t *testing.T) {
@@ -58,4 +59,43 @@ func TestCallbackCompactSyncPaginatesInvitationsWithoutReportBodiesOrVoice(t *te
 	if bad["accepted"] != false {
 		t.Fatal("unbounded compact page accepted")
 	}
+}
+
+func TestCallbackCompactRegistrationRecoversDurableAdmissionWithoutPolicy(t *testing.T) {
+	h, c, s, e := callbackFixture(t)
+	c.callbackNative.Store(false)
+	h.mu.Lock()
+	h.clients[c] = struct{}{}
+	h.mu.Unlock()
+	defer func() { h.mu.Lock(); delete(h.clients, c); h.mu.Unlock() }()
+	payload, _ := json.Marshal(map[string]any{"message_purpose": "instruction", "owner_device": "phone-a", "content": "original", "callback_on_complete": true, "callback_binding": callbackBinding(c)})
+	if _, _, err := h.messageQueue.Enqueue(messagequeue.Entry{SessionID: s.ID, RequestID: "r_callbacktask", Content: "original", Payload: payload}); err != nil {
+		t.Fatal(err)
+	}
+	id := h.callbackRecordID(s.ID, h.callbackEpoch(s.ID), "r_callbacktask")
+	if _, found, err := h.callbacks.Get(context.Background(), id); err != nil || found {
+		t.Fatal("policy already present", found, err)
+	}
+	got := callbackAction(t, h, c, callbackInput{Action: "sync", Operation: "callback_recover_compact", Native: true, Compact: true, Limit: 64})
+	if got["accepted"] != true {
+		t.Fatal(got)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		r, found, err := h.callbacks.Get(context.Background(), id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if found {
+			if !r.Enabled || r.Request != "r_callbacktask" || r.Recipient.Binding != callbackBinding(c) || r.Recipient.Device != "phone-a" {
+				t.Fatal(r)
+			}
+			if e.starts.Load() != 0 || e.appends.Load() != 0 {
+				t.Fatal("registration started voice")
+			}
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("compact-only reconnect failed to recover original durable admission")
 }

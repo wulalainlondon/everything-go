@@ -232,6 +232,9 @@ func (h *Hub) executeTaskCallback(ctx context.Context, c *Client, in callbackInp
 				*in.result = out
 			}
 			c.enqueueEvent(out)
+			if err == nil && in.Cursor == "" {
+				go h.recoverCallbackAdmissions(context.Background())
+			}
 			// Each full record is retrieved with the original get request. Do not
 			// embed report bodies or replay a whole history in this registration ACK.
 			return
