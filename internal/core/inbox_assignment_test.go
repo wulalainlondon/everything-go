@@ -60,6 +60,35 @@ func TestInboxHTTPRequiresExactPairedDeviceAndFrozenTarget(t *testing.T) {
 	if err != nil || len(rows) != 1 || rows[0].OwnerDevice != "phone" {
 		t.Fatalf("receipts %+v %v", rows, err)
 	}
+	// Explicit reprocessing is a new, exact-target request, never a mutation
+	// or a replay of the original analysis.
+	other := h.registry.Create("s_other", "Other", h.cfg.RootDir, "codex", "", "read-only", "")
+	reprocess := a
+	reprocess.ID = "r_explicit_reprocess"
+	reprocess.SessionID = other.ID
+	reprocess.ThreadID = other.ResumeID()
+	reprocess.ConfigRevision = other.SettingsSnapshot().ConfigRevision
+	reprocess.ReprocessOf = []string{a.ID}
+	nextRaw, _ := json.Marshal(reprocess)
+	if w := request("assignments", string(nextRaw), "foreign"); w.Code != 403 {
+		t.Fatalf("foreign reprocess %d", w.Code)
+	}
+	if w := request("assignments", string(nextRaw), "phone"); w.Code != 202 {
+		t.Fatalf("reprocess %d %s", w.Code, w.Body.String())
+	}
+	if w := request("assignments", string(nextRaw), "phone"); w.Code != 202 {
+		t.Fatalf("reprocess receipt %d", w.Code)
+	}
+	stale := reprocess
+	stale.ID = "r_stale_reprocess"
+	staleRaw, _ := json.Marshal(stale)
+	if w := request("assignments", string(staleRaw), "phone"); w.Code != 409 {
+		t.Fatalf("stale parent %d", w.Code)
+	}
+	receipts, err := store.EventAssignments(t.Context())
+	if err != nil || len(receipts) != 2 {
+		t.Fatalf("original receipts changed: %+v %v", receipts, err)
+	}
 	if !strings.Contains(rows[0].Content, "[Untrusted external event data]") {
 		t.Fatal("event content is not separated")
 	}

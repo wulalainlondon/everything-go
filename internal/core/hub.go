@@ -520,6 +520,26 @@ func (h *Hub) StartNativeWatcher(ctx context.Context, onTranscriptChange ...func
 			}
 		}
 	}
+	// Native watcher imports are additive; reconcile deletions separately so
+	// startup lookback and transient I/O failures never count as a missing file.
+	go func() {
+		previous, _ := h.reconcileNativeCatalog(opts, nil)
+		ticker := time.NewTicker(opts.PollInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				next, removed := h.reconcileNativeCatalog(opts, previous)
+				previous = next
+				if removed > 0 {
+					h.nativeDirty.Store(true)
+					notifyTranscriptChange("") // Request a full derived-index reconciliation.
+				}
+			}
+		}
+	}()
 	go nativewatch.WatchChanges(ctx, opts, func(ns nativewatch.NativeSession) {
 		if h.cfg.RootDir != "" && !pathInsideRoot(ns.Cwd, h.cfg.RootDir) {
 			return

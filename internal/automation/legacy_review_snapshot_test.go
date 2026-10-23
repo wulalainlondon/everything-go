@@ -30,7 +30,7 @@ func TestSnapshotProjectsLegacyReviewWithoutRewritingRoute(t *testing.T) {
 	if err = s.db.QueryRowContext(t.Context(), `SELECT handling_mode FROM external_event_routes WHERE id=?`, route.ID).Scan(&stored); err != nil || stored != "review" {
 		t.Fatalf("original stored route rewritten: %q %v", stored, err)
 	}
-	if before.InboxVersion != 1 {
+	if before.InboxVersion != 2 {
 		t.Fatal("capability lost")
 	}
 }

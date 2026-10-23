@@ -45,7 +45,7 @@ func TestRuntimeRefreshRestoresAutomationForReattachedWebView(t *testing.T) {
 	waitForType(t, c, "session_runtime_snapshot")
 	event := waitForType(t, c, "automation_snapshot")
 	snapshot, ok := event["snapshot"].(map[string]any)
-	if !ok || snapshot["inbox_version"] != float64(1) {
+	if !ok || snapshot["inbox_version"] != float64(2) {
 		t.Fatalf("reattached phone retained obsolete capability: %+v", event)
 	}
 }

@@ -981,7 +981,7 @@ func (s *Store) Snapshot(ctx context.Context) (Snapshot, error) {
 		snapshot.Proposals = append(snapshot.Proposals, item)
 	}
 	rows.Close()
-	snapshot.InboxVersion = 1
+	snapshot.InboxVersion = 2
 	snapshot.Assignments, err = s.EventAssignments(ctx)
 	if err != nil {
 		return snapshot, err

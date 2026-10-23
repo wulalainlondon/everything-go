@@ -323,6 +323,14 @@ func (s *Store) Transition(sessionID, requestID string, from []State, to State, 
 	return e, true, nil
 }
 
+// HasUnsettled guards catalog retirement without materializing historical
+// payloads or treating an uncertain original request as completed.
+func (s *Store) HasUnsettled(sessionID string) (bool, error) {
+	var pending bool
+	err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM queue_commands WHERE session_id=? AND state IN ('queued','running','steering','uncertain'))`, sessionID).Scan(&pending)
+	return pending, err
+}
+
 func (s *Store) Snapshot(sessionID string) (Snapshot, error) {
 	tx, err := s.db.Begin()
 	if err != nil {

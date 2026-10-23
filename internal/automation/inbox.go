@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"sort"
 )
 
 type EventAssignment struct {
@@ -13,6 +14,7 @@ type EventAssignment struct {
 	RuleVersion      uint64   `json:"rule_version,omitempty"`
 	ID               string   `json:"id"`
 	EventIDs         []string `json:"event_ids"`
+	ReprocessOf      []string `json:"reprocess_of,omitempty"`
 	SessionID        string   `json:"session_id"`
 	OwnerInstanceID  string   `json:"owner_instance_id"`
 	ThreadID         string   `json:"thread_id"`
@@ -29,6 +31,7 @@ func (s *Store) SaveEventAssignment(ctx context.Context, a EventAssignment) (Eve
 	if a.ID == "" || a.SessionID == "" || a.OwnerDevice == "" || len(a.EventIDs) == 0 || len(a.EventIDs) > 25 {
 		return a, errors.New("invalid event assignment")
 	}
+	sort.Strings(a.ReprocessOf)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return a, err
@@ -57,17 +60,34 @@ func (s *Store) SaveEventAssignment(ctx context.Context, a EventAssignment) (Eve
 	if err != sql.ErrNoRows {
 		return a, err
 	}
-	// An event has one initial assignment. Explicit future reprocessing must use a separate operation.
+	// A new explicit reprocessing intent compares the current owners atomically.
+	// Original receipts/queued requests remain immutable; implicit duplicates still conflict.
+	parents := map[string]bool{}
+	seenEvents := map[string]bool{}
 	for _, id := range a.EventIDs {
+		if id == "" || seenEvents[id] {
+			return a, errors.New("invalid event IDs")
+		}
+		seenEvents[id] = true
 		var owner string
 		err = tx.QueryRowContext(ctx, "SELECT assignment_id FROM event_session_owners WHERE event_id=?", a.SourceInstanceID+"\x00"+id).Scan(&owner)
 		if err == nil {
-			return a, ErrConflict
-		}
-		if err != sql.ErrNoRows {
+			parents[owner] = true
+		} else if err != sql.ErrNoRows {
 			return a, err
 		}
 	}
+	expected := map[string]bool{}
+	for _, id := range a.ReprocessOf {
+		if id == "" || expected[id] {
+			return a, ErrConflict
+		}
+		expected[id] = true
+	}
+	if !reflect.DeepEqual(parents, expected) {
+		return a, ErrConflict
+	}
+	sort.Strings(a.ReprocessOf)
 	a.CreatedAt = s.now().UnixMilli()
 	a.Status = "accepted"
 	raw, err = json.Marshal(a)
@@ -79,7 +99,7 @@ func (s *Store) SaveEventAssignment(ctx context.Context, a EventAssignment) (Eve
 		return a, err
 	}
 	for _, id := range a.EventIDs {
-		if _, err = tx.ExecContext(ctx, "INSERT INTO event_session_owners(event_id,assignment_id) VALUES(?,?)", a.SourceInstanceID+"\x00"+id, a.ID); err != nil {
+		if _, err = tx.ExecContext(ctx, "INSERT INTO event_session_owners(event_id,assignment_id) VALUES(?,?) ON CONFLICT(event_id) DO UPDATE SET assignment_id=excluded.assignment_id", a.SourceInstanceID+"\x00"+id, a.ID); err != nil {
 			return a, err
 		}
 	}

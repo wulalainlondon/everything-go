@@ -94,6 +94,11 @@ func (idx *Index) RunOnceMetrics() IngestMetrics {
 	before := databaseFootprint(idx.path)
 	walBefore := fileSize(idx.path + "-wal")
 	maintenanceRows := idx.runVersionedMaintenance()
+	if removed, err := idx.pruneDeletedTranscripts(); err != nil {
+		log.Printf("[search] deleted transcript reconciliation: %v", err)
+	} else {
+		maintenanceRows += removed
+	}
 	metrics := idx.ingestAllMetrics()
 	metrics.Mode = "full"
 	metrics.MaintenanceRows = maintenanceRows
