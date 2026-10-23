@@ -1,12 +1,10 @@
 # Everything Go — canonical release source
 
-New macOS ARM64/Intel installation is pinned to the reviewed v0.2.86 release:
+Deployment uses an explicitly selected, verified package. See the [current installation and update procedure](docs/DEPLOYMENT.md) for the two separate paths. The installer defaults to LAN discovery; Tailscale is configured separately. Cloudflare is off unless explicitly requested.
 
-```bash
-curl -fsSL https://github.com/wulalainlondon/everything-go/releases/download/v0.2.86/install.sh | bash
-```
+Run `bash install.sh --help` to see the package selectors and `--check` preflight. There is no implicit `latest` or historical default version. A source version, a qualified architecture package, a public release and a machine's installed version are separate facts. The current source version is recorded in `RELEASE_VERSION`; actual Wulala/Morrie installations are tracked by the operator's CURRENT manifests.
 
-Until publication/readback, v0.2.86 is planned, not live. See [release gates and supported limits](docs/RELEASE.md). [Averything Bridge](https://github.com/wulalainlondon/averything-bridge) remains the support/compatibility entry; both paths use this canonical payload. Historical v0.2.77/v0.2.1 assets remain unchanged.
+Public URLs are usable only after publication/readback. Historical tags and their bytes remain unchanged. [Release gates](docs/RELEASE.md) and the [support repository](https://github.com/wulalainlondon/averything-bridge) retain their original scope.
 
 Averything's production Bridge. This repository is the sole writable backend
 source; the workspace sibling `bridge/` is a generated public mirror.
@@ -154,6 +152,8 @@ Codex Browser Use requests access through `mcpServer/elicitation/request`. The G
 bridge can forward those prompts to the app or apply a controlled policy:
 
 ```bash
+# First select the reviewed package as described in docs/DEPLOYMENT.md.
+# These examples apply only to a fresh installation.
 # Ask on the phone (default)
 BRIDGE_BROWSER_ORIGIN_MODE=ask bash install.sh
 

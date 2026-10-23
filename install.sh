@@ -1,389 +1,280 @@
 #!/usr/bin/env bash
-#
-# everything-go bridge installer
-# ------------------------------------------------------------------
-# One-liner (paste to your claude/codex CLI, or run in a terminal):
-#
-#   curl -fsSL https://github.com/wulalainlondon/everything-go/releases/latest/download/install.sh | bash
-#
-# What it does:
-#   1. downloads and verifies the signed, notarized macOS app (or Linux binary)
-#   2. makes sure `cloudflared` exists (for off-WiFi remote access)
-#   3. installs everything-go as a background service (launchd / systemd)
-#      started with UDP discovery + mDNS; the tunnel starts only after a trusted
-#      device has paired on the local network
-#   4. starts it and prints how the phone app connects
-#
-# Prerequisite: you already have the `claude` and/or `codex` CLI installed
-# and logged in. This bridge spawns *your* CLI with *your* account.
-# ------------------------------------------------------------------
+# Fresh installation from an explicitly selected, verified release. See docs/DEPLOYMENT.md.
+# Existing deployments must follow the preserved-data update procedure instead.
 set -euo pipefail
+STAGING=''
+INSTALL_LOCK=''
 
-REPO="${EVERYTHING_GO_REPO:-wulalainlondon/everything-go}"
-RELEASE_TAG="${EVERYTHING_GO_TAG:-v0.2.86}"
-PORT="${EVERYTHING_GO_PORT:-8766}"
-RUNTIME_DIR="${EVERYTHING_GO_HOME:-$HOME/.everything-go-runtime}"
-LABEL="${EVERYTHING_GO_LABEL:-com.everything-go.app}"
-[[ "$LABEL" =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "invalid launchd label" >&2; exit 1; }
-PREVIOUS_APP_REFERENCE=""
-BIN="$RUNTIME_DIR/everything-go"
-APP_DIR="$RUNTIME_DIR/Everything Go.app"
-APP_BIN="$APP_DIR/Contents/MacOS/everything-go"
-EXPECTED_SIGNING_AUTHORITY="Developer ID Application: YuDi Huang (UPWLTJL6S2)"
-EXPECTED_TEAM_ID="UPWLTJL6S2"
-LAUNCH="$RUNTIME_DIR/everything_go_launch.sh"
-SESSION_STORE="${EVERYTHING_GO_SESSION_STORE:-$HOME/.claude-bridge-runtime/saved_sessions.json}"
-SERVICE_BIN="$BIN"
-PERMISSION_TARGET="$BIN"
+say() { printf '[everything-go] %s\n' "$*"; }
+die() { printf '[everything-go] %s\n' "$*" >&2; exit 1; }
+usage() {
+  cat <<'HELP'
+Usage: bash install.sh [--check | --help]
 
-# Preserve generated launch-wrapper settings across upgrades unless the caller
-# explicitly supplies an environment override. Replacing these with defaults
-# can change source-policy fingerprints, force multi-gigabyte reindexing, or
-# silently switch Codex transport behavior.
-existing_launch_export() {
-  local name="$1"
-  [ -f "$LAUNCH" ] || return 0
-  sed -n "s/^export ${name}=\"\(.*\)\"$/\1/p" "$LAUNCH" | tail -1
+Select exactly one source (no latest/default-version fallback):
+  EVERYTHING_GO_ARCHIVE=/path/to/reviewed.app.zip
+  EVERYTHING_GO_ARCHIVE_SHA256=<independently recorded SHA256>
+    OR
+  EVERYTHING_GO_TAG=vX.Y.Z  (an already published, reviewed GitHub release)
+
+Optional settings:
+  EVERYTHING_GO_REPO=wulalainlondon/everything-go
+  EVERYTHING_GO_HOME=$HOME/.everything-go-runtime
+  EVERYTHING_GO_LABEL=com.everything-go.app
+  EVERYTHING_GO_PORT=8766
+  EVERYTHING_GO_INSTANCE_NAME=<computer display name>
+  EVERYTHING_GO_SOURCE_REVISION=<expected full Git commit>
+  EVERYTHING_GO_TUNNEL=0  (default; 1 explicitly enables an existing cloudflared)
+
+--check validates prerequisites and the selected package, then removes its staging
+files. It does not install, start/restart services, pair devices or change permissions.
+Normal mode is a FRESH install. Existing data/wrappers/services/port ownership cause
+refusal before replacement. See docs/DEPLOYMENT.md for an existing-machine update.
+The CLI account must already be installed and logged in on this computer.
+HELP
 }
 
-resolve_launch_export() {
-  local name="$1" fallback="$2" existing
-  if printenv "$name" >/dev/null 2>&1; then
-    printenv "$name"
-    return 0
-  fi
-  existing=$(existing_launch_export "$name")
-  if [ -n "$existing" ]; then
-    printf '%s\n' "$existing"
+cleanup() {
+  [ -z "${STAGING:-}" ] || rm -rf "$STAGING"
+  [ -z "${INSTALL_LOCK:-}" ] || rmdir "$INSTALL_LOCK"
+}
+sha256_file() {
+  if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
+  else sha256sum "$1" | awk '{print $1}'; fi
+}
+validate_config() {
+  [[ "$LABEL" =~ ^[A-Za-z0-9_.-]+$ ]] || die 'invalid service label'
+  [[ "$PORT" =~ ^[0-9]{1,5}$ ]] && [ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ] || die 'invalid port'
+  [[ "$TUNNEL_ENABLED" = 0 || "$TUNNEL_ENABLED" = 1 ]] || die 'EVERYTHING_GO_TUNNEL must be 0 or 1'
+  [[ "$RUNTIME_DIR" = /* && "$SESSION_STORE" = /* ]] || die 'runtime and session-store paths must be absolute'
+  [[ "$RUNTIME_DIR" != *$'\n'* && "$SESSION_STORE" != *$'\n'* ]] || die 'paths must not contain newlines'
+  if [ -n "$LOCAL_ARCHIVE" ]; then
+    [ -z "$RELEASE_TAG" ] || die 'choose local archive OR release tag, not both'
+    [ -f "$LOCAL_ARCHIVE" ] || die 'local archive not found'
+    [[ "$LOCAL_SHA" =~ ^[a-fA-F0-9]{64}$ ]] || die 'local archive requires an independently recorded SHA256'
+    [ "$OS" = darwin ] || die 'local .app archives require macOS'
   else
-    printf '%s\n' "$fallback"
+    [ -z "$LOCAL_SHA" ] || die 'archive checksum provided without an archive'
+    [[ "$REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die 'invalid release repository'
+    [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die 'select an explicit published release tag or a verified local archive; no default release'
   fi
+  [ -z "$EXPECTED_SOURCE" ] || [[ "$EXPECTED_SOURCE" =~ ^[a-f0-9]{40}$ ]] || die 'expected source must be a full Git revision'
 }
-
-BROWSER_ORIGIN_MODE=$(resolve_launch_export BRIDGE_BROWSER_ORIGIN_MODE ask)
-BROWSER_ALLOWED_ORIGINS=$(resolve_launch_export BRIDGE_BROWSER_ALLOWED_ORIGINS "")
-BROWSER_MANAGE_AUTO_REVIEW=$(resolve_launch_export BRIDGE_BROWSER_MANAGE_AUTO_REVIEW 1)
-BROWSER_ENABLE_NETWORK=$(resolve_launch_export BRIDGE_BROWSER_ENABLE_NETWORK 1)
-CODEX_SESSIONS_DIR=$(resolve_launch_export EVERYTHING_GO_CODEX_SESSIONS_DIR "${CODEX_HOME:-$HOME/.codex}/sessions")
-CODEX_IGNORE_CWD_GLOBS=$(resolve_launch_export EVERYTHING_GO_CODEX_IGNORE_CWD_GLOBS "")
-CODEX_IGNORE_NAME_PREFIXES=$(resolve_launch_export EVERYTHING_GO_CODEX_IGNORE_NAME_PREFIXES "")
-CODEX_ROLLOVER_ENABLED=$(resolve_launch_export EVERYTHING_GO_CODEX_ROLLOVER_ENABLED false)
-CODEX_COLD_RESUME_MAX_BYTES=$(resolve_launch_export EVERYTHING_GO_CODEX_COLD_RESUME_MAX_BYTES 268435456)
-CODEX_CHECKPOINT_MAX_BYTES=$(resolve_launch_export EVERYTHING_GO_CODEX_CHECKPOINT_MAX_BYTES 131072)
-CODEX_APP_SERVER_MODE=$(resolve_launch_export EVERYTHING_GO_CODEX_APP_SERVER_MODE daemon)
-CODEX_APP_SERVER_SOCKET=$(resolve_launch_export EVERYTHING_GO_CODEX_APP_SERVER_SOCKET "")
-
-say()  { printf '\033[1;36m[everything-go]\033[0m %s\n' "$*"; }
-warn() { printf '\033[1;33m[everything-go]\033[0m %s\n' "$*" >&2; }
-die()  { printf '\033[1;31m[everything-go]\033[0m %s\n' "$*" >&2; exit 1; }
-
-run_permission_check() {
-  local extra_paths="$HOME/Downloads:$HOME/Documents:$HOME/Desktop"
-  "$SERVICE_BIN" \
-    --permission-check \
-    --data-dir "$RUNTIME_DIR" \
-    --session-store "$SESSION_STORE" \
-    --permission-check-paths "$extra_paths"
-}
-
-open_full_disk_access_settings() {
-  if command -v open >/dev/null 2>&1; then
-    open "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles" >/dev/null 2>&1 || true
+assert_fresh_target() {
+  [ ! -e "$LAUNCH" ] && [ ! -e "$APP_DIR" ] && [ ! -e "$BIN" ] && [ ! -e "$SESSION_STORE" ] || die 'existing deployment/data detected; use the preserved-data update procedure'
+  if [ -e "$RUNTIME_DIR" ]; then
+    [ -d "$RUNTIME_DIR" ] && [ ! -L "$RUNTIME_DIR" ] || die 'runtime must be a new or empty directory'
+    [ -z "$(ls -A "$RUNTIME_DIR")" ] || die 'runtime is not empty; refusing to replace existing identity or data'
   fi
-}
-
-ensure_macos_permissions() {
-  [ "$OS" = darwin ] || return 0
-  [ "${EVERYTHING_GO_SKIP_PERMISSION_CHECK:-0}" = "1" ] && {
-    warn "skipping macOS permission check because EVERYTHING_GO_SKIP_PERMISSION_CHECK=1"
-    return 0
-  }
-
-  say "checking macOS file permissions with the installed bridge binary ..."
-  if run_permission_check; then
-    say "macOS permission check passed"
-    return 0
-  fi
-
-  warn "macOS blocked the bridge from reading one or more local folders."
-  warn "Grant Full Disk Access to: $PERMISSION_TARGET"
-  warn "System Settings → Privacy & Security → Full Disk Access"
-  open_full_disk_access_settings
-
-  while true; do
-    if [ ! -r /dev/tty ]; then
-      die "permission approval needs an interactive terminal; re-run install.sh in Terminal after granting Full Disk Access to $SERVICE_BIN"
-    fi
-    printf "Press Enter after granting Full Disk Access, or Ctrl-C to stop: " >/dev/tty
-    read -r _unused </dev/tty
-    if run_permission_check; then
-      say "macOS permission check passed"
-      return 0
-    fi
-    warn "permission check still failed; confirm Full Disk Access is enabled for $SERVICE_BIN"
-    open_full_disk_access_settings
-  done
-}
-
-install_bridge_binary() {
-  mkdir -p "$RUNTIME_DIR"
-
-  # This installer is bound to one reviewed release. No latest/CDN fallback.
-  [[ "$REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die "invalid release repository"
-  [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "invalid release tag"
-  base_url() { printf 'https://github.com/%s/releases/download/%s/%s\n' "$REPO" "$RELEASE_TAG" "$1"; }
-
-  URL=$(base_url "$ASSET")
-
   if [ "$OS" = darwin ]; then
-    local app_asset="everything-go-darwin-${ARCH}.app.zip"
-    local app_url sums_url staging extracted authority team backup expected_sha actual_sha
-    app_url=$(base_url "$app_asset")
-    sums_url=$(base_url "SHA256SUMS")
-    say "downloading $app_asset ..."
-    curl -fSL --proto '=https' --tlsv1.2 "$app_url" -o "$RUNTIME_DIR/$app_asset.tmp" \
-      || die "signed macOS app download failed: $app_url"
-    curl -fsSL --proto '=https' --tlsv1.2 "$sums_url" -o "$RUNTIME_DIR/SHA256SUMS.tmp" \
-      || die "checksum download failed: $sums_url"
-    expected_sha=$(awk -v asset="$app_asset" '$2 == asset { print $1 }' "$RUNTIME_DIR/SHA256SUMS.tmp")
-    [ -n "$expected_sha" ] || die "release checksum does not contain $app_asset"
-    actual_sha=$(shasum -a 256 "$RUNTIME_DIR/$app_asset.tmp" | awk '{print $1}')
-    [ "$actual_sha" = "$expected_sha" ] || die "checksum mismatch for $app_asset"
-
-    staging=$(mktemp -d "$RUNTIME_DIR/.install.XXXXXX")
-    ditto -x -k "$RUNTIME_DIR/$app_asset.tmp" "$staging"
-    extracted="$staging/Everything Go.app"
-    [ -x "$extracted/Contents/MacOS/everything-go" ] \
-      || die "app asset did not contain the expected executable"
-    codesign --verify --deep --strict --verbose=2 "$extracted" \
-      || die "Developer ID signature verification failed"
-    authority=$(codesign -d --verbose=4 "$extracted" 2>&1 | sed -n 's/^Authority=//p' | head -1)
-    team=$(codesign -d --verbose=4 "$extracted" 2>&1 | sed -n 's/^TeamIdentifier=//p' | head -1)
-    [ "$authority" = "$EXPECTED_SIGNING_AUTHORITY" ] \
-      || die "unexpected signing authority: ${authority:-missing}"
-    [ "$team" = "$EXPECTED_TEAM_ID" ] || die "unexpected signing team: ${team:-missing}"
-    spctl -a -t exec -vv "$extracted" || die "Gatekeeper rejected the app"
-    xcrun stapler validate "$extracted" || die "notarization ticket validation failed"
-
-    backup="$(mktemp -d "$RUNTIME_DIR/.previous-app.XXXXXX")/Everything Go.app"
-    PREVIOUS_APP_REFERENCE="$backup"
-    if [ -d "$APP_DIR" ]; then mv "$APP_DIR" "$backup"; fi
-    if ! mv "$extracted" "$APP_DIR"; then
-      [ -d "$backup" ] && mv "$backup" "$APP_DIR"
-      die "failed to install the verified app"
-    fi
-    rm -rf "$staging"
-    rm -f "$RUNTIME_DIR/$app_asset.tmp" "$RUNTIME_DIR/SHA256SUMS.tmp"
-    SERVICE_BIN="$APP_BIN"
-    PERMISSION_TARGET="$APP_DIR"
-    say "verified signed app installed: $APP_DIR"
-    return 0
+    [ ! -e "$PLIST" ] || die 'existing LaunchAgent plist; use the update procedure'
+    if launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; then die 'service label already loaded'; fi
+  elif [ -e "$HOME/.config/systemd/user/everything-go.service" ]; then
+    die 'existing systemd service; use the update procedure'
   fi
-
-  say "downloading $ASSET ..."
-  curl -fSL --proto '=https' --tlsv1.2 "$URL" -o "$BIN.tmp" \
-    || die "download failed: $URL"
-  chmod +x "$BIN.tmp"
-  mv -f "$BIN.tmp" "$BIN"
-  SERVICE_BIN="$BIN"
-  PERMISSION_TARGET="$BIN"
-  say "binary installed: $BIN"
+  if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null | awk 'NF { found=1 } END { exit !found }'; then
+    die 'port already in use; no running service was stopped'
+  fi
 }
-
-# ── 1. platform detection ──────────────────────────────────────────
-OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
-ARCH="$(uname -m)"
-case "$ARCH" in
-  arm64|aarch64) ARCH=arm64 ;;
-  x86_64|amd64)  ARCH=amd64 ;;
-  *) die "unsupported architecture: $ARCH" ;;
-esac
-case "$OS" in
-  darwin|linux) ;;
-  *) die "unsupported OS: $OS (only macOS and Linux are supported)" ;;
-esac
-ASSET="everything-go-${OS}-${ARCH}"
-
-# ── 2. prerequisite: claude or codex CLI ───────────────────────────
-CLAUDE_BIN="$(command -v claude 2>/dev/null || true)"
-CODEX_BIN="$(command -v codex 2>/dev/null || true)"
-if [ -z "$CLAUDE_BIN" ] && [ -z "$CODEX_BIN" ]; then
-  die "neither 'claude' nor 'codex' CLI found in PATH. Install and log in to at least one first."
-fi
-say "found CLI: ${CLAUDE_BIN:-—} ${CODEX_BIN:-—}"
-
-# Collect the dirs that hold claude/codex so the background service's PATH
-# can find them (launchd/systemd start with a minimal PATH).
-CLI_PATHS=""
-for b in "$CLAUDE_BIN" "$CODEX_BIN"; do
-  [ -n "$b" ] && CLI_PATHS="$CLI_PATHS:$(dirname "$b")"
-done
-
-# ── 3. download the bridge binary/app ──────────────────────────────
-install_bridge_binary
-
-# ── 4. ensure cloudflared (remote access; optional but recommended) ─
-CF_PATH=""
-if command -v cloudflared >/dev/null 2>&1; then
-  CF_PATH="$(dirname "$(command -v cloudflared)")"
-elif [ "$OS" = darwin ] && command -v brew >/dev/null 2>&1; then
-  say "installing cloudflared via Homebrew ..."
-  brew install cloudflared && CF_PATH="$(dirname "$(command -v cloudflared)")"
-else
-  # Linux ships a raw binary; macOS only ships .tgz/.pkg, so non-brew mac
-  # users get a warning instead.
-  if [ "$OS" = linux ]; then
-    say "downloading cloudflared ..."
-    curl -fSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${ARCH}" \
-      -o "$RUNTIME_DIR/cloudflared" && chmod +x "$RUNTIME_DIR/cloudflared" \
-      && CF_PATH="$RUNTIME_DIR"
+require_tools() {
+  local tool
+  for tool in awk curl lsof mktemp; do command -v "$tool" >/dev/null 2>&1 || die "missing prerequisite: $tool"; done
+  if [ "$OS" = darwin ]; then
+    for tool in ditto codesign spctl xcrun lipo sw_vers launchctl; do command -v "$tool" >/dev/null 2>&1 || die "missing prerequisite: $tool"; done
   fi
-fi
-if [ -z "$CF_PATH" ]; then
-  warn "cloudflared not available — same-WiFi will still work via mDNS, but"
-  warn "off-WiFi remote access needs cloudflared (install Homebrew then re-run)."
-fi
-
-# ── 5. generate the launch wrapper ─────────────────────────────────
-# Service-managers start with a bare PATH; bake in the CLI + cloudflared dirs.
-SERVICE_PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin"
-if [ -n "$CLI_PATHS" ]; then
-  # Prefer the exact CLI locations discovered above.  A stale global Codex
-  # installation must not shadow the managed/current CLI for launchd.
-  SERVICE_PATH="${CLI_PATHS#:}:$SERVICE_PATH"
-fi
-[ -n "$CF_PATH" ] && SERVICE_PATH="$SERVICE_PATH:$CF_PATH"
-cat > "$LAUNCH" <<EOF
-#!/usr/bin/env bash
-set -uo pipefail
-export PATH="$SERVICE_PATH:\$PATH"
-export BRIDGE_BROWSER_ORIGIN_MODE="$BROWSER_ORIGIN_MODE"
-export BRIDGE_BROWSER_ALLOWED_ORIGINS="$BROWSER_ALLOWED_ORIGINS"
-export BRIDGE_BROWSER_MANAGE_AUTO_REVIEW="$BROWSER_MANAGE_AUTO_REVIEW"
-export BRIDGE_BROWSER_ENABLE_NETWORK="$BROWSER_ENABLE_NETWORK"
-export EVERYTHING_GO_CODEX_SESSIONS_DIR="$CODEX_SESSIONS_DIR"
-export EVERYTHING_GO_CODEX_IGNORE_CWD_GLOBS="$CODEX_IGNORE_CWD_GLOBS"
-export EVERYTHING_GO_CODEX_IGNORE_NAME_PREFIXES="$CODEX_IGNORE_NAME_PREFIXES"
-export EVERYTHING_GO_CODEX_ROLLOVER_ENABLED="$CODEX_ROLLOVER_ENABLED"
-export EVERYTHING_GO_CODEX_COLD_RESUME_MAX_BYTES="$CODEX_COLD_RESUME_MAX_BYTES"
-export EVERYTHING_GO_CODEX_CHECKPOINT_MAX_BYTES="$CODEX_CHECKPOINT_MAX_BYTES"
-export EVERYTHING_GO_CODEX_APP_SERVER_MODE="$CODEX_APP_SERVER_MODE"
-export EVERYTHING_GO_CODEX_APP_SERVER_SOCKET="$CODEX_APP_SERVER_SOCKET"
-
-if [ -r "$RUNTIME_DIR/monitoring_env.sh" ]; then
-  . "$RUNTIME_DIR/monitoring_env.sh"
-fi
-exec "$SERVICE_BIN" \\
-  --port "$PORT" \\
-  --executor go \\
-  --data-dir "$RUNTIME_DIR" \\
-  --session-store "$SESSION_STORE" \\
-  --discovery \\
-  --mdns \\
-  --tunnel \\
-  --instance-name "\$(hostname -s 2>/dev/null || echo everything-go)"
-EOF
-chmod +x "$LAUNCH"
-say "launch script written: $LAUNCH"
-ensure_macos_permissions
-
-# ── 6. install as a background service ─────────────────────────────
-install_launchd() {
-  local plist="$HOME/Library/LaunchAgents/$LABEL.plist"
+  CLAUDE_BIN="$(command -v claude 2>/dev/null || true)"
+  CODEX_BIN="$(command -v codex 2>/dev/null || true)"
+  [ -n "$CLAUDE_BIN" ] || [ -n "$CODEX_BIN" ] || die 'install and log in to claude and/or codex first'
+  CF_BIN=''
+  if [ "$TUNNEL_ENABLED" = 1 ]; then
+    CF_BIN="$(command -v cloudflared 2>/dev/null || true)"
+    [ -n "$CF_BIN" ] || die 'Tunnel explicitly requested, but cloudflared is not installed'
+  fi
+}
+verify_macos_app() {
+  local authority team version source archs minimum current
+  SERVICE_BIN="$STAGING/Everything Go.app/Contents/MacOS/everything-go"
+  [ -x "$SERVICE_BIN" ] || die 'archive does not contain Everything Go.app executable'
+  codesign --verify --deep --strict --verbose=2 "$STAGING/Everything Go.app" || die 'signature verification failed'
+  authority=$(codesign -d --verbose=4 "$STAGING/Everything Go.app" 2>&1 | sed -n 's/^Authority=//p' | head -1)
+  team=$(codesign -d --verbose=4 "$STAGING/Everything Go.app" 2>&1 | sed -n 's/^TeamIdentifier=//p' | head -1)
+  [ "$authority" = 'Developer ID Application: YuDi Huang (UPWLTJL6S2)' ] && [ "$team" = UPWLTJL6S2 ] || die 'unexpected signing identity'
+  spctl -a -t exec -vv "$STAGING/Everything Go.app" || die 'Gatekeeper rejected the app'
+  xcrun stapler validate "$STAGING/Everything Go.app" || die 'notarization ticket validation failed'
+  archs=$(lipo -archs "$SERVICE_BIN")
+  case " $archs " in *" $NATIVE_ARCH "*) ;; *) die "package architecture does not match $NATIVE_ARCH" ;; esac
+  version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$STAGING/Everything Go.app/Contents/Info.plist")
+  source=$(/usr/libexec/PlistBuddy -c 'Print :BridgeSourceRevision' "$STAGING/Everything Go.app/Contents/Info.plist")
+  minimum=$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$STAGING/Everything Go.app/Contents/Info.plist")
+  [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$source" =~ ^[a-f0-9]{40}$ ]] || die 'missing valid release provenance'
+  [ -z "$RELEASE_TAG" ] || [ "v$version" = "$RELEASE_TAG" ] || die 'bundle version differs from selected release'
+  [ -z "$EXPECTED_SOURCE" ] || [ "$source" = "$EXPECTED_SOURCE" ] || die 'bundle source differs from reviewed revision'
+  [[ "$minimum" =~ ^[0-9]+(\.[0-9]+){0,2}$ ]] || die 'invalid minimum macOS provenance'
+  current=$(sw_vers -productVersion)
+  awk -v current="$current" -v minimum="$minimum" 'BEGIN { split(current,c,"."); split(minimum,m,"."); for(i=1;i<=3;i++){ if(c[i]+0>m[i]+0)exit 0; if(c[i]+0<m[i]+0)exit 1 } exit 0 }' || die "requires macOS $minimum or newer"
+  say "verified version=$version source=$source architecture=$NATIVE_ARCH"
+}
+prepare_package() {
+  local asset base expected actual
+  STAGING=$(mktemp -d "${TMPDIR:-/tmp}/everything-go-install.XXXXXX")
+  if [ -n "$LOCAL_ARCHIVE" ]; then
+    expected=$(printf '%s' "$LOCAL_SHA" | tr '[:upper:]' '[:lower:]')
+    cp "$LOCAL_ARCHIVE" "$STAGING/package.zip"
+  else
+    asset="everything-go-${OS}-${ARCH}"
+    [ "$OS" != darwin ] || asset="$asset.app.zip"
+    base="https://github.com/$REPO/releases/download/$RELEASE_TAG"
+    curl -fSL --proto '=https' --tlsv1.2 "$base/$asset" -o "$STAGING/package.zip" || die 'selected release asset unavailable; no version fallback'
+    curl -fsSL --proto '=https' --tlsv1.2 "$base/SHA256SUMS" -o "$STAGING/SHA256SUMS" || die 'release checksum download failed'
+    expected=$(awk -v asset="$asset" '$2==asset {print $1}' "$STAGING/SHA256SUMS")
+    [[ "$expected" =~ ^[a-f0-9]{64}$ ]] || die 'release checksum missing, duplicated or malformed'
+  fi
+  actual=$(sha256_file "$STAGING/package.zip")
+  [ "$actual" = "$expected" ] || die 'archive checksum mismatch'
+  if [ "$OS" = darwin ]; then
+    ditto -x -k "$STAGING/package.zip" "$STAGING"
+    verify_macos_app
+  fi
+}
+write_launch_wrapper() {
+  local name value
+  {
+    printf '#!/usr/bin/env bash\nset -euo pipefail\n'
+    printf 'export PATH=%q\n' "$SERVICE_PATH"
+    for name in BRIDGE_BROWSER_ORIGIN_MODE BRIDGE_BROWSER_ALLOWED_ORIGINS BRIDGE_BROWSER_MANAGE_AUTO_REVIEW BRIDGE_BROWSER_ENABLE_NETWORK EVERYTHING_GO_CODEX_SESSIONS_DIR EVERYTHING_GO_CODEX_IGNORE_CWD_GLOBS EVERYTHING_GO_CODEX_IGNORE_NAME_PREFIXES EVERYTHING_GO_CODEX_ROLLOVER_ENABLED EVERYTHING_GO_CODEX_COLD_RESUME_MAX_BYTES EVERYTHING_GO_CODEX_CHECKPOINT_MAX_BYTES EVERYTHING_GO_CODEX_APP_SERVER_MODE EVERYTHING_GO_CODEX_APP_SERVER_SOCKET; do
+      value="${!name}"
+      printf 'export %s=%q\n' "$name" "$value"
+    done
+    printf 'if [ -r %q ]; then\n  . %q\nfi\n' "$RUNTIME_DIR/monitoring_env.sh" "$RUNTIME_DIR/monitoring_env.sh"
+    printf 'exec '
+    printf '%q ' "$SERVICE_BIN" --port "$PORT" --executor go --data-dir "$RUNTIME_DIR" --session-store "$SESSION_STORE" --discovery --mdns --instance-name "$INSTANCE_NAME"
+    [ -z "$CLAUDE_BIN" ] || printf '%q ' --claude-bin "$CLAUDE_BIN"
+    [ -z "$CODEX_BIN" ] || printf '%q ' --codex-bin "$CODEX_BIN"
+    [ "$TUNNEL_ENABLED" != 1 ] || printf '%q ' --tunnel
+    printf '\n'
+  } > "$LAUNCH"
+  chmod 700 "$LAUNCH"
+}
+xml_escape() { printf '%s' "$1" | sed -e 's/\&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g' -e "s/'/\&apos;/g"; }
+write_launchd_plist() {
   mkdir -p "$HOME/Library/LaunchAgents"
-  cat > "$plist" <<EOF
+  cat > "$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>$LABEL</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/bin/bash</string><string>-lc</string><string>exec $LAUNCH</string>
-  </array>
-  <key>WorkingDirectory</key><string>$RUNTIME_DIR</string>
-  <key>KeepAlive</key><true/>
-  <key>RunAtLoad</key><true/>
-  <key>ThrottleInterval</key><integer>10</integer>
-  <key>StandardOutPath</key><string>/tmp/$LABEL.stdout.log</string>
-  <key>StandardErrorPath</key><string>/tmp/$LABEL.stderr.log</string>
-</dict>
-</plist>
+<plist version="1.0"><dict>
+<key>Label</key><string>$LABEL</string>
+<key>ProgramArguments</key><array><string>/bin/bash</string><string>$(xml_escape "$LAUNCH")</string></array>
+<key>WorkingDirectory</key><string>$(xml_escape "$RUNTIME_DIR")</string>
+<key>KeepAlive</key><true/><key>RunAtLoad</key><true/>
+<key>ThrottleInterval</key><integer>10</integer>
+<key>StandardOutPath</key><string>$(xml_escape "$RUNTIME_DIR/stdout.log")</string>
+<key>StandardErrorPath</key><string>$(xml_escape "$RUNTIME_DIR/stderr.log")</string>
+</dict></plist>
 EOF
-  local target="gui/$(id -u)/$LABEL"
-  if launchctl print "$target" >/dev/null 2>&1; then
-    launchctl kickstart -k "$target"
-  else
-    launchctl bootstrap "gui/$(id -u)" "$plist"
-    launchctl kickstart -k "$target"
+}
+check_permissions() {
+  [ "$OS" = darwin ] || return 0
+  if ! "$SERVICE_BIN" --permission-check --data-dir "$RUNTIME_DIR" --session-store "$SESSION_STORE" --permission-check-paths "$HOME/Downloads:$HOME/Documents:$HOME/Desktop"; then
+    say "macOS file access not ready. Grant access to $APP_DIR in System Settings → Privacy & Security → Full Disk Access, then follow docs/DEPLOYMENT.md. Service was not started."
+    die 'permission preflight failed; installed files retained for inspection, do not rerun fresh installer'
   fi
 }
-
-verify_launchd_health_or_rollback() {
-  local target="gui/$(id -u)/$LABEL" attempt service_pid listener_pid app_inode
-  for attempt in $(seq 1 20); do
-    service_pid=$(launchctl print "$target" 2>/dev/null | awk '/^[[:space:]]*pid = [0-9]+/ { print $3; exit }' || true)
-    listener_pid=$(lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null | sort -u || true)
-    app_inode=$(stat -f '%i' "$APP_BIN" 2>/dev/null || true)
-    if [[ "$service_pid" =~ ^[0-9]+$ ]] && [ "$service_pid" = "$listener_pid" ] &&
-      lsof -a -p "$service_pid" -d txt -F in 2>/dev/null | awk -v path="$APP_BIN" -v wanted="$app_inode" '
-        /^i/ { inode=substr($0,2) }
-        /^n/ { if (substr($0,2)==path && inode==wanted) found=1 }
-        END { exit !found }'; then
-      say "launchd health check passed on port $PORT"
-      return 0
-    fi
-    sleep 1
-  done
-  # Retain this operation's backup only as reference. An old executor cannot
-  # safely take over newly accepted scoped TaskAPI work. No restore/restart here.
-  warn "new bridge failed health validation; previous app retained: ${PREVIOUS_APP_REFERENCE:-none}"
-  die "signed same-source compatible-hold recovery required; no automatic old rollback"
-}
-
-install_systemd() {
-  local unit_dir="$HOME/.config/systemd/user"
-  mkdir -p "$unit_dir"
-  cat > "$unit_dir/everything-go.service" <<EOF
+activate_fresh_service() {
+  if [ "$OS" = darwin ]; then
+    write_launchd_plist
+    launchctl bootstrap "gui/$(id -u)" "$PLIST" || die 'bootstrap failed or uncertain; inspect the original service before any retry'
+    local attempt pid listeners inode
+    for attempt in $(seq 1 20); do
+      pid=$(launchctl print "gui/$(id -u)/$LABEL" 2>/dev/null | awk '/^[[:space:]]*pid = [0-9]+/ {print $3;exit}' || true)
+      listeners=$(lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null | sort -u || true)
+      inode=$(stat -f '%i' "$SERVICE_BIN" 2>/dev/null || true)
+      if [[ "$pid" =~ ^[0-9]+$ ]] && [ "$pid" = "$listeners" ] && lsof -a -p "$pid" -d txt -F in 2>/dev/null | awk -v path="$SERVICE_BIN" -v wanted="$inode" '/^i/{inode=substr($0,2)} /^n/{if(substr($0,2)==path && inode==wanted)found=1} END{exit !found}'; then
+        say "LaunchAgent binary/listener verified on port $PORT"
+        return 0
+      fi
+      sleep 1
+    done
+    die 'service health unconfirmed; inspect logs and original receipt; no automatic old-binary rollback or restart'
+  else
+    command -v systemctl >/dev/null 2>&1 || die 'systemd user service required; no foreground fallback'
+    mkdir -p "$HOME/.config/systemd/user"
+    # systemd escaping differs from shell quoting; only simple paths are supported here.
+    [[ "$LAUNCH" =~ ^/[A-Za-z0-9_./-]+$ ]] || die 'Linux service path contains unsupported characters'
+    cat > "$HOME/.config/systemd/user/everything-go.service" <<EOF
 [Unit]
 Description=everything-go bridge
 After=network-online.target
-
 [Service]
 ExecStart=$LAUNCH
 Restart=always
 RestartSec=10
-
 [Install]
 WantedBy=default.target
 EOF
-  systemctl --user daemon-reload
-  systemctl --user enable --now everything-go.service
-  command -v loginctl >/dev/null 2>&1 && loginctl enable-linger "$(whoami)" 2>/dev/null || true
-}
-
-if [ "$OS" = darwin ]; then
-  install_launchd
-  verify_launchd_health_or_rollback
-else
-  if command -v systemctl >/dev/null 2>&1; then
-    install_systemd
-  else
-    warn "no systemd — starting in foreground (will stop when you close this shell)."
-    exec "$LAUNCH"
+    systemctl --user daemon-reload
+    systemctl --user enable --now everything-go.service
+    say 'systemd start requested; Linux end-to-end qualification remains separate'
   fi
-fi
-
-# ── 7. report ──────────────────────────────────────────────────────
-LAN_IP="$( (ipconfig getifaddr en0 2>/dev/null) || (hostname -I 2>/dev/null | awk '{print $1}') || true )"
-echo
-say "✅ everything-go is running on port $PORT"
-echo
-say "📱 In the phone app:"
-say "   • Same WiFi: it auto-discovers this bridge (UDP + mDNS). Just open the app."
-[ -n "$LAN_IP" ] && say "     (manual fallback — add bridge IP: $LAN_IP  port: $PORT)"
-say "   • Off WiFi: pair once on WiFi. Only then does the Cloudflare tunnel start;"
-say "     its URL is pushed to the trusted app automatically."
-echo
-say "logs:    /tmp/$LABEL.stderr.log"
-say "restart: launchctl kickstart -k gui/\$(id -u)/$LABEL   (macOS)"
+}
+main() {
+  local check_only=0
+  case "${1:-}" in --help|-h) usage; return 0 ;; --check) check_only=1 ;; '') ;; *) usage >&2; die 'unknown argument' ;; esac
+  [ "$#" -le 1 ] || die 'too many arguments'
+  umask 077
+  REPO="${EVERYTHING_GO_REPO:-wulalainlondon/everything-go}"
+  RELEASE_TAG="${EVERYTHING_GO_TAG:-}"
+  LOCAL_ARCHIVE="${EVERYTHING_GO_ARCHIVE:-}"
+  LOCAL_SHA="${EVERYTHING_GO_ARCHIVE_SHA256:-}"
+  EXPECTED_SOURCE="${EVERYTHING_GO_SOURCE_REVISION:-}"
+  PORT="${EVERYTHING_GO_PORT:-8766}"
+  RUNTIME_DIR="${EVERYTHING_GO_HOME:-$HOME/.everything-go-runtime}"
+  LABEL="${EVERYTHING_GO_LABEL:-com.everything-go.app}"
+  INSTANCE_NAME="${EVERYTHING_GO_INSTANCE_NAME:-$(hostname -s 2>/dev/null || echo everything-go)}"
+  TUNNEL_ENABLED="${EVERYTHING_GO_TUNNEL:-0}"
+  SESSION_STORE="${EVERYTHING_GO_SESSION_STORE:-$RUNTIME_DIR/saved_sessions.json}"
+  LAUNCH="$RUNTIME_DIR/everything_go_launch.sh"
+  APP_DIR="$RUNTIME_DIR/Everything Go.app"
+  BIN="$RUNTIME_DIR/everything-go"
+  PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+  OS=$(uname -s | tr '[:upper:]' '[:lower:]');NATIVE_ARCH=$(uname -m)
+  case "$NATIVE_ARCH" in arm64|aarch64) ARCH=arm64 ;; x86_64|amd64) ARCH=amd64;NATIVE_ARCH=x86_64 ;; *) die 'unsupported CPU architecture' ;; esac
+  case "$OS" in darwin|linux) ;; *) die 'unsupported OS' ;; esac
+  validate_config
+  require_tools
+  assert_fresh_target
+  trap cleanup EXIT
+  prepare_package
+  if [ "$check_only" = 1 ]; then
+    say 'CHECK PASSED: package and prerequisites only; no install/service/pairing/permission changes'
+    return 0
+  fi
+  # Serialize first-install writers; acquiring this lock never stops another service.
+  mkdir -p "$(dirname "$RUNTIME_DIR")"
+  local proposed_lock="$RUNTIME_DIR.install-lock"
+  mkdir "$proposed_lock" || die 'another installation or retained install lock exists; inspect before retry'
+  INSTALL_LOCK="$proposed_lock"
+  # Recheck after potentially slow download/verification, under the install lock.
+  assert_fresh_target
+  mkdir -p "$RUNTIME_DIR"
+  if [ "$OS" = darwin ]; then
+    mv "$STAGING/Everything Go.app" "$APP_DIR"
+    SERVICE_BIN="$APP_DIR/Contents/MacOS/everything-go"
+  else
+    mv "$STAGING/package.zip" "$BIN";chmod 700 "$BIN";SERVICE_BIN="$BIN"
+  fi
+  SERVICE_PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin"
+  local b
+  for b in "$CF_BIN" "$CLAUDE_BIN" "$CODEX_BIN"; do [ -z "$b" ] || SERVICE_PATH="$(dirname "$b"):$SERVICE_PATH"; done
+  : "${BRIDGE_BROWSER_ORIGIN_MODE:=ask}" "${BRIDGE_BROWSER_ALLOWED_ORIGINS:=}" "${BRIDGE_BROWSER_MANAGE_AUTO_REVIEW:=1}" "${BRIDGE_BROWSER_ENABLE_NETWORK:=1}"
+  : "${EVERYTHING_GO_CODEX_SESSIONS_DIR:=${CODEX_HOME:-$HOME/.codex}/sessions}" "${EVERYTHING_GO_CODEX_IGNORE_CWD_GLOBS:=}" "${EVERYTHING_GO_CODEX_IGNORE_NAME_PREFIXES:=}" "${EVERYTHING_GO_CODEX_ROLLOVER_ENABLED:=false}"
+  : "${EVERYTHING_GO_CODEX_COLD_RESUME_MAX_BYTES:=268435456}" "${EVERYTHING_GO_CODEX_CHECKPOINT_MAX_BYTES:=131072}" "${EVERYTHING_GO_CODEX_APP_SERVER_MODE:=daemon}" "${EVERYTHING_GO_CODEX_APP_SERVER_SOCKET:=}"
+  write_launch_wrapper
+  check_permissions
+  activate_fresh_service
+  say "Connect the phone App on the same LAN and complete pairing. For remote access, use this computer's Tailscale address, port $PORT."
+  if [ "$TUNNEL_ENABLED" = 0 ]; then say 'Cloudflare disabled; no cloudflared download/install/start performed.'
+  else say 'Tunnel explicitly enabled; it starts only after trusted-device pairing.';fi
+  say "Logs and runtime: $RUNTIME_DIR"
+  say 'CLI login/quota, phone flows, notifications and audio require their own acceptance; this check does not prove them.'
+}
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then main "$@"; fi
