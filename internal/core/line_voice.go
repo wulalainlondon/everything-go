@@ -18,8 +18,31 @@ import (
 	"everything-go/internal/linevoice"
 )
 
-func (h *Hub) LineVoiceEnabled() bool { return h.lineService != nil && lineVoiceEnabled() }
+// SetLineVoiceRuntime receives only the manifest-validated signed bundle paths.
+func (h *Hub) SetLineVoiceRuntime(node, worker string) {
+	h.lineVoiceNode = node
+	h.lineVoiceWorker = worker
+}
+func (h *Hub) lineVoiceRuntime() (string, string) {
+	if h.lineVoiceWorker != "" {
+		return h.lineVoiceNode, h.lineVoiceWorker
+	}
+	return os.Getenv("LINEJS_NODE"), os.Getenv("LINEJS_VOICE_WORKER")
+}
+func (h *Hub) LineVoiceEnabled() bool {
+	if h.lineService == nil {
+		return false
+	}
+	if h.lineVoiceWorker != "" {
+		info, e := os.Stat(h.lineVoiceWorker)
+		return filepath.IsAbs(h.lineVoiceNode) && filepath.IsAbs(h.lineVoiceWorker) && e == nil && info.Mode().IsRegular()
+	}
+	return lineVoiceEnabled()
+}
 func (h *Hub) HandoffLineVoice(ctx context.Context, caller backend.SessionControlCaller, account, target string) (any, error) {
+	return h.handoffLineVoice(ctx, caller, account, target, caller.ToolCallID)
+}
+func (h *Hub) handoffLineVoice(ctx context.Context, caller backend.SessionControlCaller, account, target, intent string) (any, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -56,7 +79,7 @@ func (h *Hub) HandoffLineVoice(ctx context.Context, caller backend.SessionContro
 			}
 			return map[string]any{"state": "handoff_requested", "replayed": true, "connected": false, "call_id": call.handoffID}, nil
 		}
-		reservation, err := h.lineService.ReserveHandoff(ctx, linebridge.Caller{Subject: "session:" + s.ID}, "device:"+owner.deviceID, s.ID, call.voiceID, account, target, caller.ToolCallID)
+		reservation, err := h.lineService.ReserveHandoff(ctx, linebridge.Caller{Subject: "session:" + s.ID}, "device:"+owner.deviceID, s.ID, call.voiceID, account, target, intent)
 		if err != nil {
 			return nil, err
 		}
@@ -199,7 +222,8 @@ func (h *Hub) handleLineVoiceStart(c *Client, cmd clientproto.Command) {
 				env = append(env, key+"="+value)
 			}
 		}
-		line, answer, err := linevoice.Offer(ctx, linevoice.Config{WorkerProtocol: 2, Node: os.Getenv("LINEJS_NODE"), Worker: os.Getenv("LINEJS_VOICE_WORKER"), ICE: ice, Env: env, Material: payload, BeforeStart: func(ctx context.Context) error {
+		node, worker := h.lineVoiceRuntime()
+		line, answer, err := linevoice.Offer(ctx, linevoice.Config{WorkerProtocol: 2, Node: node, Worker: worker, ICE: ice, Env: env, Material: payload, BeforeStart: func(ctx context.Context) error {
 			return h.lineService.ValidatePreparedCall(ctx, linebridge.Caller{Subject: "device:" + c.deviceID, Admin: true}, id)
 		}}, id, cmd.LinePeerName, cmd.SDP, func(event linevoice.Event) {
 			if event.State == "diagnostic" {

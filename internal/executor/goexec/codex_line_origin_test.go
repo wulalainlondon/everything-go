@@ -72,3 +72,31 @@ func TestLineCLIRejectsQuotedMentionsShellChainsAndDelegatedCaller(t *testing.T)
 		t.Fatal("delegation acquired LINE")
 	}
 }
+
+func TestLINEVoiceOriginUsesOriginalGrantAndExpiresWithCall(t *testing.T) {
+	c, s := lineOriginFixture(t)
+	st := c.state(s.ID)
+	st.turnActive = false
+	st.observedTurnID = "original-turn"
+	st.observedRequestID = "voice-request"
+	c.voiceCalls = map[string]*codexVoiceCall{s.ResumeID(): {voiceID: "voice-exact", sessionID: s.ID, threadID: s.ResumeID()}}
+	home, _ := os.UserHomeDir()
+	command := filepath.Join(home, ".local/bin/bridge-line") + " --id lop_voice_accounts --method accounts --params '{}'"
+	q, e := linecontrol.ParseInvocation([]string{"--id", "lop_voice_accounts", "--method", "accounts", "--params", "{}"})
+	if e != nil {
+		t.Fatal(e)
+	}
+	lineCommandEvent(t, c, s, command, "unifiedExecStartup", "voice-tool", s.ResumeID())
+	caller, e := c.ResolveLineCaller(s.ResumeID(), q.ID, q.Fingerprint())
+	if e != nil || caller.Parent != s || caller.VoiceID != "voice-exact" {
+		t.Fatal(caller, e)
+	}
+	c.voiceCalls[s.ResumeID()].voiceID = "new-voice"
+	if _, e = c.ResolveLineCaller(s.ResumeID(), q.ID, q.Fingerprint()); e == nil {
+		t.Fatal("old voice operation reused on new call")
+	}
+	delete(c.voiceCalls, s.ResumeID())
+	if _, e = c.ResolveLineCaller(s.ResumeID(), q.ID, q.Fingerprint()); e == nil {
+		t.Fatal("ended voice remained authorized")
+	}
+}

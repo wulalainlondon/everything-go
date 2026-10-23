@@ -146,6 +146,8 @@ type Hub struct {
 	work                *workitems.Service
 	events              *eventinbox.Store
 	lineService         *linebridge.Service
+	lineVoiceNode       string
+	lineVoiceWorker     string
 	lineControl         *lineLocalControl
 	automation          *automation.Store
 	automationManager   *automation.Manager

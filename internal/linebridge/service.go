@@ -290,10 +290,22 @@ func (s *Service) find(ctx context.Context, c Caller, id, query string, limit in
 	if err != nil {
 		return nil, err
 	}
+	if method == "find_targets" {
+		t, e := s.aliasTarget(ctx, c, id, query)
+		if e != nil {
+			return nil, e
+		}
+		if t != nil {
+			return []Target{*t}, nil
+		}
+	}
 	var candidates []struct {
-		ID   string `json:"id"`
-		Name string `json:"name"`
-		Kind string `json:"kind"`
+		HasAvatar     *bool  `json:"has_avatar"`
+		Alias         string `json:"alias"`
+		StatusMessage string `json:"status_message"`
+		ID            string `json:"id"`
+		Name          string `json:"name"`
+		Kind          string `json:"kind"`
 	}
 	if err = d.Invoke(ctx, method, map[string]any{"query": query, "limit": limit}, &candidates); err != nil {
 		return nil, err
@@ -307,6 +319,9 @@ func (s *Service) find(ctx context.Context, c Caller, id, query string, limit in
 		if e != nil {
 			return nil, e
 		}
+		t.HasAvatar = x.HasAvatar
+		t.Alias = x.Alias
+		t.StatusMessage = x.StatusMessage
 		out = append(out, t)
 	}
 	return out, nil
@@ -365,7 +380,7 @@ func (s *Service) Send(ctx context.Context, c Caller, id, ref string, content Co
 		return original, e
 	}
 	if due > 0 {
-		if _, err = time.LoadLocation(zone); err != nil {
+		if _, err = time.LoadLocation(zone); err != nil || zone == "" || zone == "Local" {
 			return Operation{}, Fail("line_timezone_invalid")
 		}
 		if due <= nowMS() || late < 0 || late > 24*60*60*1000 {
@@ -509,14 +524,15 @@ func (s *Service) Tick(ctx context.Context, now int64) {
 				tolerance = 5000
 			}
 			if now-op.DueAt > tolerance {
-				_, _ = s.store.Transition(ctx, op.ID, "scheduled", "held_late", "not_dispatched", "line_schedule_late", "")
+				_, _ = s.store.transitionRevision(ctx, op, "held_late", "not_dispatched", "line_schedule_late")
 				continue
 			}
-			ok, e := s.store.Transition(ctx, op.ID, "scheduled", "queued", "not_dispatched", "", "")
+			ok, e := s.store.transitionRevision(ctx, op, "queued", "not_dispatched", "")
 			if e != nil || !ok {
 				continue
 			}
 			op.State = "queued"
+			op.Revision++
 		}
 		s.launch(op)
 	}
@@ -539,6 +555,11 @@ func (s *Service) launch(op Operation) {
 func (s *Service) dispatch(op Operation) {
 	ctx, cancel := context.WithTimeout(s.ctx, 40*time.Second)
 	defer cancel()
+	fresh, err := s.store.Operation(ctx, op.ID)
+	if err != nil || fresh.State != "queued" {
+		return
+	}
+	op = fresh
 	caller := Caller{Subject: op.Subject}
 	if op.DueAt > 0 {
 		if _, err := s.account(ctx, caller, op.Account, "schedule"); err != nil {
@@ -562,7 +583,17 @@ func (s *Service) dispatch(op Operation) {
 	if err != nil {
 		return
 	}
-	ok, err := s.store.Transition(ctx, op.ID, "queued", "dispatching", "pending", "", "")
+	if op.DueAt > 0 {
+		tolerance := op.LateWindow
+		if tolerance == 0 {
+			tolerance = 5000
+		}
+		if nowMS()-op.DueAt > tolerance {
+			_, _ = s.store.transitionRevision(ctx, op, "held_late", "not_dispatched", "line_schedule_late")
+			return
+		}
+	}
+	ok, err := s.store.transitionRevision(ctx, op, "dispatching", "pending", "")
 	if err != nil || !ok {
 		return
 	}
@@ -622,6 +653,11 @@ func (s *Service) onEvent(account, epoch string, event RuntimeEvent) {
 }
 
 type Request struct {
+	Alias      string   `json:"alias,omitempty"`
+	State      string   `json:"state,omitempty"`
+	LocalTime  string   `json:"local_time,omitempty"`
+	Since      int64    `json:"since,omitempty"`
+	Until      int64    `json:"until,omitempty"`
 	Resource   string   `json:"resource_ref,omitempty"`
 	Message    string   `json:"message_ref,omitempty"`
 	Attachment string   `json:"attachment_ref,omitempty"`
@@ -646,6 +682,21 @@ type Request struct {
 
 func (s *Service) Execute(ctx context.Context, c Caller, r Request) (any, error) {
 	switch r.Method {
+	case "get_message_page":
+		return s.ReadPage(ctx, c, r)
+	case "set_target_alias":
+		return s.SetTargetAlias(ctx, c, r)
+	case "query_operations":
+		return s.QueryOperations(ctx, c, r)
+	case "get_operation_detail":
+		return s.OperationDetail(ctx, c, r.Operation)
+	case "update_scheduled_message":
+		return s.UpdateScheduledMessage(ctx, c, r)
+	case "resolve_schedule_time":
+		if _, e := s.account(ctx, c, r.Account, "schedule"); e != nil {
+			return nil, e
+		}
+		return ResolveScheduleTime(r.LocalTime, r.Timezone)
 	case "access":
 		return s.Access(ctx, c, r.Account)
 	case "list_grants":

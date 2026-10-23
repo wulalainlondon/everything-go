@@ -175,3 +175,23 @@ type CallTelemetry struct {
 	DroppedPackets int    `json:"dropped_packets,omitempty"`
 	PayloadLength  int    `json:"payload_length,omitempty"`
 }
+
+// CallIntentReceipt recovers the original source-bound call without placing another call.
+func (s *Service) CallIntentReceipt(ctx context.Context, c Caller, account, intent string) (*CallReceipt, bool, error) {
+	if _, e := s.account(ctx, c, account, "status"); e != nil {
+		return nil, false, e
+	}
+	var id string
+	e := s.store.db.QueryRowContext(ctx, "SELECT id FROM line_calls WHERE account=? AND subject=? AND intent=?", account, c.Subject, intent).Scan(&id)
+	if errors.Is(e, sql.ErrNoRows) {
+		return nil, false, nil
+	}
+	if e != nil {
+		return nil, false, e
+	}
+	r, e := s.CallReceipt(ctx, c, id)
+	if e != nil {
+		return nil, false, e
+	}
+	return &r, true, nil
+}

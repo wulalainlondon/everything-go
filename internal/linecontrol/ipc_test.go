@@ -28,7 +28,7 @@ func TestLINEPrivateControlRejectsInvalidMethodsAndKeepsSeparateMediaEntry(t *te
 	if e != nil || !got.OK || calls.Load() != 1 {
 		t.Fatal(got, e)
 	}
-	for _, method := range []string{"grant", "create_account", "play_music", "handoff_call", "resume"} {
+	for _, method := range []string{"grant", "create_account", "play_music", "grant_call", "resume"} {
 		q.Method = method
 		if _, e = Send(context.Background(), manifest, q); e == nil {
 			t.Fatal("unsupported method accepted", method)

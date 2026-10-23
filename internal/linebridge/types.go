@@ -27,11 +27,14 @@ type Caller struct {
 	Admin   bool
 }
 type Target struct {
-	Ref        string `json:"target_ref"`
-	Account    string `json:"account_ref"`
-	Name       string `json:"name"`
-	Kind       string `json:"kind"`
-	ExternalID string `json:"-"`
+	HasAvatar     *bool  `json:"has_avatar,omitempty"`
+	Alias         string `json:"alias,omitempty"`
+	StatusMessage string `json:"status_message,omitempty"`
+	Ref           string `json:"target_ref"`
+	Account       string `json:"account_ref"`
+	Name          string `json:"name"`
+	Kind          string `json:"kind"`
+	ExternalID    string `json:"-"`
 }
 type Content struct {
 	Text        string `json:"text,omitempty"`
@@ -60,12 +63,13 @@ type Operation struct {
 	LateWindow      int64   `json:"-"`
 }
 type Message struct {
-	ID          string `json:"message_ref"`
-	Target      string `json:"target_ref"`
-	Direction   string `json:"direction"`
-	Text        string `json:"text,omitempty"`
-	ContentType string `json:"content_type"`
-	Timestamp   int64  `json:"timestamp"`
+	TextTruncated bool   `json:"text_truncated,omitempty"`
+	ID            string `json:"message_ref"`
+	Target        string `json:"target_ref"`
+	Direction     string `json:"direction"`
+	Text          string `json:"text,omitempty"`
+	ContentType   string `json:"content_type"`
+	Timestamp     int64  `json:"timestamp"`
 }
 type RuntimeEvent struct {
 	Kind    string   `json:"kind"`

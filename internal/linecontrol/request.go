@@ -25,7 +25,7 @@ type Result struct {
 	Code   string `json:"code,omitempty"`
 }
 
-var methods = map[string]bool{"access": true, "list_subscriptions": true, "accounts": true, "intent_status": true, "status": true, "health": true, "find_targets": true, "find_openchats": true, "get_messages": true, "send_message": true, "schedule_message": true, "get_operation": true, "list_operations": true, "reschedule_operation": true, "cancel_operation": true, "subscribe": true, "list_attachments": true, "import_resource": true, "download_resource": true}
+var methods = map[string]bool{"handoff_call": true, "get_call": true, "cancel_call": true, "call_intent_status": true, "get_message_page": true, "set_target_alias": true, "query_operations": true, "get_operation_detail": true, "update_scheduled_message": true, "resolve_schedule_time": true, "access": true, "list_subscriptions": true, "accounts": true, "intent_status": true, "status": true, "health": true, "find_targets": true, "find_openchats": true, "get_messages": true, "send_message": true, "schedule_message": true, "get_operation": true, "list_operations": true, "reschedule_operation": true, "cancel_operation": true, "subscribe": true, "list_attachments": true, "import_resource": true, "download_resource": true}
 
 func canonicalParams(raw []byte) ([]byte, error) {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
@@ -131,7 +131,7 @@ func ParseInvocation(argv []string) (Request, error) {
 }
 func RunCLI(args []string, out, stderr io.Writer) int {
 	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
-		io.WriteString(stderr, "Usage: bridge-line --id lop_UNIQUE_INTENT --method accounts|status|health|find_targets|get_messages|send_message|get_operation|intent_status --params JSON\nThe service requires the actual original provider-observed command and existing account grants; no thread/device override or grant/call management.\n")
+		io.WriteString(stderr, "Usage: bridge-line --id lop_UNIQUE_INTENT --method accounts|status|health|find_targets|get_messages|send_message|get_operation|intent_status --params JSON\nThe service requires the actual original provider-observed command and existing account grants; no thread/device override or grant management; handoff requires the exact active authorized voice.\n")
 		return 0
 	}
 	q, e := ParseInvocation(args)

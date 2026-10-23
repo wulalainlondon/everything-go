@@ -42,6 +42,8 @@ func (d *fakeDriver) Invoke(_ context.Context, method string, input, out any) er
 		value = Identity{Principal: d.principal, Name: "fixture"}
 	case "find_targets":
 		value = []map[string]string{{"id": "u" + strings.Repeat("1", 32), "name": "Same Name", "kind": "user"}}
+	case "get_message_page":
+		value = map[string]any{"messages": []Message{{ID: "m1", Text: "fixture", ContentType: "NONE", Timestamp: 100}}, "scanned": 1, "next_cursor": "fixture-next", "coverage": "upstream_page"}
 	case "get_messages":
 		value = []Message{{ID: "m1", Text: "fixture", ContentType: "NONE"}}
 	case "send_message":

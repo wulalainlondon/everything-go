@@ -70,7 +70,7 @@ func (h *Hub) ExecuteLineTool(ctx context.Context, caller backend.SessionControl
 	if !ok || registered != caller.Parent || strings.HasPrefix(registered.ID, "s_dg_") || !h.controls.MobileMayWrite(registered.ID) {
 		return nil, linebridge.Fail("line_caller_not_owned")
 	}
-	allowed := map[string]bool{"access": true, "list_subscriptions": true, "list_attachments": true, "download_resource": true, "import_resource": true, "reschedule_operation": true, "handoff_call": true, "cancel_call": true, "get_call": true, "subscribe": true, "accounts": true, "status": true, "health": true, "find_openchats": true, "find_targets": true, "get_messages": true, "send_message": true, "get_operation": true, "list_operations": true, "schedule_message": true, "cancel_operation": true}
+	allowed := map[string]bool{"get_message_page": true, "set_target_alias": true, "query_operations": true, "get_operation_detail": true, "update_scheduled_message": true, "resolve_schedule_time": true, "access": true, "list_subscriptions": true, "list_attachments": true, "download_resource": true, "import_resource": true, "reschedule_operation": true, "handoff_call": true, "cancel_call": true, "get_call": true, "subscribe": true, "accounts": true, "status": true, "health": true, "find_openchats": true, "find_targets": true, "get_messages": true, "send_message": true, "get_operation": true, "list_operations": true, "schedule_message": true, "cancel_operation": true}
 	if !allowed[method] {
 		return nil, linebridge.Fail("line_tool_unavailable")
 	}
@@ -112,25 +112,29 @@ func (h *Hub) ExecuteLineTool(ctx context.Context, caller backend.SessionControl
 		return h.HandoffLineVoice(ctx, caller, request.Account, request.Target)
 	}
 	result, err := h.lineService.Execute(ctx, linebridge.Caller{Subject: "session:" + registered.ID}, request)
-	if messages, ok := result.([]linebridge.Message); ok {
-		// Preserve the count but cap model output. Full text stays available via
-		// explicitly bounded reads; no bulk chat injection into native history.
+	capMessages := func(messages []linebridge.Message) {
 		budget := 24000
 		for i := range messages {
-			text := []rune(messages[i].Text)
+			runes := []rune(messages[i].Text)
 			limit := 2000
 			if budget < limit {
 				limit = budget
 			}
-			if len(text) > limit {
-				messages[i].Text = string(text[:limit]) + "…"
+			if len(runes) > limit {
+				messages[i].Text = string(runes[:limit])
+				messages[i].TextTruncated = true
 			}
 			budget -= len([]rune(messages[i].Text))
-			if budget < 0 {
-				budget = 0
-			}
 		}
+	}
+	if messages, ok := result.([]linebridge.Message); ok {
+		capMessages(messages)
 		result = messages
 	}
+	if page, ok := result.(linebridge.MessagePage); ok {
+		capMessages(page.Messages)
+		result = page
+	}
+
 	return result, err
 }

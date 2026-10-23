@@ -4,6 +4,7 @@ import {pathToFileURL} from 'node:url';
 import {LineFailure,object,text,integer,type Base,type Runtime,type RawMessage,type WireMessage,type ServiceEvent} from './types.js';
 import {sendResource} from './media.js';
 import {findRooms,roomEvents} from './openchat.js';
+import {messagePage} from './history.js';
 import {Pairing} from './pairing.js';
 
 export type RuntimeLoader=()=>Promise<Runtime>;
@@ -12,7 +13,7 @@ export class AccountService {
  private opening?:Promise<Runtime>;
  private closed=false;
  private pairingRequested=false;
- private directory?:{at:number;contacts:{id:string;name:string;alias:string;kind:string}[]};
+ private directory?:{at:number;contacts:{id:string;name:string;alias:string;status_message:string;has_avatar:boolean;kind:string}[]};
  private sends=new Map<string,{fingerprint:string;result:Promise<{message_id:string}>}>();
  private pairing=new Pairing();
  constructor(private loader:RuntimeLoader){}
@@ -51,10 +52,10 @@ export class AccountService {
     const ids=(await base.relation.getUserFriendIds({request:{blockStatus:'ALL'}})).userFriendMids??[];
     if(ids.length>2000)throw new LineFailure('line_directory_limit');
     const contacts=[];
-    for(let i=0;i<ids.length;i+=100){for(const c of await base.talk.getContacts({mids:ids.slice(i,i+100)}))contacts.push({id:c.mid,name:c.displayName,alias:c.displayNameOverridden??'',kind:'user'});}
+    for(let i=0;i<ids.length;i+=100){for(const c of await base.talk.getContacts({mids:ids.slice(i,i+100)}))contacts.push({id:c.mid,name:c.displayName,alias:c.displayNameOverridden??'',status_message:(c.statusMessage??'').slice(0,256),has_avatar:!!(c.picturePath||c.pictureStatus),kind:'user'});}
     this.directory={at:Date.now(),contacts};
    }
-   return this.directory.contacts.filter(c=>[c.name,c.alias].some(n=>n.normalize('NFKC').toLocaleLowerCase().includes(query))).slice(0,limit).map(({alias:_,...c})=>c);
+   return this.directory.contacts.filter(c=>[c.name,c.alias].some(n=>n.normalize('NFKC').toLocaleLowerCase().includes(query))).slice(0,limit);
   }
   if(method==='download_resource'){
    const target=text(args.target,128),id=text(args.message,128);
@@ -69,6 +70,7 @@ export class AccountService {
    const target=text(args.target,128),cursor=typeof args.cursor==='string'?args.cursor:'';const result=await roomEvents(base,target,cursor,100);
    return {events:result.messages.map(m=>({kind:m.kind,event_key:m.key,target,message:{...this.message(m.raw,base,target),direction:'unknown'}})),cursor:result.cursor,gap:!cursor};
   }
+  if(method==='get_message_page')return messagePage(base,text(args.target,128),integer(args.limit,1,100),typeof args.cursor==='string'?args.cursor:'',raw=>this.message(raw,base,text(args.target,128)));
   if(method==='get_messages'){
    const target=text(args.target,128),limit=integer(args.limit,1,100);
    if(args.cursor)throw new LineFailure('line_history_pagination_unverified');

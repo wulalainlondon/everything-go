@@ -100,11 +100,12 @@ provide the fixed entry without requiring old native dynamic-tool hot reload.
 
 ## User and tool surfaces
 
-The app settings manage accounts, QR pairing, explicit same-account re-login,
-paired-device grants, conversation grants, contact/room selection, bounded
-history, subscriptions, files, send receipts, schedules, cancellation and
-rescheduling. Each send carries an explicit account and account-bound target.
-Switching accounts clears the old draft/target and cannot change an existing job.
+The primary product is a voice-first AI assistant. App settings expose the
+existing account/access/health and owner-sharing controls; a second LINE inbox,
+chat browser or schedule dashboard is not part of the current user requirement.
+The AI reads selected messages, sends explicitly requested content, manages
+schedules and requests source-bound phone handoff. See LINE_VOICE_ASSISTANT.txt
+for exact methods, current limits and the distinction between code and live QA.
 
 `POST /api/line/v1/request` requires an exact paired-device bearer credential and
 `X-Bridge-Device-ID`; it has no loopback authentication bypass. Pairing and grant
@@ -175,8 +176,11 @@ The implemented first path retires AI audio, waits for its terminal/cleanup ACK,
 then starts the LINE leg on the same phone and conversation. Android preserves
 the accepted audio-focus, local-release and foreground-service guards. A failed
 release, stale socket, wrong phone, expired reservation or cancellation prevents
-handoff. Web uses the same source-binding checks. iPhone original-voice handoff
-and answer-first handoff remain disabled until their device prototypes pass.
+handoff. Android and iOS now implement exact-reference source-bound handoff; their
+real-device qualification is tracked separately. iOS waits for CallKit audio
+deactivation. Web-only clients still advertise no handoff support. Answer-first
+handoff is not included. Operator enablement and original account grants remain
+required; compiled code alone is not permission or a successful phone call.
 
 The call worker starts a monotonic 20-minute timer after remote answer/media
 readiness. It maintains silent media when needed and emits bounded structural

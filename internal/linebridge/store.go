@@ -77,6 +77,7 @@ func OpenStore(dir, authority string, key []byte) (*Store, error) {
 		return nil, err
 	}
 	if _, err = db.Exec(`CREATE TABLE IF NOT EXISTS line_health_observations(account TEXT PRIMARY KEY,checked_at INTEGER NOT NULL,state TEXT NOT NULL,code TEXT NOT NULL,binding_revision INTEGER NOT NULL DEFAULT 0);
+ CREATE TABLE IF NOT EXISTS line_target_aliases(account TEXT NOT NULL,subject TEXT NOT NULL,alias_key TEXT NOT NULL,target TEXT NOT NULL,PRIMARY KEY(account,subject,alias_key),FOREIGN KEY(account) REFERENCES line_accounts(id));
  CREATE TABLE IF NOT EXISTS line_grant_revisions(account TEXT PRIMARY KEY,revision INTEGER NOT NULL);`); err != nil {
 		db.Close()
 		return nil, err
@@ -433,6 +434,16 @@ func (s *Store) Enqueue(ctx context.Context, c Caller, a Account, t Target, cont
 }
 func (s *Store) Transition(ctx context.Context, id, from, to, effect, code, remote string) (bool, error) {
 	r, e := s.db.ExecContext(ctx, "UPDATE line_ops SET state=?,effect=?,code=?,remote_id=?,updated_at=?,revision=revision+1 WHERE id=? AND state=?", to, effect, code, remote, nowMS(), id, from)
+	if e != nil {
+		return false, e
+	}
+	n, e := r.RowsAffected()
+	return n == 1, e
+}
+
+// A scheduler/dispatcher snapshot must not overwrite a newer human edit.
+func (s *Store) transitionRevision(ctx context.Context, op Operation, to, effect, code string) (bool, error) {
+	r, e := s.db.ExecContext(ctx, "UPDATE line_ops SET state=?,effect=?,code=?,updated_at=?,revision=revision+1 WHERE id=? AND state=? AND revision=?", to, effect, code, nowMS(), op.ID, op.State, op.Revision)
 	if e != nil {
 		return false, e
 	}

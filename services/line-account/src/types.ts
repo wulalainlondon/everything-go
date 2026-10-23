@@ -1,8 +1,8 @@
-export interface RawMessage { id?:string; from?:string; to?:string; text?:string; contentType?:string|number; createdTime?:string|number|bigint; chunks?:Uint8Array[]; contentMetadata?:Record<string,string> }
+export interface RawMessage { id?:string; from?:string; to?:string; text?:string; contentType?:string|number; createdTime?:string|number|bigint;deliveredTime?:string|number|bigint; chunks?:Uint8Array[]; contentMetadata?:Record<string,string> }
 export interface Base {
  profile:{mid:string;displayName?:string};
  relation:{getUserFriendIds(input:unknown):Promise<{userFriendMids?:string[]}>};
- talk:{getProfile():Promise<{mid:string;displayName?:string}>;getContacts(input:unknown):Promise<{mid:string;displayName:string;displayNameOverridden?:string}[]>;getRecentMessagesV2(input:unknown):Promise<RawMessage[]>;negotiateE2EEPublicKey(input:unknown):Promise<{specVersion?:number;publicKey?:unknown}>;sendMessage(input:unknown):Promise<RawMessage>;sync(input:unknown):Promise<SyncResult>;sendChatChecked(input:unknown):Promise<unknown>};
+ talk:{getProfile():Promise<{mid:string;displayName?:string}>;getContacts(input:unknown):Promise<{mid:string;displayName:string;displayNameOverridden?:string;statusMessage?:string;picturePath?:string;pictureStatus?:string}[]>;getPreviousMessagesV2WithRequest(input:unknown):Promise<RawMessage[]>;getRecentMessagesV2(input:unknown):Promise<RawMessage[]>;negotiateE2EEPublicKey(input:unknown):Promise<{specVersion?:number;publicKey?:unknown}>;sendMessage(input:unknown):Promise<RawMessage>;sync(input:unknown):Promise<SyncResult>;sendChatChecked(input:unknown):Promise<unknown>};
  obs:{constructor:Function;downloadMediaByE2EE(input:RawMessage):Promise<File|null>};
  e2ee:{decryptE2EEMessage(input:RawMessage):Promise<RawMessage>;encryptE2EEMessage(to:string,text:string,type:string):Promise<Uint8Array[]>};
  square:{getSquare(input:unknown):Promise<Record<string,unknown>>;fetchMyEvents(input:unknown):Promise<Record<string,unknown>>;getSquareChat(input:unknown):Promise<Record<string,unknown>>;fetchSquareChatEvents(input:unknown):Promise<Record<string,unknown>>};

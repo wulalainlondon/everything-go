@@ -18,7 +18,7 @@ try{
   await mkdir(to);for(const name of ['package.json','package-lock.json'])await copyFile(join(from,name),join(to,name));run(['ci','--omit=dev','--ignore-scripts'],to);
  }
  await copyTree(join(account,'dist'),join(output,'account/dist'));
- for(const name of ['route-worker.mjs','session.mjs','audio.mjs','credentials.mjs','protected-storage.mjs','profile-lock.mjs','linejs-transport.mjs','TRANSPORT_PATCH.txt'])await copyFile(join(voice,name),join(output,'voice',name));
+ for(const name of ['route-worker.mjs','session.mjs','audio.mjs','credentials.mjs','protected-storage.mjs','profile-lock.mjs','linejs-transport.mjs','srtp-rollover.mjs','TRANSPORT_PATCH.txt'])await copyFile(join(voice,name),join(output,'voice',name));
  const files={};
  async function hashTree(path){for(const entry of await readdir(path,{withFileTypes:true})){if(entry.isSymbolicLink())continue;const item=join(path,entry.name);if(entry.isDirectory())await hashTree(item);else if(entry.isFile())files[relative(output,item).split('\\').join('/')]=createHash('sha256').update(await readFile(item)).digest('hex')}}
  await hashTree(output);const nodePath=await realpath(process.execPath),nodeHash=createHash('sha256').update(await readFile(nodePath)).digest('hex');
