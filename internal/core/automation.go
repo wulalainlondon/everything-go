@@ -288,6 +288,9 @@ func (h *Hub) broadcastAutomationSnapshot() {
 }
 
 func (h *Hub) ServeAutomationAPI(w http.ResponseWriter, r *http.Request) {
+	if automationAppCORS(w, r) {
+		return
+	}
 	if h.automation == nil {
 		http.Error(w, "automation unavailable", http.StatusServiceUnavailable)
 		return
