@@ -15,7 +15,16 @@ func (h *Hub) reconcileNativeCatalog(opts nativewatch.Options, previous map[stri
 	candidates := map[string]bool{}
 	for _, s := range h.registry.List() {
 		snap := s.Snapshot()
-		if catalog.MissingSession(snap.Backend, snap.ResumeID) {
+		missing := catalog.MissingSession(snap.Backend, snap.ResumeID)
+		// A logical conversation may own older physical threads. Never retire
+		// it while any original thread remains available.
+		for _, id := range snap.HistoricalResumeIDs {
+			if !catalog.MissingSession(snap.Backend, id) {
+				missing = false
+				break
+			}
+		}
+		if missing {
 			candidates[snap.ID+"\x00"+snap.ResumeID] = true
 		}
 	}

@@ -648,8 +648,8 @@ func (r *Registry) PruneCodexSessions(ignore func(cwd, name string) bool) int {
 	return removed
 }
 
-// PruneMissingNativeSessions retires only idle, native-imported catalog rows.
-// Bridge-created identities and all execution/queue receipts remain intact.
+// PruneMissingNativeSessions retires idle imported or Bridge-created rows
+// bound to a confirmed missing native conversation. Execution/queue receipts remain intact.
 // The caller supplies authoritative deletion evidence and a durable-work guard.
 func (r *Registry) PruneMissingNativeSessions(missing func(Snapshot) bool) int {
 	if missing == nil {
@@ -665,7 +665,7 @@ func (r *Registry) PruneMissingNativeSessions(missing func(Snapshot) bool) int {
 		} else if snap.Backend != "claude" {
 			continue
 		}
-		if len(snap.ResumeID) < 12 || id != prefix+snap.ResumeID[:12] || !missing(snap) {
+		if len(snap.ResumeID) < 12 || (id != prefix+snap.ResumeID[:12] && !strings.HasPrefix(id, "s_")) || !missing(snap) {
 			continue
 		}
 		s.mu.Lock()
