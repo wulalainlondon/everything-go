@@ -24,8 +24,10 @@ type Store struct {
 	aead      cipher.AEAD
 	key       []byte
 	Authority string
-	mu        sync.Mutex
-	release   func()
+	// Installed once by the operator-configured service before it is published.
+	voiceDefaultAllowed func(context.Context, Caller, string, string) bool
+	mu                  sync.Mutex
+	release             func()
 }
 
 func OpenStore(dir, authority string, key []byte) (*Store, error) {
@@ -257,23 +259,42 @@ func (s *Store) Account(ctx context.Context, id string) (Account, error) {
 }
 func (s *Store) Allowed(ctx context.Context, c Caller, account, scope string) bool {
 	var n int
-	return c.Subject != "" && s.db.QueryRowContext(ctx, "SELECT count(*) FROM line_grants WHERE account=? AND subject=? AND scope=?", account, c.Subject, scope).Scan(&n) == nil && n == 1
+	if c.Subject == "" {
+		return false
+	}
+	if s.db.QueryRowContext(ctx, "SELECT count(*) FROM line_grants WHERE account=? AND subject=? AND scope=?", account, c.Subject, scope).Scan(&n) != nil {
+		return false
+	}
+	return n == 1 || (s.voiceDefaultAllowed != nil && s.voiceDefaultAllowed(ctx, c, account, scope))
 }
 func (s *Store) Accounts(ctx context.Context, c Caller) ([]Account, error) {
-	rows, err := s.db.QueryContext(ctx, "SELECT a.* FROM line_accounts a JOIN line_grants g ON g.account=a.id WHERE g.subject=? AND g.scope='status' ORDER BY a.created_at", c.Subject)
+	rows, err := s.db.QueryContext(ctx, "SELECT * FROM line_accounts ORDER BY created_at")
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	out := []Account{}
+	// Finish the scan before evaluating access: the store intentionally owns a
+	// single connection, and inherited access revalidates the account binding.
+	all := []Account{}
 	for rows.Next() {
 		a, e := accountScan(rows)
 		if e != nil {
+			rows.Close()
 			return nil, e
 		}
-		out = append(out, a)
+		all = append(all, a)
 	}
-	return out, rows.Err()
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return nil, err
+	}
+	out := []Account{}
+	for _, a := range all {
+		if s.Allowed(ctx, c, a.ID, "status") {
+			out = append(out, a)
+		}
+	}
+	return out, nil
 }
 func (s *Store) Grant(ctx context.Context, c Caller, account, subject string, allowed []string) error {
 	if subject == "" {

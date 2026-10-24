@@ -47,6 +47,29 @@ func (h *Hub) LineSessionAllowed(id string) bool {
 	_, ok := h.registry.Get(id)
 	return ok && !strings.HasPrefix(id, "s_dg_") && h.controls.MobileMayWrite(id)
 }
+
+// Global voice dispatch belongs only to this Go's paired devices and ordinary
+// conversations the mobile user can operate. Delegates/PM/hidden/closed scopes
+// do not inherit it, even if a caller presents a valid native tool origin.
+func (h *Hub) LineVoiceDispatchSubjectAllowed(subject string) bool {
+	if !h.LineSubjectAllowed(subject) {
+		return false
+	}
+	if strings.HasPrefix(subject, "device:") {
+		return true
+	}
+	if !strings.HasPrefix(subject, "session:") {
+		return false
+	}
+	id := strings.TrimPrefix(subject, "session:")
+	s, ok := h.registry.Get(id)
+	if !ok || strings.HasPrefix(id, "pm_") || !h.controllerInScope(s) {
+		return false
+	}
+	snap := s.Snapshot()
+	policy, err := h.PMConfiguration(id)
+	return !snap.Hidden && s.State() != session.Closed && err == nil && policy == nil
+}
 func (h *Hub) ServeLineAPI(w http.ResponseWriter, r *http.Request) {
 	authorize := func(r *http.Request) (linebridge.Caller, bool) {
 		fields := strings.Fields(r.Header.Get("Authorization"))

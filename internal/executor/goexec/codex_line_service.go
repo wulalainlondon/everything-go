@@ -83,7 +83,7 @@ func (c *Codex) applyLineServiceTools(s *session.Session, params map[string]any)
 		tools = append(tools, map[string]any{"type": "function", "name": d.name, "description": d.description, "inputSchema": map[string]any{"type": "object", "additionalProperties": false, "properties": properties, "required": required}})
 	}
 	existing, _ := params["dynamicTools"].([]map[string]any)
-	params["dynamicTools"] = append(existing, map[string]any{"type": "namespace", "name": "bridge_line", "description": "Account-scoped LINE messaging and receipts under the current conversation's explicit grants.", "tools": tools})
+	params["dynamicTools"] = append(existing, map[string]any{"type": "namespace", "name": "bridge_line", "description": "Account-scoped LINE messaging and receipts under the current conversation's effective grants, including a human-enabled Go voice-dispatch default. The model cannot alter that policy.", "tools": tools})
 }
 func (c *Codex) handleLineServiceTool(id any, method string, raw json.RawMessage) bool {
 	if method != "item/tool/call" {

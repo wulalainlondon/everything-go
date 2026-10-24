@@ -37,7 +37,7 @@ func configuredLineService(hub *core.Hub, dataDir, authority string, transfers *
 	if err != nil {
 		return nil, err
 	}
-	config := linebridge.Config{BlockedScopes: runtimeConfig.Blocked, Subjects: hub.LineSubjects, DataDir: dir, KeychainHelper: helper, LegacyDir: runtimeConfig.Legacy, EventSink: hub.LineEventSink(store), Resources: func(ctx context.Context, c linebridge.Caller, ref string) (linebridge.ResourceInput, error) {
+	config := linebridge.Config{VoiceDispatchAccounts: runtimeConfig.VoiceDispatchAccounts, VoiceDispatchSubjectAllowed: hub.LineVoiceDispatchSubjectAllowed, BlockedScopes: runtimeConfig.Blocked, Subjects: hub.LineSubjects, DataDir: dir, KeychainHelper: helper, LegacyDir: runtimeConfig.Legacy, EventSink: hub.LineEventSink(store), Resources: func(ctx context.Context, c linebridge.Caller, ref string) (linebridge.ResourceInput, error) {
 		if strings.HasPrefix(c.Subject, "device:") {
 			data, name, mime, err := transfers.ReadCompletedForDevice(strings.TrimPrefix(c.Subject, "device:"), ref, linebridge.MaxResourceBytes)
 			if err != nil {

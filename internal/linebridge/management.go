@@ -10,11 +10,12 @@ import (
 // Management is an original-owner view. A paired device being Admin never
 // permits it to inspect another owner's sharing or to become that owner.
 type Access struct {
-	Subject   string         `json:"subject_ref"`
-	Role      string         `json:"role"`
-	CanManage bool           `json:"can_manage"`
-	Scopes    []string       `json:"scopes"`
-	Limits    map[string]int `json:"limits"`
+	VoiceDispatch VoiceDispatchAccess `json:"voice_dispatch"`
+	Subject       string              `json:"subject_ref"`
+	Role          string              `json:"role"`
+	CanManage     bool                `json:"can_manage"`
+	Scopes        []string            `json:"scopes"`
+	Limits        map[string]int      `json:"limits"`
 }
 type Grant struct {
 	Subject string   `json:"subject_ref"`
@@ -42,25 +43,17 @@ func (s *Service) Access(ctx context.Context, c Caller, id string) (Access, erro
 	if err != nil {
 		return Access{}, err
 	}
-	rows, err := s.store.db.QueryContext(ctx, "SELECT scope FROM line_grants WHERE account=? AND subject=? ORDER BY scope", id, c.Subject)
-	if err != nil {
-		return Access{}, err
-	}
-	defer rows.Close()
-	out := Access{Subject: c.Subject, Role: "shared", CanManage: c.Admin && a.Owner == c.Subject, Scopes: []string{}, Limits: map[string]int{"find_targets": 50, "find_openchats": 20, "get_messages": 100}}
+	out := Access{Subject: c.Subject, Role: "shared", CanManage: c.Admin && a.Owner == c.Subject, Scopes: []string{}, Limits: map[string]int{"find_targets": 50, "find_openchats": 20, "get_messages": 100}, VoiceDispatch: s.voiceDispatchAccess(ctx, c, id)}
 	if out.CanManage {
 		out.Role = "owner"
 	}
-	for rows.Next() {
-		var scope string
-		if err = rows.Scan(&scope); err != nil {
-			return Access{}, err
-		}
-		if !s.config.BlockedScopes[scope] {
+	for _, scope := range scopes {
+		if !s.config.BlockedScopes[scope] && s.store.Allowed(ctx, c, id, scope) {
 			out.Scopes = append(out.Scopes, scope)
 		}
 	}
-	return out, rows.Err()
+	sort.Strings(out.Scopes)
+	return out, nil
 }
 func (s *Service) requireOwner(ctx context.Context, c Caller, id string) error {
 	if !c.Admin || (s.config.SubjectAllowed != nil && !s.config.SubjectAllowed(c.Subject)) {

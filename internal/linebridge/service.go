@@ -19,6 +19,8 @@ type Config struct {
 	Resources                          ResourceResolver
 	BlockedScopes                      map[string]bool
 	Subjects                           func() []Subject
+	VoiceDispatchAccounts              []VoiceDispatchAccount
+	VoiceDispatchSubjectAllowed        func(string) bool
 }
 type runtimeEntry struct {
 	epoch   string
@@ -45,7 +47,9 @@ type Service struct {
 
 func NewService(store *Store, factory Factory, config Config) *Service {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Service{store: store, factory: factory, config: config, ctx: ctx, cancel: cancel, runtimes: map[string]*runtimeEntry{}, busy: map[string]bool{}, polling: map[string]bool{}, pollState: map[string]string{}, calls: map[string]*callOwner{}}
+	s := &Service{store: store, factory: factory, config: config, ctx: ctx, cancel: cancel, runtimes: map[string]*runtimeEntry{}, busy: map[string]bool{}, polling: map[string]bool{}, pollState: map[string]string{}, calls: map[string]*callOwner{}}
+	store.voiceDefaultAllowed = s.voiceDispatchAllowed
+	return s
 }
 func (s *Service) Store() *Store { return s.store }
 func (s *Service) Close() {

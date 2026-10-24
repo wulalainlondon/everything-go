@@ -14,3 +14,12 @@ Phone handoff: fixed entry now exposes handoff_call, get_call, cancel_call and c
 Operator activation: allow_calls in the original private line-service config enables only the signed manifest-verified route worker; it does not add any account grants. Original owner must authorize exact conversation and phone call scope. Prior retirement of mobile handoff was superseded by this user's explicit new requirement. Preserve stable release guard, account/profile/Keychain and other Go features. Receiver test authorized: the no-avatar Morrie using S10+; identify uniquely before any test effect.
 
 Engineering evidence is separate from deployment, actual speech, LINE receipt and human audio. No claim that upstream codec wrappers, every Bluetooth route, lockscreen or long-call audio has passed without direct evidence. Optional future group/multi-account/automatic-reply/Claude features remain outside this task.
+
+Go 0.2.173：一次啟用所有一般語音對話的 LINE 使用權
+原 data-dir/line-service.json 的私有 operator 設定可加入：
+  "voice_dispatch_accounts": [{"account_ref":"由既有 accounts 返回的原帳號","binding_revision":原帳號現行數值}]
+由人類操作者明確指定既有帳號，無此欄位時不擴大原授權；不是模型可呼叫的方法，也不改個別 line_grants 或提升 owner/admin。
+所有此 Go 已配對裝置與手機可操作的一般對話，取得該原帳號的調閱、傳送、附件、排程、事件及通話等使用能力；底層 blocked_scopes 仍優先。PM、委派、隱藏、已關閉與範圍外對話不繼承。
+因此所有一般語音對話可直接操作；同一對話的文字輸入也可管理原來的預約，不要求逐對話勾權限。排程仍屬原 subject，不跨對話洩露原操作內容。
+帳號 disabled／binding_revision 變更、移除配對或關閉此 operator policy 時停止繼承。通話仍驗證 exact active voice、原手機配對、來源持有及音訊交接；此設定不構成主動撥號／自動回覆的指令。
+App 444 設定顯示「LINE 語音調度已啟用」，不再顯示個別分享設定；舊 Go 缺此欄位時保留原分享 UI。關閉統一使用權從原 operator 設定移除此帳號後受控重啟 Go，原 direct grants 保持。

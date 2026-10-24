@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"everything-go/internal/linebridge"
 	"os"
 	"path/filepath"
 	"strings"
@@ -152,5 +153,21 @@ func TestLineCorruptEnablementCannotSilentlyDisableExistingService(t *testing.T)
 		if _, e := readLineConfig(data, exe); e == nil {
 			t.Fatal("ambiguous enablement accepted")
 		}
+	}
+}
+
+func TestLineVoiceDispatchDefaultsAreExplicitPinnedOperatorIntent(t *testing.T) {
+	data, exe, cfg := lineConfigFixture(t)
+	const account = "ln_11111111111111111111111111111111"
+	cfg.VoiceDispatchAccounts = []linebridge.VoiceDispatchAccount{{Account: account, Binding: 28}}
+	writeLineConfig(t, data, cfg)
+	actual, err := readLineConfig(data, exe)
+	if err != nil || len(actual.VoiceDispatchAccounts) != 1 || actual.VoiceDispatchAccounts[0].Binding != 28 {
+		t.Fatal(actual, err)
+	}
+	cfg.VoiceDispatchAccounts = append(cfg.VoiceDispatchAccounts, cfg.VoiceDispatchAccounts[0])
+	writeLineConfig(t, data, cfg)
+	if _, err = readLineConfig(data, exe); err == nil {
+		t.Fatal("ambiguous duplicate account accepted")
 	}
 }
