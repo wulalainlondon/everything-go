@@ -560,7 +560,7 @@ func (s *Store) Page(ctx context.Context, a Actor, c Command) (Page, error) {
 	return s.page(ctx, s.db, a, r, c)
 }
 func (s *Store) page(ctx context.Context, q sqlReader, a Actor, r Room, c Command) (Page, error) {
-	allowed := map[string]bool{"message": true, "agent": true, "document": true, "document_version": true, "document_proposal": true, "task": true, "workflow": true, "review": true, "knowledge": true, "decision": true, "attachment": true, "media_comment": true, "schedule": true, "occurrence": true, "effect": true, "notification": true, "reaction": true, "research_source": true}
+	allowed := map[string]bool{"message": true, "agent": true, "document": true, "document_version": true, "document_proposal": true, "task": true, "workflow": true, "review": true, "knowledge": true, "decision": true, "attachment": true, "media_comment": true, "schedule": true, "occurrence": true, "effect": true, "notification": true, "reaction": true, "research_source": true, "human_todo": true}
 	if !allowed[c.Kind] {
 		return Page{}, errors.New("entity_kind_invalid")
 	}

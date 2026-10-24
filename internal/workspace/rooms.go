@@ -149,7 +149,7 @@ func (s *Store) read(ctx context.Context, a Actor, c Command) (Result, error) {
 		if len(snapshot.Members) > 100 {
 			return r, errors.New("member_limit")
 		}
-		for _, kind := range []string{"message", "agent", "document", "document_proposal", "task", "workflow", "review", "knowledge", "decision", "attachment", "media_comment", "schedule", "occurrence", "effect", "notification", "reaction", "research_source"} {
+		for _, kind := range []string{"message", "agent", "document", "document_proposal", "task", "workflow", "review", "knowledge", "decision", "attachment", "media_comment", "schedule", "occurrence", "effect", "notification", "reaction", "research_source", "human_todo"} {
 			page, e := s.page(ctx, tx, a, room, Command{Kind: kind, Limit: 30})
 			if e != nil {
 				return r, e
@@ -244,7 +244,7 @@ func (s *Store) read(ctx context.Context, a Actor, c Command) (Result, error) {
 		// Escaped LIKE searches only explicitly readable room content; neither
 		// catalog counts nor search snippets ever query other rooms first.
 		q = strings.NewReplacer("\\", "\\\\", "%", "\\%", "_", "\\_").Replace(q)
-		rows, err := s.db.QueryContext(ctx, "SELECT "+entityColumns+` FROM entities WHERE room_id=? AND kind IN ('message','document','knowledge','decision','media_comment') AND CAST(body AS TEXT) LIKE ? ESCAPE '\' ORDER BY room_seq DESC LIMIT ?`, room.ID, "%"+q+"%", limit+1)
+		rows, err := s.db.QueryContext(ctx, "SELECT "+entityColumns+` FROM entities WHERE room_id=? AND kind IN ('message','document','knowledge','decision','media_comment','human_todo') AND CAST(body AS TEXT) LIKE ? ESCAPE '\' ORDER BY room_seq DESC LIMIT ?`, room.ID, "%"+q+"%", limit+1)
 		if err != nil {
 			return r, err
 		}
@@ -345,6 +345,8 @@ func (s *Store) mutate(ctx context.Context, tx *sql.Tx, a Actor, r Room, c Comma
 		return s.updateRoom(ctx, tx, a, r, c)
 	case "create_invite", "create_device_invite", "revoke_invite", "update_member", "leave_room":
 		return s.membership(ctx, tx, a, r, c)
+	case "create_human_todo", "update_human_todo", "respond_human_todo", "resolve_human_todo":
+		return s.humanTodoMutation(ctx, tx, a, r, c)
 	case "post_message", "edit_message", "delete_message", "set_reaction", "mark_read", "read_notification":
 		return s.messageMutation(ctx, tx, a, r, c)
 	case "save_document", "accept_document", "propose_document", "resolve_proposal", "restore_document", "propose_knowledge", "resolve_knowledge", "record_decision", "media_comment":

@@ -433,7 +433,7 @@ func (s *Store) taskPrompt(ctx context.Context, q sqlReader, r Room, t Task) (st
 			return "", err
 		}
 		switch ref.Kind {
-		case "message", "message_version", "document_version", "knowledge", "decision", "media_comment", "research_source":
+		case "message", "message_version", "document_version", "knowledge", "decision", "media_comment", "research_source", "human_todo":
 			if t.Role.RoomExclusive && (len(e.Body) > 8000 || b.Len()+len(e.Body) > 64000) {
 				fmt.Fprintf(&b, "\n[%s %s rev=%d hash=%s bytes=%d: not inlined; read with room_read_source using this request ID and offset.]\n", ref.Kind, ref.ID, ref.Revision, ref.Hash, len(e.Body))
 			} else {
