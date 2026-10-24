@@ -51,6 +51,8 @@ import (
 	"everything-go/internal/voicecontrol"
 	"everything-go/internal/voicemediaipc"
 	"everything-go/internal/workitems"
+	"everything-go/internal/workspacepush"
+	"everything-go/internal/workspacetools"
 )
 
 func main() {
@@ -98,6 +100,9 @@ func main() {
 	mdns := flag.Bool("mdns", false, "enable mDNS (_bridge._tcp) registration")
 	mdnsOff := flag.Bool("no-mdns", false, "deprecated: mDNS is disabled by default")
 	disableSearch := flag.Bool("disable-search", false, "disable transcript search and background indexing")
+	workspaceEnabled := flag.Bool("collaboration-workspace", false, "enable scoped collaboration rooms and the isolated guest transport")
+	workspacePushConfig := flag.String("workspace-push-config", "", "private workspace-only FCM profile with exact original Keychain service/account")
+	workspaceToolsConfig := flag.String("workspace-tools-config", "", "private operator-reviewed workspace account profiles; original exact Keychain entries only")
 	disableNativeWatcher := flag.Bool("disable-native-watcher", false, "disable native session discovery outside bridge-created sessions")
 	mode := flag.String("mode", "bridge", "run mode: bridge | index | devices (read-only local device inventory)")
 	indexPathsStdin := flag.Bool("index-paths-stdin", false, "index only newline-delimited transcript paths read from stdin")
@@ -213,6 +218,7 @@ func main() {
 		log.Fatalf("load instance id: %v", err)
 	}
 	cfg := core.Config{
+		WorkspaceEnabled:   *workspaceEnabled,
 		DelegationCapacity: capacity,
 		DelegationHandoff:  handoffConfig,
 		InstanceName:       *instanceName,
@@ -226,12 +232,40 @@ func main() {
 		CodexRemote:        codexRemoteEndpoint(),
 	}
 	hub := core.NewHub(reg, cfg, pairing, *port)
+	if cfg.WorkspaceEnabled && !hub.WorkspaceAvailable() {
+		log.Fatal("explicit collaboration workspace configuration failed; existing storage was preserved")
+	}
+	if *workspacePushConfig != "" {
+		if !cfg.WorkspaceEnabled {
+			log.Fatal("workspace push profile requires collaboration workspace")
+		}
+		sender, err := workspacepush.Load(*workspacePushConfig)
+		if err != nil {
+			log.Fatal("workspace push profile unavailable or invalid")
+		}
+		if err = hub.SetWorkspacePush(sender); err != nil {
+			log.Fatal("workspace push configuration failed")
+		}
+	}
+	if *workspaceToolsConfig != "" {
+		if !*workspaceEnabled {
+			log.Fatal("workspace tool configuration requires collaboration-workspace")
+		}
+		adapters, err := workspacetools.Load(*workspaceToolsConfig)
+		if err != nil {
+			log.Fatal(err)
+		}
+		if err = hub.SetWorkspaceToolAdapters(adapters); err != nil {
+			log.Fatal(err)
+		}
+	}
 	if err := hub.ConfigureNativeResponseCapture(*nativeCapture); err != nil {
 		log.Fatal("native task capture configuration refused")
 	}
 	defer hub.DisableNativeResponseCapture()
 	defer hub.CloseDelegations()
 	defer hub.CloseSessionDispatches()
+	defer hub.CloseWorkspace()
 	remoteDesktopListener := startRemoteDesktop(cfg.TailscaleIP, cfg.DataDir, hub.HTTPAuthorized)
 	if remoteDesktopListener != nil {
 		defer remoteDesktopListener.Close()
@@ -343,6 +377,7 @@ func main() {
 	hub.StartTaskCallbacks(callbackCtx)
 	hub.StartDeviceInventoryAdmin(ctx)
 	hub.StartWorkScheduler(ctx)
+	hub.StartWorkspaceScheduler(callbackCtx)
 	hub.StartMaintenanceRecovery(ctx)
 	hub.StartAutomationScheduler(ctx)
 	hub.StartRelayScheduler(ctx)
@@ -444,6 +479,7 @@ func main() {
 	mux.Handle("/api/drop/v1/uploads", transfers.DropHandler())
 	mux.Handle("/api/drop/v1/uploads/", transfers.DropHandler())
 	mux.HandleFunc("/api/work/v1/items/", hub.ServeWorkAPI)
+	mux.HandleFunc("/api/workspace/v1/guest", hub.ServeWorkspaceGuest)
 	mux.HandleFunc("/api/inbox/v1/files/", hub.ServeInboxDownload)
 	mux.HandleFunc("/api/events/v1/events", hub.ServeEventAPI)
 	mux.HandleFunc("/api/automation/v1/", hub.ServeAutomationAPI)

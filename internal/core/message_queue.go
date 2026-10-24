@@ -22,6 +22,7 @@ import (
 )
 
 type queuedPayload struct {
+	WorkspaceTask       *workspaceQueueBinding     `json:"workspace_task,omitempty"`
 	VoiceContext        bool                       `json:"voice_context,omitempty"`
 	VoiceID             string                     `json:"voice_id,omitempty"`
 	VoiceThread         string                     `json:"voice_thread,omitempty"`
@@ -235,17 +236,27 @@ func (h *Hub) runQueuedMessage(s *session.Session, requestID string) {
 		h.Emit(backend.NewError(s.ID, requestID, "invalid_queued_message", "Queued message could not be decoded"))
 		return
 	}
+	if payload.WorkspaceTask != nil {
+		p, target, err := h.validateWorkspaceNative(context.Background(), payload.WorkspaceTask.RoomID, payload.WorkspaceTask.TaskID)
+		if err != nil || target != s || p.Task.RequestID != requestID {
+			h.Emit(backend.NewError(s.ID, requestID, "room_authorization_changed", "Room authorization or original target changed before native execution"))
+			return
+		}
+		if payload.ExpectedTarget != nil && payload.ExpectedTarget.ThreadID == "" && p.Task.NativeThreadID != "" && h.workspace.KnownThread(context.Background(), s.ID) == p.Task.NativeThreadID {
+			payload.ExpectedTarget.ThreadID = p.Task.NativeThreadID
+		}
+	}
 	if !payload.ExpectedTarget.matches(s) {
 		h.Emit(backend.NewError(s.ID, requestID, "dispatch_target_changed", "Target thread or configuration changed while waiting; this instruction was not sent"))
 		return
 	}
-	if payload.PartnerRole != nil {
+	if payload.PartnerRole != nil && payload.WorkspaceTask == nil {
 		if err := h.intakeWritePolicy(s); err != nil {
 			h.Emit(backend.NewError(s.ID, requestID, "partner_role_scope_changed", "Role scope changed before native consumption"))
 			return
 		}
 	}
-	if payload.FormalIntake {
+	if payload.FormalIntake && payload.WorkspaceTask == nil {
 		if err := h.intakeWritePolicy(s); err != nil {
 			h.Emit(backend.NewError(s.ID, requestID, "intake_scope_changed", "Original task intake permission changed before native consumption"))
 			return
@@ -290,6 +301,12 @@ func (h *Hub) runQueuedMessage(s *session.Session, requestID string) {
 		return
 	}
 	sendContext := backend.WithPartnerRole(backend.WithVisualPresentation(context.Background(), payload.VisualPresentation), payload.PartnerRole)
+	if payload.WorkspaceTask != nil {
+		if _, target, err := h.validateWorkspaceNative(context.Background(), payload.WorkspaceTask.RoomID, payload.WorkspaceTask.TaskID); err != nil || target != s {
+			h.Emit(backend.NewError(s.ID, requestID, "room_authorization_changed", "Room authority changed at Send"))
+			return
+		}
+	}
 	if payload.ExternalReviewOnly {
 		grant, err := h.dispatches.Grant(context.Background(), "peer:"+payload.ExternalPeer)
 		if err != nil || !grant.Allows(h.cfg.InstanceID, h.cfg.InstanceID, s.ID) {

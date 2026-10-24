@@ -94,6 +94,9 @@ func (h *Hub) delegateSession(parent *session.Session, parentRequestID, toolCall
 	if parent == nil || parentRequestID == "" || toolCallID == "" || parent.Backend() != backend.Codex {
 		return backend.DelegationReceipt{}, errors.New("delegation_parent_invalid")
 	}
+	if h.workspaceReservedSession(parent.ID) || h.workspaceManagedRequest(parent.ID, parentRequestID) {
+		return backend.DelegationReceipt{}, errors.New("room_workflow_owns_handoffs")
+	}
 	registered, ok := h.registry.Get(parent.ID)
 	if !ok || registered != parent {
 		return backend.DelegationReceipt{}, errors.New("delegation_parent_not_active")

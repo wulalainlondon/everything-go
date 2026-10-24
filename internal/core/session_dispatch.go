@@ -18,6 +18,9 @@ import (
 )
 
 func (h *Hub) controllerCaller(c backend.SessionControlCaller) error {
+	if c.Parent != nil && (h.workspaceReservedSession(c.Parent.ID) || h.workspaceManagedRequest(c.Parent.ID, c.RequestID)) {
+		return errors.New("room_controller_scope_forbidden")
+	}
 	if h.dispatches == nil || c.Parent == nil || c.Parent.Backend() != backend.Codex || c.RequestID == "" || c.TurnID == "" || c.ToolCallID == "" {
 		return errors.New("controller_caller_invalid")
 	}

@@ -257,6 +257,9 @@ func (h *Hub) handleTaskAPI(ctx context.Context, c *Client, raw []byte) {
 	c.enqueueEvent(response)
 }
 func (h *Hub) Authorize(ctx context.Context, c taskapi.VerifiedContext, r taskapi.Request) (taskapi.Locator, error) {
+	if c.SourceSessionID != "" && (h.workspaceReservedSession(c.SourceSessionID) || h.workspaceManagedRequest(c.SourceSessionID, c.SourceRequestID)) {
+		return taskapi.Locator{}, taskapi.Failure("permission", "known_none", "request_scope_change")
+	}
 	var in apiInput
 	if json.Unmarshal(r.Input, &in) != nil {
 		return taskapi.Locator{}, taskapi.Failure("invalid_argument", "known_none", "correct_input")

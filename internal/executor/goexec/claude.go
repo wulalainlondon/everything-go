@@ -922,7 +922,7 @@ func (c *Claude) readStdout(s *session.Session, p *proc, stdout interface{ Read(
 			}
 			if evt.Subtype == "init" && c.pmProvider != nil {
 				pm, err := c.pmProvider.PMConfiguration(s.ID)
-				if err != nil || (pm != nil && !validPMTools(evt.Tools)) {
+				if err != nil || (pm != nil && !validPMPolicyTools(pm,evt.Tools)) {
 					p.cancel()
 					c.sink.Emit(backend.NewError(s.ID, p.currentReqID(), "pm_tool_policy_mismatch", "PM runtime exposed unexpected tools; execution was stopped."))
 					return

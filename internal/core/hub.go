@@ -54,11 +54,13 @@ import (
 	"everything-go/internal/voicetransfer"
 	"everything-go/internal/widgetaccess"
 	"everything-go/internal/workitems"
+	"everything-go/internal/workspace"
 )
 
 // Config carries the connection-identity fields surfaced in hello_ack so the
 // app can label the bridge and respect its filesystem jail.
 type Config struct {
+	WorkspaceEnabled   bool
 	DelegationHandoff  *handoff.Config
 	DelegationCapacity *delegation.CapacityConfig
 	InstanceName       string
@@ -79,6 +81,17 @@ type Config struct {
 // the executor.Sink (Emit broadcasts an event to connected clients, or buffers
 // it when none are connected so a reconnecting client can recover it).
 type Hub struct {
+	workspace            *workspace.Store
+	workspaceScheduler   atomic.Bool
+	workspaceWake        chan struct{}
+	workspaceCancel      context.CancelFunc
+	workspaceWorkers     sync.WaitGroup
+	workspaceAdapters    map[string]workspace.ToolAdapter
+	workspacePush        workspace.PushSender
+	workspaceRequests    sync.Map
+	workspaceEffectWake  chan struct{}
+	workspaceMCPURL      string
+	workspaceMCP         *http.Server
 	partners             *partners.Store
 	transfers            *voicetransfer.Store
 	interactionScheduler atomic.Bool
@@ -222,6 +235,8 @@ type Hub struct {
 func NewHub(reg *session.Registry, cfg Config, pairing *governance.Pairing, port int) *Hub {
 	cfg.Port = port
 	h := &Hub{
+		workspaceWake:       make(chan struct{}, 1),
+		workspaceEffectWake: make(chan struct{}, 1),
 		recapJobs:           make(chan struct{}, 4),
 		toolOperations:      toolenv.Open(cfg.DataDir),
 		registry:            reg,
@@ -254,6 +269,14 @@ func NewHub(reg *session.Registry, cfg Config, pairing *governance.Pairing, port
 		h.partners = store
 	} else {
 		log.Printf("[partners] storage unavailable: %v", err)
+	}
+	if cfg.WorkspaceEnabled {
+		if store, err := workspace.Open(cfg.DataDir, cfg.InstanceID); err == nil {
+			h.workspace = store
+			store.SetOwnerGrantValidator(h.workspaceGrantCurrent)
+		} else {
+			log.Printf("[workspace] storage unavailable; capability disabled")
+		}
 	}
 	if store, err := taskinteraction.Open(cfg.DataDir); err != nil {
 		log.Printf("[interaction] storage unavailable")
@@ -338,6 +361,13 @@ func NewHub(reg *session.Registry, cfg Config, pairing *governance.Pairing, port
 // as its Sink, so the Hub is built first).
 func (h *Hub) SetExecutor(e executor.Executor) {
 	h.exec = e
+	if h.messageQueue != nil {
+		if requests, err := h.messageQueue.ActiveWorkspaceRequests(); err == nil {
+			for _, r := range requests {
+				h.workspaceRequests.Store(r[0]+"\x00"+r[1], true)
+			}
+		}
+	}
 	h.restoreMaintenanceHolds()
 	h.resumeNotificationReplies()
 	h.resumeQueuedMessages()
@@ -590,6 +620,7 @@ func (h *Hub) connectedDeviceIDs(exclude string) []string {
 // event for replay on the next reconnect (the offline-recovery path). Safe for
 // concurrent use.
 func (h *Hub) Emit(event any) {
+	h.observeWorkspaceResearch(event)
 	if e, ok := event.(protocol.InteractionResolved); ok {
 		h.observeInteractionResolution(e)
 	}
@@ -688,7 +719,11 @@ func (h *Hub) Emit(event any) {
 		mediaEvent.URL = h.mediaScan.LocalURL(mediaEvent.Path)
 		event = mediaEvent
 	}
-	logOutbound(event)
+	if h.workspacePrivateNativeEvent(event) {
+		logOutbound(workspaceWire{Type: "workspace_native_event"})
+	} else {
+		logOutbound(event)
+	}
 	if h.goals.Apply(event) {
 		switch e := event.(type) {
 		case protocol.GoalUpdate:
@@ -753,6 +788,11 @@ func (h *Hub) Emit(event any) {
 	// persist-on-turn-complete trigger.
 	switch event.(type) {
 	case protocol.SessionUUID:
+		if observed, ok := event.(protocol.SessionUUID); ok && h.workspace != nil {
+			if current, found := h.registry.Get(observed.SessionID); found && current.ResumeID() == observed.ClaudeUUID {
+				_ = h.workspace.PinInitialThread(context.Background(), observed.SessionID, observed.ClaudeUUID)
+			}
+		}
 		if observed, ok := event.(protocol.SessionUUID); ok && h.partners != nil {
 			if current, found := h.registry.Get(observed.SessionID); found && current.ResumeID() == observed.ClaudeUUID {
 				if err := h.partners.PinInitialThread(observed.SessionID, observed.ClaudeUUID); err != nil {

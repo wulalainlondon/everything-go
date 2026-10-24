@@ -7,6 +7,7 @@ type PMConfiguration struct {
 	Instructions, MCPURL, Token, RuntimeDir string
 	Tools                                   []map[string]any
 	Worker                                  bool
+	Room                                    bool // no inherited filesystem, shell, apps, plugins or delegation
 	Sandbox                                 string
 	RequestID                               string
 }

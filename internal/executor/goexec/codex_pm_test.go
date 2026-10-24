@@ -125,3 +125,69 @@ func TestCodexPMDeclinesApproval(t *testing.T) {
 		}
 	}
 }
+
+func TestRoomCodexStartAndResumeHaveIdenticalReadOnlyIsolation(t *testing.T) {
+	for _, resume := range []string{"", "native-thread"} {
+		t.Run("resume_"+resume, func(t *testing.T) {
+			c := NewCodex(&capSink{}, "codex")
+			c.appServerMode = "daemon"
+			c.SetPMProvider(codexPMFixtureProvider{p: &backend.PMConfiguration{Room: true, Worker: true, Sandbox: "read-only", RuntimeDir: t.TempDir(), Instructions: "FIXED PM ROLE", Tools: []map[string]any{{"name": "room_get_context", "description": "Read context", "inputSchema": map[string]any{"type": "object"}}}}})
+			writer := &rpcCaptureWriter{writes: make(chan []byte, 8)}
+			c.rpc.setWriter(writer)
+			s := session.NewRegistry().Create("pm_test", "PM", t.TempDir(), backend.Codex, "room-user-model", "read-only", resume)
+			done := make(chan error, 1)
+			go func() { done <- c.ensureThread(s, c.state(s.ID)) }()
+			for i := 0; i < 2; i++ {
+				var frame struct {
+					ID     int            `json:"id"`
+					Method string         `json:"method"`
+					Params map[string]any `json:"params"`
+				}
+				select {
+				case raw := <-writer.writes:
+					if err := json.Unmarshal(raw, &frame); err != nil {
+						t.Fatal(err)
+					}
+				case <-time.After(time.Second):
+					t.Fatal("missing policy RPC")
+				}
+				response := `{"config":{"mcp_servers":{"dangerous":{"command":"ignored"}}}}`
+				if i == 0 {
+					if frame.Method != "config/read" {
+						t.Fatal(frame.Method)
+					}
+				} else {
+					expected := "thread/start"
+					if resume != "" {
+						expected = "thread/resume"
+					}
+					if frame.Method != expected || frame.Params["sandbox"] != "read-only" || frame.Params["baseInstructions"] != nil || frame.Params["developerInstructions"] != "FIXED PM ROLE" || frame.Params["model"] != "room-user-model" {
+						t.Fatal(frame)
+					}
+					cfg := frame.Params["config"].(map[string]any)
+					if cfg["web_search"] != "live" || cfg["project_doc_max_bytes"] != float64(0) {
+						t.Fatal("room research/isolation drift", cfg)
+					}
+					features := cfg["features"].(map[string]any)
+					for _, name := range []string{"shell_tool", "unified_exec", "multi_agent", "plugins", "apps", "memories", "image_generation", "view_image", "hooks"} {
+						if features[name] != false {
+							t.Fatal("room feature leaked", name, features)
+						}
+					}
+					if cfg["mcp_servers"].(map[string]any)["dangerous"].(map[string]any)["enabled"] != false || cfg["agents"].(map[string]any)["enabled"] != false {
+						t.Fatal(cfg)
+					}
+					encoded, _ := json.Marshal(cfg)
+					if !strings.Contains(string(encoded), `"excluded_tool_namespaces":["functions"]`) {
+						t.Fatal(string(encoded))
+					}
+					response = `{"thread":{"id":"native-thread"}}`
+				}
+				c.rpc.dispatchResponse(json.RawMessage(fmt.Sprintf(`{"id":%d,"result":%s}`, frame.ID, response)))
+			}
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}

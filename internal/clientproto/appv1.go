@@ -11,6 +11,7 @@ import (
 	"everything-go/internal/session"
 	"everything-go/internal/toolenv"
 	"everything-go/internal/workitems"
+	"everything-go/internal/workspace"
 )
 
 // AppV1 builds outbound frames for the mobile app's current JSON protocol.
@@ -22,6 +23,7 @@ func NewAppV1() AppV1 { return AppV1{} }
 
 // Command is the protocol-neutral shape the core router consumes.
 type Command struct {
+	Workspace *workspace.Command
 	// Internal admission hint; never populated by the wire adapter.
 	AutoVoicePhoto  bool
 	Partner         *partners.Request
@@ -212,6 +214,7 @@ type Command struct {
 
 func (AppV1) ParseCommand(in protocol.Inbound) Command {
 	return Command{
+		Workspace:       in.Workspace,
 		Partner:         in.Partner,
 		ToolEnvironment: in.ToolEnvironment,
 		PM:              in.PM,

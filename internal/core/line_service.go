@@ -44,6 +44,9 @@ func (h *Hub) LineSubjects() []linebridge.Subject {
 	return out
 }
 func (h *Hub) LineSessionAllowed(id string) bool {
+	if h.workspaceReservedSession(id) {
+		return false
+	}
 	_, ok := h.registry.Get(id)
 	return ok && !strings.HasPrefix(id, "s_dg_") && h.controls.MobileMayWrite(id)
 }
@@ -88,6 +91,9 @@ func (h *Hub) ServeLineAPI(w http.ResponseWriter, r *http.Request) {
 func (h *Hub) ExecuteLineTool(ctx context.Context, caller backend.SessionControlCaller, method string, args json.RawMessage) (any, error) {
 	if h.lineService == nil || caller.Parent == nil || caller.ToolCallID == "" {
 		return nil, linebridge.Fail("line_caller_unavailable")
+	}
+	if h.workspaceReservedSession(caller.Parent.ID) || h.workspaceManagedRequest(caller.Parent.ID, caller.RequestID) {
+		return nil, linebridge.Fail("line_caller_not_owned")
 	}
 	registered, ok := h.registry.Get(caller.Parent.ID)
 	if !ok || registered != caller.Parent || strings.HasPrefix(registered.ID, "s_dg_") || !h.controls.MobileMayWrite(registered.ID) {

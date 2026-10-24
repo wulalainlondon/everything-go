@@ -64,6 +64,9 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		c.enqueueEvent(h.client.Error("", "", "Pairing required before this device can use the bridge"))
 		return
 	}
+	if h.rejectRoomSessionCommand(c, cmd) {
+		return
+	}
 	if h.rejectToolMaintenanceWrite(c, cmd) {
 		return
 	}
@@ -77,6 +80,8 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		}
 	}
 	switch cmd.Kind {
+	case "workspace_request":
+		h.handleWorkspace(c, cmd)
 	case "partner_profile_request":
 		h.handlePartnerProfile(c, cmd)
 	case "task_api_request":
@@ -130,6 +135,9 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		}
 		if h.partners != nil && h.pairedTaskDevice(c) != "" {
 			helloInput.Capabilities = append(helloInput.Capabilities, "teammate_profile_v1")
+		}
+		if h.workspace != nil && h.pairedTaskDevice(c) != "" {
+			helloInput.Capabilities = append(helloInput.Capabilities, "collaboration_workspace_v1")
 		}
 		if h.sharedReadAuthorized(c) {
 			helloInput.Capabilities = append(helloInput.Capabilities, "session_read_sync_v1")

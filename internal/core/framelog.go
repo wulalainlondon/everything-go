@@ -35,6 +35,10 @@ func logOutbound(event any) {
 	if !frameLog {
 		return
 	}
+	if _, private := event.(interface{ PrivatePayload() }); private {
+		log.Printf(">> workspace frame [private payload redacted]")
+		return
+	}
 	if voice, ok := event.(protocol.RealtimeVoiceEvent); ok {
 		log.Printf(">> codex_voice_event session=%s state=%s signaling=[redacted]", voice.SessionID, voice.State)
 		return

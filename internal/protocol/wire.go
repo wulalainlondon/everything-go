@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"everything-go/internal/coordination"
 	"everything-go/internal/partners"
+	"everything-go/internal/workspace"
 
 	"everything-go/internal/eventinbox"
 	"everything-go/internal/identity"
@@ -22,6 +23,7 @@ import (
 // All fields are optional; only `Type` is always present. New command fields can
 // be appended without breaking older ones.
 type Inbound struct {
+	Workspace       *workspace.Command                 `json:"workspace,omitempty"`
 	Partner         *partners.Request                  `json:"partner,omitempty"`
 	ToolEnvironment *toolenv.Request                   `json:"tool_environment,omitempty"`
 	PM              *coordination.Command              `json:"pm,omitempty"`
