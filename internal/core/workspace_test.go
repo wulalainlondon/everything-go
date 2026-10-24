@@ -420,3 +420,46 @@ func TestWorkspaceAttachmentReadKeepsActionAndExactBytesOnWire(t *testing.T) {
 		t.Fatal("range read changed bytes")
 	}
 }
+
+func TestWorkspaceNativeStreamAndLegacyCatalogRespectRoomMembership(t *testing.T) {
+	f := workspaceSetup(t)
+	room := f.room("Scoped native room")
+	entity := f.agent(room, "Scoped worker")
+	var agent workspace.Agent
+	if err := json.Unmarshal(entity.Body, &agent); err != nil {
+		t.Fatal(err)
+	}
+	var client *Client
+	f.h.mu.RLock()
+	for c := range f.h.clients {
+		client = c
+	}
+	f.h.mu.RUnlock()
+	if client == nil {
+		t.Fatal("no actual paired client")
+	}
+	data, err := marshalEvent(protocol.NewTextChunk(agent.SessionID, "r_fixture_native", "private-native-body"), f.h.cfg.InstanceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !f.h.workspaceNativeFrameAllowed(client, data) {
+		t.Fatal("current member stream denied")
+	}
+	for _, summary := range f.h.sessionSummaries() {
+		if summary.ID == agent.SessionID {
+			t.Fatal("room worker appeared as ordinary legacy conversation")
+		}
+	}
+	invite := f.call(workspace.Command{Action: "create_invite", RoomID: room.ID, Data: wireData(map[string]any{"role": "admin", "expires_at": time.Now().Add(time.Hour).UnixMilli()})})
+	credential := strings.Repeat("fixture-guest-credential-", 3)
+	guest, _, err := f.h.workspace.AcceptInvite(f.ctx, invite.InviteCode, credential, "fixture-guest-device", "Guest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := f.call(workspace.Command{Action: "snapshot", RoomID: room.ID}).Snapshot.Room
+	f.call(workspace.Command{Action: "transfer_owner", RoomID: room.ID, ExpectedRevision: &current.Revision, Data: wireData(map[string]any{"principal_id": guest.ID})})
+	f.call(workspace.Command{Action: "leave_room", RoomID: room.ID})
+	if f.h.workspaceNativeFrameAllowed(client, data) {
+		t.Fatal("departed owner received room native content through scoped legacy wire")
+	}
+}

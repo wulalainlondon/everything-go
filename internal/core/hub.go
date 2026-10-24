@@ -770,7 +770,11 @@ func (h *Hub) Emit(event any) {
 	h.mu.RUnlock()
 
 	if n == 0 {
-		h.offline.Append(event)
+		// Room-native stream fragments have their own durable room/task source.
+		// Do not leave private content in the legacy shared replay journal.
+		if !h.workspaceRoomNativeEvent(event) {
+			h.offline.Append(event)
+		}
 	} else {
 		h.mu.RLock()
 		clients := make([]*Client, 0, len(h.clients))

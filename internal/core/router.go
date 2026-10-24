@@ -1406,7 +1406,13 @@ func (h *Hub) sendResumable(c *Client, limit int) {
 }
 
 func (h *Hub) sessionSummaries() []protocol.SessionSummary {
-	sessions := h.registry.List()
+	all := h.registry.List()
+	sessions := make([]*session.Session, 0, len(all))
+	for _, s := range all {
+		if !strings.HasPrefix(s.ID, "s_cw_") {
+			sessions = append(sessions, s)
+		}
+	}
 	out := make([]protocol.SessionSummary, 0, len(sessions))
 	runtimeIDs := make([]string, 0, len(sessions))
 	for _, s := range sessions {
@@ -1517,6 +1523,9 @@ func (c *Client) enqueueEventUnlogged(event any) {
 	data, err := marshalEvent(event, c.wireAuthority())
 	if err != nil {
 		log.Printf("enqueueEvent marshal: %v", err)
+		return
+	}
+	if !c.hub.workspaceNativeFrameAllowed(c, data) {
 		return
 	}
 	c.enqueue(data)

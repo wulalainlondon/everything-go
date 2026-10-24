@@ -433,8 +433,18 @@ func (h *Hub) rejectRoomSessionCommand(c *Client, cmd clientproto.Command) bool 
 	if h.workspace == nil || cmd.SessionID == "" {
 		return false
 	}
-	if _, exclusive := h.workspace.SessionRoom(context.Background(), cmd.SessionID); !exclusive {
+	room, exclusive := h.workspace.SessionRoom(context.Background(), cmd.SessionID)
+	if !exclusive {
 		return false
+	}
+	a, ok := h.workspaceOwner(c)
+	if !ok {
+		c.enqueueEventUnlogged(h.client.Error("", cmd.RequestID, "workspace_permission_denied"))
+		return true
+	}
+	if _, _, err := h.workspace.Authorize(context.Background(), a, room, "read"); err != nil {
+		c.enqueueEventUnlogged(h.client.Error("", cmd.RequestID, "workspace_permission_denied"))
+		return true
 	}
 	switch cmd.Kind {
 	case "message", "steer_message", "new_session", "clear_session", "close_session", "fork_session", "switch_session_config", "set_effort", "codex_voice_start", "codex_voice_text", "voice_call_prepare", "voice_transfer_control":
@@ -633,4 +643,42 @@ func workspaceProspectivePath(path string) (string, error) {
 		suffix = append(suffix, filepath.Base(p))
 		p = parent
 	}
+}
+
+// Native events remain original-session events, but a paired owner who has left
+// the room cannot recover room content through the legacy stream or replay.
+func (h *Hub) workspaceNativeFrameAllowed(c *Client, data []byte) bool {
+	if h.workspace == nil {
+		return true
+	}
+	var header struct {
+		SessionID string `json:"session_id"`
+	}
+	if json.Unmarshal(data, &header) != nil || !strings.HasPrefix(identity.WireSessionID(header.SessionID), "s_cw_") {
+		return true
+	}
+	room, exclusive := h.workspace.SessionRoom(context.Background(), identity.WireSessionID(header.SessionID))
+	if !exclusive {
+		return false
+	}
+	a, ok := h.workspaceOwner(c)
+	if !ok {
+		return false
+	}
+	_, _, err := h.workspace.Authorize(context.Background(), a, room, "read")
+	return err == nil
+}
+
+func (h *Hub) workspaceRoomNativeEvent(event any) bool {
+	if h.workspace == nil {
+		return false
+	}
+	data, err := json.Marshal(event)
+	if err != nil {
+		return false
+	}
+	var header struct {
+		SessionID string `json:"session_id"`
+	}
+	return json.Unmarshal(data, &header) == nil && strings.HasPrefix(identity.WireSessionID(header.SessionID), "s_cw_")
 }

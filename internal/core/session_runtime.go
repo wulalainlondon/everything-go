@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"log"
+	"strings"
 
 	"everything-go/internal/fcm"
 	"everything-go/internal/liveactivity"
@@ -38,6 +39,9 @@ func (h *Hub) runtimeSnapshot(deviceID string) protocol.SessionRuntimeSnapshot {
 	ids := make([]string, 0, len(sessions))
 	for _, s := range sessions {
 		snap := s.Snapshot()
+		if strings.HasPrefix(snap.ID, "s_cw_") {
+			continue
+		}
 		ids = append(ids, snap.ID)
 		phase := snap.State.String()
 		if phase == "streaming" {
