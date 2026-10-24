@@ -9,6 +9,8 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -427,9 +429,16 @@ func TestWorkspaceNativeReadToolsRejectUnpinnedSourceAndExpiredRoomToken(t *test
 }
 
 func TestWorkspaceSecretsExcludedFromOptionalFrameLogs(t *testing.T) {
-	prior := frameLog
-	frameLog = true
-	defer func() { frameLog = prior }()
+	// Logging is a startup-only setting. Exercise it in a fresh test process
+	// instead of racing live actor callbacks by mutating a package global.
+	if os.Getenv("BRIDGE_FRAMELOG_TEST_CHILD") != "1" {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestWorkspaceSecretsExcludedFromOptionalFrameLogs$")
+		cmd.Env = append(os.Environ(), "BRIDGE_FRAMELOG_TEST_CHILD=1", "EG_FRAME_LOG=1")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("frame-log child: %v\n%s", err, out)
+		}
+		return
+	}
 	var out bytes.Buffer
 	old := log.Writer()
 	log.SetOutput(&out)
