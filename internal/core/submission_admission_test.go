@@ -80,7 +80,10 @@ func TestKnownBusyRaceReturnsOriginalInputToFIFOWithoutFailure(t *testing.T) {
 	e.race.Store(true)
 	h.SetExecutor(e)
 	c := newTestClient(h)
-	fe.onSend = func(s *session.Session, id, _ string) { h.Emit(protocol.NewDone(s.ID, id)) }
+	// enqueueTestMessage waits for a later message_ack and may consume an
+	// earlier done frame. Observe the native submission order independently.
+	starts := make(chan string, 3)
+	fe.onSend = func(s *session.Session, id, _ string) { starts <- id; h.Emit(protocol.NewDone(s.ID, id)) }
 	enqueueTestMessage(t, h, c, "a")
 	deadline := time.After(2 * time.Second)
 	for {
@@ -102,8 +105,13 @@ func TestKnownBusyRaceReturnsOriginalInputToFIFOWithoutFailure(t *testing.T) {
 	// Wake the original actor gate by appending another ordinary input.
 	enqueueTestMessage(t, h, c, "c")
 	for _, id := range []string{"a", "b", "c"} {
-		if got := waitForType(t, c, "done")["request_id"]; got != id {
-			t.Fatal("FIFO changed", got, id)
+		select {
+		case got := <-starts:
+			if got != id {
+				t.Fatal("FIFO changed", got, id)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("native input was not submitted", id)
 		}
 	}
 	if e.sends.Load() != 3 {
