@@ -42,7 +42,7 @@ func ScanTranscriptCatalog(roots map[string]string) TranscriptCatalog {
 			if d.IsDir() {
 				return nil
 			}
-			name := strings.TrimSuffix(d.Name(), ".gz")
+			name := strings.TrimSuffix(strings.TrimSuffix(d.Name(), ".gz"), ".zst")
 			if !strings.HasSuffix(name, ".jsonl") {
 				return nil
 			}
@@ -90,6 +90,9 @@ func (c TranscriptCatalog) MissingPath(backend, path string) bool {
 		return false
 	}
 	if _, err = os.Lstat(abs + ".gz"); !os.IsNotExist(err) {
+		return false
+	}
+	if _, err = os.Lstat(abs + ".zst"); !os.IsNotExist(err) {
 		return false
 	}
 	// Recheck source availability; unplugging a root is never a deletion.

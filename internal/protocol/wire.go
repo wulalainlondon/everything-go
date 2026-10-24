@@ -823,10 +823,11 @@ func NewSessionCommandFailed(sessionID, requestID, message string, queueLength i
 // --- Streaming / turn events (session-scoped) ------------------------------
 
 type TextChunk struct {
-	Type      string `json:"type"`
-	SessionID string `json:"session_id"`
-	RequestID string `json:"request_id,omitempty"`
-	Content   string `json:"content"`
+	Type         string `json:"type"`
+	SessionID    string `json:"session_id"`
+	RequestID    string `json:"request_id,omitempty"`
+	Content      string `json:"content"`
+	SourceItemID string `json:"source_item_id,omitempty"`
 }
 
 func NewTextChunk(sessionID, reqID, content string) TextChunk {

@@ -42,3 +42,34 @@ func TestNativeCatalogDeletionNeedsTwoScansAndProtectsDurableWork(t *testing.T) 
 		t.Fatal("deleted imported row retained")
 	}
 }
+
+func TestBridgeCreatedNativeDeletionKeepsHistoricalAndQueuedBindings(t *testing.T) {
+	h, _ := newTestHub(t)
+	root := t.TempDir()
+	opts := nativewatch.Options{CodexSessionsDir: root}
+	missing := "12345678-1234-1234-1234-123456789abc"
+	old := "22345678-1234-1234-1234-123456789abc"
+	h.registry.Create("s_deleted", "deleted", "/", "codex", "", "", missing)
+	historical := h.registry.Create("s_historical", "history", "/", "codex", "", "", missing)
+	historical.AddHistoricalResumeID(old)
+	if err := os.WriteFile(filepath.Join(root, "rollout-2026-01-01-"+old+".jsonl.zst"), []byte("fixture"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	h.registry.Create("s_queued", "queued", "/", "codex", "", "", missing)
+	if _, _, err := h.messageQueue.Enqueue(messagequeue.Entry{SessionID: "s_queued", RequestID: "r_keep", Content: "keep", Payload: []byte(`{}`)}); err != nil {
+		t.Fatal(err)
+	}
+	previous, n := h.reconcileNativeCatalog(opts, nil)
+	if n != 0 {
+		t.Fatal("retired on first scan")
+	}
+	_, n = h.reconcileNativeCatalog(opts, previous)
+	if n != 1 {
+		t.Fatalf("retired=%d want1", n)
+	}
+	for _, id := range []string{"s_historical", "s_queued"} {
+		if _, ok := h.registry.Get(id); !ok {
+			t.Fatalf("protected row %s lost", id)
+		}
+	}
+}

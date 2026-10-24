@@ -69,7 +69,7 @@ func (c *Codex) LoadHistory(resumeID string, opts history.Opts) (*history.Result
 	if fi, err := os.Stat(path); err == nil && !fi.IsDir() {
 		key := history.FileKey{Path: path, MtimeNS: fi.ModTime().UnixNano(), Size: fi.Size()}
 		// Reparse older tails whose typed tool-output parts were saved empty.
-		cacheName := "codex:turns-v4:" + resumeID
+		cacheName := "codex:turns-v5-item-ids:" + resumeID
 		if messages, ok := history.DefaultCache().Load(cacheName, key); ok {
 			if !opts.IncludeThinking {
 				messages = history.StripThinkingBlocks(messages)
@@ -380,6 +380,7 @@ func parseCodexHistoryWindow(lines []history.TailLine, resumeID string, truncate
 	}
 
 	pendingCommentary := ""
+	var pendingCommentaryBlocks []map[string]any
 	pendingCommentaryLine := 0
 	var pendingCommentaryTS int64
 	flushPendingCommentary := func() {
@@ -389,20 +390,22 @@ func parseCodexHistoryWindow(lines []history.TailLine, resumeID string, truncate
 		message := history.CompleteMsg(
 			"codex", resumeID, "codex:"+resumeID+":line:"+itoa(pendingCommentaryLine),
 			"assistant", pendingCommentary, pendingCommentaryTS,
-			[]map[string]any{{"type": "text", "text": pendingCommentary}},
+			pendingCommentaryBlocks,
 		)
 		message["history_read_result_verified"] = false
 		messages = append(messages, message)
 		pendingCommentary = ""
+		pendingCommentaryBlocks = nil
 	}
 	attachPendingCommentary := func(blocks []map[string]any) []map[string]any {
 		if pendingCommentary == "" {
 			return blocks
 		}
 		merged := make([]map[string]any, 0, len(blocks)+1)
-		merged = append(merged, map[string]any{"type": "text", "text": pendingCommentary})
+		merged = append(merged, pendingCommentaryBlocks...)
 		merged = append(merged, blocks...)
 		pendingCommentary = ""
+		pendingCommentaryBlocks = nil
 		return merged
 	}
 
@@ -435,6 +438,7 @@ func parseCodexHistoryWindow(lines []history.TailLine, resumeID string, truncate
 		ts := parseCodexISOms(rc.row.Timestamp)
 		if role == "assistant" && payload.Phase == "commentary" {
 			pendingCommentary = appendCodexHistoryCommentary(pendingCommentary, text)
+			pendingCommentaryBlocks = appendNativeCommentaryBlock(pendingCommentaryBlocks, text, payload.ID)
 			pendingCommentaryLine = rc.lineNo
 			pendingCommentaryTS = ts
 			continue
@@ -445,6 +449,9 @@ func parseCodexHistoryWindow(lines []history.TailLine, resumeID string, truncate
 			flushPendingCommentary()
 		}
 		blocks := []map[string]any{{"type": "text", "text": text}}
+		if role == "assistant" && payload.ID != "" {
+			blocks[0]["source_item_id"] = payload.ID
+		}
 		if role == "assistant" {
 			blocks = attachPendingCommentary(blocks)
 		}
@@ -477,6 +484,7 @@ type codexHistoryRow struct {
 }
 
 type codexHistoryPayload struct {
+	ID      string          `json:"id"`
 	Type    string          `json:"type"`
 	Role    string          `json:"role"`
 	Phase   string          `json:"phase"`

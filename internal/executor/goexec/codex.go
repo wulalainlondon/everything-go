@@ -1343,14 +1343,18 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 			// intermediate assistant updates), not private model reasoning.  Sending
 			// it as thinking_chunk buries every live update in a collapsed thinking
 			// card and makes an active Codex turn look as if it is not streaming.
-			c.sink.Emit(backend.NewTextChunk(s.ID, reqID, p.Delta))
+			chunk := backend.NewTextChunk(s.ID, reqID, p.Delta)
+			chunk.SourceItemID = p.ItemID
+			c.sink.Emit(chunk)
 			return
 		}
 		c.appendCodexAgentOutput(st, p.ThreadID, p.Delta)
 		st.mu.Lock()
 		st.accumulatedText += p.Delta
 		st.mu.Unlock()
-		c.sink.Emit(backend.NewTextChunk(s.ID, reqID, p.Delta))
+		chunk := backend.NewTextChunk(s.ID, reqID, p.Delta)
+		chunk.SourceItemID = p.ItemID
+		c.sink.Emit(chunk)
 
 	case "item/reasoning/textDelta":
 		if !isRootThread {

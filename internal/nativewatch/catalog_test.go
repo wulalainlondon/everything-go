@@ -40,3 +40,16 @@ func TestCatalogRequiresCompleteReadableOriginalSource(t *testing.T) {
 		t.Fatal("offline source treated as deletion")
 	}
 }
+
+func TestCatalogRetainsZstdArchivedTranscript(t *testing.T) {
+	root := t.TempDir()
+	id := "12345678-1234-1234-1234-123456789abc"
+	path := filepath.Join(root, "rollout-2026-10-01T00-00-00-"+id+".jsonl")
+	if err := os.WriteFile(path+".zst", []byte("compressed fixture"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	c := ScanTranscriptCatalog(map[string]string{BackendCodex: root})
+	if c.MissingSession(BackendCodex, id) || c.MissingPath(BackendCodex, path) {
+		t.Fatal("compressed original treated as deleted")
+	}
+}
