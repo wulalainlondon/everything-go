@@ -167,6 +167,8 @@ type Task struct {
 	ConfigRevision     uint64                       `json:"config_revision"`
 	Role               Agent                        `json:"role"`
 	CanonicalID        string                       `json:"canonical_task_id,omitempty"`
+	WorkItemID         string                       `json:"work_item_id,omitempty"`
+	RunID              string                       `json:"run_id,omitempty"`
 	WorkflowID         string                       `json:"workflow_id,omitempty"`
 	Step               string                       `json:"step,omitempty"`
 	Draft              int                          `json:"draft_version"`
@@ -334,6 +336,7 @@ type Snapshot struct {
 type Command struct {
 	// Supplied only by the core adapter after actual session/config/grant
 	// validation. A wire client cannot mark its own binding as verified.
+	VerifiedProjectID       string          `json:"-"`
 	VerifiedAgent           *Agent          `json:"-"`
 	VerifiedAdapterRevision string          `json:"-"`
 	Action                  string          `json:"action"`

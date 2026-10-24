@@ -643,8 +643,11 @@ func (h *Hub) Read(ctx context.Context, c taskapi.AuthorizedCommand) (any, error
 			return nil, err
 		}
 		for _, raw := range page.Items {
-			if task, ok := raw.(map[string]any); ok && !h.frozenTaskNativeKnown(task) {
-				return nil, taskapi.Failure("cursor_expired", "known_none", "refresh_snapshot")
+			if task, ok := raw.(map[string]any); ok {
+				id, _ := task["task_id"].(string)
+				if _, err := h.apiRecord(ctx, c.Caller, id); err != nil || !h.frozenTaskNativeKnown(task) {
+					return nil, taskapi.Failure("cursor_expired", "known_none", "refresh_snapshot")
+				}
 			}
 		}
 		result := map[string]any{"items": page.Items, "has_more": page.HasMore, "partial": false, "history_status": "partial"}
@@ -729,6 +732,9 @@ func (h *Hub) Read(ctx context.Context, c taskapi.AuthorizedCommand) (any, error
 		if end > len(chars) {
 			end = len(chars)
 		}
+		if err := h.checkAPIRecord(ctx, c.Caller, r); err != nil {
+			return nil, err
+		}
 		return map[string]any{"task_id": r.TaskID, "seal_id": in.SealID, "final_hash": task["final_hash"], "anchor": task["result_anchor"], "terminal_status": "succeeded", "text": string(chars[in.Offset:end]), "offset": in.Offset, "next_offset": end, "has_more": end < len(chars), "artifacts": []any{}, "qa": task["qa"], "limitations": []string{}}, nil
 	}
 	return nil, taskapi.Failure("unsupported", "known_none", "read_capabilities")
@@ -736,6 +742,13 @@ func (h *Hub) Read(ctx context.Context, c taskapi.AuthorizedCommand) (any, error
 func stringID(n uint64) string { raw, _ := json.Marshal(n); return string(raw) }
 func (h *Hub) apiReadScope(ctx context.Context, c taskapi.VerifiedContext, in apiInput) (taskapi.ReadScope, error) {
 	policies := map[string]any{}
+	if a, ok := h.workspacePairedTaskActor(c); ok {
+		fingerprint, err := h.workspace.MembershipFingerprint(ctx, a)
+		if err != nil {
+			return taskapi.ReadScope{}, err
+		}
+		policies["workspace_membership"] = fingerprint
+	}
 	if c.SourceSessionID != "" && h.dispatches != nil {
 		grant, err := h.dispatches.Grant(ctx, c.SourceSessionID)
 		if err == nil {

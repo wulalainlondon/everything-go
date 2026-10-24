@@ -20,6 +20,7 @@ import (
 	"everything-go/internal/identity"
 	"everything-go/internal/protocol"
 	"everything-go/internal/session"
+	"everything-go/internal/workitems"
 	"everything-go/internal/workspace"
 	"github.com/coder/websocket"
 	"golang.org/x/text/unicode/norm"
@@ -33,6 +34,7 @@ type workspaceWire struct {
 	OK            bool                         `json:"ok"`
 	Error         string                       `json:"error,omitempty"`
 	Data          *workspace.Result            `json:"data,omitempty"`
+	Projects      []workitems.ProjectRef       `json:"projects,omitempty"`
 	Catalog       []workspace.Agent            `json:"catalog,omitempty"`
 	Backends      []protocol.BackendDefinition `json:"backends,omitempty"`
 	MutationState string                       `json:"mutation_state,omitempty"`
@@ -85,6 +87,9 @@ func (h *Hub) handleWorkspace(c *Client, cmd clientproto.Command) {
 			out.Error = "workspace_wrong_authority"
 		} else {
 			out.OK = true
+			if h.work != nil {
+				out.Projects, _ = h.work.ProjectRefs(c.ctx)
+			}
 			out.Catalog = h.workspaceAgentCatalog()
 			out.Backends = h.client.BackendRegistryUpdated(h.workspaceCatalog(c.ctx)).Backends
 		}
@@ -106,6 +111,7 @@ func (h *Hub) handleWorkspace(c *Client, cmd clientproto.Command) {
 		out.Data = nil
 		out.Catalog = nil
 		out.Backends = nil
+		out.Projects = nil
 		out.Error = "workspace_permission_revoked"
 		out.MutationState = "unknown"
 	}
@@ -204,12 +210,13 @@ func (h *Hub) verifyWorkspaceAgent(ctx context.Context, a workspace.Actor, c wor
 		return workspace.Agent{}, errors.New("original_session_permission_required")
 	}
 	var profileID, description, name string
-	var roleRevision uint64
+	var roleRevision, sourceRoleRevision uint64
 	if h.partners != nil {
 		if p, found := h.partners.ForSession(s.ID); found {
 			profileID, description, name, roleRevision = p.ID, p.Description, p.Name, p.RoleRevision
 		}
 	}
+	sourceRoleRevision = roleRevision
 	if in.ProfileID != "" && profileID != in.ProfileID {
 		return workspace.Agent{}, errors.New("profile_binding_changed")
 	}
@@ -239,13 +246,14 @@ func (h *Hub) verifyWorkspaceAgent(ctx context.Context, a workspace.Actor, c wor
 			return workspace.Agent{}, err
 		}
 		roleRevision = prior.RoleRevision
+		sourceRoleRevision = prior.SourceRoleRevision
 		if prior.Description != description {
 			roleRevision++
 		}
 	}
 	settings := s.SettingsSnapshot()
 	description = norm.NFC.String(strings.TrimSpace(description))
-	return workspace.Agent{Ready: true, Name: strings.TrimSpace(name), Description: description, ProfileID: profileID, SessionID: s.ID, ThreadID: s.ResumeID(), Config: settings.ConfigRevision, RoleRevision: roleRevision, SourceRoleRevision: roleRevision, RoleHash: workspaceHash(description), Backend: string(settings.Backend), Model: settings.Model, Sandbox: settings.Sandbox, RoomExclusive: exclusive, Disabled: in.Disabled}, nil
+	return workspace.Agent{Ready: true, Name: strings.TrimSpace(name), Description: description, ProfileID: profileID, SessionID: s.ID, ThreadID: s.ResumeID(), Config: settings.ConfigRevision, RoleRevision: roleRevision, SourceRoleRevision: sourceRoleRevision, RoleHash: workspaceHash(description), Backend: string(settings.Backend), Model: settings.Model, Sandbox: settings.Sandbox, RoomExclusive: exclusive, Disabled: in.Disabled}, nil
 }
 
 func (h *Hub) workspaceCatalog(ctx context.Context) []backend.Definition {
@@ -274,6 +282,24 @@ func (h *Hub) executeWorkspace(ctx context.Context, a workspace.Actor, c workspa
 	}
 	if c.Authority != h.cfg.InstanceID {
 		return workspace.Result{}, errors.New("workspace_wrong_authority")
+	}
+	if c.Action == "create_room" {
+		var in struct {
+			ProjectID string `json:"project_id"`
+		}
+		if json.Unmarshal(c.Data, &in) != nil {
+			return workspace.Result{}, errors.New("room_payload_invalid")
+		}
+		if in.ProjectID != "" {
+			if !a.Owner || h.work == nil {
+				return workspace.Result{}, errors.New("original_project_unavailable")
+			}
+			project, err := h.work.GetProject(ctx, in.ProjectID)
+			if err != nil || project.AuthorityInstanceID != h.cfg.InstanceID || project.ArchivedAt != nil {
+				return workspace.Result{}, errors.New("original_project_unavailable")
+			}
+			c.VerifiedProjectID = project.ID
+		}
 	}
 	if c.Action == "set_push_subscription" && h.workspacePush == nil {
 		return workspace.Result{}, errors.New("workspace_push_not_configured")
@@ -323,6 +349,9 @@ func (h *Hub) executeWorkspace(ctx context.Context, a workspace.Actor, c workspa
 			_, _ = h.workspace.AgentReady(ctx, c.RoomID, result.Entity.ID, agent.SessionID, false, "native_session_setup_failed")
 			return result, errors.New("native_session_setup_failed_lookup_original")
 		}
+	}
+	if c.Action == "accept_task" && result.Entity != nil {
+		_ = h.projectWorkspaceTask(ctx, c.RoomID, result.Entity.ID)
 	}
 	if c.MutationID != "" && !workspace.ReadAction(c.Action) {
 		h.wakeWorkspace()
@@ -430,11 +459,22 @@ func (h *Hub) workspaceInvalidation() {
 }
 
 func (h *Hub) rejectRoomSessionCommand(c *Client, cmd clientproto.Command) bool {
-	if h.workspace == nil || cmd.SessionID == "" {
+	if cmd.SessionID == "" {
 		return false
+	}
+	if h.workspace == nil {
+		if !h.workspaceReservedSession(cmd.SessionID) {
+			return false
+		}
+		c.enqueueEventUnlogged(h.client.Error("", cmd.RequestID, "workspace_unavailable"))
+		return true
 	}
 	room, exclusive := h.workspace.SessionRoom(context.Background(), cmd.SessionID)
 	if !exclusive {
+		if strings.HasPrefix(cmd.SessionID, "s_cw_") {
+			c.enqueueEventUnlogged(h.client.Error("", cmd.RequestID, "workspace_permission_denied"))
+			return true
+		}
 		return false
 	}
 	a, ok := h.workspaceOwner(c)
@@ -648,31 +688,48 @@ func workspaceProspectivePath(path string) (string, error) {
 // Native events remain original-session events, but a paired owner who has left
 // the room cannot recover room content through the legacy stream or replay.
 func (h *Hub) workspaceNativeFrameAllowed(c *Client, data []byte) bool {
-	if h.workspace == nil {
-		return true
-	}
-	var header struct {
-		SessionID string `json:"session_id"`
-	}
-	if json.Unmarshal(data, &header) != nil || !strings.HasPrefix(identity.WireSessionID(header.SessionID), "s_cw_") {
-		return true
-	}
-	room, exclusive := h.workspace.SessionRoom(context.Background(), identity.WireSessionID(header.SessionID))
-	if !exclusive {
+	var value any
+	if json.Unmarshal(data, &value) != nil {
 		return false
 	}
-	a, ok := h.workspaceOwner(c)
-	if !ok {
-		return false
+	var allowed func(any) bool
+	allowed = func(v any) bool {
+		switch node := v.(type) {
+		case []any:
+			for _, child := range node {
+				if !allowed(child) {
+					return false
+				}
+			}
+		case map[string]any:
+			if id, ok := node["session_id"].(string); ok && strings.HasPrefix(identity.WireSessionID(id), "s_cw_") {
+				if h.workspace == nil {
+					return false
+				}
+				room, exclusive := h.workspace.SessionRoom(context.Background(), identity.WireSessionID(id))
+				if !exclusive {
+					return false
+				}
+				a, ok := h.workspaceOwner(c)
+				if !ok {
+					return false
+				}
+				if _, _, err := h.workspace.Authorize(context.Background(), a, room, "read"); err != nil {
+					return false
+				}
+			}
+			for _, child := range node {
+				if !allowed(child) {
+					return false
+				}
+			}
+		}
+		return true
 	}
-	_, _, err := h.workspace.Authorize(context.Background(), a, room, "read")
-	return err == nil
+	return allowed(value)
 }
 
 func (h *Hub) workspaceRoomNativeEvent(event any) bool {
-	if h.workspace == nil {
-		return false
-	}
 	data, err := json.Marshal(event)
 	if err != nil {
 		return false
@@ -681,4 +738,34 @@ func (h *Hub) workspaceRoomNativeEvent(event any) bool {
 		SessionID string `json:"session_id"`
 	}
 	return json.Unmarshal(data, &header) == nil && strings.HasPrefix(identity.WireSessionID(header.SessionID), "s_cw_")
+}
+
+// Check structural identities only; text containing JSON is still ordinary text.
+func workspaceFrameHasReservedSession(data []byte) bool {
+	var value any
+	if json.Unmarshal(data, &value) != nil {
+		return false
+	}
+	var contains func(any) bool
+	contains = func(v any) bool {
+		switch node := v.(type) {
+		case []any:
+			for _, child := range node {
+				if contains(child) {
+					return true
+				}
+			}
+		case map[string]any:
+			if id, ok := node["session_id"].(string); ok && strings.HasPrefix(identity.WireSessionID(id), "s_cw_") {
+				return true
+			}
+			for _, child := range node {
+				if contains(child) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	return contains(value)
 }

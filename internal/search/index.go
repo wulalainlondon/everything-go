@@ -25,9 +25,10 @@ type Index struct {
 
 	writeMu sync.Mutex
 
-	mu       sync.Mutex
-	ready    bool
-	progress ingestProgress
+	mu          sync.Mutex
+	privateUIDs map[string]bool
+	ready       bool
+	progress    ingestProgress
 }
 
 type ingestProgress struct {

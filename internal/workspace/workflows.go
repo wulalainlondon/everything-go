@@ -87,6 +87,8 @@ type Observation struct {
 	Execution      string
 	Reason         string
 	CanonicalID    string
+	WorkItemID     string
+	RunID          string
 	NativeThreadID string
 	NativeTurnID   string
 	SealID         string
@@ -116,6 +118,12 @@ func (s *Store) Observe(ctx context.Context, roomID, taskID string, o Observatio
 	}
 	actor := Actor{ID: "agent:" + t.AgentID, Name: t.Role.Name}
 	prior, _ := json.Marshal(t)
+	if o.WorkItemID != "" || o.RunID != "" {
+		if o.WorkItemID == "" || o.RunID == "" || (t.WorkItemID != "" && (t.WorkItemID != o.WorkItemID || t.RunID != o.RunID)) {
+			return errors.New("original_work_link_conflict")
+		}
+		t.WorkItemID, t.RunID = o.WorkItemID, o.RunID
+	}
 	if t.Axes.Final == "sealed" {
 		if o.Hash != "" && o.Hash != t.FinalHash {
 			return errors.New("immutable_final_conflict")

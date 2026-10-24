@@ -99,7 +99,7 @@ func (s *Store) OwnsRequest(ctx context.Context, sessionID, requestID string) (b
 	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(
 		SELECT 1 FROM work_item_runs r
 		JOIN work_item_session_links l ON l.id=r.session_link_id
-		WHERE l.session_id=? AND r.request_id=?
+		WHERE r.work_item_id NOT GLOB 'wi_cw_*' AND l.session_id=? AND r.request_id=?
 	)`, sessionID, requestID).Scan(&exists)
 	return exists == 1, err
 }
@@ -124,7 +124,7 @@ func (s *Store) AdvanceRun(ctx context.Context, sessionID, requestID, status, re
 		r.status,r.started_at,r.finished_at,r.terminal_reason,r.session_id,r.instruction,r.available_at,
 		r.attempt,r.max_attempts,r.claimed_at,r.queue_reason
 		FROM work_item_runs r JOIN work_item_session_links l ON l.id=r.session_link_id
-		WHERE l.session_id=? AND r.finished_at IS NULL AND (?='' OR r.request_id=?)
+		WHERE r.work_item_id NOT GLOB 'wi_cw_*' AND l.session_id=? AND r.finished_at IS NULL AND (?='' OR r.request_id=?)
 		ORDER BY r.started_at DESC LIMIT 1`, sessionID, requestID, requestID).Scan(
 		&run.ID, &run.WorkItemID, &run.SessionLinkID, &run.RequestID, &run.Kind,
 		&run.Status, &run.StartedAt, &run.FinishedAt, &run.TerminalReason, &run.SessionID,
@@ -183,7 +183,7 @@ func (s *Store) RecoverQueue(ctx context.Context) (int64, error) {
 	now := s.now().UnixMilli()
 	result, err := s.db.ExecContext(ctx, `UPDATE work_item_runs
 		SET status='queued',available_at=?,claimed_at=NULL,queue_reason='bridge_restarted'
-		WHERE finished_at IS NULL AND status IN ('submitted','dispatching','running')`, now)
+		WHERE work_item_id NOT GLOB 'wi_cw_*' AND finished_at IS NULL AND status IN ('submitted','dispatching','running')`, now)
 	if err != nil {
 		return 0, err
 	}
@@ -214,7 +214,7 @@ func (s *Store) ClaimNextRun(ctx context.Context, now int64) (Run, WorkItem, boo
 	err = tx.QueryRowContext(ctx, `SELECT r.id,r.work_item_id,r.session_link_id,r.request_id,r.kind,r.status,
 		started_at,finished_at,terminal_reason,session_id,instruction,available_at,attempt,max_attempts,claimed_at,queue_reason
 		FROM work_item_runs r JOIN work_items w ON w.id=r.work_item_id
-		WHERE r.finished_at IS NULL AND r.status IN ('queued','deferred')
+		WHERE r.work_item_id NOT GLOB 'wi_cw_*' AND r.finished_at IS NULL AND r.status IN ('queued','deferred')
 		AND r.available_at<=? AND r.attempt<r.max_attempts
 		ORDER BY CASE w.priority
 			WHEN 'urgent' THEN 400 WHEN 'high' THEN 300 WHEN 'medium' THEN 200

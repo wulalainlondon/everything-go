@@ -12,6 +12,7 @@ import (
 	"everything-go/internal/backend"
 	"everything-go/internal/protocol"
 	"everything-go/internal/session"
+	"everything-go/internal/workitems"
 )
 
 // Opt-in, isolated HTTP/WS UI harness. The synthetic executor never starts a
@@ -22,6 +23,13 @@ func TestWorkspaceBrowserFixture(t *testing.T) {
 		t.Skip("browser harness not requested")
 	}
 	f := workspaceSetupDuration(t, 45*time.Minute)
+	f.h.pairing.OpenEnrollment(time.Second)
+	if err := f.h.pairing.Claim("fixture-native-workspace-device-token", "native-ux-fixture-device"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.h.work.CreateProject(f.ctx, workitems.CreateProjectInput{Name: "Synthetic original project"}); err != nil {
+		t.Fatal(err)
+	}
 	ex := f.h.exec.(*workspaceFixtureExecutor)
 	ex.onSend = func(s *session.Session, request, content string) {
 		if s.ResumeID() == "" {

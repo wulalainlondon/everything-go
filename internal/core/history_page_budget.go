@@ -82,6 +82,9 @@ func (h *Hub) enqueueHistoryFrame(c *Client, sessionID string, cmd clientproto.C
 		h.historyReadError(c, sessionID, cmd, "history_frame_too_large", "history page exceeds the safe wire size; original content retained")
 		return
 	}
+	if !h.workspaceNativeFrameAllowed(c, data) {
+		return
+	}
 	logOutbound(event)
 	c.enqueue(data)
 }

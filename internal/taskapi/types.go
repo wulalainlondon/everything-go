@@ -41,6 +41,10 @@ type Response struct {
 	RequestVersion *string   `json:"request_api_version,omitempty"`
 }
 
+// Task responses may contain private source/result text and artifact bytes.
+// Protocol diagnostics retain the frame type without logging that payload.
+func (Response) PrivatePayload() {}
+
 func (r Response) MarshalJSON() ([]byte, error) {
 	type wire Response
 	raw, err := json.Marshal(wire(r))

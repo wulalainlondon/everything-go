@@ -408,6 +408,20 @@ func (h *Hub) HTTPAuthorized(r *http.Request) bool {
 func (h *Hub) SetSearch(s *search.Index) {
 	h.search = s
 	if s != nil {
+		if h.workspace != nil {
+			ids, err := h.workspace.PrivateNativeThreadIDs(context.Background())
+			if err != nil {
+				panic("workspace native search isolation unavailable")
+			}
+			for _, id := range ids {
+				s.ProtectNativeSession(id)
+			}
+		}
+		for _, current := range h.registry.List() {
+			if strings.HasPrefix(current.ID, "s_cw_") {
+				s.ProtectNativeSession(current.ResumeID())
+			}
+		}
 		go h.reconcileRestartMarkersFromSearch()
 	}
 }
@@ -794,6 +808,9 @@ func (h *Hub) Emit(event any) {
 	case protocol.SessionUUID:
 		if observed, ok := event.(protocol.SessionUUID); ok && h.workspace != nil {
 			if current, found := h.registry.Get(observed.SessionID); found && current.ResumeID() == observed.ClaudeUUID {
+				if strings.HasPrefix(observed.SessionID, "s_cw_") && h.search != nil {
+					h.search.ProtectNativeSession(observed.ClaudeUUID)
+				}
 				_ = h.workspace.PinInitialThread(context.Background(), observed.SessionID, observed.ClaudeUUID)
 			}
 		}

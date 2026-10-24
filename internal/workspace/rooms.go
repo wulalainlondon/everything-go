@@ -373,6 +373,9 @@ func (s *Store) createRoom(ctx context.Context, tx *sql.Tx, a Actor, c Command) 
 	if err := decode(c.Data, &in); err != nil {
 		return Result{}, err
 	}
+	if in.ProjectID != "" && in.ProjectID != c.VerifiedProjectID {
+		return Result{}, errors.New("original_project_verification_required")
+	}
 	var owner string
 	if err := tx.QueryRowContext(ctx, "SELECT owner FROM workspaces WHERE id=?", c.WorkspaceID).Scan(&owner); err != nil || owner != a.ID {
 		return Result{}, errors.New("workspace_permission_denied")

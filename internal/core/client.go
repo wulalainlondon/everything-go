@@ -512,6 +512,12 @@ func (c *Client) writePump(ctx context.Context) {
 			}
 		}
 		c.writeMu.Lock()
+		// A queued native/replay frame is not a durable read grant. Membership
+		// may have changed while this socket was backpressured.
+		if c.hub != nil && !c.hub.workspaceNativeFrameAllowed(c, data) {
+			c.writeMu.Unlock()
+			continue
+		}
 		wctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		err := c.conn.Write(wctx, data)
 		cancel()

@@ -69,3 +69,18 @@ entry; account listing is not authenticated health. Calendar conflicts, times,
 timezone, attendees and email attachment hashes are reviewable before approval.
 Approved content/account/destination/revision/expiry are pinned; unknown effects
 use original provider lookup only. Schedules never grant external send authority.
+
+Original project/work integration
+A linked project must exist in the original WorkItem authority and remain active
+at native admission. Owner catalog references contain only id/name/version, not
+paths or private project context. The same room task r_ is journaled atomically
+with original queue admission under its actual authenticated_workspace transport
+and workspace_grant namespace; it is not a native/controller impersonation.
+Linked tasks have real reserved WorkItem/Run rows, which are observation-only,
+manual, excluded from the ordinary scheduler/recovery and legacy work views.
+Current room membership is required by original TaskAPI reads as well as room
+reads. Frozen pages bind a membership fingerprint. Queued native/history/replay
+frames recheck current permission at socket write; disabled workspace support
+still quarantines reserved sessions. The global search index excludes room native
+transcripts; use room search. Native generated host-file events cannot publish
+through the legacy global media registry. Room blobs use the scoped gateway.

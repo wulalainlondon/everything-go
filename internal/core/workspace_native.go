@@ -128,6 +128,15 @@ func (h *Hub) validateWorkspaceNativeMode(ctx context.Context, roomID, taskID st
 	if err != nil {
 		return p, nil, err
 	}
+	if !consumed && p.Room.ProjectID != "" {
+		if h.work == nil {
+			return p, nil, errors.New("original_project_unavailable")
+		}
+		project, e := h.work.GetProject(ctx, p.Room.ProjectID)
+		if e != nil || project.AuthorityInstanceID != h.cfg.InstanceID || project.ArchivedAt != nil {
+			return p, nil, errors.New("original_project_unavailable")
+		}
+	}
 	if !h.workspaceGrantCurrent(p.Grant) {
 		return p, nil, errors.New("original_pairing_credential_revoked")
 	}
@@ -190,7 +199,7 @@ func (h *Hub) enqueueWorkspaceTask(ctx context.Context, p workspace.PreparedTask
 		return err
 	}
 	h.workspaceRequests.Store(s.ID+"\x00"+p.Task.RequestID, true)
-	e, inserted, err := h.messageQueue.Enqueue(messagequeue.Entry{SessionID: s.ID, RequestID: p.Task.RequestID, Content: truncateGraphemes(p.Task.Instruction, 4000), Payload: b, PayloadHash: workspaceHash(string(b)), FileNames: []string{}, ImageCount: len(images)})
+	e, inserted, err := h.messageQueue.Enqueue(messagequeue.Entry{SessionID: s.ID, RequestID: p.Task.RequestID, Content: truncateGraphemes(p.Task.Instruction, 4000), Payload: b, PayloadHash: workspaceHash(string(b)), FileNames: []string{}, ImageCount: len(images), API: h.workspaceTaskAdmission(ctx, p)})
 	if err != nil {
 		return err
 	}
@@ -205,6 +214,9 @@ func (h *Hub) enqueueWorkspaceTask(ctx context.Context, p workspace.PreparedTask
 	return nil
 }
 func (h *Hub) reconcileWorkspaceTask(ctx context.Context, p workspace.PreparedTask) {
+	if err := h.projectWorkspaceTask(ctx, p.Room.ID, p.Entity.ID); err != nil {
+		return
+	}
 	t := p.Task
 	entry, found, err := h.messageQueue.Get(t.SessionID, t.RequestID)
 	if err != nil {
@@ -327,6 +339,7 @@ func (h *Hub) reconcileWorkspaceTask(ctx context.Context, p workspace.PreparedTa
 		o.Reason = "original_native_request_state_unknown"
 	}
 	if err = h.workspace.Observe(ctx, p.Room.ID, p.Entity.ID, o); err == nil {
+		_ = h.projectWorkspaceTask(ctx, p.Room.ID, p.Entity.ID)
 		h.workspaceInvalidation()
 	}
 }

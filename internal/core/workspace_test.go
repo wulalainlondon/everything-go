@@ -21,6 +21,8 @@ import (
 	"everything-go/internal/history"
 	"everything-go/internal/protocol"
 	"everything-go/internal/session"
+	"everything-go/internal/taskapi"
+	"everything-go/internal/workitems"
 	"everything-go/internal/workspace"
 	"github.com/coder/websocket"
 )
@@ -78,6 +80,11 @@ func workspaceSetupDuration(t *testing.T, duration time.Duration) *workspaceHarn
 		t.Fatal(err)
 	}
 	h := NewHub(session.NewRegistry(), Config{WorkspaceEnabled: true, InstanceID: "workspace-fixture", InstanceName: "Isolated workspace fixture", RootDir: root, DataDir: root, Backends: []backend.Definition{{ID: backend.Codex, DefaultModel: "fixture-model", Models: []backend.Model{{ID: "fixture-model", Label: "Synthetic model"}}}}}, pair, 0)
+	service, err := workitems.OpenService(root, "workspace-fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.SetWorkItems(service)
 	ctx, cancel := context.WithTimeout(context.Background(), duration)
 	ex := &workspaceFixtureExecutor{fakeExec: &fakeExec{sink: h}, proof: &workspaceFixtureHistory{correlationHistoryFixture: correlationHistoryFixture{Owners: map[string]string{}}, finals: map[string][]map[string]any{}}}
 	h.SetExecutor(ex)
@@ -98,6 +105,7 @@ func workspaceSetupDuration(t *testing.T, duration time.Duration) *workspaceHarn
 		_ = conn.CloseNow()
 		cancel()
 		_ = h.CloseWorkspace()
+		_ = service.Close()
 		server.Close()
 		_ = h.messageQueue.Close()
 		_ = h.delegations.Close()
@@ -166,7 +174,19 @@ func (f *workspaceHarness) agent(room workspace.Room, name string) workspace.Ent
 
 func TestWorkspaceWSOwnerTaskUsesOriginalQueueAndSealedFixtureFinal(t *testing.T) {
 	f := workspaceSetup(t)
-	room := f.room("Project channel")
+	project, err := f.h.work.CreateProject(f.ctx, workitems.CreateProjectInput{Name: "Original linked project"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws := f.call(workspace.Command{Action: "create_workspace", Data: wireData(map[string]any{"name": "Workspace"})})
+	linked := f.call(workspace.Command{Action: "create_room", WorkspaceID: ws.Workspace.ID, Data: wireData(map[string]any{"name": "Project channel", "project_id": project.ID})})
+	room := *linked.Room
+	if room.ProjectID != project.ID {
+		t.Fatal("original project missing")
+	}
+	if _, err = f.h.executeWorkspace(f.ctx, f.owner, workspace.Command{Action: "create_room", Authority: f.h.cfg.InstanceID, WorkspaceID: ws.Workspace.ID, MutationID: "invalid-project", Data: wireData(map[string]any{"name": "Invalid", "project_id": "missing"})}); err == nil {
+		t.Fatal("unverified original project accepted")
+	}
 	agent := f.agent(room, "Researcher")
 	var role workspace.Agent
 	if err := json.Unmarshal(agent.Body, &role); err != nil || !role.Ready || !role.RoomExclusive {
@@ -238,8 +258,19 @@ func TestWorkspaceWSOwnerTaskUsesOriginalQueueAndSealedFixtureFinal(t *testing.T
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+	if final.WorkItemID == "" || final.RunID == "" {
+		t.Fatal("original WorkItem/Run projection missing", final)
+	}
 	if final.Axes.Final != "sealed" || final.Axes.Delivery != "delivered" || final.Axes.Human != "unreviewed" || final.CanonicalID == "" {
 		t.Fatal("original final axes not separated", final)
+	}
+	journal, err := f.h.messageQueue.TaskJournal().FindTask(f.ctx, final.CanonicalID)
+	if err != nil || journal.SessionID != task.SessionID || journal.RequestID != task.RequestID {
+		t.Fatal("original TaskAPI journal missing", journal, err)
+	}
+	var metadata apiMetadata
+	if json.Unmarshal(journal.Metadata, &metadata) != nil || metadata.Transport != "authenticated_workspace" || metadata.Caller.BindingKind != "workspace_grant" || metadata.WorkspaceRoomID != room.ID {
+		t.Fatal("incorrect transport/caller provenance", metadata)
 	}
 	again := f.call(command)
 	if again.Entity.ID != first.Entity.ID || calls.Load() != 1 {
@@ -250,6 +281,36 @@ func TestWorkspaceWSOwnerTaskUsesOriginalQueueAndSealedFixtureFinal(t *testing.T
 	}
 	if f.h.LineSessionAllowed(role.SessionID) {
 		t.Fatal("room inherited Go-wide LINE")
+	}
+	var paired *Client
+	f.h.mu.RLock()
+	for client := range f.h.clients {
+		if f.h.pairedTaskDevice(client) == "workspace-device" {
+			paired = client
+		}
+	}
+	f.h.mu.RUnlock()
+	bound, err := f.h.taskHuman(paired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actual, err := bound.Check(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = f.h.apiRecord(f.ctx, actual, final.CanonicalID); err != nil {
+		t.Fatal("current room member cannot read original TaskAPI", err)
+	}
+	invite := f.call(workspace.Command{Action: "create_invite", RoomID: room.ID, Data: wireData(map[string]any{"role": "admin", "expires_at": time.Now().Add(time.Hour).UnixMilli()})})
+	guest, _, err := f.h.workspace.AcceptInvite(f.ctx, invite.InviteCode, strings.Repeat("fixture-other-human-", 3), "other-device", "Other human")
+	if err != nil {
+		t.Fatal(err)
+	}
+	latest := f.call(workspace.Command{Action: "snapshot", RoomID: room.ID}).Snapshot.Room
+	f.call(workspace.Command{Action: "transfer_owner", RoomID: room.ID, ExpectedRevision: &latest.Revision, Data: wireData(map[string]any{"principal_id": guest.ID})})
+	f.call(workspace.Command{Action: "leave_room", RoomID: room.ID})
+	if _, err = f.h.apiRecord(f.ctx, actual, final.CanonicalID); err == nil {
+		t.Fatal("departed owner read room task through original TaskAPI")
 	}
 }
 
@@ -374,6 +435,8 @@ func TestWorkspaceSecretsExcludedFromOptionalFrameLogs(t *testing.T) {
 	log.SetOutput(&out)
 	defer log.SetOutput(old)
 	logOutbound(workspaceWire{Type: "workspace_result", Authority: "fixture", Data: &workspace.Result{InviteCode: "PRIVATE-INVITE-BEARER", ToolData: "PRIVATE-ACCOUNT-DATA"}})
+	logOutbound(taskapi.Response{Type: "task_api_response", Result: map[string]any{"text": "PRIVATE-ROOM-FINAL"}})
+	logOutbound(protocol.NewTextChunk("s_cw_private", "r_original", "PRIVATE-NATIVE-TEXT"))
 	if strings.Contains(out.String(), "PRIVATE-") || !strings.Contains(out.String(), "redacted") {
 		t.Fatal("sensitive workspace payload logged", out.String())
 	}
@@ -461,5 +524,91 @@ func TestWorkspaceNativeStreamAndLegacyCatalogRespectRoomMembership(t *testing.T
 	f.call(workspace.Command{Action: "leave_room", RoomID: room.ID})
 	if f.h.workspaceNativeFrameAllowed(client, data) {
 		t.Fatal("departed owner received room native content through scoped legacy wire")
+	}
+	var nested any
+	if json.Unmarshal(data, &nested) != nil {
+		t.Fatal("frame")
+	}
+	replay, _ := json.Marshal(map[string]any{"type": "offline_replay", "events": []any{map[string]any{"type": "wrapper", "event": nested}}})
+	if f.h.workspaceNativeFrameAllowed(client, replay) {
+		t.Fatal("nested legacy replay bypassed current room membership")
+	}
+}
+
+func TestWorkspaceDisabledStillQuarantinesReservedNativeEvents(t *testing.T) {
+	// A disabled capability must not downgrade old reserved sessions into
+	// ordinary legacy output, even before its room DB is opened.
+	h := &Hub{}
+	private := protocol.NewTextChunk("s_cw_original", "r_original", "private room body")
+	data, _ := json.Marshal(private)
+	if h.workspaceNativeFrameAllowed(nil, data) || !h.workspaceRoomNativeEvent(private) {
+		t.Fatal("disabled workspace exposed reserved native output")
+	}
+	ordinary := protocol.NewTextChunk("ordinary", "r_original", "ordinary body")
+	data, _ = json.Marshal(ordinary)
+	if !h.workspaceNativeFrameAllowed(nil, data) || h.workspaceRoomNativeEvent(ordinary) {
+		t.Fatal("ordinary legacy output changed")
+	}
+}
+
+func TestWorkspaceBackpressuredNativeFrameRechecksMembershipAtWrite(t *testing.T) {
+	f := workspaceSetup(t)
+	room := f.room("Backpressured room")
+	entity := f.agent(room, "Worker")
+	var agent workspace.Agent
+	if err := json.Unmarshal(entity.Body, &agent); err != nil {
+		t.Fatal(err)
+	}
+	invite := f.call(workspace.Command{Action: "create_invite", RoomID: room.ID, Data: wireData(map[string]any{"role": "admin", "expires_at": time.Now().Add(time.Hour).UnixMilli()})})
+	guest, _, err := f.h.workspace.AcceptInvite(f.ctx, invite.InviteCode, strings.Repeat("backpressure-fixture-", 3), "guest-device", "Guest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := f.call(workspace.Command{Action: "snapshot", RoomID: room.ID}).Snapshot.Room
+	f.call(workspace.Command{Action: "transfer_owner", RoomID: room.ID, ExpectedRevision: &current.Revision, Data: wireData(map[string]any{"principal_id": guest.ID})})
+	var client *Client
+	f.h.mu.RLock()
+	for c := range f.h.clients {
+		client = c
+	}
+	f.h.mu.RUnlock()
+	if client == nil {
+		t.Fatal("actual client missing")
+	}
+	client.writeMu.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			client.writeMu.Unlock()
+		}
+	}()
+	// Admission-time ACL permits this frame. The socket cannot write yet.
+	client.enqueueEventUnlogged(protocol.NewTextChunk(agent.SessionID, "r_fixture", "PRIVATE-BACKPRESSURED-NATIVE"))
+	latest, _, err := f.h.workspace.Authorize(f.ctx, f.owner, room.ID, "read")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = f.h.executeWorkspace(f.ctx, f.owner, workspace.Command{Authority: f.h.cfg.InstanceID, Action: "leave_room", RoomID: room.ID, MutationID: "fixture-leave-before-socket-write", ExpectedACL: &latest.ACLRevision})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.enqueueEventUnlogged(map[string]any{"type": "fixture_marker"})
+	locked = false
+	client.writeMu.Unlock()
+	for {
+		_, data, err := f.conn.Read(f.ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(data, []byte("PRIVATE-BACKPRESSURED-NATIVE")) {
+			t.Fatal("revoked queued native frame reached socket")
+		}
+		var header struct {
+			Type string `json:"type"`
+		}
+		_ = json.Unmarshal(data, &header)
+		if header.Type == "fixture_marker" {
+			break
+		}
 	}
 }

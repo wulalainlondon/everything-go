@@ -66,15 +66,17 @@ type apiInput struct {
 	ApprovedPM     json.RawMessage `json:"approved_pm_task_ref"`
 }
 type apiMetadata struct {
-	CanonicalRoots []string
-	CanonicalCwd   string
-	RootIdentities map[string]string
-	Request        taskapi.Request
-	Caller         taskapi.VerifiedContext
-	SourceThread   string
-	SourceRevision uint64
-	Transport      string
-	Intake         *intakeMetadata
+	WorkspaceRoomID string
+	WorkspaceTaskID string
+	CanonicalRoots  []string
+	CanonicalCwd    string
+	RootIdentities  map[string]string
+	Request         taskapi.Request
+	Caller          taskapi.VerifiedContext
+	SourceThread    string
+	SourceRevision  uint64
+	Transport       string
+	Intake          *intakeMetadata
 }
 type apiSeal struct{ Backend, SessionID, RequestID, ThreadID, TurnID, MessageID, Text, Hash, Status string }
 
@@ -1088,6 +1090,16 @@ func (h *Hub) checkAPIRecord(ctx context.Context, c taskapi.VerifiedContext, r t
 	var meta apiMetadata
 	if json.Unmarshal(r.Metadata, &meta) != nil {
 		return taskapi.Failure("key_expired", "known_receipt", "lookup_original")
+	}
+	if meta.WorkspaceRoomID != "" {
+		if !h.workspaceTaskReader(ctx, c, meta.WorkspaceRoomID) {
+			return taskapi.Failure("permission", "known_none", "request_scope_change")
+		}
+		_, task, err := h.workspace.WorkProjectionState(ctx, meta.WorkspaceRoomID, meta.WorkspaceTaskID)
+		if err != nil || task.SessionID != r.SessionID || task.RequestID != r.RequestID {
+			return taskapi.Failure("permission", "known_none", "request_scope_change")
+		}
+		return nil
 	}
 	if preparingChild {
 		source, found := h.registry.Get(meta.Caller.SourceSessionID)
