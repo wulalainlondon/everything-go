@@ -149,8 +149,12 @@ func (s *Store) read(ctx context.Context, a Actor, c Command) (Result, error) {
 		if len(snapshot.Members) > 100 {
 			return r, errors.New("member_limit")
 		}
-		for _, kind := range []string{"message", "agent", "document", "document_proposal", "task", "workflow", "review", "knowledge", "decision", "attachment", "media_comment", "schedule", "occurrence", "effect", "notification", "reaction", "research_source", "human_todo"} {
-			page, e := s.page(ctx, tx, a, room, Command{Kind: kind, Limit: 30})
+		for _, kind := range []string{"message", "agent", "document", "document_proposal", "task", "workflow", "review", "knowledge", "decision", "attachment", "media_comment", "schedule", "occurrence", "effect", "notification", "reaction", "research_source", "human_todo", "avatar"} {
+			limit := 30
+			if kind == "avatar" {
+				limit = 100
+			}
+			page, e := s.page(ctx, tx, a, room, Command{Kind: kind, Limit: limit})
 			if e != nil {
 				return r, e
 			}
@@ -320,6 +324,8 @@ func (s *Store) mutate(ctx context.Context, tx *sql.Tx, a Actor, r Room, c Comma
 		return out, err
 	case "create_room":
 		return s.createRoom(ctx, tx, a, c)
+	case "set_avatar":
+		return s.setAvatar(ctx, tx, a, r, c)
 	case "set_push_subscription":
 		return s.pushMutation(ctx, tx, a, r, c)
 	case "set_room_preference":
