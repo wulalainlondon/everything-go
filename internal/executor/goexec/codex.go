@@ -55,7 +55,7 @@ const (
 
 var (
 	codexAskUserRE     = regexp.MustCompile("(?s)```(?:json)?\\s*(\\{[^`]*?\"(?:ask_user_question|AskUserQuestion)\"[^`]*?\\})\\s*```|(\\{[^{}]*\"(?:ask_user_question|AskUserQuestion)\"[^{}]*\\})")
-	codexInlineImageRE = regexp.MustCompile(`"type"\s*:\s*"input_image"`)
+	codexInlineImageRE = regexp.MustCompile(`"type"\s*:\s*"(?:input_image|inputImage)"`)
 	// Image generation tool results contain an inline input_image data URL plus
 	// a compact text block naming the durable file under ~/.codex/generated_images.
 	// Extract only that managed path; never forward the multi-megabyte base64
@@ -1176,6 +1176,7 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 			Command           json.RawMessage `json:"command"`
 			Output            json.RawMessage `json:"output"`
 			AggregatedOutput  json.RawMessage `json:"aggregatedOutput"`
+			ContentItems      json.RawMessage `json:"contentItems"`
 			Status            string          `json:"status"`
 			Tool              string          `json:"tool"`
 			SenderThreadID    string          `json:"senderThreadId"`
@@ -1432,6 +1433,9 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 		}
 		if len(rawOutput) == 0 || string(rawOutput) == "null" {
 			rawOutput = p.Item.AggregatedOutput
+		}
+		if len(rawOutput) == 0 || string(rawOutput) == "null" {
+			rawOutput = p.Item.ContentItems
 		}
 		generatedPaths := codexGeneratedImagePaths(rawOutput)
 		output := rawToString(rawOutput)

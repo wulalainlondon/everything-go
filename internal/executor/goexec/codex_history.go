@@ -69,7 +69,7 @@ func (c *Codex) LoadHistory(resumeID string, opts history.Opts) (*history.Result
 	if fi, err := os.Stat(path); err == nil && !fi.IsDir() {
 		key := history.FileKey{Path: path, MtimeNS: fi.ModTime().UnixNano(), Size: fi.Size()}
 		// Reparse older tails whose typed tool-output parts were saved empty.
-		cacheName := "codex:turns-v5-item-ids:" + resumeID
+		cacheName := "codex:turns-v6-generated-images:" + resumeID
 		if messages, ok := history.DefaultCache().Load(cacheName, key); ok {
 			if !opts.IncludeThinking {
 				messages = history.StripThinkingBlocks(messages)
@@ -321,6 +321,7 @@ func parseCodexHistoryWindow(lines []history.TailLine, resumeID string, truncate
 	}
 	var records []rec
 	toolOutputs := map[string]string{}
+	toolImages := map[string][]string{}
 	var messages []map[string]any
 	turnID := ""
 	tailClosed := false
@@ -376,6 +377,10 @@ func parseCodexHistoryWindow(lines []history.TailLine, resumeID string, truncate
 		turnBySource["codex:"+resumeID+":line:"+itoa(ln.LineNo)] = turnID
 		if id, out, ok := codexResponseToolOutput(row.Payload); ok {
 			toolOutputs[id] = out
+			var result codexToolPayload
+			if json.Unmarshal(row.Payload, &result) == nil {
+				toolImages[id] = codexGeneratedImagePaths(result.Output)
+			}
 		}
 	}
 
@@ -417,10 +422,14 @@ func parseCodexHistoryWindow(lines []history.TailLine, resumeID string, truncate
 		previousTurn = rc.turnID
 		if tool, ok := normalizeCodexResponseTool(rc.row.Payload, toolOutputs[codexPayloadCallID(rc.row.Payload)]); ok {
 			blocks := attachPendingCommentary([]map[string]any{tool.historyBlock()})
-			messages = append(messages, history.CompleteMsg(
+			message := history.CompleteMsg(
 				"codex", resumeID, "codex:"+resumeID+":line:"+itoa(rc.lineNo),
 				"assistant", firstNonEmpty(tool.Command, tool.Name), parseCodexISOms(rc.row.Timestamp), blocks,
-			))
+			)
+			if paths := toolImages[codexPayloadCallID(rc.row.Payload)]; len(paths) > 0 {
+				message["generated_image_paths"] = paths
+			}
+			messages = append(messages, message)
 			continue
 		}
 		payload := parseCodexHistoryPayload(rc.row.Payload)

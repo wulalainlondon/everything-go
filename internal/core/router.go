@@ -1229,6 +1229,10 @@ func (h *Hub) sendHistory(c *Client, s *session.Session, cmd clientproto.Command
 	if msgs == nil {
 		msgs = []map[string]any{}
 	}
+	// Recover only trusted native generated-image tool results with their
+	// durable original request binding. The normal attachment journal owns
+	// per-device replay and deduplication, including after a restart.
+	h.recoverHistoryGeneratedImages(s, resumeIDs, msgs)
 	if rangeProof != nil {
 		// source_session_id is a legacy field recursively projected as a Bridge
 		// SessionKey. Keep it byte-compatible and carry the actual native UUID

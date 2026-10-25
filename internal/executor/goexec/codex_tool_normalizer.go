@@ -78,6 +78,13 @@ func codexResponseOutputText(raw json.RawMessage) string {
 	if len(raw) == 0 || string(raw) == "null" {
 		return ""
 	}
+	if codexHasInlineImage(raw) {
+		paths := codexGeneratedImagePaths(raw)
+		if len(paths) > 0 {
+			return "Generated image:\n" + strings.Join(paths, "\n")
+		}
+		return "Generated image completed, but no saved file path was returned."
+	}
 	var text string
 	if json.Unmarshal(raw, &text) == nil {
 		return text
@@ -89,7 +96,7 @@ func codexResponseOutputText(raw json.RawMessage) string {
 	if json.Unmarshal(raw, &parts) == nil {
 		texts := make([]string, 0, len(parts))
 		for _, part := range parts {
-			if part.Text == nil || (part.Type != "input_text" && part.Type != "output_text" && part.Type != "text") {
+			if part.Text == nil || (part.Type != "input_text" && part.Type != "output_text" && part.Type != "text" && part.Type != "inputText") {
 				return string(raw)
 			}
 			texts = append(texts, *part.Text)
