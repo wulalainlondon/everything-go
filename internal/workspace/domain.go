@@ -18,6 +18,7 @@ import (
 )
 
 const Capability = "collaboration_workspace_v1"
+const OverviewCapability = "collaboration_workspace_overview_v1"
 const MaxTextBytes = 65536
 const MaxAttachmentBytes = 8 * 1024 * 1024
 const MaxContextReferences = 128
@@ -357,6 +358,7 @@ type Command struct {
 	Data                    json.RawMessage `json:"data,omitempty"`
 }
 type Result struct {
+	Overview     *Overview     `json:"overview,omitempty"`
 	ToolAccounts []ToolAccount `json:"tool_accounts,omitempty"`
 	ToolData     any           `json:"tool_data,omitempty"`
 	Action       string        `json:"action"`

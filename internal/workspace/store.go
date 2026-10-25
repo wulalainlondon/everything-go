@@ -117,6 +117,7 @@ CREATE TABLE IF NOT EXISTS invite_authorizations(invite_id TEXT PRIMARY KEY,payl
 CREATE TABLE IF NOT EXISTS entities(seq INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT NOT NULL UNIQUE,room_id TEXT NOT NULL,room_seq INTEGER NOT NULL,kind TEXT NOT NULL,revision INTEGER NOT NULL,created_by TEXT NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,hash TEXT NOT NULL,body BLOB NOT NULL);
 CREATE UNIQUE INDEX IF NOT EXISTS entity_room_seq ON entities(room_id,room_seq);
 CREATE INDEX IF NOT EXISTS entity_page ON entities(room_id,kind,room_seq);
+CREATE INDEX IF NOT EXISTS entity_overview ON entities(room_id,kind,updated_at);
 CREATE TABLE IF NOT EXISTS entity_versions(entity_id TEXT NOT NULL,room_id TEXT NOT NULL,kind TEXT NOT NULL,revision INTEGER NOT NULL,metadata BLOB NOT NULL,PRIMARY KEY(entity_id,revision));
 CREATE TABLE IF NOT EXISTS read_messages(room_id TEXT NOT NULL,principal_id TEXT NOT NULL,message_id TEXT NOT NULL,sequence INTEGER NOT NULL,PRIMARY KEY(room_id,principal_id,message_id));
 CREATE INDEX IF NOT EXISTS read_message_scope ON read_messages(room_id,principal_id,sequence);
@@ -387,7 +388,7 @@ func (e *CommitUncertain) Unwrap() error { return e.Cause }
 
 func ReadAction(action string) bool {
 	switch action {
-	case "list", "snapshot", "page", "get", "events", "search", "status", "read_attachment", "export_document", "tool_accounts", "tool_read", "agent_binding":
+	case "overview", "list", "snapshot", "page", "get", "events", "search", "status", "read_attachment", "export_document", "tool_accounts", "tool_read", "agent_binding":
 		return true
 	}
 	return false
@@ -415,6 +416,12 @@ func (s *Store) Apply(ctx context.Context, a Actor, c Command) (Result, error) {
 			}
 			if r.Snapshot != nil && current.ACLRevision != r.Snapshot.Room.ACLRevision {
 				return Result{}, errors.New("acl_revision_conflict")
+			}
+		}
+		if r.Overview != nil {
+			current, e := s.overviewScope(ctx, s.db, a)
+			if e != nil || current != r.Overview.ScopeRevision {
+				return Result{}, errors.New("overview_scope_changed")
 			}
 		}
 		for _, room := range r.Rooms {
@@ -504,6 +511,9 @@ func (s *Store) decorateInvite(a Actor, r Result) Result {
 
 type cursor struct {
 	Room, Actor, Kind, Thread string
+	Scope, Key                string `json:",omitempty"`
+	Pinned                    bool   `json:",omitempty"`
+	Expires                   int64  `json:",omitempty"`
 	ACL                       uint64
 	Before                    int64
 }
@@ -636,7 +646,7 @@ func (s *Store) page(ctx context.Context, q sqlReader, a Actor, r Room, c Comman
 		}
 	}
 	if page.HasMore && len(page.Items) > 0 {
-		page.Cursor, err = s.encodeCursor(cursor{r.ID, a.ID, c.Kind, c.ThreadID, r.ACLRevision, page.Items[len(page.Items)-1].Sequence})
+		page.Cursor, err = s.encodeCursor(cursor{Room: r.ID, Actor: a.ID, Kind: c.Kind, Thread: c.ThreadID, ACL: r.ACLRevision, Before: page.Items[len(page.Items)-1].Sequence})
 		if err != nil {
 			return Page{}, err
 		}

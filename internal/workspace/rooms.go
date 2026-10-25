@@ -14,6 +14,9 @@ func (s *Store) read(ctx context.Context, a Actor, c Command) (Result, error) {
 	if err := s.actorOK(ctx, s.db, a); err != nil {
 		return Result{}, err
 	}
+	if c.Action == "overview" {
+		return s.overview(ctx, a, c)
+	}
 	r := Result{Action: c.Action, PrincipalID: a.ID}
 	if c.Action == "list" {
 		rows, err := s.db.QueryContext(ctx, "SELECT DISTINCT w.id,w.name,w.owner,w.revision FROM workspaces w JOIN rooms r ON r.workspace_id=w.id JOIN members m ON m.room_id=r.id WHERE m.principal_id=? AND m.active=1 UNION SELECT id,name,owner,revision FROM workspaces WHERE owner=? ORDER BY id LIMIT 101", a.ID, a.ID)

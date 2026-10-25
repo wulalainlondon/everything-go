@@ -137,7 +137,7 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 			helloInput.Capabilities = append(helloInput.Capabilities, "teammate_profile_v1")
 		}
 		if h.workspace != nil && h.pairedTaskDevice(c) != "" {
-			helloInput.Capabilities = append(helloInput.Capabilities, "collaboration_workspace_v1")
+			helloInput.Capabilities = append(helloInput.Capabilities, h.workspaceCapabilities()...)
 		}
 		if h.sharedReadAuthorized(c) {
 			helloInput.Capabilities = append(helloInput.Capabilities, "session_read_sync_v1")

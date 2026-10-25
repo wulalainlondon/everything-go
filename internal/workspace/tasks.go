@@ -174,6 +174,13 @@ func (s *Store) taskMutation(ctx context.Context, tx *sql.Tx, a Actor, r Room, c
 			if t.Axes.QA == "FAIL" || t.Axes.QA == "pending" || t.Axes.QA == "unknown" {
 				return out, errors.New("qa_not_passed")
 			}
+			available, checkErr := taskAcceptanceAvailable(ctx, tx, r.ID, e.ID)
+			if checkErr != nil {
+				return out, checkErr
+			}
+			if !available {
+				return out, errors.New("workflow_version_changed")
+			}
 			t.Axes.Human = "accepted"
 		}
 		e, err = s.put(ctx, tx, a, r, e, t)

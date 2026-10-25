@@ -60,14 +60,15 @@ import (
 // Config carries the connection-identity fields surfaced in hello_ack so the
 // app can label the bridge and respect its filesystem jail.
 type Config struct {
-	WorkspaceEnabled   bool
-	DelegationHandoff  *handoff.Config
-	DelegationCapacity *delegation.CapacityConfig
-	InstanceName       string
-	InstanceID         string
-	RootDir            string
-	DataDir            string
-	LanIP              string
+	WorkspaceEnabled          bool
+	WorkspaceOverviewDisabled bool
+	DelegationHandoff         *handoff.Config
+	DelegationCapacity        *delegation.CapacityConfig
+	InstanceName              string
+	InstanceID                string
+	RootDir                   string
+	DataDir                   string
+	LanIP                     string
 	// ResolveLANIP is evaluated for each handshake; laptops can change networks
 	// while the hub remains alive. Nil preserves static embedders/tests.
 	ResolveLANIP func() string

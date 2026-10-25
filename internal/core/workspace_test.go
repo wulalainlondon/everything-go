@@ -621,3 +621,19 @@ func TestWorkspaceBackpressuredNativeFrameRechecksMembershipAtWrite(t *testing.T
 		}
 	}
 }
+
+func TestWorkspaceOverviewIndependentDisable(t *testing.T) {
+	f := workspaceSetup(t)
+	f.h.cfg.WorkspaceOverviewDisabled = true
+	for _, cap := range f.h.workspaceCapabilities() {
+		if cap == workspace.OverviewCapability {
+			t.Fatal("disabled overview advertised")
+		}
+	}
+	if _, err := f.h.executeWorkspace(f.ctx, f.owner, workspace.Command{Authority: f.h.cfg.InstanceID, Action: "overview"}); err == nil || !strings.Contains(err.Error(), "workspace_overview_unavailable") {
+		t.Fatal("overview gate missing", err)
+	}
+	if _, err := f.h.executeWorkspace(f.ctx, f.owner, workspace.Command{Authority: f.h.cfg.InstanceID, Action: "list"}); err != nil {
+		t.Fatal("legacy workspace disabled", err)
+	}
+}

@@ -47,6 +47,14 @@ func workspaceHash(v string) string   { b := sha256.Sum256([]byte(v)); return he
 
 func (h *Hub) WorkspaceAvailable() bool { return h.workspace != nil }
 
+func (h *Hub) workspaceCapabilities() []string {
+	caps := []string{workspace.Capability}
+	if !h.cfg.WorkspaceOverviewDisabled {
+		caps = append(caps, workspace.OverviewCapability)
+	}
+	return caps
+}
+
 func (h *Hub) workspaceOwner(c *Client) (workspace.Actor, bool) {
 	if h.workspace == nil || c == nil || !c.live() || c.enrollmentOnly || c.inventoryProbe || h.pairedTaskDevice(c) == "" {
 		return workspace.Actor{}, false
@@ -279,6 +287,9 @@ func (h *Hub) executeWorkspace(ctx context.Context, a workspace.Actor, c workspa
 	}
 	if h.workspace == nil {
 		return workspace.Result{}, errors.New("workspace_unavailable")
+	}
+	if c.Action == "overview" && h.cfg.WorkspaceOverviewDisabled {
+		return workspace.Result{}, errors.New("workspace_overview_unavailable")
 	}
 	if c.Authority != h.cfg.InstanceID {
 		return workspace.Result{}, errors.New("workspace_wrong_authority")
@@ -567,7 +578,7 @@ func (h *Hub) ServeWorkspaceGuest(w http.ResponseWriter, r *http.Request) {
 		defer stop()
 		return conn.Write(writeCtx, websocket.MessageText, b)
 	}
-	if write(workspaceWire{Type: "workspace_guest_ready", Authority: h.cfg.InstanceID, PrincipalID: actor.ID, OK: true}) != nil {
+	if write(workspaceWire{Type: "workspace_guest_ready", Authority: h.cfg.InstanceID, PrincipalID: actor.ID, OK: true, Data: &workspace.Result{Action: "capabilities", ToolData: map[string]any{"workspace_capabilities": h.workspaceCapabilities()}}}) != nil {
 		return
 	}
 	conn.SetReadLimit(16 * 1024 * 1024)
