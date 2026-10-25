@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 
+	delegationcontract "everything-go/contracts/delegation/v1"
 	"everything-go/internal/backend"
 	"everything-go/internal/session"
 )
@@ -20,10 +21,10 @@ func (c *Codex) applyDelegationThreadTools(s *session.Session, params map[string
 	}
 	params["dynamicTools"] = []map[string]any{{
 		"type": "namespace", "name": "bridge_sessions",
-		"description": "Delegate a user-authorized, independent one-turn task to a new Bridge conversation. Bridge returns its final answer to this conversation after completion.",
+		"description": "Manage this original parent’s authorized delegated tasks. Create a session for a new logical task; continue corrections/rechecks on the original owner/QA sessions. Each round returns its own final to this parent.",
 		"tools": []map[string]any{{
 			"type": "function", "name": "delegate_session",
-			"description": "Create a fresh independent Codex session for a bounded task. Use only when the user asks you to delegate or independently check work. The child sees only the instruction you supply, not this chat history.",
+			"description": "Accept a fresh independent Codex task; excess work waits in a durable FIFO. An acceptance receipt does not prove execution started. Query get_capacity for this parent's separate execution, waiting and delivery limits. Use only for a new logical task the user authorized you to delegate or independently check. For an existing logical task use continue_delegation or its original TaskAPI append; reuse the bound independent QA. The child sees only the instruction you supply, not this chat history.",
 			"inputSchema": map[string]any{
 				"type": "object", "additionalProperties": false,
 				"properties": map[string]any{
@@ -50,6 +51,18 @@ func (c *Codex) applyDelegationThreadTools(s *session.Session, params map[string
 			},
 		}},
 	}}
+	if _, ok := c.delegationProvider.(backend.DelegationQueueProvider); ok {
+		namespaces := params["dynamicTools"].([]map[string]any)
+		entries := namespaces[0]["tools"].([]map[string]any)
+		namespaces[0]["tools"] = append(entries,
+			map[string]any{"type": "function", "name": "get_capacity", "description": "Read this parent's configured execution, waiting and reserved-delivery bounds and counts. No work is started.", "inputSchema": map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{}}},
+			map[string]any{"type": "function", "name": "cancel_waiting_delegation", "description": "Cancel this parent's exact delegation only while it is durably waiting for execution capacity. Already-started or uncertain work is never reported stopped.", "inputSchema": map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{"delegation_id": map[string]any{"type": "string", "minLength": 1}}, "required": []string{"delegation_id"}}})
+	}
+	if _, ok := c.delegationProvider.(backend.DelegationContinuityProvider); ok {
+		namespaces := params["dynamicTools"].([]map[string]any)
+		entries := namespaces[0]["tools"].([]map[string]any)
+		namespaces[0]["tools"] = append(entries, delegationcontract.Tools()...)
+	}
 }
 
 func (c *Codex) handleDelegationServerRequest(id any, method string, raw json.RawMessage) bool {
@@ -77,7 +90,7 @@ func (c *Codex) handleDelegationServerRequest(id any, method string, raw json.Ra
 		var result any
 		st := c.state(s.ID)
 		st.mu.Lock()
-		requestID, turnID, active := st.reqID, st.currentTurnID, st.turnActive
+		requestID, turnID, active := st.reqID, st.currentTurnID, st.turnActive && !st.turnStartPending
 		st.mu.Unlock()
 		owned := active && requestID != "" && turnID != "" && call.TurnID == turnID
 		var voiceCaller backend.SessionControlCaller
@@ -104,6 +117,66 @@ func (c *Codex) handleDelegationServerRequest(id any, method string, raw json.Ra
 						result, err = provider.DelegateVoiceSession(voiceCaller, spec)
 					} else {
 						err = errors.New("delegation_voice_unsupported")
+					}
+				}
+			case "cancel_waiting_delegation", "get_capacity":
+				provider, ok := c.delegationProvider.(backend.DelegationQueueProvider)
+				if !ok {
+					err = errors.New("delegation_queue_unsupported")
+					break
+				}
+				var args struct {
+					ID string `json:"delegation_id"`
+				}
+				decoder := json.NewDecoder(bytes.NewReader(call.Arguments))
+				decoder.DisallowUnknownFields()
+				if err = decoder.Decode(&args); err == nil {
+					if call.Tool == "get_capacity" {
+						result, err = provider.DelegationCapacity(s)
+					} else {
+						result, err = provider.CancelWaitingDelegation(s, args.ID)
+					}
+				}
+			case "continue_delegation", "get_delegation_rounds", "bind_delegation_qa", "record_delegation_review":
+				provider, ok := c.delegationProvider.(backend.DelegationContinuityProvider)
+				if !ok || !owned {
+					err = errors.New("delegation_continuation_parent_not_owned")
+					break
+				}
+				if err = delegationcontract.Validate(call.Tool, call.Arguments); err != nil {
+					break
+				}
+				decoder := json.NewDecoder(bytes.NewReader(call.Arguments))
+				decoder.DisallowUnknownFields()
+				switch call.Tool {
+				case "continue_delegation":
+					var in backend.DelegationContinuation
+					if err = decoder.Decode(&in); err == nil {
+						result, err = provider.ContinueDelegation(s, requestID, call.CallID, in)
+					}
+				case "get_delegation_rounds":
+					var in struct {
+						ID    string `json:"delegation_id"`
+						After uint64 `json:"after_version"`
+					}
+					if err = decoder.Decode(&in); err == nil {
+						result, err = provider.DelegationRounds(s, in.ID, in.After)
+					}
+				case "bind_delegation_qa":
+					var in struct {
+						Owner string `json:"owner_delegation_id"`
+						QA    string `json:"qa_delegation_id"`
+					}
+					if err = decoder.Decode(&in); err == nil {
+						result, err = provider.BindDelegationQA(s, requestID, call.CallID, in.Owner, in.QA)
+					}
+				case "record_delegation_review":
+					var in struct {
+						Owner string `json:"owner_round_id"`
+						QA    string `json:"qa_round_id"`
+					}
+					if err = decoder.Decode(&in); err == nil {
+						result, err = provider.RecordDelegationReview(s, requestID, call.CallID, in.Owner, in.QA)
 					}
 				}
 			case "read_result":
@@ -135,4 +208,11 @@ func (c *Codex) handleDelegationServerRequest(id any, method string, raw json.Ra
 			"contentItems": []map[string]any{{"type": "inputText", "text": output}}}})
 	}()
 	return true
+}
+
+func (c *Codex) delegationContextPinned(s *session.Session) (bool, error) {
+	if provider, ok := c.delegationProvider.(backend.DelegationContextProvider); ok {
+		return provider.PreserveDelegationContext(s)
+	}
+	return false, nil
 }

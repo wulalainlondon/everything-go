@@ -23,6 +23,15 @@ type codexFailureDetail struct {
 }
 
 func codexSubmissionFailure(err error) *codexFailureDetail {
+	var correlation *codexAcceptanceError
+	if errors.As(err, &correlation) {
+		f := correlation.Failure
+		if f.Category == "" {
+			f.Category = recovery.Unknown
+		}
+		f.Source = correlation.Reason
+		return &codexFailureDetail{Failure: f, Acceptance: recovery.AcceptanceUnknown}
+	}
 	d := &codexFailureDetail{Failure: recovery.ClassifyCodex(nil, err.Error()), Acceptance: recovery.AcceptanceUnknown}
 	if d.Failure.Source == "unknown" {
 		d.Failure.Source = "submission_error"

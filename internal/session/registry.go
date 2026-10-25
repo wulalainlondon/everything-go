@@ -73,6 +73,7 @@ type Session struct {
 	activeQueuedID string
 	quit           chan struct{}
 	workerUp       bool
+	workerDone     chan struct{}
 	turnDone       chan struct{}
 }
 
@@ -645,6 +646,53 @@ func (r *Registry) PruneCodexSessions(ignore func(cwd, name string) bool) int {
 		r.Persist()
 	}
 	return removed
+}
+
+// PruneMissingNativeSessions retires idle imported or Bridge-created rows
+// bound to a confirmed missing native conversation. Execution/queue receipts remain intact.
+// The caller supplies authoritative deletion evidence and a durable-work guard.
+func (r *Registry) PruneMissingNativeSessions(missing func(Snapshot) bool) int {
+	if missing == nil {
+		return 0
+	}
+	r.mu.Lock()
+	var removed []*Session
+	for id, s := range r.sessions {
+		snap := s.Snapshot()
+		prefix := "jl_c_"
+		if snap.Backend == "codex" {
+			prefix = "jl_x_"
+		} else if snap.Backend != "claude" {
+			continue
+		}
+		if len(snap.ResumeID) < 12 || (id != prefix+snap.ResumeID[:12] && !strings.HasPrefix(id, "s_")) || !missing(snap) {
+			continue
+		}
+		s.mu.Lock()
+		if s.state == Idle && len(s.mailbox) == 0 && s.queueHolds == 0 && s.activeQueuedID == "" && !s.configUpdating && s.resumeID == snap.ResumeID {
+			// Close under the same lock that excludes Submit, before removing the row.
+			s.state = Closed
+			if s.turnDone != nil {
+				close(s.turnDone)
+				s.turnDone = nil
+			}
+			if s.quit != nil {
+				close(s.quit)
+				s.quit = nil
+			}
+			s.queueHolds = 0
+			s.signalQueueLocked()
+			s.workerUp = false
+			delete(r.sessions, id)
+			removed = append(removed, s)
+		}
+		s.mu.Unlock()
+	}
+	r.mu.Unlock()
+	if len(removed) > 0 {
+		r.Persist()
+	}
+	return len(removed)
 }
 
 // Create registers a session under the client-supplied id. If the id already

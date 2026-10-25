@@ -9,6 +9,7 @@ import (
 	"everything-go/internal/messagequeue"
 	"everything-go/internal/session"
 	"everything-go/internal/sessiondispatch"
+	"fmt"
 	"github.com/coder/websocket"
 	"testing"
 )
@@ -27,7 +28,7 @@ func TestQueueReceiptReadIsExactPureCASAndIndependentOfStateRevision(t *testing.
 	if out["status"] != "supported" || fact["delivery"] != "unverified" || fact["can_cancel"] != false {
 		t.Fatal(out)
 	}
-	h.Emit(backend.NativeTaskAccepted{SessionID: s.ID, RequestID: e.RequestID, ThreadID: "thread", TurnID: "native-exact"})
+	emitVerifiedNativeFixture(h, backend.NativeTaskAccepted{SessionID: s.ID, RequestID: e.RequestID, ThreadID: "thread", TurnID: "native-exact"})
 	h.reconcileQueueReceipts(owner, cmd)
 	out = waitForType(t, owner, "queue_receipts_reconciled")
 	fact = out["receipts"].([]any)[0].(map[string]any)
@@ -66,7 +67,7 @@ func TestQueueCancelNeverCancelsUncertainNativeOrSystemNotice(t *testing.T) {
 			h.messageQueue.Transition(s.ID, e.RequestID, []messagequeue.State{messagequeue.Queued}, test.state, "", "", "")
 		}
 		if test.id == "r_native" {
-			h.Emit(backend.NativeTaskAccepted{SessionID: s.ID, RequestID: test.id, ThreadID: "thread", TurnID: "active"})
+			emitVerifiedNativeFixture(h, backend.NativeTaskAccepted{SessionID: s.ID, RequestID: test.id, ThreadID: "thread", TurnID: "active"})
 		}
 		h.cancelQueuedMessage(owner, clientproto.Command{SessionID: s.ID, RequestID: test.id})
 		if waitForType(t, owner, "queue_action_result")["status"] != "rejected" {
@@ -116,6 +117,20 @@ func TestQueueReceiptReadRejectsDuplicateAndHiddenScopeWithoutMaintenanceEffects
 type exactQueueProvider struct {
 	*floatingHistoryProvider
 	onRead func()
+	proofs map[string]string
+}
+
+func (p *exactQueueProvider) seedNativeFixture(proof backend.NativeTaskAccepted) {
+	if p.proofs == nil {
+		p.proofs = map[string]string{}
+	}
+	p.proofs[proof.ThreadID+"/"+proof.TurnID] = proof.RequestID
+}
+func (p *exactQueueProvider) ValidateNativeAcceptance(_ *session.Session, thread, request, turn string) error {
+	if p.proofs[thread+"/"+turn] != request {
+		return fmt.Errorf("native correlation unavailable")
+	}
+	return nil
 }
 
 func (p *exactQueueProvider) ExactQueueFinal(string, string, string) (bool, error) {
@@ -155,7 +170,7 @@ func TestQueueReadAndCancelRevalidateRevokedPairingAfterProviderIO(t *testing.T)
 			provider := &exactQueueProvider{floatingHistoryProvider: &floatingHistoryProvider{}, onRead: func() { h.pairing.Unclaim("qa-read-owner") }}
 			h.SetExecutor(&exactQueueExec{fakeExec: fe, provider: provider})
 			if action == "read" {
-				h.Emit(backend.NativeTaskAccepted{SessionID: s.ID, RequestID: e.RequestID, ThreadID: "thread", TurnID: "original-turn"})
+				emitVerifiedNativeFixture(h, backend.NativeTaskAccepted{SessionID: s.ID, RequestID: e.RequestID, ThreadID: "thread", TurnID: "original-turn"})
 				snap, _ := h.messageQueue.Snapshot(s.ID)
 				rev := snap.Revision
 				h.reconcileQueueReceipts(owner, clientproto.Command{SessionID: s.ID, RequestID: "read", TaskRequestIDs: []string{e.RequestID}, ExpectedRevision: &rev})
@@ -184,7 +199,7 @@ func TestQueueReconciliationAuthenticatedWSDecoderAndCapability(t *testing.T) {
 	}
 	s := h.registry.Create("s1", "Task", t.TempDir(), backend.Codex, "", "", "thread")
 	e := taskEntry(t, h, s.ID, "r_wire-original", "queue-device", messagequeue.Uncertain)
-	h.Emit(backend.NativeTaskAccepted{SessionID: s.ID, RequestID: e.RequestID, ThreadID: "thread", TurnID: "wire-native"})
+	emitVerifiedNativeFixture(h, backend.NativeTaskAccepted{SessionID: s.ID, RequestID: e.RequestID, ThreadID: "thread", TurnID: "wire-native"})
 	conn, ctx, cleanup := dialWS(t, h)
 	defer cleanup()
 	write := func(raw string) {
@@ -305,7 +320,7 @@ func TestNF01ReceiptOriginalIdentityRegistryAndFinalAxes(t *testing.T) {
 			s := h.registry.Create("s1", "Task", t.TempDir(), backend.Codex, "", "", "thread")
 			owner := sharedReadClient(t, h, "owner")
 			e := taskEntry(t, h, s.ID, "r_original", "owner", messagequeue.Uncertain)
-			h.Emit(backend.NativeTaskAccepted{SessionID: s.ID, RequestID: e.RequestID, ThreadID: "thread", TurnID: "turn"})
+			emitVerifiedNativeFixture(h, backend.NativeTaskAccepted{SessionID: s.ID, RequestID: e.RequestID, ThreadID: "thread", TurnID: "turn"})
 			snap, _ := h.messageQueue.Snapshot(s.ID)
 			rev := snap.Revision
 			provider := &nf01ReceiptProvider{exactQueueProvider: &exactQueueProvider{floatingHistoryProvider: &floatingHistoryProvider{}}}
@@ -330,6 +345,7 @@ func TestNF01ReceiptOriginalIdentityRegistryAndFinalAxes(t *testing.T) {
 				}
 			}
 			h.SetExecutor(&nf01ReceiptExec{fakeExec: fe, provider: provider})
+			provider.seedNativeFixture(backend.NativeTaskAccepted{SessionID: s.ID, RequestID: e.RequestID, ThreadID: "thread", TurnID: "turn"})
 			h.reconcileQueueReceipts(owner, clientproto.Command{SessionID: s.ID, RequestID: "readonly", TaskRequestIDs: []string{e.RequestID}, ExpectedRevision: &rev})
 			out := waitForType(t, owner, "queue_receipts_reconciled")
 			if provider.hash != e.PayloadHash {

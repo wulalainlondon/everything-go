@@ -45,6 +45,18 @@ func (s *Session) SettingsSnapshot() Snapshot {
 	return snap
 }
 
+// StableConfigurationSnapshot allows a voice preparation to read its owning
+// session without crossing an uncommitted settings RPC. It does not reserve or
+// interrupt any active text turn.
+func (s *Session) StableConfigurationSnapshot() (Snapshot, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.configUpdating || s.state == Closed {
+		return Snapshot{}, errors.New("session_configuration_updating")
+	}
+	return s.snapshotLocked(), nil
+}
+
 // The Hub holds messageQueueMu for update + durable commit + admission. This
 // method additionally excludes config RPC/dequeue transitions under s.mu.
 func (s *Session) SetFutureConfiguration(c Configuration, expected *uint64) (Snapshot, error) {

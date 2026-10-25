@@ -323,6 +323,9 @@
       "type": "task_api_response"
     },
     {
+      "type": "task_callback"
+    },
+    {
       "type": "task_killed"
     },
     {
@@ -360,6 +363,12 @@
     },
     {
       "type": "user_input_request"
+    },
+    {
+      "type": "voice_prepared"
+    },
+    {
+      "type": "voice_transfer"
     },
     {
       "type": "webrtc_answer"
@@ -440,6 +449,9 @@
     },
     {
       "type": "codex_goal_set"
+    },
+    {
+      "type": "codex_voice_media_state"
     },
     {
       "type": "codex_voice_start"
@@ -679,6 +691,9 @@
       "type": "task_api_request"
     },
     {
+      "type": "task_callback_request"
+    },
+    {
       "type": "tunnel_url_ack"
     },
     {
@@ -686,6 +701,12 @@
     },
     {
       "type": "user_input_response"
+    },
+    {
+      "type": "voice_call_prepare"
+    },
+    {
+      "type": "voice_transfer_control"
     },
     {
       "type": "webrtc_answer"

@@ -85,6 +85,13 @@ func (m *Mux) Send(ctx context.Context, s *session.Session, reqID, content strin
 	return sendReliable(ctx, e, m.terminal, s, reqID, content, images, files)
 }
 func (m *Mux) Stop(ctx context.Context, s *session.Session) error { return m.pick(s).Stop(ctx, s) }
+
+func (m *Mux) QueuedSubmissionReady(ctx context.Context, s *session.Session, requestID string) error {
+	if reader, ok := m.pick(s).(backend.QueuedSubmissionReader); ok {
+		return reader.QueuedSubmissionReady(ctx, s, requestID)
+	}
+	return nil
+}
 func (m *Mux) StartRealtimeVoice(ctx context.Context, s *session.Session, input backend.RealtimeVoiceStart) (backend.RealtimeVoiceAnswer, error) {
 	voice, ok := m.pick(s).(backend.RealtimeVoiceExecutor)
 	if !ok {
@@ -348,4 +355,34 @@ func (m *Mux) TaskAPICapabilities() []taskapi.ProviderCapability {
 		}
 	}
 	return out
+}
+
+func (m *Mux) AppendRealtimeVoiceSpeech(ctx context.Context, s *session.Session, voice, text string) error {
+	p, ok := m.pick(s).(backend.RealtimeSpeechExecutor)
+	if !ok {
+		return fmt.Errorf("原語音來源尚未支援直接匯報")
+	}
+	return p.AppendRealtimeVoiceSpeech(ctx, s, voice, text)
+}
+func (m *Mux) ReadRealtimeVoiceSpeech(ctx context.Context, s *session.Session, voice string, since int64) (backend.RealtimeSpeechEvidence, error) {
+	p, ok := m.pick(s).(backend.RealtimeSpeechReader)
+	if !ok {
+		return backend.RealtimeSpeechEvidence{}, fmt.Errorf("原來源未提供逐通話播報回讀")
+	}
+	return p.ReadRealtimeVoiceSpeech(ctx, s, voice, since)
+}
+
+// Only a retained bounded task may use this enforcer; it grants no arbitrary
+// existing-target creation route and changes no provider/global settings.
+func (m *Mux) ExistingTaskScopeMode() string { return "retained_bounded_only" }
+func (m *Mux) ValidateExistingTaskScope(s *session.Session, scope taskapi.ChildScope, cwd string) error {
+	e, ok := m.byBackend[s.Backend()]
+	if !ok {
+		return taskapi.Failure("unsupported", "known_none", "read_capabilities")
+	}
+	guard, ok := e.(backend.ExistingTaskScopeEnforcer)
+	if !ok {
+		return taskapi.Failure("unsupported", "known_none", "read_capabilities")
+	}
+	return guard.ValidateExistingTaskScope(s, scope, cwd)
 }

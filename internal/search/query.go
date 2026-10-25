@@ -177,8 +177,9 @@ SELECT session_id, display_name, cwd, project_dir, backend,
 FROM _ranked WHERE per_sess_rank <= ? ORDER BY rank`
 
 func (idx *Index) runFTS(ftsQuery string, f Filters, limit, offset int) []Hit {
-	where := "messages_fts MATCH ?"
-	args := []any{ftsQuery}
+	guard, privateArgs := idx.publicSessionClause("s")
+	where := guard + " AND messages_fts MATCH ?"
+	args := append(privateArgs, ftsQuery)
 	if f.Since != "" {
 		where += " AND m.ts >= ?"
 		args = append(args, f.Since)
@@ -212,7 +213,9 @@ func (idx *Index) runLikeFallback(tokens []string, f Filters, limit, offset int)
 		likeClauses = append(likeClauses, "m.content LIKE ?")
 		args = append(args, "%"+t+"%")
 	}
-	where := strings.Join(likeClauses, " AND ")
+	guard, privateArgs := idx.publicSessionClause("s")
+	where := guard + " AND " + strings.Join(likeClauses, " AND ")
+	args = append(privateArgs, args...)
 	if f.Since != "" {
 		where += " AND m.ts >= ?"
 		args = append(args, f.Since)
@@ -466,8 +469,8 @@ type SessionListResponse struct {
 }
 
 func (idx *Index) ListSessions(cursor string, limit int, projectDir string, includeHidden bool, includeSubagents bool) SessionListResponse {
-	var where []string
-	var args []any
+	guard, args := idx.publicSessionClause("s")
+	where := []string{guard}
 	if !includeHidden {
 		where = append(where, "is_hidden = 0")
 	}
@@ -488,7 +491,7 @@ func (idx *Index) ListSessions(cursor string, limit int, projectDir string, incl
 		whereSQL = "WHERE " + strings.Join(where, " AND ")
 	}
 	args = append(args, limit+1)
-	sql := "SELECT session_id, display_name, cwd, project_dir, backend, first_ts, last_ts, msg_count, is_pinned FROM sessions " +
+	sql := "SELECT session_id, display_name, cwd, project_dir, backend, first_ts, last_ts, msg_count, is_pinned FROM sessions s " +
 		whereSQL + " ORDER BY is_pinned DESC, last_ts DESC LIMIT ?"
 
 	resp := SessionListResponse{Type: "session_list", Items: []SessionItem{}}
@@ -552,8 +555,12 @@ func (idx *Index) GetContext(sessionID, msgUUID string, around int) ContextRespo
 		TargetMsgUUID: msgUUID, Messages: []ContextMessage{}}
 
 	var dn, cwd, backend *string
-	idx.db.QueryRow("SELECT display_name, cwd, backend FROM sessions WHERE session_id = ? LIMIT 1",
-		sessionID).Scan(&dn, &cwd, &backend)
+	guard, args := idx.publicSessionClause("s")
+	args = append([]any{sessionID}, args...)
+	if idx.db.QueryRow("SELECT display_name, cwd, backend FROM sessions s WHERE session_id = ? AND "+guard+" LIMIT 1",
+		args...).Scan(&dn, &cwd, &backend) != nil {
+		return resp
+	}
 	resp.SessionDisplayName, resp.Cwd, resp.Backend = dn, cwd, backend
 
 	var targetRowid int64

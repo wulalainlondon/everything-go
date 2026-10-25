@@ -24,6 +24,7 @@ func TestFinalAnswerForRequestExcludesCommentaryAndOtherTurns(t *testing.T) {
 	rows := []string{
 		`{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-one"}}`,
 		`{"type":"response_item","payload":{"type":"message","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"Progress only"}]}}`,
+		`{"type":"response_item","payload":{"type":"message","role":"assistant","phase":"partial_answer","content":[{"type":"output_text","text":"Partial answer is not the native final"}]}}`,
 		`{"type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"Verified result"}]}}`,
 		`{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-one"}}`,
 		`{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-two"}}`,

@@ -106,11 +106,13 @@ func (s *Store) OriginEntries(instance, parent string) ([]Entry, error) {
 // transaction. No attachment bytes or credentials enter this typed relation.
 func saveTaskAdmission(tx *sql.Tx, e Entry) error {
 	var raw struct {
-		MessagePurpose string          `json:"message_purpose,omitempty"`
-		OwnerDevice    string          `json:"owner_device"`
-		Origin         json.RawMessage `json:"task_origin"`
-		Target         json.RawMessage `json:"expected_target"`
-		Content        string          `json:"content"`
+		MessagePurpose     string          `json:"message_purpose,omitempty"`
+		CallbackOnComplete *bool           `json:"callback_on_complete,omitempty"`
+		CallbackBinding    string          `json:"callback_binding,omitempty"`
+		OwnerDevice        string          `json:"owner_device"`
+		Origin             json.RawMessage `json:"task_origin"`
+		Target             json.RawMessage `json:"expected_target"`
+		Content            string          `json:"content"`
 	}
 	if json.Unmarshal(e.Payload, &raw) != nil || raw.OwnerDevice == "" && len(raw.Origin) == 0 && raw.MessagePurpose == "" {
 		return nil

@@ -29,6 +29,7 @@ import (
 	"everything-go/internal/automation"
 	"everything-go/internal/backend"
 	"everything-go/internal/core"
+	"everything-go/internal/delegation"
 	"everything-go/internal/deviceinventory"
 	"everything-go/internal/eventinbox"
 	"everything-go/internal/executor"
@@ -37,18 +38,44 @@ import (
 	"everything-go/internal/feed"
 	"everything-go/internal/filetransfer"
 	"everything-go/internal/governance"
+	"everything-go/internal/handoff"
 	"everything-go/internal/inbox"
+	"everything-go/internal/linecontrol"
 	"everything-go/internal/media"
+	"everything-go/internal/mediaservice"
 	"everything-go/internal/netsvc"
 	"everything-go/internal/relay"
 	"everything-go/internal/search"
 	"everything-go/internal/session"
 	"everything-go/internal/sourcepolicy"
+	"everything-go/internal/voicecontrol"
+	"everything-go/internal/voicemediaipc"
 	"everything-go/internal/workitems"
+	"everything-go/internal/workspacepush"
+	"everything-go/internal/workspacetools"
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "voice-control" {
+		os.Exit(voicecontrol.RunCLI(os.Args[2:], os.Stdout, os.Stderr))
+	}
+	if len(os.Args) > 1 && os.Args[1] == "line" {
+		os.Exit(linecontrol.RunCLI(os.Args[2:], os.Stdout, os.Stderr))
+	}
+	if len(os.Args) > 1 && os.Args[1] == "line-check" {
+		os.Exit(runLineCheck(os.Args[2:], os.Stdout))
+	}
+	if len(os.Args) > 1 && os.Args[1] == "media" {
+		os.Exit(mediaservice.RunCLI(os.Args[2:], os.Stdout, os.Stderr))
+	}
+	if len(os.Args) > 1 && os.Args[1] == "voice-media" {
+		os.Exit(voicemediaipc.RunCLI(os.Args[2:], os.Stdout, os.Stderr))
+	}
+	lineConfigCheck := flag.Bool("check-line-config", false, "Read-only LINE private-config and signed-runtime preflight; no account network actions")
+	pairingWindow := flag.Duration("pairing-window", 0, "Explicit short pairing window for a loopback-only local acceptance instance")
+	listenHost := flag.String("listen-host", "", "IP to bind (empty = all interfaces; use 127.0.0.1 for isolated local acceptance)")
 	port := flag.Int("port", 8767, "WebSocket listen port (Python prod uses 8766)")
+	mediaControl := flag.Bool("media-control", false, "Enable fixed local media control after provider origin verification")
 	execName := flag.String("executor", "go", "AI executor: go | python")
 	claudeBin := flag.String("claude-bin", "claude", "path to the claude CLI binary")
 	codexBin := flag.String("codex-bin", "codex", "path to the codex CLI binary")
@@ -58,6 +85,9 @@ func main() {
 	dataDir := flag.String("data-dir", ".", "directory for everything-go's own persisted state")
 	sessionStore := flag.String("session-store", os.Getenv("EVERYTHING_GO_SESSION_STORE"), "canonical saved_sessions.json path (empty = DATA_DIR/everything_go_sessions.json)")
 	instanceName := flag.String("instance-name", "everything-go", "human label shown in the app")
+	nativeCapture := flag.String("native-task-capture-config", "", "operator-owned acceptance capture JSON; default off, no business authority")
+	delegationHandoff := flag.String("delegation-handoff-config", "", "operator-owned per-parent handoff JSON; off when omitted")
+	delegationCapacity := flag.String("delegation-capacity-config", "", "server-owned per-parent delegation capacity JSON (default 6 active, 64 waiting, 128 reserved results)")
 	rootDir := flag.String("root-dir", "", "filesystem jail root (\"\" = no jail)")
 	permissionCheck := flag.Bool("permission-check", false, "check filesystem permissions needed by the resident bridge and exit")
 	permissionCheckPaths := flag.String("permission-check-paths", "", "additional filesystem paths to check, separated by ':' on Unix or ';' on Windows")
@@ -70,10 +100,44 @@ func main() {
 	mdns := flag.Bool("mdns", false, "enable mDNS (_bridge._tcp) registration")
 	mdnsOff := flag.Bool("no-mdns", false, "deprecated: mDNS is disabled by default")
 	disableSearch := flag.Bool("disable-search", false, "disable transcript search and background indexing")
+	workspaceEnabled := flag.Bool("collaboration-workspace", false, "enable scoped collaboration rooms and the isolated guest transport")
+	workspacePushConfig := flag.String("workspace-push-config", "", "private workspace-only FCM profile with exact original Keychain service/account")
+	workspaceToolsConfig := flag.String("workspace-tools-config", "", "private operator-reviewed workspace account profiles; original exact Keychain entries only")
 	disableNativeWatcher := flag.Bool("disable-native-watcher", false, "disable native session discovery outside bridge-created sessions")
 	mode := flag.String("mode", "bridge", "run mode: bridge | index | devices (read-only local device inventory)")
 	indexPathsStdin := flag.Bool("index-paths-stdin", false, "index only newline-delimited transcript paths read from stdin")
 	flag.Parse()
+	if *lineConfigCheck {
+		os.Exit(runLineCheck([]string{"--data-dir", *dataDir}, os.Stdout))
+	}
+	var capacity *delegation.CapacityConfig
+	if *delegationCapacity != "" {
+		f, e := os.Open(*delegationCapacity)
+		if e != nil {
+			log.Fatal("delegation capacity configuration unavailable")
+		}
+		c, e := delegation.ReadCapacityConfig(f)
+		f.Close()
+		if e != nil {
+			log.Fatalf("invalid delegation capacity configuration: %v", e)
+		}
+		capacity = &c
+	}
+
+	var handoffConfig *handoff.Config
+	if *delegationHandoff != "" {
+		f, err := os.Open(*delegationHandoff)
+		if err != nil {
+			log.Fatal("delegation handoff configuration unavailable")
+		}
+		parsed, err := handoff.ReadConfig(f)
+		f.Close()
+		if err != nil {
+			log.Fatalf("invalid delegation handoff configuration: %v", err)
+		}
+		handoffConfig = &parsed
+	}
+
 	if *mode == "devices" {
 		result, err := deviceinventory.Query(context.Background(), *dataDir)
 		if err != nil {
@@ -118,7 +182,10 @@ func main() {
 	}
 	// Claim the port before opening durable stores. A second launchd job must
 	// fail without running message-queue recovery against the live process.
-	addr := fmt.Sprintf(":%d", *port)
+	if *listenHost != "" && net.ParseIP(*listenHost) == nil {
+		log.Fatal("listen-host must be an IP address")
+	}
+	addr := net.JoinHostPort(*listenHost, fmt.Sprint(*port))
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		log.Fatalf("listen tcp %s before state initialization: %v", addr, err)
@@ -139,24 +206,66 @@ func main() {
 	}
 
 	pairing := governance.NewPairing(filepath.Join(*dataDir, "pairing.json"))
+	if *pairingWindow > 0 {
+		ip := net.ParseIP(*listenHost)
+		if ip == nil || !ip.IsLoopback() || *pairingWindow > 2*time.Minute {
+			log.Fatal("pairing-window requires loopback bind and at most two minutes")
+		}
+		pairing.OpenEnrollment(*pairingWindow)
+	}
 	instanceID, err := governance.LoadOrCreateInstanceID(filepath.Join(*dataDir, "instance_id"))
 	if err != nil {
 		log.Fatalf("load instance id: %v", err)
 	}
 	cfg := core.Config{
-		InstanceName: *instanceName,
-		InstanceID:   instanceID,
-		RootDir:      *rootDir,
-		DataDir:      *dataDir,
-		LanIP:        detectLanIP(),
-		ResolveLANIP: detectLanIP,
-		TailscaleIP:  detectTailscaleIP(),
-		Backends:     backend.DefaultRegistry(*remoteWSURL != ""),
-		CodexRemote:  codexRemoteEndpoint(),
+		WorkspaceEnabled:   *workspaceEnabled,
+		DelegationCapacity: capacity,
+		DelegationHandoff:  handoffConfig,
+		InstanceName:       *instanceName,
+		InstanceID:         instanceID,
+		RootDir:            *rootDir,
+		DataDir:            *dataDir,
+		LanIP:              detectLanIP(),
+		ResolveLANIP:       detectLanIP,
+		TailscaleIP:        detectTailscaleIP(),
+		Backends:           backend.DefaultRegistry(*remoteWSURL != ""),
+		CodexRemote:        codexRemoteEndpoint(),
 	}
 	hub := core.NewHub(reg, cfg, pairing, *port)
+	if cfg.WorkspaceEnabled && !hub.WorkspaceAvailable() {
+		log.Fatal("explicit collaboration workspace configuration failed; existing storage was preserved")
+	}
+	if *workspacePushConfig != "" {
+		if !cfg.WorkspaceEnabled {
+			log.Fatal("workspace push profile requires collaboration workspace")
+		}
+		sender, err := workspacepush.Load(*workspacePushConfig)
+		if err != nil {
+			log.Fatal("workspace push profile unavailable or invalid")
+		}
+		if err = hub.SetWorkspacePush(sender); err != nil {
+			log.Fatal("workspace push configuration failed")
+		}
+	}
+	if *workspaceToolsConfig != "" {
+		if !*workspaceEnabled {
+			log.Fatal("workspace tool configuration requires collaboration-workspace")
+		}
+		adapters, err := workspacetools.Load(*workspaceToolsConfig)
+		if err != nil {
+			log.Fatal(err)
+		}
+		if err = hub.SetWorkspaceToolAdapters(adapters); err != nil {
+			log.Fatal(err)
+		}
+	}
+	if err := hub.ConfigureNativeResponseCapture(*nativeCapture); err != nil {
+		log.Fatal("native task capture configuration refused")
+	}
+	defer hub.DisableNativeResponseCapture()
 	defer hub.CloseDelegations()
 	defer hub.CloseSessionDispatches()
+	defer hub.CloseWorkspace()
 	remoteDesktopListener := startRemoteDesktop(cfg.TailscaleIP, cfg.DataDir, hub.HTTPAuthorized)
 	if remoteDesktopListener != nil {
 		defer remoteDesktopListener.Close()
@@ -184,6 +293,15 @@ func main() {
 		log.Printf("bootstrapped %d connector account(s)", created)
 	}
 	hub.SetAutomation(automationStore)
+	transfers, err := filetransfer.NewService(*dataDir, *rootDir, hub.HTTPAuthorized)
+	if err != nil {
+		log.Fatalf("initialize file transfer: %v", err)
+	}
+	if lineService, lineErr := configuredLineService(hub, *dataDir, instanceID, transfers); lineErr != nil {
+		log.Fatalf("LINE service configuration failed: %s", lineErr.Error())
+	} else if lineService != nil {
+		defer func() { lineService.Close(); _ = lineService.Store().Close() }()
+	}
 	relayStore, err := relay.Open(*dataDir)
 	if err != nil {
 		log.Fatalf("open bridge relay: %v", err)
@@ -207,6 +325,7 @@ func main() {
 		codex.SetDelegationProvider(hub)
 		codex.SetSessionControlProvider(hub)
 		codex.SetDataDir(*dataDir)
+		codex.RegisterExistingDaemonObservation()
 		ollama := goexec.NewOllama(terminal, *ollamaHost, "")
 		backends := map[string]executor.Executor{
 			"claude": claude,
@@ -219,6 +338,25 @@ func main() {
 		mux := executor.NewReliableMux(backends, claude, terminal)
 		mux.SetTurnAdmission(hub)
 		hub.SetExecutor(mux)
+		if hub.LineServiceEnabled() {
+			closeLine, err := hub.StartLineControl(codex)
+			if err != nil {
+				log.Fatalf("LINE control initialization failed: %s", err)
+			}
+			defer closeLine()
+		}
+		closeVoiceControl, err := hub.StartVoiceControl(codex)
+		if err != nil {
+			log.Fatalf("initialize voice control: %v", err)
+		}
+		defer closeVoiceControl()
+		if *mediaControl {
+			closeMedia, err := hub.StartUnifiedVoiceMedia(codex, mediaservice.DefaultManifest())
+			if err != nil {
+				log.Fatalf("initialize media control: %v", err)
+			}
+			defer closeMedia()
+		}
 		if err := hub.EnablePMCollaboration(context.Background()); err != nil {
 			log.Fatalf("initialize PM collaboration: %v", err)
 		}
@@ -234,8 +372,12 @@ func main() {
 	// the heap-heavy parse of every transcript lands in a process that exits and
 	// returns its memory to the OS (see runSearchIndexerLoop).
 	ctx := context.Background()
+	callbackCtx, stopCallbacks := context.WithCancel(ctx)
+	defer stopCallbacks()
+	hub.StartTaskCallbacks(callbackCtx)
 	hub.StartDeviceInventoryAdmin(ctx)
 	hub.StartWorkScheduler(ctx)
+	hub.StartWorkspaceScheduler(callbackCtx)
 	hub.StartMaintenanceRecovery(ctx)
 	hub.StartAutomationScheduler(ctx)
 	hub.StartRelayScheduler(ctx)
@@ -330,10 +472,6 @@ func main() {
 		}()
 	}
 
-	transfers, err := filetransfer.NewService(*dataDir, *rootDir, hub.HTTPAuthorized)
-	if err != nil {
-		log.Fatalf("initialize file transfer: %v", err)
-	}
 	mux := http.NewServeMux()
 	mux.Handle("/media/", media.Handler())
 	mux.Handle("/upload", transfers.UploadHandler())
@@ -341,10 +479,14 @@ func main() {
 	mux.Handle("/api/drop/v1/uploads", transfers.DropHandler())
 	mux.Handle("/api/drop/v1/uploads/", transfers.DropHandler())
 	mux.HandleFunc("/api/work/v1/items/", hub.ServeWorkAPI)
+	mux.HandleFunc("/api/workspace/v1/guest", hub.ServeWorkspaceGuest)
 	mux.HandleFunc("/api/inbox/v1/files/", hub.ServeInboxDownload)
 	mux.HandleFunc("/api/events/v1/events", hub.ServeEventAPI)
 	mux.HandleFunc("/api/automation/v1/", hub.ServeAutomationAPI)
+	mux.HandleFunc("/api/line/v1/", hub.ServeLineAPI)
 	mux.HandleFunc("/api/relay/v1/", hub.ServeRelayAPI)
+	mux.HandleFunc("/api/internal-agents/v1/observation", hub.ServeInternalAgentObservation)
+	mux.HandleFunc("/api/plugin-metadata/v1/status", hub.ServePluginMetadataStatus)
 	mux.HandleFunc("/api/session-control/v1/", hub.ServeSessionControlAPI)
 	mux.HandleFunc("/api/notification/v1/replies", hub.ServeNotificationReplyAPI)
 	mux.HandleFunc("/api/widgets/v1/", hub.ServeWidgetAPI)

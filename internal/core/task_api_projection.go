@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -15,11 +16,62 @@ import (
 
 	contract "everything-go/contracts/task-api/v1"
 	"everything-go/internal/backend"
+	"everything-go/internal/delegation"
 	"everything-go/internal/history"
 	"everything-go/internal/messagequeue"
 	"everything-go/internal/session"
 	"everything-go/internal/taskapi"
 )
+
+// Public logical-task reads select the current canonical round. Keep apiTask
+// itself exact-request: result collection and original receipt recovery must
+// never jump ahead to a later queued round.
+func (h *Hub) currentTaskProjectionRecord(ctx context.Context, r taskapi.IntentRecord) (taskapi.IntentRecord, error) {
+	if r.Path != "delegation" || h.delegations == nil {
+		return r, nil
+	}
+	_, formal, err := h.delegations.APIBackend(ctx, r.SessionID)
+	if err != nil || !formal {
+		return r, err
+	}
+	root, found, err := h.delegations.ByID(ctx, r.NativeID)
+	if err != nil {
+		return r, err
+	}
+	if !found || root.ChildSessionID != r.SessionID || r.TaskID != apiID(h.cfg.InstanceID, "delegation", root.ID) {
+		return r, taskapi.Failure("permission", "known_none", "lookup_original")
+	}
+	round, found, err := h.delegations.Round(ctx, root.ID)
+	if err != nil {
+		return r, err
+	}
+	if !found || round.LogicalID != root.ID || round.Authority != "" && round.Authority != h.cfg.InstanceID {
+		return r, taskapi.Failure("permission", "known_none", "lookup_original")
+	}
+	latest, err := h.delegations.LatestRound(ctx, root.ID)
+	if err != nil {
+		return r, err
+	}
+	selected, found, err := h.delegations.ByID(ctx, latest.ID)
+	if err != nil {
+		return r, err
+	}
+	if !found || latest.LogicalID != root.ID || latest.Authority != "" && latest.Authority != h.cfg.InstanceID || selected.ChildSessionID != root.ChildSessionID || selected.ParentSessionID != root.ParentSessionID || selected.ChildRequestID == "" {
+		return r, taskapi.Failure("permission", "known_none", "lookup_original")
+	}
+	// Preserve the immutable logical task ID, original source/scope metadata
+	// and definition. Only the projected execution/result request changes.
+	r.RequestID = selected.ChildRequestID
+	return r, nil
+}
+
+func (h *Hub) apiCurrentTask(ctx context.Context, r taskapi.IntentRecord) (map[string]any, error) {
+	selected, err := h.currentTaskProjectionRecord(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+	return h.apiTask(ctx, selected)
+}
 
 func (h *Hub) apiTask(ctx context.Context, r taskapi.IntentRecord) (map[string]any, error) {
 	var legacy struct{ LegacyLinkID string }
@@ -39,6 +91,12 @@ func (h *Hub) apiTask(ctx context.Context, r taskapi.IntentRecord) (map[string]a
 	revision := uint64(0)
 	var anchor any
 	sealID, finalHash, finalText := "", "", ""
+	if meta.Intake != nil {
+		identity["config_revision"] = meta.Intake.Configuration.Revision
+		if thread, ok := meta.Intake.Source["native_thread_id"]; ok {
+			identity["native_thread_id"] = thread
+		}
+	}
 	if exists {
 		var original apiInput
 		json.Unmarshal(meta.Request.Input, &original)
@@ -50,6 +108,10 @@ func (h *Hub) apiTask(ctx context.Context, r taskapi.IntentRecord) (map[string]a
 		}
 	}
 	nativeThread, nativeTurn, nativeKnown := h.messageQueue.NativeExecution(r.SessionID, r.RequestID)
+	nativeTupleObserved := nativeKnown
+	if exists && nativeKnown && !h.nativeCorrelationKnown(target, nativeThread, r.RequestID, nativeTurn) {
+		nativeKnown = false
+	}
 	if nativeKnown {
 		if expected, ok := identity["native_thread_id"].(string); ok && expected != "" && expected != nativeThread {
 			nativeKnown = false
@@ -78,9 +140,41 @@ func (h *Hub) apiTask(ctx context.Context, r taskapi.IntentRecord) (map[string]a
 		if n > revision {
 			revision = n
 		}
+		if r.Path == "delegation" {
+			n, e = h.delegations.Revision(ctx, command.SessionID, command.RequestID)
+			if e != nil {
+				return nil, e
+			}
+			if n > revision {
+				revision = n
+			}
+		}
+	}
+	capacityAccepted := false
+	if r.Path == "delegation" {
+		n, e := h.delegations.Revision(ctx, r.SessionID, r.RequestID)
+		if e != nil {
+			return nil, e
+		}
+		if n > revision {
+			revision = n
+		}
+		if original, ok, e := h.delegations.ByChildRequest(ctx, r.SessionID, r.RequestID); e != nil {
+			return nil, e
+		} else if ok && original.ChildRequestID == r.RequestID && !found {
+			capacityAccepted = true
+			axes["admission"] = "queued"
+			if original.State == "terminal" {
+				if original.Error == "cancelled_before_start" {
+					axes["cancellation"] = "confirmed"
+				} else {
+					axes["execution"] = "failed"
+				}
+			}
+		}
 	}
 	_ = snapshot.Revision
-	if !found {
+	if !found && !capacityAccepted {
 		if state, e := h.apiJournals()[r.Path].OutboxState(ctx, r.Key); e == nil && state == "unknown" {
 			axes["admission"] = "unknown"
 			axes["execution"] = "unknown"
@@ -121,10 +215,11 @@ func (h *Hub) apiTask(ctx context.Context, r taskapi.IntentRecord) (map[string]a
 			}
 		}
 	}
-	if found && entry.State == messagequeue.Completed {
+	canUseSeal := exists && (!nativeTupleObserved || nativeKnown) && (target.Backend() != backend.Codex || nativeKnown)
+	if found && entry.State == messagequeue.Completed && canUseSeal {
 		if stored, e := h.messageQueue.TaskSeal(ctx, r.SessionID, r.RequestID, ""); e == nil {
 			var saved map[string]any
-			if json.Unmarshal(stored.Anchor, &saved) == nil {
+			if json.Unmarshal(stored.Anchor, &saved) == nil && h.nativeSealKnown(target, saved, r.RequestID, nativeThread, nativeTurn) {
 				anchor = saved
 				sealID = stored.ID
 				finalHash = stored.Hash
@@ -171,11 +266,22 @@ func (h *Hub) apiTask(ctx context.Context, r taskapi.IntentRecord) (map[string]a
 	if meta.Caller.SourceSessionID != "" {
 		source["identity"] = map[string]any{"instance_id": h.cfg.InstanceID, "session_id": meta.Caller.SourceSessionID, "request_id": meta.Caller.SourceRequestID, "native_thread_id": meta.SourceThread, "config_revision": meta.SourceRevision}
 	}
+	if meta.Intake != nil {
+		source["identity"] = meta.Intake.Source
+	}
 	task := map[string]any{"task_id": r.TaskID, "task_ref": map[string]string{"authority_instance_id": h.cfg.InstanceID, "path": r.Path, "native_record_id": r.NativeID}, "revision": revision, "definition_revision": uint64(1), "source": source, "target": identity, "axes": axes, "artifact_refs": []any{}, "qa": map[string]any{"status": "not_requested", "evidence_refs": []any{}}, "evidence_refs": []any{}, "receipt_ids": []string{r.ReceiptID}, "child_task_ids": []string{}, "provenance": "legacy", "views": []string{"self"}, "capabilities": []string{"get", "read_result"}}
 	for _, field := range []string{"goal", "scope", "acceptance", "dependencies", "workspace"} {
 		if value, ok := input[field]; ok {
 			task[field] = value
 		}
+	}
+	if meta.Intake != nil {
+		runes := []rune(meta.Intake.Goal)
+		if len(runes) > 4096 {
+			runes = runes[:4096]
+		}
+		task["goal"] = string(runes)
+		task["provenance"] = "unknown" // current execution boundary is inherited, never forged as a new child scope
 	}
 	if worker, ok := input["new_worker"].(map[string]any); ok {
 		task["worker_profile"] = worker["profile"]
@@ -192,7 +298,7 @@ func (h *Hub) apiTask(ctx context.Context, r taskapi.IntentRecord) (map[string]a
 		}
 	}
 	if r.Path == "delegation" {
-		if original, found, e := h.delegations.ByID(ctx, r.NativeID); e == nil && found && len(original.Artifacts) > 0 {
+		if original, found, e := h.delegations.ByChildRequest(ctx, r.SessionID, r.RequestID); e == nil && found && len(original.Artifacts) > 0 {
 			artifacts := []any{}
 			for i, path := range original.Artifacts {
 				if len(artifacts) == 100 {
@@ -217,7 +323,7 @@ func (h *Hub) apiTask(ctx context.Context, r taskapi.IntentRecord) (map[string]a
 	if meta.Caller.SourceSessionID != "" {
 		task["views"] = append(task["views"].([]string), "source_children")
 	}
-	if anchor != nil {
+	if anchor != nil && canUseSeal {
 		conflict, _ := h.messageQueue.NativeConflict(r.SessionID, r.RequestID)
 		encoded, _ := json.Marshal(anchor)
 		if conflict {
@@ -237,15 +343,24 @@ func (h *Hub) apiTask(ctx context.Context, r taskapi.IntentRecord) (map[string]a
 		delete(task, "result_anchor")
 		delete(task, "seal_id")
 		delete(task, "final_hash")
-	} else if found && entry.State == messagequeue.Completed && anchor == nil {
+	} else if found && entry.State == messagequeue.Completed && anchor == nil && canUseSeal {
 		if persisted, e := h.messageQueue.TaskSeal(ctx, r.SessionID, r.RequestID, ""); e == nil {
 			var saved map[string]any
-			if json.Unmarshal(persisted.Anchor, &saved) == nil {
+			if json.Unmarshal(persisted.Anchor, &saved) == nil && h.nativeSealKnown(target, saved, r.RequestID, nativeThread, nativeTurn) {
 				task["result_anchor"] = saved
 				task["seal_id"] = persisted.ID
 				task["final_hash"] = persisted.Hash
 				axes["final"] = "sealed"
 			}
+		}
+	}
+	if !canUseSeal {
+		delete(task, "result_anchor")
+		delete(task, "seal_id")
+		delete(task, "final_hash")
+		if found && entry.State == messagequeue.Completed {
+			axes["execution"] = "unknown"
+			axes["final"] = "unknown"
 		}
 	}
 	if r.Path == "delegation" || r.Path == "controller" {
@@ -256,6 +371,44 @@ func (h *Hub) apiTask(ctx context.Context, r taskapi.IntentRecord) (map[string]a
 		axes["delivery"] = state
 		if state == "delivered" {
 			task["source_delivery_anchor"] = deliveryAnchor
+		}
+	}
+	if r.Path == "delegation" {
+		if d, found, e := h.delegations.ByChildRequest(ctx, r.SessionID, r.RequestID); e != nil {
+			return nil, e
+		} else if found {
+			if m, found, e := h.delegations.Round(ctx, d.ID); e != nil {
+				return nil, e
+			} else if found {
+				latest, e := h.delegations.LatestRound(ctx, m.LogicalID)
+				if e != nil {
+					return nil, e
+				}
+				after := uint64(0)
+				if latest.Version > 128 {
+					after = latest.Version - 128
+				}
+				rounds, e := h.delegations.RoundsAfter(ctx, m.LogicalID, after)
+				if e != nil {
+					return nil, e
+				}
+				out := []any{}
+				for _, round := range rounds {
+					record, found, e := h.delegations.ByID(ctx, round.ID)
+					if e != nil || !found {
+						return nil, errors.New("delegation_round_missing")
+					}
+					qa, verdict, e := h.delegations.QAForRound(ctx, round.ID)
+					if e != nil {
+						return nil, e
+					}
+					out = append(out, map[string]any{"delegation_id": round.ID, "round_version": round.Version, "previous_round_id": round.PreviousID, "request_id": record.ChildRequestID, "execution": record.State, "terminal_status": record.TerminalStatus, "delivery": record.DeliveryState, "dispatcher_session_id": record.ParentSessionID, "dispatcher_request_id": record.OriginRequestID, "qa_round_id": qa, "qa_verdict": verdict, "successor_reason": ""})
+				}
+				task["continuity"] = map[string]any{"logical_task_id": m.LogicalID, "current_round_id": latest.ID, "current_round_version": latest.Version, "rounds": out, "earlier_rounds_omitted": after > 0}
+				if err := h.projectCanonicalDelegationQA(ctx, d.ID, task, axes); err != nil {
+					return nil, err
+				}
+			}
 		}
 	}
 	return task, nil
@@ -290,7 +443,7 @@ func (h *Hub) apiList(ctx context.Context, c taskapi.VerifiedContext, sessionID,
 			if e := h.checkAPIRecord(ctx, c, record); e != nil {
 				continue
 			}
-			task, err := h.apiTask(ctx, record)
+			task, err := h.apiCurrentTask(ctx, record)
 			if err != nil {
 				return nil, err
 			}
@@ -328,6 +481,8 @@ func (h *Hub) Read(ctx context.Context, c taskapi.AuthorizedCommand) (any, error
 	var in apiInput
 	json.Unmarshal(c.Request.Input, &in)
 	switch c.Request.Operation {
+	case "intake":
+		return h.readIntake(ctx, c)
 	case "legacy_source":
 		return h.readLegacySource(ctx, c)
 	case "read_input":
@@ -402,11 +557,11 @@ func (h *Hub) Read(ctx context.Context, c taskapi.AuthorizedCommand) (any, error
 	case "capabilities":
 		ops := []string{"capabilities", "create_dispatch", "list", "get", "read_result", "append", "cancel", "snapshot", "events"}
 		routes := map[string]string{}
-		if _, ok := h.exec.(backend.ExistingTaskScopeEnforcer); ok {
+		if h.existingTargetCreationAvailable() {
 			routes["existing_target"] = "ordinary"
 		}
 		if c.Caller.SourceSessionID != "" {
-			if _, ok := h.exec.(backend.ExistingTaskScopeEnforcer); ok {
+			if h.existingTargetCreationAvailable() {
 				routes["existing_target"] = "controller"
 			}
 			routes["new_worker"] = "delegation"
@@ -416,7 +571,7 @@ func (h *Hub) Read(ctx context.Context, c taskapi.AuthorizedCommand) (any, error
 			providers = source.TaskAPICapabilities()
 		}
 		if c.Caller.BindingKind == "paired_human" {
-			ops = append(ops, "legacy_source")
+			ops = append(ops, "legacy_source", "intake")
 		}
 		if !apiOwnedAdmissionEnabled {
 			ops = []string{"capabilities", "list", "get", "read_result", "cancel", "snapshot", "events"}
@@ -425,7 +580,34 @@ func (h *Hub) Read(ctx context.Context, c taskapi.AuthorizedCommand) (any, error
 			}
 			routes = map[string]string{}
 		}
-		return map[string]any{"api_versions": []string{contract.Version}, "schema_hash": contract.Hash(), "allowed_operations": ops, "paths": []string{"ordinary", "controller", "delegation"}, "providers": providers, "limits": map[string]int{"max_instruction_chars": 32000, "max_pending_children": 3, "event_retention_days": 30, "max_events_per_scope": 100000, "receipt_retention_days": 90}, "default_worker_profile": map[string]string{"backend": "codex", "model": "gpt-6.1-sol", "effort": "high"}, "mutation_authority_instance_id": h.cfg.InstanceID, "create_routes": routes}, nil
+		capacity := delegation.DefaultLimits
+		if h.delegations == nil {
+			capacity.Active = 0
+			delete(routes, "new_worker")
+		} else {
+			var err error
+			capacity, err = h.delegations.LimitsForParent(ctx, c.Caller.SourceSessionID)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if h.delegations != nil && c.Caller.SourceSessionID != "" {
+			if worker, e := h.delegations.HasChild(ctx, c.Caller.SourceSessionID); e != nil {
+				return nil, e
+			} else if worker {
+				ops = []string{"capabilities"}
+				routes = map[string]string{}
+				capacity.Active = 0
+				if s, found := h.registry.Get(c.Caller.SourceSessionID); found {
+					if formal, e := h.TaskWorkerScope(s); e != nil {
+						return nil, e
+					} else if formal != nil {
+						ops = append(ops, "read_input")
+					}
+				}
+			}
+		}
+		return map[string]any{"api_versions": []string{contract.Version}, "schema_hash": contract.Hash(), "allowed_operations": ops, "paths": []string{"ordinary", "controller", "delegation"}, "providers": providers, "limits": map[string]int{"max_instruction_chars": 32000, "max_pending_children": capacity.Active, "event_retention_days": 30, "max_events_per_scope": 100000, "receipt_retention_days": 90}, "default_worker_profile": map[string]string{"backend": "codex", "model": "gpt-6.1-sol", "effort": "high"}, "mutation_authority_instance_id": h.cfg.InstanceID, "create_routes": routes}, nil
 	case "get":
 		if in.Original != nil {
 			j := h.apiJournals()[c.Locator.Path]
@@ -448,7 +630,7 @@ func (h *Hub) Read(ctx context.Context, c taskapi.AuthorizedCommand) (any, error
 		if err != nil {
 			return nil, err
 		}
-		return h.apiTask(ctx, r)
+		return h.apiCurrentTask(ctx, r)
 	case "list":
 		scope, err := h.apiReadScope(ctx, c.Caller, in)
 		if err != nil {
@@ -459,6 +641,14 @@ func (h *Hub) Read(ctx context.Context, c taskapi.AuthorizedCommand) (any, error
 		page, err := engine.Page(ctx, scope, views, in.Cursor, in.Limit)
 		if err != nil {
 			return nil, err
+		}
+		for _, raw := range page.Items {
+			if task, ok := raw.(map[string]any); ok {
+				id, _ := task["task_id"].(string)
+				if _, err := h.apiRecord(ctx, c.Caller, id); err != nil || !h.frozenTaskNativeKnown(task) {
+					return nil, taskapi.Failure("cursor_expired", "known_none", "refresh_snapshot")
+				}
+			}
 		}
 		result := map[string]any{"items": page.Items, "has_more": page.HasMore, "partial": false, "history_status": "partial"}
 		if page.NextPageCursor != "" {
@@ -482,9 +672,25 @@ func (h *Hub) Read(ctx context.Context, c taskapi.AuthorizedCommand) (any, error
 			if !ok {
 				continue
 			}
+			if !h.frozenTaskNativeKnown(task) {
+				return nil, taskapi.Failure("cursor_expired", "known_none", "refresh_snapshot")
+			}
 			id, _ := task["task_id"].(string)
 			if _, err := h.apiRecord(ctx, c.Caller, id); err != nil {
 				return nil, taskapi.Failure("cursor_expired", "known_none", "refresh_snapshot")
+			}
+			// A pre-upgrade frozen positive cannot bypass the current provider
+			// ownership guard. Expire its cursor; leave stored history untouched.
+			if target, ok := task["target"].(map[string]any); ok {
+				if turn, ok := target["native_turn_id"].(string); ok && turn != "" {
+					sessionID, _ := target["session_id"].(string)
+					request, _ := target["request_id"].(string)
+					thread, _ := target["native_thread_id"].(string)
+					s, found := h.registry.Get(sessionID)
+					if !found || !h.nativeCorrelationKnown(s, thread, request, turn) {
+						return nil, taskapi.Failure("cursor_expired", "known_none", "refresh_snapshot")
+					}
+				}
 			}
 		}
 		if c.Revalidate == nil || c.Revalidate(ctx) != nil {
@@ -499,6 +705,10 @@ func (h *Hub) Read(ctx context.Context, c taskapi.AuthorizedCommand) (any, error
 
 	case "read_result":
 		r, err := h.apiRecord(ctx, c.Caller, in.TaskID)
+		if err != nil {
+			return nil, err
+		}
+		r, err = h.currentTaskProjectionRecord(ctx, r)
 		if err != nil {
 			return nil, err
 		}
@@ -522,6 +732,9 @@ func (h *Hub) Read(ctx context.Context, c taskapi.AuthorizedCommand) (any, error
 		if end > len(chars) {
 			end = len(chars)
 		}
+		if err := h.checkAPIRecord(ctx, c.Caller, r); err != nil {
+			return nil, err
+		}
 		return map[string]any{"task_id": r.TaskID, "seal_id": in.SealID, "final_hash": task["final_hash"], "anchor": task["result_anchor"], "terminal_status": "succeeded", "text": string(chars[in.Offset:end]), "offset": in.Offset, "next_offset": end, "has_more": end < len(chars), "artifacts": []any{}, "qa": task["qa"], "limitations": []string{}}, nil
 	}
 	return nil, taskapi.Failure("unsupported", "known_none", "read_capabilities")
@@ -529,6 +742,13 @@ func (h *Hub) Read(ctx context.Context, c taskapi.AuthorizedCommand) (any, error
 func stringID(n uint64) string { raw, _ := json.Marshal(n); return string(raw) }
 func (h *Hub) apiReadScope(ctx context.Context, c taskapi.VerifiedContext, in apiInput) (taskapi.ReadScope, error) {
 	policies := map[string]any{}
+	if a, ok := h.workspacePairedTaskActor(c); ok {
+		fingerprint, err := h.workspace.MembershipFingerprint(ctx, a)
+		if err != nil {
+			return taskapi.ReadScope{}, err
+		}
+		policies["workspace_membership"] = fingerprint
+	}
 	if c.SourceSessionID != "" && h.dispatches != nil {
 		grant, err := h.dispatches.Grant(ctx, c.SourceSessionID)
 		if err == nil {
@@ -803,11 +1023,11 @@ func (h *Hub) apiDelivery(ctx context.Context, r taskapi.IntentRecord) (string, 
 	var metadata apiMetadata
 	json.Unmarshal(r.Metadata, &metadata)
 	if r.Path == "delegation" {
-		original, found, e := h.delegations.ByID(ctx, r.NativeID)
+		original, found, e := h.delegations.ByChildRequest(ctx, r.SessionID, r.RequestID)
 		if e != nil || !found {
 			return "unknown", nil
 		}
-		if r.RequestID != original.ChildRequestID {
+		if original.DeliveryState == "not_requested" {
 			return "not_requested", nil
 		}
 		parentID = original.ParentSessionID

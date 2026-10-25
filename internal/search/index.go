@@ -25,9 +25,10 @@ type Index struct {
 
 	writeMu sync.Mutex
 
-	mu       sync.Mutex
-	ready    bool
-	progress ingestProgress
+	mu          sync.Mutex
+	privateUIDs map[string]bool
+	ready       bool
+	progress    ingestProgress
 }
 
 type ingestProgress struct {
@@ -94,6 +95,11 @@ func (idx *Index) RunOnceMetrics() IngestMetrics {
 	before := databaseFootprint(idx.path)
 	walBefore := fileSize(idx.path + "-wal")
 	maintenanceRows := idx.runVersionedMaintenance()
+	if removed, err := idx.pruneDeletedTranscripts(); err != nil {
+		log.Printf("[search] deleted transcript reconciliation: %v", err)
+	} else {
+		maintenanceRows += removed
+	}
 	metrics := idx.ingestAllMetrics()
 	metrics.Mode = "full"
 	metrics.MaintenanceRows = maintenanceRows
@@ -124,6 +130,11 @@ const codexMessageIDVersion = "2-offset"
 
 func (idx *Index) runVersionedMaintenance() int64 {
 	var changed int64
+	if cleaned, err := idx.refreshPresentationProjection(); err != nil {
+		log.Printf("[search] presentation projection maintenance: %v", err)
+	} else {
+		changed += cleaned
+	}
 	if rebuilt, err := idx.refreshCodexMessageIDVersion(); err != nil {
 		log.Printf("[search] Codex message ID migration: %v", err)
 	} else if rebuilt > 0 {

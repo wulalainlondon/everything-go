@@ -32,8 +32,8 @@ func (s *Store) Diagnostics(ctx context.Context) (Diagnostics, error) {
 	}{
 		{"SELECT COALESCE(MAX(revision),0) FROM work_changes", &d.Revision},
 		{"SELECT COUNT(*) FROM work_projects WHERE archived_at IS NULL", &d.Projects},
-		{"SELECT COUNT(*) FROM work_items WHERE archived_at IS NULL", &d.Items},
-		{"SELECT COUNT(*) FROM work_item_runs WHERE finished_at IS NULL", &d.ActiveRuns},
+		{"SELECT COUNT(*) FROM work_items WHERE id NOT GLOB 'wi_cw_*' AND archived_at IS NULL", &d.Items},
+		{"SELECT COUNT(*) FROM work_item_runs WHERE work_item_id NOT GLOB 'wi_cw_*' AND finished_at IS NULL", &d.ActiveRuns},
 		{"SELECT COUNT(*) FROM work_changes", &d.RetainedChanges},
 		{"SELECT COUNT(*) FROM work_device_cursors WHERE authority_instance_id=? AND updated_at>=?", &d.ActiveDevices},
 	}

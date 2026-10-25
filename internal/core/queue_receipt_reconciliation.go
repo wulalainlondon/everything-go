@@ -127,6 +127,8 @@ func (h *Hub) reconcileQueueReceiptsWithIdentity(c *Client, cmd clientproto.Comm
 				fact.Reason = "native_map_missing"
 			case !taskSourceThread(s, native.ThreadID):
 				fact.Reason = "native_thread_mismatch"
+			case !h.nativeCorrelationKnown(s, native.ThreadID, id, native.TurnID):
+				fact.Reason = "native_correlation_unverified"
 			default:
 				fact.Delivery = "native_consumed"
 				fact.NativeThreadID = native.ThreadID
@@ -189,7 +191,7 @@ func (h *Hub) reconcileQueueReceiptsWithIdentity(c *Client, cmd clientproto.Comm
 		}
 		native, found, err := h.messageQueue.ExactNativeAcceptance(s.ID, fact.RequestID)
 		currentEntry, entryFound, entryErr := h.messageQueue.Get(s.ID, fact.RequestID)
-		if err != nil || !found || entryErr != nil || !entryFound || currentEntry.PayloadHash != fact.PayloadHash || native.ThreadID != fact.NativeThreadID || native.TurnID != fact.NativeTurnID {
+		if err != nil || !found || entryErr != nil || !entryFound || currentEntry.PayloadHash != fact.PayloadHash || native.ThreadID != fact.NativeThreadID || native.TurnID != fact.NativeTurnID || !h.nativeCorrelationKnown(s, native.ThreadID, fact.RequestID, native.TurnID) {
 			fact.Delivery = "unverified"
 			fact.Final = "unverified"
 			fact.NativeThreadID = ""

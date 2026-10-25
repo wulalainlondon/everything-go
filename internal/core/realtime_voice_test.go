@@ -18,6 +18,7 @@ type voiceExec struct {
 	starts, stops, cancels atomic.Int32
 	threadID               string
 	selectedVoice          string
+	startInstructions      string
 	callback               func(backend.RealtimeVoiceEvent)
 }
 
@@ -25,6 +26,7 @@ func (f *voiceExec) StartRealtimeVoice(_ context.Context, s *session.Session, in
 	f.starts.Add(1)
 	f.threadID = s.ResumeID()
 	f.selectedVoice = input.VoiceName
+	f.startInstructions = input.SpeakerInstructions
 	f.callback = input.OnEvent
 	return backend.RealtimeVoiceAnswer{ThreadID: s.ResumeID(), VoiceID: input.VoiceID, SDP: "v=0\r\nprivate-answer"}, nil
 }

@@ -30,6 +30,9 @@ func (c *Codex) waitForCodexTurn(s *session.Session, st *codexState, done <-chan
 
 func (c *Codex) checkCodexTurnLiveness(s *session.Session, st *codexState, now time.Time) {
 	waitingForInput := c.hasPendingInteraction(s.ID)
+	if source, ok := c.taskProvider.(interface{ TaskInteractionWaiting(string) bool }); ok && source.TaskInteractionWaiting(s.ID) {
+		waitingForInput = true
+	}
 	st.mu.Lock()
 	if !st.turnActive || st.stopping || st.inactivityStopRequested {
 		st.mu.Unlock()

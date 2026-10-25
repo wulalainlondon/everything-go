@@ -438,3 +438,48 @@ func TestControllerActualTailscaleTransportIntegration(t *testing.T) {
 	}
 	t.Log("actual Tailscale HMAC dispatch and sealed result passed; executor is a fixture, not Codex voice")
 }
+
+func TestControllerMissingThreadTerminalDrainsOriginalQueueAndPreservesReceipt(t *testing.T) {
+	h, fe, caller, target := controllerFixture(t)
+	defer target.CloseAndWait()
+	ctx := context.Background()
+	if _, err := h.dispatches.SetGrant(ctx, caller.Parent.ID, sessiondispatch.Grant{Enabled: true, Local: true}, 0); err != nil {
+		t.Fatal(err)
+	}
+	var sends atomic.Int32
+	fe.onSend = func(s *session.Session, id, _ string) {
+		sends.Add(1)
+		h.Emit(backend.NewError(s.ID, id, backend.ErrProcessDied, "failed to start codex thread: no rollout found for thread id target-thread"))
+	}
+	input := backend.SessionControlRequest{Action: "dispatch_to_session", SessionID: target.ID,
+		ExpectedThreadID: target.ResumeID(), ExpectedConfigRevision: target.SettingsSnapshot().ConfigRevision, Content: "original instruction"}
+	value, err := h.ControlSession(ctx, caller, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := value.(sessiondispatch.Record)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		receipt := h.refreshSessionDispatch(ctx, original)
+		if receipt.State == "failed" && !target.IsStreaming() {
+			if receipt.RequestID != original.RequestID || receipt.ID != original.ID ||
+				!strings.Contains(receipt.Error, "no rollout found") || target.QueueLen() != 0 {
+				t.Fatal("original failed receipt or queue incorrect", receipt)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("request did not terminate", receipt)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	again, err := h.ControlSession(ctx, caller, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt := again.(sessiondispatch.Record)
+	if receipt.ID != original.ID || receipt.RequestID != original.RequestID || receipt.State != "failed" ||
+		sends.Load() != 1 || target.ResumeID() != "target-thread" {
+		t.Fatal("failed request replayed or original identity changed", receipt, sends.Load())
+	}
+}

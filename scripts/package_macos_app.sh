@@ -50,6 +50,9 @@ xcrun swiftc -parse-as-library -O -target "$SWIFT_TARGET" \
   -o "$MACOS_DIR/bridge-remote-helper" "$(dirname "$0")/../native/bridge-remote-helper.swift"
 xcrun swiftc -parse-as-library -O -target "$SWIFT_TARGET" \
   -o "$MACOS_DIR/bridge-remote-stream" "$(dirname "$0")/../native/bridge-remote-stream.swift"
+if [ "${EVERYTHING_GO_INCLUDE_LINE:-0}" = "1" ]; then
+  node "$(dirname "$0")/stage_line_runtime.mjs" "$RES_DIR/line"
+fi
 "$(dirname "$0")/write_release_provenance.sh" "$RES_DIR/release-provenance.json"
 
 cat > "$APP_DIR/Contents/Info.plist" <<EOF

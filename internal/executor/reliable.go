@@ -96,6 +96,10 @@ func (s *TerminalSink) completeSession(sessionID string) {
 
 func (s *TerminalSink) observeTerminal(event any) {
 	switch e := event.(type) {
+	case backend.NativeSubmissionUncertain:
+		// This settles the adapter invocation, not the native work. The Hub
+		// retains its uncertain receipt; do not overwrite it with send_error.
+		s.complete(turnKey{sessionID: e.SessionID, reqID: e.RequestID})
 	case protocol.Done:
 		s.complete(turnKey{sessionID: e.SessionID, reqID: e.RequestID})
 	case protocol.Stopped:
@@ -130,7 +134,7 @@ func sendReliable(ctx context.Context, inner Executor, sink *TerminalSink, s *se
 		}
 	}()
 	err = inner.Send(ctx, s, reqID, content, images, files)
-	if errors.Is(err, backend.ErrThreadActiveWriter) {
+	if errors.Is(err, backend.ErrThreadActiveWriter) || errors.Is(err, backend.ErrNativeSubmissionBusy) {
 		// The Hub converts this ownership conflict into a durable session_control
 		// event plus a request-scoped rejection. Do not manufacture a generic red
 		// send_error before it gets that opportunity.

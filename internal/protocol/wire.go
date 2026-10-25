@@ -10,6 +10,8 @@ package protocol
 import (
 	"encoding/json"
 	"everything-go/internal/coordination"
+	"everything-go/internal/partners"
+	"everything-go/internal/workspace"
 
 	"everything-go/internal/eventinbox"
 	"everything-go/internal/identity"
@@ -21,6 +23,8 @@ import (
 // All fields are optional; only `Type` is always present. New command fields can
 // be appended without breaking older ones.
 type Inbound struct {
+	Workspace       *workspace.Command                 `json:"workspace,omitempty"`
+	Partner         *partners.Request                  `json:"partner,omitempty"`
 	ToolEnvironment *toolenv.Request                   `json:"tool_environment,omitempty"`
 	PM              *coordination.Command              `json:"pm,omitempty"`
 	Collaboration   *coordination.CollaborationCommand `json:"collaboration,omitempty"`
@@ -59,7 +63,12 @@ type Inbound struct {
 	TaskTarget     *TaskTarget `json:"task_target,omitempty"`
 	TaskOrigin     *TaskOrigin `json:"task_origin,omitempty"`
 	// message
-	Content string `json:"content"`
+	Content            string `json:"content"`
+	VisualPresentation string `json:"visual_presentation,omitempty"`
+	CallbackID         string `json:"callback_id,omitempty"`
+	CallbackInvitation string `json:"callback_invitation_id,omitempty"`
+	CallbackClaim      string `json:"callback_claim_operation,omitempty"`
+	CallbackOnComplete *bool  `json:"callback_on_complete,omitempty"`
 
 	// binary video upload control frames
 	UploadRequestID string `json:"upload_request_id"`
@@ -69,10 +78,12 @@ type Inbound struct {
 	SizeBytes       int64  `json:"size_bytes"`
 
 	// request_history
-	Limit     int    `json:"limit"`
-	KnownLast string `json:"known_last_source_message_id"`
-	Mode      string `json:"mode"`
-	Before    string `json:"before_source_message_id"`
+	Limit             int    `json:"limit"`
+	KnownLast         string `json:"known_last_source_message_id"`
+	Mode              string `json:"mode"`
+	Before            string `json:"before_source_message_id"`
+	HistoryRequestID  string `json:"history_request_id,omitempty"`
+	HistoryContinuity bool   `json:"history_continuity,omitempty"`
 	// Client opt-in for thinking blocks in history messages. Legacy clients
 	// never send it and keep receiving the Python-era text/tool_call-only shape.
 	IncludeThinking bool `json:"include_thinking"`
@@ -122,12 +133,37 @@ type Inbound struct {
 	// WebRTC signaling: webrtc_offer carries SDP; webrtc_ice carries a trickled
 	// candidate. SDPMLineIndex is a pointer because 0 is a valid index distinct
 	// from "absent" (the app sends null when unknown).
-	SDP           string `json:"sdp"`
-	VoiceID       string `json:"voice_id,omitempty"`
-	VoiceName     string `json:"voice_name,omitempty"`
-	Candidate     string `json:"candidate"`
-	SDPMid        string `json:"sdpMid"`
-	SDPMLineIndex *int   `json:"sdpMLineIndex"`
+	SDP                       string                 `json:"sdp"`
+	VoiceStartPermit          string                 `json:"voice_start_permit,omitempty"`
+	VoiceID                   string                 `json:"voice_id,omitempty"`
+	VoiceExternalMusicCapable bool                   `json:"voice_external_music_capable,omitempty"`
+	VoiceMusicProvider        string                 `json:"voice_music_provider,omitempty"`
+	ExternalMusic             *ExternalMusicState    `json:"external_music,omitempty"`
+	VoiceMediaCapable         bool                   `json:"voice_media_capable,omitempty"`
+	VoiceContext              bool                   `json:"voice_context,omitempty"`
+	VoiceSystemVolumeCapable  bool                   `json:"voice_system_volume_capable,omitempty"`
+	SystemMediaAudio          *SystemMediaAudioState `json:"system_media_audio,omitempty"`
+	VoiceAudioCapable         bool                   `json:"voice_audio_capable,omitempty"`
+	VoiceAudio                *VoiceAudioState       `json:"voice_audio,omitempty"`
+	VoiceMediaObserveCapable  bool                   `json:"voice_media_observe_capable,omitempty"`
+	VoiceDeviceModel          string                 `json:"voice_device_model,omitempty"`
+	MediaCommandID            string                 `json:"media_command_id,omitempty"`
+	MediaSequence             uint64                 `json:"media_sequence,omitempty"`
+	MediaState                string                 `json:"media_state,omitempty"`
+	MediaErrorCode            string                 `json:"media_error_code,omitempty"`
+	MediaVideoID              string                 `json:"media_video_id,omitempty"`
+	MediaAudio                *MediaAudioInfo        `json:"media_audio,omitempty"`
+	MediaVolume               *int                   `json:"media_volume,omitempty"`
+	VoiceName                 string                 `json:"voice_name,omitempty"`
+	VoiceMode                 string                 `json:"voice_mode,omitempty"`
+	LineHandoffCapable        bool                   `json:"line_handoff_capable,omitempty"`
+	LinePeerName              string                 `json:"line_peer_name,omitempty"`
+	LineAccountRef            string                 `json:"line_account_ref,omitempty"`
+	LineCallID                string                 `json:"line_call_id,omitempty"`
+	LineTargetRef             string                 `json:"line_target_ref,omitempty"`
+	Candidate                 string                 `json:"candidate"`
+	SDPMid                    string                 `json:"sdpMid"`
+	SDPMLineIndex             *int                   `json:"sdpMLineIndex"`
 
 	// user_input_response: the app's answer to an AskUserQuestion interaction.
 	// Answers is keyed by question_id. Cancelled is a pointer to distinguish
@@ -597,38 +633,68 @@ type RecentMessage struct {
 }
 
 // SessionSummary mirrors SessionSummarySchema.
+// SessionSourceMetadata never asserts that an unmapped session is human-created.
+type SessionSourceMetadata struct {
+	MetadataError  string                      `json:"metadata_error,omitempty"`
+	NativeThreadID string                      `json:"native_thread_id,omitempty"`
+	Version        int                         `json:"version"`
+	Origin         string                      `json:"origin"`
+	Coverage       string                      `json:"coverage"`
+	CreatedBy      string                      `json:"created_by,omitempty"`
+	Relationships  []SessionSourceRelationship `json:"relationships"`
+}
+type SessionSourceRelationship struct {
+	OriginRequestID string `json:"origin_request_id,omitempty"`
+	RootSessionID   string `json:"root_session_id,omitempty"`
+	LineageStatus   string `json:"lineage_status"`
+	LineageScope    string `json:"lineage_scope"`
+	Execution       string `json:"execution"`
+	DelegationID    string `json:"delegation_id"`
+	ParentSessionID string `json:"parent_session_id,omitempty"`
+	ParentAvailable bool   `json:"parent_available"`
+	ChildRequestID  string `json:"child_request_id"`
+	State           string `json:"state"`
+	TerminalStatus  string `json:"terminal_status"`
+	Final           string `json:"final"`
+	Delivery        string `json:"delivery"`
+	QA              string `json:"qa"`
+	UpdatedAtUnixMS int64  `json:"updated_at_unix_ms"`
+}
 type SessionSummary struct {
-	ContextUsed          *int            `json:"context_used,omitempty"`
-	ContextMax           *int            `json:"context_max,omitempty"`
-	ActiveModel          string          `json:"active_model,omitempty"`
-	ActiveEffort         string          `json:"active_effort,omitempty"`
-	ActiveServiceTier    string          `json:"active_service_tier,omitempty"`
-	ActiveConfigRevision uint64          `json:"active_config_revision"`
-	ConfigRevision       uint64          `json:"config_revision"`
-	ID                   string          `json:"id"`
-	Name                 string          `json:"name"`
-	AuthorityInstanceID  string          `json:"authority_instance_id,omitempty"`
-	MetadataRevision     uint64          `json:"metadata_revision"`
-	NameUpdatedAt        int64           `json:"name_updated_at,omitempty"`
-	NameUpdatedBy        string          `json:"name_updated_by,omitempty"`
-	LastNameMutationID   string          `json:"last_name_mutation_id,omitempty"`
-	IsStreaming          bool            `json:"is_streaming"`
-	CreatedAt            float64         `json:"created_at"`
-	LastActivity         float64         `json:"last_activity,omitempty"`
-	Cwd                  string          `json:"cwd,omitempty"`
-	Model                string          `json:"model,omitempty"`
-	Effort               string          `json:"effort,omitempty"`
-	ServiceTier          string          `json:"service_tier,omitempty"`
-	CollaborationMode    string          `json:"collaboration_mode,omitempty"`
-	Personality          string          `json:"personality,omitempty"`
-	Backend              string          `json:"backend,omitempty"`
-	Sandbox              string          `json:"sandbox,omitempty"`
-	Pinned               bool            `json:"pinned"`
-	Hidden               bool            `json:"hidden"`
-	RecentMessages       []RecentMessage `json:"recent_messages,omitempty"`
-	PreviewText          string          `json:"preview_text,omitempty"`
-	PreviewRole          string          `json:"preview_role,omitempty"`
-	PreviewVersion       int             `json:"preview_version,omitempty"`
+	// Current registered native identity; empty explicitly means not established.
+	ClaudeUUID           string                 `json:"claude_uuid"`
+	SessionSource        *SessionSourceMetadata `json:"session_source,omitempty"`
+	ContextUsed          *int                   `json:"context_used,omitempty"`
+	ContextMax           *int                   `json:"context_max,omitempty"`
+	ActiveModel          string                 `json:"active_model,omitempty"`
+	ActiveEffort         string                 `json:"active_effort,omitempty"`
+	ActiveServiceTier    string                 `json:"active_service_tier,omitempty"`
+	ActiveConfigRevision uint64                 `json:"active_config_revision"`
+	ConfigRevision       uint64                 `json:"config_revision"`
+	ID                   string                 `json:"id"`
+	Name                 string                 `json:"name"`
+	AuthorityInstanceID  string                 `json:"authority_instance_id,omitempty"`
+	MetadataRevision     uint64                 `json:"metadata_revision"`
+	NameUpdatedAt        int64                  `json:"name_updated_at,omitempty"`
+	NameUpdatedBy        string                 `json:"name_updated_by,omitempty"`
+	LastNameMutationID   string                 `json:"last_name_mutation_id,omitempty"`
+	IsStreaming          bool                   `json:"is_streaming"`
+	CreatedAt            float64                `json:"created_at"`
+	LastActivity         float64                `json:"last_activity,omitempty"`
+	Cwd                  string                 `json:"cwd,omitempty"`
+	Model                string                 `json:"model,omitempty"`
+	Effort               string                 `json:"effort,omitempty"`
+	ServiceTier          string                 `json:"service_tier,omitempty"`
+	CollaborationMode    string                 `json:"collaboration_mode,omitempty"`
+	Personality          string                 `json:"personality,omitempty"`
+	Backend              string                 `json:"backend,omitempty"`
+	Sandbox              string                 `json:"sandbox,omitempty"`
+	Pinned               bool                   `json:"pinned"`
+	Hidden               bool                   `json:"hidden"`
+	RecentMessages       []RecentMessage        `json:"recent_messages,omitempty"`
+	PreviewText          string                 `json:"preview_text,omitempty"`
+	PreviewRole          string                 `json:"preview_role,omitempty"`
+	PreviewVersion       int                    `json:"preview_version,omitempty"`
 }
 
 // CodexLiveDiff carries the latest aggregated turn diff. Replacing rather than
@@ -759,10 +825,11 @@ func NewSessionCommandFailed(sessionID, requestID, message string, queueLength i
 // --- Streaming / turn events (session-scoped) ------------------------------
 
 type TextChunk struct {
-	Type      string `json:"type"`
-	SessionID string `json:"session_id"`
-	RequestID string `json:"request_id,omitempty"`
-	Content   string `json:"content"`
+	Type         string `json:"type"`
+	SessionID    string `json:"session_id"`
+	RequestID    string `json:"request_id,omitempty"`
+	Content      string `json:"content"`
+	SourceItemID string `json:"source_item_id,omitempty"`
 }
 
 func NewTextChunk(sessionID, reqID, content string) TextChunk {
@@ -996,17 +1063,37 @@ func NewSessionInitInfo(sessionID, model, permissionMode string, tools, slashCom
 
 // --- History ----------------------------------------------------------------
 
+type HistoryRangeProof struct {
+	Version       int               `json:"version"`
+	RequestID     string            `json:"request_id"`
+	Authority     string            `json:"authority_instance_id"`
+	SessionID     string            `json:"session_id"`
+	NativeThread  string            `json:"native_thread_id"`
+	Threads       []string          `json:"logical_threads"`
+	Generations   map[string]string `json:"source_generations"`
+	ServerEpoch   string            `json:"server_epoch"`
+	Sequence      uint64            `json:"sequence"`
+	Kind          string            `json:"kind"`
+	Cursor        string            `json:"cursor,omitempty"`
+	First         string            `json:"first_source_message_id,omitempty"`
+	Last          string            `json:"last_source_message_id,omitempty"`
+	HasMoreBefore bool              `json:"has_more_before"`
+	HasMoreAfter  bool              `json:"has_more_after"`
+	KnownIDFound  bool              `json:"known_id_found"`
+}
+
 type HistorySnapshot struct {
-	Type                string           `json:"type"`
-	SessionID           string           `json:"session_id"`
-	Messages            []map[string]any `json:"messages"`
-	SourceCount         int              `json:"source_count"`
-	HasMoreBefore       bool             `json:"has_more_before"`
-	KnownIDFound        bool             `json:"known_id_found"`
-	SnapshotReason      string           `json:"snapshot_reason,omitempty"`
-	HistoryReadEpoch    string           `json:"history_read_epoch,omitempty"`
-	HistoryReadRevision uint64           `json:"history_read_revision,omitempty"`
-	HistoryReadToken    string           `json:"history_read_token,omitempty"`
+	Continuity          *HistoryRangeProof `json:"history_continuity,omitempty"`
+	Type                string             `json:"type"`
+	SessionID           string             `json:"session_id"`
+	Messages            []map[string]any   `json:"messages"`
+	SourceCount         int                `json:"source_count"`
+	HasMoreBefore       bool               `json:"has_more_before"`
+	KnownIDFound        bool               `json:"known_id_found"`
+	SnapshotReason      string             `json:"snapshot_reason,omitempty"`
+	HistoryReadEpoch    string             `json:"history_read_epoch,omitempty"`
+	HistoryReadRevision uint64             `json:"history_read_revision,omitempty"`
+	HistoryReadToken    string             `json:"history_read_token,omitempty"`
 }
 
 type HistoryDelta struct {
@@ -1433,6 +1520,7 @@ func NewUsageReport(fiveHour, sevenDay, sevenDaySonnet *UsageWindow) UsageReport
 // --- Status -----------------------------------------------------------------
 
 type StatusResult struct {
+	RequestID string         `json:"request_id,omitempty"`
 	Type      string         `json:"type"`
 	SessionID string         `json:"session_id"`
 	Status    map[string]any `json:"status"`

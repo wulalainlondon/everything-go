@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -12,9 +13,12 @@ import (
 
 	"everything-go/internal/backend"
 	"everything-go/internal/session"
+	"everything-go/internal/taskapi"
 )
 
 type codexVoiceCall struct {
+	callbackSpeech               bool
+	mediaGeneration              string
 	voiceID, threadID, sessionID string
 	answer                       chan backend.RealtimeVoiceAnswer
 	failure                      chan error
@@ -23,8 +27,13 @@ type codexVoiceCall struct {
 	callback                     func(backend.RealtimeVoiceEvent)
 }
 
-// Exact resume only; no fork, new thread, config reset, or cancellation of active work.
+// Exact restoration plus owning-session permission synchronization. No fork,
+// unrelated settings reset, or cancellation of active work.
 func (c *Codex) voiceThread(s *session.Session) (string, error) {
+	return c.voiceThreadContext(context.Background(), s)
+}
+
+func (c *Codex) voiceThreadContext(ctx context.Context, s *session.Session) (string, error) {
 	if s.Backend() != backend.Codex || s.ResumeID() == "" {
 		return "", errors.New("此對話尚未建立 Codex thread，請先傳送一則文字訊息")
 	}
@@ -32,14 +41,21 @@ func (c *Codex) voiceThread(s *session.Session) (string, error) {
 		return "", err
 	}
 	diagnostics, _ := c.RuntimeDiagnostics()["codex"].(map[string]any)
-	if version, _ := diagnostics["running_version"].(string); version != "0.160.0" && c.authPath != "" {
+	if version, _ := diagnostics["running_version"].(string); !taskapi.SupportedNativeProviderVersion("codex", version) && c.authPath != "" {
 		c.refreshRuntimeDiagnostics(filepath.Dir(c.authPath))
 		diagnostics, _ = c.RuntimeDiagnostics()["codex"].(map[string]any)
 	}
-	if version, _ := diagnostics["running_version"].(string); version != "0.160.0" {
-		return "", fmt.Errorf("共享 Codex app-server 為 %s；雙向語音需要已驗證的 0.160.0", version)
+	if version, _ := diagnostics["running_version"].(string); !taskapi.SupportedNativeProviderVersion("codex", version) {
+		return "", fmt.Errorf("共享 Codex app-server 為 %s；雙向語音需要已驗證的 CLI 介面版本", version)
 	}
-	return c.resumeExactControllerThread(s)
+	id, err := c.resumeExactControllerThread(s)
+	if err != nil {
+		return "", err
+	}
+	if err = c.syncVoiceSessionPermissions(ctx, s, id); err != nil {
+		return "", err
+	}
+	return id, nil
 }
 
 // Exact restoration shared by voice and pinned dispatches. Never rebuild a
@@ -109,14 +125,34 @@ func (c *Codex) StartRealtimeVoice(ctx context.Context, s *session.Session, inpu
 	if len(input.SDP) > 64*1024 || !strings.HasPrefix(input.SDP, "v=0") || input.VoiceID == "" {
 		return backend.RealtimeVoiceAnswer{}, errors.New("無效的語音協商資料")
 	}
-	id, err := c.voiceThread(s)
+	// Reserve the native identity before any settings mutation. Duplicate or
+	// concurrent starts must not reconfigure an already active voice.
+	original := s.ResumeID()
+	if original == "" {
+		return backend.RealtimeVoiceAnswer{}, errors.New("此對話尚未建立 Codex thread，請先傳送一則文字訊息")
+	}
+	c.voiceMu.Lock()
+	if c.voiceCalls[original] != nil || c.voicePreparing[original] {
+		c.voiceMu.Unlock()
+		return backend.RealtimeVoiceAnswer{}, errors.New("此對話已有語音連線，請先結束舊連線")
+	}
+	if c.voicePreparing == nil {
+		c.voicePreparing = map[string]bool{}
+	}
+	c.voicePreparing[original] = true
+	c.voiceMu.Unlock()
+	defer func() { c.voiceMu.Lock(); delete(c.voicePreparing, original); c.voiceMu.Unlock() }()
+	id, err := c.voiceThreadContext(ctx, s)
 	if err != nil {
 		return backend.RealtimeVoiceAnswer{}, err
+	}
+	if id != original {
+		return backend.RealtimeVoiceAnswer{}, errors.New("voice_session_configuration_changed")
 	}
 	if err := ctx.Err(); err != nil {
 		return backend.RealtimeVoiceAnswer{}, err
 	}
-	call := &codexVoiceCall{voiceID: input.VoiceID, threadID: id, sessionID: s.ID, answer: make(chan backend.RealtimeVoiceAnswer, 1), failure: make(chan error, 1), closed: make(chan struct{}), callback: input.OnEvent}
+	call := &codexVoiceCall{callbackSpeech: input.SpeakerInstructions != "", mediaGeneration: input.MediaGeneration, voiceID: input.VoiceID, threadID: id, sessionID: s.ID, answer: make(chan backend.RealtimeVoiceAnswer, 1), failure: make(chan error, 1), closed: make(chan struct{}), callback: input.OnEvent}
 	c.voiceMu.Lock()
 	if c.voiceCalls == nil {
 		c.voiceCalls = map[string]*codexVoiceCall{}
@@ -129,6 +165,9 @@ func (c *Codex) StartRealtimeVoice(ctx context.Context, s *session.Session, inpu
 	c.voiceMu.Unlock()
 	params := realtimeVoiceStartParams(id, input)
 	_, err = c.rpcCall("thread/realtime/start", params, 30*time.Second)
+	if call.callbackSpeech {
+		log.Printf("[callback] voice=%s stage=start_rpc_ack accepted=%t", call.voiceID, err == nil)
+	}
 
 	if err == nil && ctx.Err() != nil {
 		err = ctx.Err()
@@ -153,6 +192,9 @@ func (c *Codex) StartRealtimeVoice(ctx context.Context, s *session.Session, inpu
 	}
 	cleanup, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
+	if call.callbackSpeech && err != nil {
+		log.Printf("[callback] voice=%s stage=start_failed category=%s", call.voiceID, realtimeFailureCategory(err.Error()))
+	}
 	_ = c.StopRealtimeVoice(cleanup, s, input.VoiceID)
 	return backend.RealtimeVoiceAnswer{}, err
 }
@@ -207,6 +249,13 @@ func (c *Codex) dispatchVoice(method string, raw json.RawMessage) bool {
 		Text     string `json:"text"`
 		Delta    string `json:"delta"`
 		Role     string `json:"role"`
+		Message  string `json:"message"`
+		Item     struct {
+			Type  string `json:"type"`
+			Voice string `json:"realtimeSessionId"`
+			Role  string `json:"role"`
+			Text  string `json:"text"`
+		} `json:"item"`
 	}
 	if json.Unmarshal(raw, &p) != nil {
 		return true
@@ -217,8 +266,22 @@ func (c *Codex) dispatchVoice(method string, raw json.RawMessage) bool {
 	if call == nil || (p.VoiceID != "" && p.VoiceID != call.voiceID) {
 		return true
 	}
+	if call.callbackSpeech && (method == "thread/realtime/sdp" || method == "thread/realtime/started" || method == "thread/realtime/closed") {
+		log.Printf("[callback] voice=%s native_event=%s", call.voiceID, method)
+	}
 	event := backend.RealtimeVoiceEvent{}
+	if method == "thread/realtime/itemAdded" {
+		c.observeMediaHandoff(call, raw)
+	}
 	switch method {
+	case "thread/realtime/itemCompleted":
+		if p.Item.Type != "transcriptSegment" || p.Item.Voice != call.voiceID {
+			return true
+		}
+		event.State = "transcript_done"
+		event.Text = p.Item.Text
+		event.Role = p.Item.Role
+		event.TranscriptVoiceID = p.Item.Voice
 	case "thread/realtime/sdp":
 		if len(p.SDP) > 64*1024 {
 			return true
@@ -229,6 +292,9 @@ func (c *Codex) dispatchVoice(method string, raw json.RawMessage) bool {
 		}
 		return true
 	case "thread/realtime/error":
+		if call.callbackSpeech {
+			log.Printf("[callback] realtime failure voice=%s category=%s", call.voiceID, realtimeFailureCategory(p.Message))
+		}
 		event.State = "error"
 		event.Message = "Codex 語音服務中斷，請結束語音後重新連線"
 		select {
@@ -279,6 +345,15 @@ func (c *Codex) failVoiceCalls() {
 
 func realtimeVoiceStartParams(thread string, input backend.RealtimeVoiceStart) map[string]any {
 	params := map[string]any{"threadId": thread, "outputModality": "audio", "transport": map[string]any{"type": "webrtc", "sdp": input.SDP}, "version": "v3", "realtimeSessionId": input.VoiceID, "clientManagedHandoffs": false, "includeStartupContext": true, "flushTranscriptTailOnSessionEnd": false}
+	// prompt configures the realtime speaker. realtimeStartInstructions below
+	// configures the backing agent and cannot bootstrap proactive speech.
+	if input.SpeakerInstructions != "" {
+		params["prompt"] = input.SpeakerInstructions
+		params["includeStartupContext"] = false
+	}
+	if input.MediaInstructions != "" {
+		params["realtimeStartInstructions"] = input.MediaInstructions
+	}
 	if input.VoiceName != "" {
 		params["voice"] = input.VoiceName
 	}

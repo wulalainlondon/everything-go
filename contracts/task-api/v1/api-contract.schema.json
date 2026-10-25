@@ -566,7 +566,8 @@
             "append",
             "cancel",
             "deliver_result",
-            "legacy_source"
+            "legacy_source",
+            "intake"
           ]
         },
         "authority_instance_id": {
@@ -592,7 +593,8 @@
               "operation": {
                 "enum": [
                   "create_dispatch",
-                  "legacy_source"
+                  "legacy_source",
+                  "intake"
                 ]
               }
             }
@@ -614,37 +616,12 @@
       "description": "Unambiguous canonical-store locator. Append/cancel/delivery keys are namespaced by task_id; create by server-resolved path. Caller stable scope/generation is server-bound and never client-selected."
     },
     "GetInput": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "task_id": {
-          "$ref": "#/$defs/ID"
-        },
-        "original_receipt": {
-          "$ref": "#/$defs/LookupReceipt"
-        }
-      },
-      "required": [],
       "oneOf": [
         {
-          "required": [
-            "task_id"
-          ],
-          "not": {
-            "required": [
-              "original_receipt"
-            ]
-          }
+          "$ref": "#/$defs/OriginalGetInput"
         },
         {
-          "required": [
-            "original_receipt"
-          ],
-          "not": {
-            "required": [
-              "task_id"
-            ]
-          }
+          "$ref": "#/$defs/NativeContinuityGetInput"
         }
       ]
     },
@@ -677,61 +654,12 @@
       ]
     },
     "AppendInput": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "task_id": {
-          "$ref": "#/$defs/ID"
-        },
-        "expected_revision": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 9007199254740991
-        },
-        "target": {
-          "$ref": "#/$defs/Target"
-        },
-        "content": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 32000
-        },
-        "mode": {
-          "type": "string",
-          "enum": [
-            "queue",
-            "steer"
-          ]
-        },
-        "expected_active_request_id": {
-          "$ref": "#/$defs/ID"
-        },
-        "expected_execution": {
-          "$ref": "#/$defs/ExecutionRef"
-        }
-      },
-      "required": [
-        "task_id",
-        "expected_revision",
-        "target",
-        "content",
-        "mode"
-      ],
-      "allOf": [
+      "oneOf": [
         {
-          "if": {
-            "properties": {
-              "mode": {
-                "const": "steer"
-              }
-            }
-          },
-          "then": {
-            "required": [
-              "expected_active_request_id",
-              "expected_execution"
-            ]
-          }
+          "$ref": "#/$defs/OriginalAppendInput"
+        },
+        {
+          "$ref": "#/$defs/NativeContinuityAppendInput"
         }
       ]
     },
@@ -1163,7 +1091,8 @@
             "append",
             "cancel",
             "deliver_result",
-            "legacy_source"
+            "legacy_source",
+            "intake"
           ]
         },
         "intent_hash": {
@@ -1343,6 +1272,95 @@
         },
         "final_hash": {
           "$ref": "#/$defs/Hash"
+        },
+        "continuity": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "logical_task_id": {
+              "$ref": "#/$defs/ID"
+            },
+            "current_round_id": {
+              "$ref": "#/$defs/ID"
+            },
+            "current_round_version": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "earlier_rounds_omitted": {
+              "type": "boolean"
+            },
+            "rounds": {
+              "type": "array",
+              "maxItems": 128,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "previous_round_id": {
+                    "type": "string"
+                  },
+                  "execution": {
+                    "type": "string"
+                  },
+                  "terminal_status": {
+                    "type": "string"
+                  },
+                  "delivery": {
+                    "type": "string"
+                  },
+                  "dispatcher_session_id": {
+                    "type": "string"
+                  },
+                  "dispatcher_request_id": {
+                    "type": "string"
+                  },
+                  "qa_round_id": {
+                    "type": "string"
+                  },
+                  "qa_verdict": {
+                    "type": "string"
+                  },
+                  "successor_reason": {
+                    "type": "string"
+                  },
+                  "delegation_id": {
+                    "$ref": "#/$defs/ID"
+                  },
+                  "request_id": {
+                    "$ref": "#/$defs/ID"
+                  },
+                  "round_version": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9007199254740991
+                  }
+                },
+                "required": [
+                  "previous_round_id",
+                  "execution",
+                  "terminal_status",
+                  "delivery",
+                  "dispatcher_session_id",
+                  "dispatcher_request_id",
+                  "qa_round_id",
+                  "qa_verdict",
+                  "successor_reason",
+                  "delegation_id",
+                  "request_id",
+                  "round_version"
+                ]
+              }
+            }
+          },
+          "required": [
+            "logical_task_id",
+            "current_round_id",
+            "current_round_version",
+            "rounds",
+            "earlier_rounds_omitted"
+          ]
         }
       },
       "required": [
@@ -2420,6 +2438,9 @@
         },
         {
           "$ref": "#/$defs/Request_legacy_source"
+        },
+        {
+          "$ref": "#/$defs/Request_intake"
         }
       ]
     },
@@ -2545,6 +2566,9 @@
             },
             {
               "$ref": "#/$defs/Receipt"
+            },
+            {
+              "$ref": "#/$defs/NativeContinuityResult"
             }
           ]
         }
@@ -2610,7 +2634,14 @@
           "const": true
         },
         "result": {
-          "$ref": "#/$defs/Receipt"
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Receipt"
+            },
+            {
+              "$ref": "#/$defs/NativeContinuityResult"
+            }
+          ]
         }
       },
       "required": [
@@ -2836,6 +2867,9 @@
         },
         {
           "$ref": "#/$defs/Response_legacy_source"
+        },
+        {
+          "$ref": "#/$defs/Response_intake"
         }
       ]
     },
@@ -3506,6 +3540,862 @@
         "operation",
         "ok",
         "result"
+      ]
+    },
+    "IntakeTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "instance_id": {
+          "$ref": "#/$defs/ID"
+        },
+        "session_id": {
+          "$ref": "#/$defs/ID"
+        },
+        "expected_native_thread_id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ID"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "expected_config_revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "instance_id",
+        "session_id",
+        "expected_native_thread_id",
+        "expected_config_revision"
+      ]
+    },
+    "IntakeImage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200000
+        },
+        "media_type": {
+          "type": "string",
+          "enum": [
+            "image/jpeg",
+            "image/png",
+            "image/webp"
+          ]
+        }
+      },
+      "required": [
+        "data",
+        "media_type"
+      ]
+    },
+    "IntakeFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "attachment_id": {
+          "type": "string",
+          "pattern": "^u_[a-f0-9]{32}$"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 512
+        },
+        "content": {
+          "type": "string",
+          "maxLength": 200000
+        },
+        "media_type": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483648
+        }
+      },
+      "required": [],
+      "anyOf": [
+        {
+          "required": [
+            "attachment_id"
+          ]
+        },
+        {
+          "required": [
+            "name",
+            "content",
+            "media_type"
+          ]
+        }
+      ]
+    },
+    "IntakeInput": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "action": {
+              "const": "inspect"
+            },
+            "session_id": {
+              "$ref": "#/$defs/ID"
+            }
+          },
+          "required": [
+            "action",
+            "session_id"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "action": {
+              "const": "submit"
+            },
+            "submission_request_id": {
+              "type": "string",
+              "pattern": "^r_[a-f0-9]{32}$"
+            },
+            "target": {
+              "$ref": "#/$defs/IntakeTarget"
+            },
+            "goal": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 32000
+            },
+            "images": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/IntakeImage"
+              },
+              "maxItems": 8
+            },
+            "files": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/IntakeFile"
+              },
+              "maxItems": 20
+            }
+          },
+          "required": [
+            "action",
+            "submission_request_id",
+            "target",
+            "goal"
+          ]
+        }
+      ]
+    },
+    "IntakeContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "available",
+            "unsupported",
+            "permission",
+            "unknown"
+          ]
+        },
+        "session_id": {
+          "$ref": "#/$defs/ID"
+        },
+        "target": {
+          "$ref": "#/$defs/IntakeTarget"
+        },
+        "current_configuration": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "backend": {
+              "type": "string",
+              "maxLength": 4096
+            },
+            "model": {
+              "type": "string",
+              "maxLength": 4096
+            },
+            "effort": {
+              "type": "string",
+              "maxLength": 4096
+            },
+            "sandbox": {
+              "type": "string",
+              "maxLength": 4096
+            },
+            "cwd": {
+              "type": "string",
+              "maxLength": 4096
+            }
+          },
+          "required": [
+            "backend",
+            "model",
+            "effort",
+            "sandbox",
+            "cwd"
+          ]
+        },
+        "configuration_known": {
+          "type": "boolean"
+        },
+        "delegation_grant_enabled": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "scope_behavior": {
+          "const": "preserve_current_session"
+        },
+        "server_verified_binding": {
+          "const": "paired_human"
+        },
+        "max_frame_bytes": {
+          "const": 262144
+        },
+        "max_goal_chars": {
+          "const": 32000
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "status",
+        "session_id",
+        "target",
+        "current_configuration",
+        "configuration_known",
+        "delegation_grant_enabled",
+        "scope_behavior",
+        "server_verified_binding",
+        "max_frame_bytes",
+        "max_goal_chars"
+      ]
+    },
+    "Request_intake": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "task_api_request"
+        },
+        "api_version": {
+          "$ref": "#/$defs/Version"
+        },
+        "correlation_id": {
+          "$ref": "#/$defs/ID"
+        },
+        "operation": {
+          "const": "intake"
+        },
+        "input": {
+          "$ref": "#/$defs/IntakeInput"
+        },
+        "idempotency_key": {
+          "$ref": "#/$defs/Key"
+        }
+      },
+      "required": [
+        "type",
+        "api_version",
+        "correlation_id",
+        "operation",
+        "input"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "input": {
+                "properties": {
+                  "action": {
+                    "const": "submit"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "idempotency_key"
+            ]
+          }
+        }
+      ]
+    },
+    "Response_intake": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "task_api_response"
+        },
+        "api_version": {
+          "$ref": "#/$defs/Version"
+        },
+        "correlation_id": {
+          "$ref": "#/$defs/ID"
+        },
+        "operation": {
+          "const": "intake"
+        },
+        "ok": {
+          "const": true
+        },
+        "result": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/IntakeContext"
+            },
+            {
+              "$ref": "#/$defs/Receipt"
+            }
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "api_version",
+        "correlation_id",
+        "operation",
+        "ok",
+        "result"
+      ]
+    },
+    "NativeContinuityAppendInput": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "continuity": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "action": {
+                  "const": "continue"
+                },
+                "arguments": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "delegation_id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 256
+                    },
+                    "expected_previous_round_id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 256
+                    },
+                    "instance_id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 256
+                    },
+                    "expected_thread_id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 256
+                    },
+                    "expected_config_revision": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "content": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 32000
+                    },
+                    "mode": {
+                      "type": "string",
+                      "enum": [
+                        "queue",
+                        "steer"
+                      ]
+                    },
+                    "active_request_id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 256
+                    }
+                  },
+                  "required": [
+                    "delegation_id",
+                    "expected_previous_round_id",
+                    "instance_id",
+                    "expected_thread_id",
+                    "expected_config_revision",
+                    "content",
+                    "mode"
+                  ],
+                  "allOf": [
+                    {
+                      "if": {
+                        "properties": {
+                          "mode": {
+                            "const": "steer"
+                          }
+                        }
+                      },
+                      "then": {
+                        "required": [
+                          "active_request_id"
+                        ]
+                      }
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "action",
+                "arguments"
+              ]
+            }
+          },
+          "required": [
+            "continuity"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "continuity": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "action": {
+                  "const": "bind_qa"
+                },
+                "arguments": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "owner_delegation_id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 256
+                    },
+                    "qa_delegation_id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 256
+                    }
+                  },
+                  "required": [
+                    "owner_delegation_id",
+                    "qa_delegation_id"
+                  ]
+                }
+              },
+              "required": [
+                "action",
+                "arguments"
+              ]
+            }
+          },
+          "required": [
+            "continuity"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "continuity": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "action": {
+                  "const": "record_review"
+                },
+                "arguments": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "owner_round_id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 256
+                    },
+                    "qa_round_id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 256
+                    }
+                  },
+                  "required": [
+                    "owner_round_id",
+                    "qa_round_id"
+                  ]
+                }
+              },
+              "required": [
+                "action",
+                "arguments"
+              ]
+            }
+          },
+          "required": [
+            "continuity"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "continuity": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "action": {
+                  "const": "reauthorize_pair"
+                },
+                "arguments": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "owner_delegation_id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 256
+                    },
+                    "qa_delegation_id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 256
+                    },
+                    "instance_id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 256
+                    },
+                    "expected_source_thread_id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 256
+                    },
+                    "expected_owner_thread_id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 256
+                    },
+                    "expected_qa_thread_id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 256
+                    },
+                    "expected_source_revision": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "new_source_revision": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "expected_owner_config_revision": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "expected_qa_config_revision": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "owner_delegation_id",
+                    "qa_delegation_id",
+                    "instance_id",
+                    "expected_source_thread_id",
+                    "expected_owner_thread_id",
+                    "expected_qa_thread_id",
+                    "expected_source_revision",
+                    "new_source_revision",
+                    "expected_owner_config_revision",
+                    "expected_qa_config_revision"
+                  ]
+                }
+              },
+              "required": [
+                "action",
+                "arguments"
+              ]
+            }
+          },
+          "required": [
+            "continuity"
+          ]
+        }
+      ]
+    },
+    "NativeContinuityGetInput": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "continuity": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "action": {
+                  "const": "rounds"
+                },
+                "arguments": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "delegation_id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 256
+                    },
+                    "after_version": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "delegation_id"
+                  ]
+                }
+              },
+              "required": [
+                "action",
+                "arguments"
+              ]
+            }
+          },
+          "required": [
+            "continuity"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "continuity": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "action": {
+                  "const": "command"
+                },
+                "arguments": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "idempotency_key": {
+                      "$ref": "#/$defs/Key"
+                    }
+                  },
+                  "required": [
+                    "idempotency_key"
+                  ]
+                }
+              },
+              "required": [
+                "action",
+                "arguments"
+              ]
+            }
+          },
+          "required": [
+            "continuity"
+          ]
+        }
+      ]
+    },
+    "OriginalAppendInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "task_id": {
+          "$ref": "#/$defs/ID"
+        },
+        "expected_revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "target": {
+          "$ref": "#/$defs/Target"
+        },
+        "content": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32000
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "queue",
+            "steer"
+          ]
+        },
+        "expected_active_request_id": {
+          "$ref": "#/$defs/ID"
+        },
+        "expected_execution": {
+          "$ref": "#/$defs/ExecutionRef"
+        },
+        "return_to_parent": {
+          "type": "boolean",
+          "description": "Delegation queue append only: reserve and return this exact round through original parent handoff; default false retains legacy behavior."
+        },
+        "expected_previous_round_id": {
+          "$ref": "#/$defs/ID",
+          "description": "Logical delegation round CAS, independent of timestamp/state revision; required for a requested per-round parent return."
+        }
+      },
+      "required": [
+        "task_id",
+        "expected_revision",
+        "target",
+        "content",
+        "mode"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "steer"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "expected_active_request_id",
+              "expected_execution"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "return_to_parent": {
+                "const": true
+              }
+            },
+            "required": [
+              "return_to_parent"
+            ]
+          },
+          "then": {
+            "required": [
+              "expected_previous_round_id"
+            ]
+          }
+        }
+      ]
+    },
+    "OriginalGetInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "task_id": {
+          "$ref": "#/$defs/ID"
+        },
+        "original_receipt": {
+          "$ref": "#/$defs/LookupReceipt"
+        }
+      },
+      "required": [],
+      "oneOf": [
+        {
+          "required": [
+            "task_id"
+          ],
+          "not": {
+            "required": [
+              "original_receipt"
+            ]
+          }
+        },
+        {
+          "required": [
+            "original_receipt"
+          ],
+          "not": {
+            "required": [
+              "task_id"
+            ]
+          }
+        }
+      ]
+    },
+    "NativeContinuityResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "continuity": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "action": {
+              "enum": [
+                "continue",
+                "bind_qa",
+                "record_review",
+                "rounds",
+                "command",
+                "reauthorize_pair"
+              ]
+            },
+            "data": {
+              "type": "object"
+            },
+            "idempotency_key": {
+              "type": "string",
+              "maxLength": 512
+            },
+            "state": {
+              "enum": [
+                "read",
+                "completed",
+                "reserved",
+                "refused"
+              ]
+            }
+          },
+          "required": [
+            "action",
+            "data",
+            "state"
+          ]
+        }
+      },
+      "required": [
+        "continuity"
       ]
     }
   }

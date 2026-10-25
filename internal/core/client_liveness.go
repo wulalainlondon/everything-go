@@ -2,7 +2,9 @@ package core
 
 import (
 	"context"
+	"errors"
 	"io"
+	"net"
 	"sync/atomic"
 	"time"
 )
@@ -67,4 +69,23 @@ func pingWithInboundProgress(ctx context.Context, p pinger, idle, maximum time.D
 			timer.Reset(remaining)
 		}
 	}
+}
+
+// Error classes are bounded metadata; do not log websocket payloads, SDP or
+// authentication material while diagnosing liveness failures.
+func pingFailureClass(err error) string {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "deadline_exceeded"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "canceled"
+	}
+	if errors.Is(err, net.ErrClosed) || errors.Is(err, io.EOF) {
+		return "transport_closed"
+	}
+	var e net.Error
+	if errors.As(err, &e) && e.Timeout() {
+		return "network_timeout"
+	}
+	return "transport_failure"
 }

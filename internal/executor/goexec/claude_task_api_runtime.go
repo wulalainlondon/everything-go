@@ -233,6 +233,13 @@ func (m *claudeTaskMCP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		response := m.c.taskProvider.ExecuteTask(r.Context(), caller, call.Arguments)
+		if sink, ok := m.c.taskProvider.(backend.NativeTaskResponseCapture); ok {
+			if err := sink.CaptureTaskResponse(r.Context(), caller, call.Arguments, response); err != nil {
+				http.Error(w, "owned_capture_failed", http.StatusInternalServerError)
+				return
+			}
+		}
+
 		text, _ := json.Marshal(response)
 		respond(map[string]any{"content": []map[string]string{{"type": "text", "text": string(text)}}, "isError": !response.OK})
 	default:
@@ -268,7 +275,7 @@ func (c *Claude) taskSpawn(s *session.Session, args []string, pm *backend.PMConf
 		return args, nil, nil
 	}
 	version := c.taskVersion()
-	if version != "2.1.280" && version != "2.1.291" {
+	if !taskapi.SupportedNativeProviderVersion("claude", version) {
 		if bounded {
 			return nil, nil, fmt.Errorf("unsupported: bounded task provider version")
 		}
@@ -298,6 +305,10 @@ func (c *Claude) taskSpawn(s *session.Session, args []string, pm *backend.PMConf
 			allowed = append(allowed, "mcp__bridge_tasks__"+name)
 		}
 	}
+	if scope != nil && !validTaskWorkerTools(allowed) {
+		lease.revoke()
+		return nil, nil, fmt.Errorf("unsupported: bounded preset toolset")
+	}
 	filtered := normalizeClaudeTaskArgs(args, scope != nil, allowed)
 	filtered = append(filtered, "--mcp-config", string(config), "--replay-user-messages")
 
@@ -316,14 +327,17 @@ func addTaskEnvironment(current []string, lease *claudeTaskLease) []string {
 func (c *Claude) TaskAPICapabilities() []taskapi.ProviderCapability {
 	version := c.taskVersion()
 	capability := taskapi.UnloadedCapability("claude", version, "MCP registration or exact provider version is unavailable.")
-	if c.taskProvider != nil && c.taskMCP != nil && (version == "2.1.280" || version == "2.1.291") {
+	if c.taskProvider != nil && c.taskMCP != nil && taskapi.SupportedNativeProviderVersion("claude", version) {
 		capability.Binding = "mcp_process_binding"
 		capability.Lifecycle = "registered"
 		capability.NativeEvidence = "exact_provider_token"
 		capability.Operations = []string{"capabilities", "create_dispatch", "list", "get", "read_result", "snapshot", "events", "read_input"}
+		if version == "2.1.296" {
+			capability.Operations = append(capability.Operations, "append")
+		}
 		capability.Models = []any{map[string]any{"model": "sonnet", "efforts": []string{"high"}}, map[string]any{"model": "opus", "efforts": []string{"high"}}}
 		capability.Enforcement = taskapi.ScopeEnforcement{Mode: "gateway_only_tools", Roots: true, Tools: true, Network: true, Delegation: true}
-		capability.Reason = "Exact CLI tag registered with per-turn MCP lease; tools/list and invocation require the actual process. Init toolset is checked before bounded-worker use. Account/quota are unknown; BG, voice task invocation, active cancel and steer are unsupported."
+		capability.Reason = "Exact CLI tag registered with per-turn MCP lease; tools/list and invocation require the actual process. Init toolset is checked before bounded-worker use. Only original-owner retained bounded append is qualified. Account/quota are unknown; BG, voice task invocation, active cancel and steer are unsupported."
 	}
 	return []taskapi.ProviderCapability{capability}
 }
@@ -339,6 +353,24 @@ func (lease *claudeTaskLease) revoke() {
 		}
 		lease.server.mu.Unlock()
 	}
+}
+
+// Ending a business turn immediately invalidates every captured TaskCaller.
+// The still-running CLI may ping/list its MCP transport while idle; removing
+// that endpoint here makes a healthy completed turn look like a disconnected
+// server. Stop/DELETE/process exit still revoke the entire transport, and Send
+// creates a fresh process/lease before any later business turn.
+func (lease *claudeTaskLease) endTurn() {
+	lease.mu.Lock()
+	lease.requestID = ""
+	lease.mu.Unlock()
+}
+
+func (lease *claudeTaskLease) hasTurn() bool {
+	lease.mu.Lock()
+	defer lease.mu.Unlock()
+	// Revocation is not proof that an in-flight native turn finished.
+	return lease.requestID != ""
 }
 
 // Preserve the original caller preset; only a verified bounded worker gets the
@@ -381,7 +413,7 @@ func validTaskWorkerTools(tools []string) bool {
 		switch tool {
 		case "mcp__bridge_tasks__task_read_input":
 			found = true
-		case "mcp__bridge_tasks__task_capabilities", "ToolSearch", "EndConversation":
+		case "mcp__bridge_tasks__task_capabilities", "mcp__bridge_tasks__task_interactions", "ToolSearch", "EndConversation":
 		default:
 			return false
 		}

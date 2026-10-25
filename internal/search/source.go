@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"everything-go/internal/backend"
 	"everything-go/internal/sourcepolicy"
 )
 
@@ -206,6 +207,9 @@ func (c claudeSource) iterMessages(path string, startOffset int64) ([]searchable
 			return
 		}
 		text := extractClaudeText(rec.Message)
+		if rec.Type == "user" {
+			text = backend.OriginalPresentationContent(text)
+		}
 		if text == "" {
 			return
 		}
@@ -258,7 +262,7 @@ func (c claudeSource) sessionMeta(path string) sessionMeta {
 			meta.FirstTS = rec.Timestamp
 		}
 		if meta.DisplayName == "" && rec.Type == "user" {
-			text := extractClaudeText(rec.Message)
+			text := backend.OriginalPresentationContent(extractClaudeText(rec.Message))
 			if text != "" && !isFrameworkNoise(text) {
 				meta.DisplayName = collapseWS(text, 80)
 			}
@@ -367,6 +371,9 @@ func (c codexSource) iterMessages(path string, startOffset int64) ([]searchableM
 			return
 		}
 		text := blocksToText(pl.Content, []string{"text", "input_text", "output_text"})
+		if pl.Role == "user" {
+			text = backend.OriginalPresentationContent(text)
+		}
 		if text == "" {
 			return
 		}
@@ -414,7 +421,7 @@ func (c codexSource) sessionMeta(path string) sessionMeta {
 		if meta.DisplayName == "" && rec.Type == "response_item" {
 			var pl codexPayload
 			if json.Unmarshal(rec.Payload, &pl) == nil && pl.Type == "message" && pl.Role == "user" {
-				text := blocksToText(pl.Content, []string{"text", "input_text", "output_text"})
+				text := backend.OriginalPresentationContent(blocksToText(pl.Content, []string{"text", "input_text", "output_text"}))
 				if text != "" && !isCodexBootstrap(text) && !isFrameworkNoise(text) {
 					meta.DisplayName = collapseWS(text, 80)
 				}

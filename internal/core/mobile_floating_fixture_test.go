@@ -28,8 +28,26 @@ type floatingHistoryExec struct {
 }
 
 type floatingHistoryProvider struct {
-	mu       sync.Mutex
-	byResume map[string][]map[string]any
+	mu           sync.Mutex
+	byResume     map[string][]map[string]any
+	nativeProofs map[string]string
+}
+
+func (p *floatingHistoryProvider) seedNativeFixture(proof backend.NativeTaskAccepted) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.nativeProofs == nil {
+		p.nativeProofs = map[string]string{}
+	}
+	p.nativeProofs[proof.ThreadID+"/"+proof.TurnID] = proof.RequestID
+}
+func (p *floatingHistoryProvider) ValidateNativeAcceptance(_ *session.Session, thread, request, turn string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.nativeProofs[thread+"/"+turn] != request {
+		return fmt.Errorf("native correlation unavailable")
+	}
+	return nil
 }
 
 func (p *floatingHistoryProvider) LoadHistory(id string, opts history.Opts) (*history.Result, error) {

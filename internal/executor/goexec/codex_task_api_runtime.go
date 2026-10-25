@@ -32,8 +32,14 @@ func (c *Codex) applyTaskAPIThreadTools(s *session.Session, params map[string]an
 		// Bounded workers receive only the scoped gateway namespace. Legacy
 		// controller/delegation/read tools retain their original parent policy.
 		params["dynamicTools"] = []map[string]any{{"type": "namespace", "name": "bridge_tasks", "description": "Bounded task input/context only.", "tools": tools}}
+		if _, resume := params["threadId"]; resume {
+			// 0.162.1 restores the SAME thread's original dynamic catalog;
+			// ThreadResumeParams has no dynamicTools field. Never claim an
+			// ignored parameter re-registered or narrowed an arbitrary thread.
+			delete(params, "dynamicTools")
+		}
 		version := c.taskDaemonVersion()
-		if version != "0.160.0" {
+		if !taskapi.SupportedNativeProviderVersion("codex", version) {
 			return errors.New("unsupported: exact bounded Codex daemon version is unverified")
 		}
 		raw, e := c.rpcCall("config/read", map[string]any{"includeLayers": false}, 15*time.Second)
@@ -98,7 +104,7 @@ func (c *Codex) handleTaskAPIServerRequest(id any, method string, raw json.RawMe
 		st := c.state(s.ID)
 		st.mu.Lock()
 		request := st.reqID
-		owned := st.turnActive && st.currentTurnID == call.TurnID && st.threadID == call.ThreadID
+		owned := st.turnActive && !st.turnStartPending && st.currentTurnID == call.TurnID && st.threadID == call.ThreadID
 		st.mu.Unlock()
 		if !owned || request == "" {
 			_ = c.rpc.write(map[string]any{"id": id, "result": map[string]any{"success": false, "contentItems": []map[string]any{{"type": "inputText", "text": "caller_unbound"}}}})
@@ -107,9 +113,16 @@ func (c *Codex) handleTaskAPIServerRequest(id any, method string, raw json.RawMe
 		caller := backend.TaskCaller{Session: s, RequestID: request, ThreadID: call.ThreadID, TurnID: call.TurnID, CallID: call.CallID, ProviderVersion: c.taskDaemonVersion(), Validate: func() bool {
 			st.mu.Lock()
 			defer st.mu.Unlock()
-			return st.turnActive && st.reqID == request && st.currentTurnID == call.TurnID && st.threadID == call.ThreadID
+			return st.turnActive && !st.turnStartPending && st.reqID == request && st.currentTurnID == call.TurnID && st.threadID == call.ThreadID
 		}}
 		response := c.taskProvider.ExecuteTask(context.Background(), caller, call.Arguments)
+		if sink, ok := c.taskProvider.(backend.NativeTaskResponseCapture); ok {
+			if err := sink.CaptureTaskResponse(context.Background(), caller, call.Arguments, response); err != nil {
+				_ = c.rpc.write(map[string]any{"id": id, "result": map[string]any{"success": false, "contentItems": []map[string]any{{"type": "inputText", "text": "owned_capture_failed"}}}})
+				return
+			}
+		}
+
 		encoded, _ := json.Marshal(response)
 		_ = c.rpc.write(map[string]any{"id": id, "result": map[string]any{"success": response.OK, "contentItems": []map[string]any{{"type": "inputText", "text": string(encoded)}}}})
 	}()
@@ -122,14 +135,17 @@ func (c *Codex) TaskAPICapabilities() []taskapi.ProviderCapability {
 		version = "unknown"
 	}
 	capability := taskapi.UnloadedCapability("codex", version, "Original daemon version and provider tool registration must be verified; account/quota are unknown.")
-	if c.taskProvider != nil && version == "0.160.0" {
+	if c.taskProvider != nil && taskapi.SupportedNativeProviderVersion("codex", version) {
 		capability.Binding = "native_tool"
 		capability.Lifecycle = "registered"
 		capability.NativeEvidence = "exact_turn"
 		capability.Operations = []string{"capabilities", "create_dispatch", "list", "get", "read_result", "snapshot", "events", "read_input"}
+		if version == "0.162.1" {
+			capability.Operations = append(capability.Operations, "append")
+		}
 		capability.Models = []any{map[string]any{"model": "gpt-6.1-sol", "efforts": []string{"high"}}}
 		capability.Enforcement = taskapi.ScopeEnforcement{Mode: "gateway_only_tools", Roots: true, Tools: true, Network: true, Delegation: true}
-		capability.Reason = "Adapter registered for exact daemon 0.160.0; per-thread RPC and invocation are distinct later evidence. Existing-thread narrowing, active cancel, steer and BG are unsupported. Account/quota remain unknown."
+		capability.Reason = "Adapter registered for qualified daemon " + version + "; per-thread RPC and invocation are distinct later evidence. Only original-owner retained bounded append is qualified. Arbitrary existing-thread narrowing, active cancel, steer and BG are unsupported. Account/quota remain unknown."
 	}
 	return []taskapi.ProviderCapability{capability}
 }

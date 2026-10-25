@@ -77,6 +77,8 @@ func TestCodexJoinedTurnSettlesDurableQueueAndPhoneRuntime(t *testing.T) {
 			switch request.Method {
 			case "thread/resume":
 				result = map[string]any{"thread": map[string]any{"id": "root", "status": map[string]string{"type": "active"}}}
+			case "thread/read":
+				result = map[string]any{"thread": map[string]any{"id": "root", "status": map[string]string{"type": "idle"}}}
 			case "turn/start":
 				n := starts.Add(1)
 				id := "joined-turn"
@@ -84,7 +86,7 @@ func TestCodexJoinedTurnSettlesDurableQueueAndPhoneRuntime(t *testing.T) {
 					id = "next-turn"
 				}
 				if n == 1 {
-					// Joining a running desktop turn produces no turn/started;
+					// A fresh accepted turn can produce no turn/started;
 					// completion can even precede the submission response.
 					if !text(id, "部署已完成") || !terminal("old-turn") || !terminal(id) {
 						return

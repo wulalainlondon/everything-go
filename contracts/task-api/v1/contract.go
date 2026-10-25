@@ -259,7 +259,7 @@ func ToolInputs() (map[string]any, error) {
 			continue
 		}
 		op := strings.TrimPrefix(name, "Request_")
-		if op == "deliver_result" || op == "legacy_source" {
+		if op == "deliver_result" || op == "legacy_source" || op == "intake" {
 			continue
 		}
 		tools["task_"+op] = map[string]any{"$schema": "https://json-schema.org/draft/2020-12/schema", "$defs": defs, "$ref": "#/$defs/" + name}
@@ -269,3 +269,6 @@ func ToolInputs() (map[string]any, error) {
 func CompilerTag() string {
 	return fmt.Sprintf("%s; github.com/santhosh-tekuri/jsonschema/v6@v6.0.2", "draft-2020-12")
 }
+
+// Shared transport integer constraint, independent of version definitions.
+func ValidateWireNumbers(value any) error { return wireNumbers(value) }

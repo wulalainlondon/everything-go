@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"everything-go/internal/backend"
 	"everything-go/internal/taskapi"
 	"strings"
 
@@ -56,8 +57,14 @@ func (h *Hub) nativeTaskTurn(s *session.Session, request string) string {
 			return ""
 		}
 		if turn := h.messageQueue.NativeAcceptance(s.ID, request, s.ResumeID()); turn != "" {
-			return turn
+			if h.nativeCorrelationKnown(s, s.ResumeID(), request, turn) {
+				return turn
+			}
+			return ""
 		}
+	}
+	if s.Backend() == backend.Codex {
+		return ""
 	}
 	if hr, ok := h.exec.(historyRouter); ok {
 		if provider, ok := hr.ProviderFor(s); ok {
@@ -101,6 +108,13 @@ func (h *Hub) projectSessionTask(s *session.Session, e messagequeue.Entry, owner
 	task.NativeTurnID = h.nativeTaskTurn(s, e.RequestID)
 	effective := e
 	if e.State == messagequeue.Steered {
+		if !h.messageQueue.StrictSteerProven(e) {
+			task.Transport = "ordinary_steer"
+			task.State = "legacy_unknown"
+			task.NativeTurnID = ""
+			task.APIAxes = map[string]string{"admission": "queued", "execution": "unknown", "final": "unknown", "qa": "not_requested", "delivery": "not_requested"}
+			return task
+		}
 		task.Transport = "ordinary_steer"
 		task.NativeTurnID = e.TurnID
 		task.ExecutionRequestID = e.ActiveRequestID
@@ -109,7 +123,7 @@ func (h *Hub) projectSessionTask(s *session.Session, e messagequeue.Entry, owner
 		active, found, err := h.messageQueue.Get(s.ID, e.ActiveRequestID)
 		// The accepted steering RPC pins both the original execution and native
 		// turn. An unrelated busy/terminal request never completes this supplement.
-		if err != nil || !found || e.TurnID == "" || (h.nativeTaskTurn(s, e.ActiveRequestID) != "" && h.nativeTaskTurn(s, e.ActiveRequestID) != e.TurnID) {
+		if err != nil || !found || e.TurnID == "" || h.nativeTaskTurn(s, e.ActiveRequestID) != e.TurnID {
 			return task
 		}
 		effective = active
@@ -138,6 +152,9 @@ func (h *Hub) projectSessionTask(s *session.Session, e messagequeue.Entry, owner
 		final := finals[task.ExecutionRequestID]
 		if final != nil {
 			finalTurn, _ := final["source_turn_id"].(string)
+			if s.Backend() == backend.Codex && (task.NativeTurnID == "" || task.NativeTurnID != finalTurn) {
+				break
+			}
 			if e.State == messagequeue.Steered && finalTurn != e.TurnID {
 				break
 			}

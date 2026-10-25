@@ -63,31 +63,34 @@ func (g Grant) Allows(local, instance, session string) bool {
 }
 
 type Record struct {
-	ParentThreadID     string `json:"parent_thread_id"`
-	ID                 string `json:"dispatch_id"`
-	ParentID           string `json:"parent_session_id"`
-	OriginRequestID    string `json:"origin_request_id"`
-	TurnID             string `json:"turn_id"`
-	ToolCallID         string `json:"tool_call_id"`
-	VoiceID            string `json:"voice_id,omitempty"`
-	InstanceID         string `json:"instance_id"`
-	SessionID          string `json:"target_session_id"`
-	ThreadID           string `json:"thread_id"`
-	ConfigRevision     uint64 `json:"config_revision"`
-	RequestID          string `json:"request_id"`
-	ExecutionRequestID string `json:"execution_request_id,omitempty"`
-	ExecutionTurnID    string `json:"execution_turn_id,omitempty"`
-	Mode               string `json:"mode"`
-	Content            string `json:"content"`
-	IntentHash         string `json:"intent_hash"`
-	State              string `json:"state"`
-	Error              string `json:"error,omitempty"`
-	Result             string `json:"result,omitempty"`
-	DeliveryState      string `json:"delivery_state"`
-	DeliveryError      string `json:"delivery_error,omitempty"`
-	CreatedAt          int64  `json:"created_at"`
-	UpdatedAt          int64  `json:"updated_at"`
-	TerminalAt         int64  `json:"terminal_at,omitempty"`
+	ParentExecutionRequestID string `json:"parent_execution_request_id,omitempty"`
+	ParentConfigRevision     uint64 `json:"parent_config_revision"`
+	ParentConfigKnown        bool   `json:"parent_config_known,omitempty"`
+	ParentThreadID           string `json:"parent_thread_id"`
+	ID                       string `json:"dispatch_id"`
+	ParentID                 string `json:"parent_session_id"`
+	OriginRequestID          string `json:"origin_request_id"`
+	TurnID                   string `json:"turn_id"`
+	ToolCallID               string `json:"tool_call_id"`
+	VoiceID                  string `json:"voice_id,omitempty"`
+	InstanceID               string `json:"instance_id"`
+	SessionID                string `json:"target_session_id"`
+	ThreadID                 string `json:"thread_id"`
+	ConfigRevision           uint64 `json:"config_revision"`
+	RequestID                string `json:"request_id"`
+	ExecutionRequestID       string `json:"execution_request_id,omitempty"`
+	ExecutionTurnID          string `json:"execution_turn_id,omitempty"`
+	Mode                     string `json:"mode"`
+	Content                  string `json:"content"`
+	IntentHash               string `json:"intent_hash"`
+	State                    string `json:"state"`
+	Error                    string `json:"error,omitempty"`
+	Result                   string `json:"result,omitempty"`
+	DeliveryState            string `json:"delivery_state"`
+	DeliveryError            string `json:"delivery_error,omitempty"`
+	CreatedAt                int64  `json:"created_at"`
+	UpdatedAt                int64  `json:"updated_at"`
+	TerminalAt               int64  `json:"terminal_at,omitempty"`
 }
 type Store struct{ db *sql.DB }
 
