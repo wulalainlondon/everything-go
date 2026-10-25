@@ -122,14 +122,23 @@ func (s *Store) RecordResearchTool(ctx context.Context, session, request, toolID
 	}
 	if result {
 		o.State = "provider_output_observed_not_independent_fact_verification"
+		previousQuery := o.Query
 		var web struct {
 			Query   *string           `json:"query"`
 			Results []json.RawMessage `json:"results"`
 		}
-		if json.Unmarshal([]byte(output), &web) == nil && web.Query != nil && len(web.Results) == 0 {
-			o.State = "provider_completed_without_search_results"
+		if json.Unmarshal([]byte(output), &web) == nil && web.Query != nil {
+			// Native web tools may start without arguments and fill them only
+			// on completion. The original result supplies this query, never
+			// the model's final answer or a caller-created source record.
+			if *web.Query != "" {
+				o.Query = clipUTF8(*web.Query, 8000)
+			}
+			if len(web.Results) == 0 {
+				o.State = "provider_completed_without_search_results"
+			}
 		}
-		if o.OutputHash == digest([]byte(output)) {
+		if o.OutputHash == digest([]byte(output)) && o.Query == previousQuery {
 			return nil
 		}
 		o.OutputHash = digest([]byte(output))

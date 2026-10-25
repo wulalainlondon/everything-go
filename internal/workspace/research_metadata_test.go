@@ -19,7 +19,7 @@ func TestResearchObservationBoundariesAndLateStartPreserveResult(t *testing.T) {
 	entity := f.task(agent, nil)
 	task, _ := bodyOf[Task](entity)
 	var err error
-	if err = f.s.RecordResearchTool(f.ctx, task.SessionID, task.RequestID, "web-observed", "webSearch", "query", "", false); err != nil {
+	if err = f.s.RecordResearchTool(f.ctx, task.SessionID, task.RequestID, "web-observed", "webSearch", "", "", false); err != nil {
 		t.Fatal(err)
 	}
 	out := `{"query":"query","results":[{"url":"https://example.org/","snippet":"` + strings.Repeat("界", 6000) + `"}]}`
@@ -37,7 +37,7 @@ func TestResearchObservationBoundariesAndLateStartPreserveResult(t *testing.T) {
 	}
 	var o ResearchObservation
 	json.Unmarshal(e.Body, &o)
-	if !o.Truncated || len(o.Excerpt) > 16000 || o.OutputHash != digest([]byte(out)) || len(o.URLs) != 1 {
+	if o.Query != "query" || !o.Truncated || len(o.Excerpt) > 16000 || o.OutputHash != digest([]byte(out)) || len(o.URLs) != 1 {
 		t.Fatalf("incomplete observation %+v", o)
 	}
 	if err = f.s.RecordResearchTool(f.ctx, task.SessionID, task.RequestID, "web-observed", "webSearch", "query", "", false); err != nil {
