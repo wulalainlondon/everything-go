@@ -1421,7 +1421,8 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 			c.emitCodexAgentTree(s)
 			return
 		}
-		if _, isTool := normalizeCodexLiveTool(m.Params); !isTool {
+		tool, isTool := normalizeCodexLiveTool(m.Params)
+		if !isTool {
 			return
 		}
 		itemID := firstNonEmpty(p.ItemID, p.Item.ID, "codex_item")
@@ -1434,6 +1435,11 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 		}
 		generatedPaths := codexGeneratedImagePaths(rawOutput)
 		output := rawToString(rawOutput)
+		if output == "" && tool.Output != "" {
+			// A completed web item can arrive without its started notification.
+			c.tools.Start(s.ID, reqID, itemID, tool.Name, tool.Command)
+			output = tool.Output
+		}
 		if codexHasInlineImage(rawOutput) {
 			if len(generatedPaths) > 0 {
 				output = "Generated image:\n" + strings.Join(generatedPaths, "\n")

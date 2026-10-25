@@ -46,6 +46,24 @@ func webTool(name string) bool {
 	return false
 }
 func observationURLs(output string) []string {
+	// JSON escapes such as \u0026 must be decoded before preserving a URL.
+	// For native structured web results retain source URLs, not thumbnails.
+	var web struct {
+		Query   *string `json:"query"`
+		Results []struct {
+			URL string `json:"url"`
+		} `json:"results"`
+	}
+	if json.Unmarshal([]byte(output), &web) == nil && web.Query != nil {
+		values := []string{}
+		for _, result := range web.Results {
+			if result.URL != "" {
+				values = append(values, result.URL)
+			}
+		}
+		output = strings.Join(values, "\n")
+	}
+
 	out := []string{}
 	seen := map[string]bool{}
 	for _, raw := range observedURLPattern.FindAllString(output, 100) {
@@ -99,8 +117,21 @@ func (s *Store) RecordResearchTool(ctx context.Context, session, request, toolID
 	} else if result {
 		return nil
 	}
+	if !result && o.State != "provider_tool_started" {
+		return nil
+	}
 	if result {
 		o.State = "provider_output_observed_not_independent_fact_verification"
+		var web struct {
+			Query   *string           `json:"query"`
+			Results []json.RawMessage `json:"results"`
+		}
+		if json.Unmarshal([]byte(output), &web) == nil && web.Query != nil && len(web.Results) == 0 {
+			o.State = "provider_completed_without_search_results"
+		}
+		if o.OutputHash == digest([]byte(output)) {
+			return nil
+		}
 		o.OutputHash = digest([]byte(output))
 		o.Excerpt = clipUTF8(output, 16000)
 		o.Truncated = len(o.Excerpt) != len(output)

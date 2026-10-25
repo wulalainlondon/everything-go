@@ -108,6 +108,9 @@ func normalizeCodexLiveTool(params json.RawMessage) (codexToolCall, bool) {
 		ID        string          `json:"id"`
 		Name      string          `json:"name"`
 		Type      string          `json:"type"`
+		Query     string          `json:"query"`
+		Action    json.RawMessage `json:"action"`
+		Results   json.RawMessage `json:"results"`
 		Command   json.RawMessage `json:"command"`
 		Input     json.RawMessage `json:"input"`
 		Arguments json.RawMessage `json:"arguments"`
@@ -115,6 +118,9 @@ func normalizeCodexLiveTool(params json.RawMessage) (codexToolCall, bool) {
 			ID        string          `json:"id"`
 			Name      string          `json:"name"`
 			Type      string          `json:"type"`
+			Query     string          `json:"query"`
+			Action    json.RawMessage `json:"action"`
+			Results   json.RawMessage `json:"results"`
 			Command   json.RawMessage `json:"command"`
 			Input     json.RawMessage `json:"input"`
 			Arguments json.RawMessage `json:"arguments"`
@@ -140,10 +146,28 @@ func normalizeCodexLiveTool(params json.RawMessage) (codexToolCall, bool) {
 	}
 	commandRaw := firstRaw(p.Command, p.Input, p.Arguments, p.Item.Command, p.Item.Input, p.Item.Arguments)
 	name, command := normalizeCodexToolNameCommand(rawName, commandRaw)
+	output := ""
+	if itemType == "webSearch" || itemType == "web_search" {
+		action, results := firstRaw(p.Item.Action, p.Action), firstRaw(p.Item.Results, p.Results)
+		query := firstNonEmpty(p.Item.Query, p.Query)
+		command = firstNonEmpty(query, rawToString(action), command)
+		// The provider exposes structured web metadata separately from output.
+		// Keep only its observed query/action/results, never infer from model text.
+		data := map[string]any{"query": query}
+		if len(action) > 0 {
+			data["action"] = action
+		}
+		if len(results) > 0 {
+			data["results"] = results
+		}
+		raw, _ := json.Marshal(data)
+		output = string(raw)
+	}
 	return codexToolCall{
 		ID:      firstNonEmpty(p.ItemID, p.CallID, p.ToolCall, p.ToolUseID, p.ID, p.Item.ID, "codex_item"),
 		Name:    name,
 		Command: command,
+		Output:  output,
 	}, true
 }
 

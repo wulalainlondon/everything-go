@@ -1,0 +1,38 @@
+{
+  "threadId": "root",
+  "item": {
+    "id": "exec-3bd44132-c5d7-4ea8-ab1c-ca059153d058",
+    "query": "https://github.com/wulalainlondon/averything-bridge",
+    "action": {
+      "type": "openPage",
+      "url": "https://github.com/wulalainlondon/averything-bridge"
+    },
+    "results": [
+      {
+        "type": "text_result",
+        "domain": "github.com",
+        "ref_id": "turn0view0",
+        "snippet": "Total lines: 263",
+        "thumbnail_url": "https://images.openai.com/static-rsc-1/_pCSUUS9qeVWsYdMctmUeGH7_pDMH14oIEa8TwHYlT1MYUjF8S5o6QGUip7uHI3m3aYTbgR2SO6Dx22b8mCwxEK8BZluGi0VgTn1ePoRvjmC3DDuzV4Y2oJ5mriRPAYAZfGfomunsVxfJ4ovy-8FaTg5VsPtk5WQxq_0Gu3eWMRfbBokQMWSN7w9Qi765wgqqufwKYjFiU2vuc584z3Vhw",
+        "title": "GitHub - wulalainlondon/averything-bridge · GitHub",
+        "url": "https://github.com/wulalainlondon/averything-bridge"
+      },
+      {
+        "type": "text_result",
+        "domain": "github.com",
+        "ref_id": "turn0view1",
+        "snippet": "Total lines: 374",
+        "thumbnail_url": "https://images.openai.com/static-rsc-1/CVrwtLwkb3yP5bwpAA_-YoniDamOjqlKo9heF7VdgSS8rDkturzzoNMwcvE6UlUkPbvm1F4H_zg0BIFKeWoP892elTTL0AAe_Hso5LTFxndc4MnhnaA2s1_OBJj-jzRDKjSq-tNKCpxxm45zrTnYmWOZ4pcDX9Xe6STHDBXQqUBjI1v-giQbwwFXyANMRCiFBnJb06NSYAKqHl3ah2imLQ",
+        "title": "GitHub - wulalainlondon/everything-go: Self-hosted Go bridge for the everything app — connects your phone to your local claude/codex CLI (mDNS auto-discovery + cloudflare tunnel) · GitHub",
+        "url": "https://github.com/wulalainlondon/everything-go"
+      },
+      {
+        "type": "text_result",
+        "ref_id": "turn0view2",
+        "snippet": "Total lines: 1",
+        "title": "Internal Error"
+      }
+    ],
+    "type": "webSearch"
+  }
+}
