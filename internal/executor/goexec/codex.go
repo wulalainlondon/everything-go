@@ -1177,6 +1177,8 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 			Output            json.RawMessage `json:"output"`
 			AggregatedOutput  json.RawMessage `json:"aggregatedOutput"`
 			ContentItems      json.RawMessage `json:"contentItems"`
+			SavedPath         string          `json:"savedPath"`
+			Failure           json.RawMessage `json:"failure"`
 			Status            string          `json:"status"`
 			Tool              string          `json:"tool"`
 			SenderThreadID    string          `json:"senderThreadId"`
@@ -1420,6 +1422,22 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 		}
 		if !isRootThread {
 			c.emitCodexAgentTree(s)
+			return
+		}
+		if p.Item.Type == "imageGeneration" {
+			itemID := firstNonEmpty(p.ItemID, p.Item.ID, "codex_image")
+			c.tools.Start(s.ID, reqID, itemID, "imageGeneration", "")
+			output := "Image generation completed without a verified saved image."
+			path := p.Item.SavedPath
+			failed := len(p.Item.Failure) > 0 && string(p.Item.Failure) != "null"
+			if p.Item.Status == "completed" && !failed && codexNativeGeneratedImagePath(path, p.ThreadID) {
+				output = "Generated image:\n" + path
+				c.sink.Emit(protocol.Media{Type: "media", SessionID: s.ID, RequestID: reqID, MediaType: "image", Path: path})
+			} else if failed || p.Item.Status == "failed" {
+				output = "Image generation failed."
+			}
+			c.tools.Result(s.ID, reqID, itemID, output)
+			c.tools.End(s.ID, reqID, itemID)
 			return
 		}
 		tool, isTool := normalizeCodexLiveTool(m.Params)
@@ -4000,4 +4018,19 @@ func rawToString(raw json.RawMessage) string {
 		return s
 	}
 	return string(raw)
+}
+
+// savedPath is provider metadata, not model prose. Keep it in the original
+// physical thread's managed image directory and require an existing file.
+func codexNativeGeneratedImagePath(path, thread string) bool {
+	if path == "" || thread == "" || filepath.Clean(path) != path || filepath.Base(filepath.Dir(path)) != thread || filepath.Base(filepath.Dir(filepath.Dir(path))) != "generated_images" || filepath.Base(filepath.Dir(filepath.Dir(filepath.Dir(path)))) != ".codex" {
+		return false
+	}
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".png", ".jpg", ".jpeg", ".gif", ".webp":
+	default:
+		return false
+	}
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular()
 }
