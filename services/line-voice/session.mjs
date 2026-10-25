@@ -1,4 +1,9 @@
 import {createHash} from 'node:crypto';
+// Only a known, bounded reason may control automatic return on the phone.
+// Never expose an arbitrary SDK exception (which may contain private material).
+export function callFailureCode(error){
+  return error?.message==='line_answer_timeout'?'line_answer_timeout':'line_call_failed';
+}
 export class VoiceSession {
   constructor(deps){this.deps=deps;this.stopped=false;this.state='idle';this.queue=[];this.sending=false;}
   check(){if(this.stopped)throw new Error('call_cancelled');}

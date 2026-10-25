@@ -3,6 +3,7 @@ package linevoice
 import (
 	"context"
 	"encoding/base64"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -153,6 +154,65 @@ func TestActualWebRTCDuplexThroughIsolatedOpusWorker(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 	if closed.Load() != 1 {
 		t.Fatalf("closed events=%d", closed.Load())
+	}
+}
+
+func TestUnansweredWorkerReasonSurvivesUntilConfirmedChildExit(t *testing.T) {
+	for _, code := range []string{"line_answer_timeout", "Authorization: private fixture", "line_answer_timeout extra"} {
+		t.Run(code, func(t *testing.T) {
+			node, err := exec.LookPath("node")
+			if err != nil {
+				t.Fatal(err)
+			}
+			worker := filepath.Join(t.TempDir(), "worker.mjs")
+			script := fmt.Sprintf(`process.stdout.write('{"type":"ready","protocol_version":2}\n');process.stdin.once('data',()=>{process.stdout.write(JSON.stringify({type:'error',code:%q})+'\n');process.stdin.pause();});`, code)
+			if err = os.WriteFile(worker, []byte(script), 0600); err != nil {
+				t.Fatal(err)
+			}
+			pc, _, offer := phone(t)
+			events := make(chan Event, 8)
+			call, answer, err := Offer(context.Background(), Config{Node: node, Worker: worker, WorkerProtocol: 2}, "line_"+strings.Repeat("c", 64), "fixture", offer, func(e Event) { events <- e })
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer call.Close()
+			if err = pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: answer}); err != nil {
+				t.Fatal(err)
+			}
+			want := "line_call_failed"
+			if code == "line_answer_timeout" {
+				want = code
+			}
+			failed := false
+			deadline := time.After(10 * time.Second)
+			for {
+				select {
+				case e := <-events:
+					if e.State == "connected" {
+						t.Fatal("unanswered call claimed connected")
+					}
+					if e.State == "error" {
+						if e.Code != want {
+							t.Fatalf("code %q, want %q", e.Code, want)
+						}
+						failed = true
+					}
+					if e.State == "closed" {
+						if !failed {
+							t.Fatal("closed before safe error")
+						}
+						ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+						defer cancel()
+						if err = call.WaitClosed(ctx); err != nil {
+							t.Fatal(err)
+						}
+						return
+					}
+				case <-deadline:
+					t.Fatal("worker did not settle")
+				}
+			}
+		})
 	}
 }
 func TestNoWorkerStartsBeforePhoneTransportConnects(t *testing.T) {

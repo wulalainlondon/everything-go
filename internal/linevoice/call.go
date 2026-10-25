@@ -370,7 +370,7 @@ func (c *Call) run() {
 		case "error":
 			code := f.Code
 			switch code {
-			case "peer_not_unique", "keychain_unavailable", "existing_login_required", "credential_store_busy", "call_intent_already_used", "call_route_unavailable", "line_media_unavailable":
+			case "peer_not_unique", "keychain_unavailable", "existing_login_required", "credential_store_busy", "call_intent_already_used", "call_route_unavailable", "line_media_unavailable", "line_answer_timeout":
 			default:
 				code = "line_call_failed"
 			}

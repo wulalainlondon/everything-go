@@ -263,9 +263,16 @@ func (h *Hub) handleLineVoiceStart(c *Client, cmd clientproto.Command) {
 					message = "手機音訊網路連線失敗或已中斷"
 				case "call_duration_limit":
 					message = "本次 LINE 通話已達時限，已結束"
+				case "line_answer_timeout":
+					message = "LINE 等待接聽逾時，通話已結束"
 				}
 			}
 			out := voiceEvent(cmd, event.State, message)
+			// A structured, owner-bound reason lets capable phones distinguish
+			// a settled unanswered call from transport or authorization failures.
+			if event.State == "error" && event.Code == "line_answer_timeout" {
+				out.LineCallCode = event.Code
+			}
 			out.ThreadID = s.ResumeID()
 			if c.live() {
 				c.enqueueEvent(out)

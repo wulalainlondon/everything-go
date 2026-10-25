@@ -7,6 +7,7 @@ type RealtimeVoiceEvent struct {
 	LineAccountRef string             `json:"line_account_ref,omitempty"`
 	LineTargetRef  string             `json:"line_target_ref,omitempty"`
 	LinePeerName   string             `json:"line_peer_name,omitempty"`
+	LineCallCode   string             `json:"line_call_code,omitempty"`
 	Type           string             `json:"type"`
 	SessionID      string             `json:"session_id"`
 	RequestID      string             `json:"request_id"`

@@ -2,7 +2,7 @@
 // login helpers are intentionally absent from this worker.
 import {loadPatchedTransport} from './linejs-transport.mjs';
 import {normalizer,linePayload,opusFromLine} from './audio.mjs';
-import {VoiceSession} from './session.mjs';
+import {VoiceSession,callFailureCode} from './session.mjs';
 console.log=()=>{};console.error=()=>{};
 let PlanetTransport;
 try{({PlanetTransport}=await loadPatchedTransport())}catch{process.stdout.write(JSON.stringify({type:'error',code:'line_transport_patch_invalid'})+'\n');process.exit(1)}
@@ -27,7 +27,7 @@ function command(value){
  if(value.type==='stop'){void finish();return}
  if(value.type==='start'){
   if(started||process.env.LINEJS_ALLOW_CALLS!=='1'){emit({type:'error',code:'line_call_not_enabled_or_duplicate'});void finish();return}
-  started=true;task=start(value).catch(()=>{emit({type:'error',code:'line_call_failed'})}).finally(()=>{if(session?.state!=='connected')void finish()});return;
+  started=true;task=start(value).catch(error=>{emit({type:'error',code:callFailureCode(error)})}).finally(()=>{if(session?.state!=='connected')void finish()});return;
  }
  if(value.type==='audio'&&session&&typeof value.data==='string'&&value.data.length<=6000){lastAudio=Date.now();session.audio(Buffer.from(value.data,'base64'))}
 }
