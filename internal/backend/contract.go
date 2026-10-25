@@ -17,6 +17,8 @@ var (
 	ErrSteerRejected      = errors.New("steering was rejected before applying input")
 	ErrNoActiveTurn       = errors.New("there is no active turn to steer")
 	ErrThreadActiveWriter = errors.New("codex thread is controlled by another client")
+	// Returned only before any native input RPC has been attempted.
+	ErrNativeSubmissionBusy = errors.New("native_submission_busy")
 )
 
 const (
@@ -126,6 +128,12 @@ type Executor interface {
 	Close(ctx context.Context, s *session.Session) error
 }
 
+// QueuedSubmissionReader reads native readiness without submitting model input.
+// A non-nil result keeps an ordinary queued input waiting and cancellable.
+type QueuedSubmissionReader interface {
+	QueuedSubmissionReady(context.Context, *session.Session, string) error
+}
+
 type sandboxOverrideContextKey struct{}
 
 // WithSandboxOverride applies a server-authoritative sandbox to one submitted
@@ -145,6 +153,7 @@ func SandboxOverride(ctx context.Context) (string, bool) {
 // message. RequestID is the original request that owns the turn; clients use it
 // to keep subsequent streaming events attached to the same lifecycle.
 type SteerResult struct {
+	StrictACK bool // server adapter only; not client supplied or a primary-owner rebind
 	TurnID    string
 	RequestID string
 }

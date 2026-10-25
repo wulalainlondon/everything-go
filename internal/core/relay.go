@@ -7,11 +7,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"everything-go/internal/automation"
 	"io"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -73,6 +75,18 @@ func (h *Hub) ServeRelayAPI(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(path, "/")
 	w.Header().Set("Content-Type", "application/json")
 	switch {
+	case r.Method == http.MethodGet && len(parts) == 2 && parts[0] == "session-target":
+		target, ok := h.registry.Get(parts[1])
+		if !ok || h.dispatches == nil {
+			http.Error(w, "target unavailable", 409)
+			return
+		}
+		grant, err := h.dispatches.Grant(r.Context(), "peer:"+origin)
+		if err != nil || !grant.Allows(h.cfg.InstanceID, h.cfg.InstanceID, target.ID) || !h.eventSessionAllowed(target) {
+			http.Error(w, "target not granted", 403)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"session_id": target.ID, "thread_id": target.ResumeID(), "config_revision": target.SettingsSnapshot().ConfigRevision, "owner_instance_id": h.cfg.InstanceID})
 	case r.Method == http.MethodPost && path == "jobs":
 		var job relay.Job
 		decoder := json.NewDecoder(bytes.NewReader(body))
@@ -80,6 +94,17 @@ func (h *Hub) ServeRelayAPI(w http.ResponseWriter, r *http.Request) {
 		if decoder.Decode(&job) != nil || decoder.Decode(&struct{}{}) != io.EOF || job.OriginInstanceID != origin || job.TargetInstanceID != h.cfg.InstanceID {
 			http.Error(w, "invalid relay job", http.StatusBadRequest)
 			return
+		}
+		if job.Metadata["session_assignment"] == "1" {
+			if h.dispatches == nil {
+				http.Error(w, "peer permission unavailable", 403)
+				return
+			}
+			g, err := h.dispatches.Grant(r.Context(), "peer:"+origin)
+			if err != nil || !g.Allows(h.cfg.InstanceID, h.cfg.InstanceID, job.TargetSessionID) {
+				http.Error(w, "peer target not granted", 403)
+				return
+			}
 		}
 		created, err := h.relay.AcceptInbound(r.Context(), job)
 		if err != nil {
@@ -272,6 +297,32 @@ func (h *Hub) drainRelayInbound(ctx context.Context) {
 	}
 	if snap := sess.Snapshot(); record.Job.ReviewOnly && snap.Sandbox != "read-only" && snap.Backend != backend.Codex {
 		h.deferRelayInbound(record, "target_session_not_read_only", time.Minute)
+		return
+	}
+	if record.Job.Metadata["session_assignment"] == "1" {
+		revision, err := strconv.ParseUint(record.Job.Metadata["target_config_revision"], 10, 64)
+		if err != nil || sess.ResumeID() != record.Job.Metadata["target_thread_id"] || sess.SettingsSnapshot().ConfigRevision != revision {
+			h.deferRelayInbound(record, "original_target_changed", time.Minute)
+			return
+		}
+		a := automation.EventAssignment{ID: record.Job.ID, EventIDs: record.Job.EventIDs, SessionID: sess.ID, OwnerInstanceID: h.cfg.InstanceID, ThreadID: sess.ResumeID(), ConfigRevision: revision, OwnerDevice: "relay:" + record.Job.OriginInstanceID, SourceInstanceID: record.Job.OriginInstanceID, Mode: "analyze", Content: relayReviewInstruction(record.Job)}
+		evidence, err := h.materializeRelaySessionEvidence(ctx, record)
+		if err != nil {
+			h.deferRelayInbound(record, "evidence_transfer_pending", time.Minute)
+			return
+		}
+		a.Content += evidence
+		saved, err := h.automation.SaveEventAssignment(ctx, a)
+		if err != nil {
+			h.deferRelayInbound(record, "assignment_conflict", time.Minute)
+			return
+		}
+		if err = h.enqueueEventAssignment(ctx, saved); err != nil {
+			h.deferRelayInbound(record, "target_unavailable", time.Minute)
+			return
+		}
+		_ = h.relay.Update(ctx, record.Job.ID, "inbound", "queued", "", saved.ID, saved.ID, "", 0)
+		h.broadcastAutomationSnapshot()
 		return
 	}
 	item, err := h.work.GetItem(ctx, record.Job.TargetWorkItemID)

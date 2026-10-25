@@ -1,10 +1,12 @@
 package goexec
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -15,8 +17,9 @@ import (
 type rpcPlumber struct {
 	name string
 
-	wmu sync.Mutex
-	w   io.Writer
+	wmu            sync.Mutex
+	w              io.Writer
+	transportEpoch atomic.Uint64
 
 	mu      sync.Mutex
 	nextID  int
@@ -50,6 +53,7 @@ func newRPCPlumber(name string) *rpcPlumber {
 func (p *rpcPlumber) setWriter(w io.Writer) {
 	p.wmu.Lock()
 	p.w = w
+	p.transportEpoch.Add(1)
 	p.wmu.Unlock()
 }
 
@@ -60,12 +64,21 @@ func (p *rpcPlumber) hasWriter() bool {
 }
 
 func (p *rpcPlumber) write(obj any) error {
+	return p.writeAtEpoch(obj, nil)
+}
+
+// The expected generation is checked under the same lock as the write. A
+// reconnected transport must not reuse a read admission from an older peer.
+func (p *rpcPlumber) writeAtEpoch(obj any, expected *uint64) error {
 	data, err := json.Marshal(obj)
 	if err != nil {
 		return err
 	}
 	p.wmu.Lock()
 	defer p.wmu.Unlock()
+	if expected != nil && p.transportEpoch.Load() != *expected {
+		return &codexAcceptanceError{Reason: "native_source_changed"}
+	}
 	if p.w == nil {
 		return fmt.Errorf("[%s] no writer", p.name)
 	}
@@ -76,31 +89,51 @@ func (p *rpcPlumber) write(obj any) error {
 // request sends a method call and blocks until the matching response arrives or
 // the timeout elapses.
 func (p *rpcPlumber) request(method string, params any, timeout time.Duration) (json.RawMessage, error) {
+	return p.requestAtEpoch(method, params, timeout, nil)
+}
+
+func (p *rpcPlumber) requestAtEpoch(method string, params any, timeout time.Duration, expected *uint64) (json.RawMessage, error) {
+	return p.requestAtEpochContext(context.Background(), method, params, timeout, expected)
+}
+
+// Cancellation retires only this response correlation. It neither cancels the
+// server operation nor closes/replaces the shared writer. Writes retain the
+// original transport's locking and I/O bounds; ctx bounds the response wait.
+func (p *rpcPlumber) requestAtEpochContext(ctx context.Context, method string, params any, timeout time.Duration, expected *uint64) (json.RawMessage, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	p.mu.Lock()
 	id := p.nextID
 	p.nextID++
 	ch := make(chan rpcReply, 1)
 	p.pending[id] = ch
 	p.mu.Unlock()
+	defer func() {
+		p.mu.Lock()
+		delete(p.pending, id)
+		p.mu.Unlock()
+	}()
 
 	req := map[string]any{"id": id, "method": method}
 	if params != nil {
 		req["params"] = params
 	}
-	if err := p.write(req); err != nil {
-		p.mu.Lock()
-		delete(p.pending, id)
-		p.mu.Unlock()
+	if err := p.writeAtEpoch(req, expected); err != nil {
 		return nil, err
 	}
 
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 	select {
 	case reply := <-ch:
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		return reply.result, reply.err
-	case <-time.After(timeout):
-		p.mu.Lock()
-		delete(p.pending, id)
-		p.mu.Unlock()
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-timer.C:
 		return nil, &rpcTimeoutError{Name: p.name, Method: method, Timeout: timeout}
 	}
 }
@@ -144,6 +177,7 @@ func (p *rpcPlumber) dispatchResponse(raw json.RawMessage) bool {
 }
 
 func (p *rpcPlumber) failAll(err error) {
+	p.transportEpoch.Add(1)
 	p.mu.Lock()
 	for id, ch := range p.pending {
 		ch <- rpcReply{err: err}

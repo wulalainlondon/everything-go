@@ -179,48 +179,11 @@ func (s *Store) Insert(ctx context.Context, in Input) (Event, bool, error) {
 }
 
 func (s *Store) InsertWithAttachments(ctx context.Context, in Input, attachments []AttachmentInput) (Event, bool, error) {
-	in.Source = strings.TrimSpace(in.Source)
-	in.EventKey = strings.TrimSpace(in.EventKey)
-	in.Kind = strings.TrimSpace(in.Kind)
-	in.Severity = strings.ToLower(strings.TrimSpace(in.Severity))
-	in.Title = strings.TrimSpace(in.Title)
-	in.URL = strings.TrimSpace(in.URL)
-	if in.Severity == "" {
-		in.Severity = "info"
-	}
-	if in.Source == "" || len(in.Source) > 64 || in.EventKey == "" || len(in.EventKey) > 128 || in.Kind == "" || len(in.Kind) > 64 {
-		return Event{}, false, errors.New("source, event key, and kind are required and exceed their size limit")
-	}
-	if in.Title == "" || len(in.Title) > 240 || len(in.Body) > 32*1024 || len(in.URL) > 2048 {
-		return Event{}, false, errors.New("event title, body, or URL exceeds its size limit")
-	}
-	if in.URL != "" {
-		parsed, err := url.Parse(in.URL)
-		if err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" {
-			return Event{}, false, errors.New("event URL must be an absolute HTTP or HTTPS URL")
-		}
-	}
-	switch in.Severity {
-	case "info", "success", "warning", "error", "critical":
-	default:
-		return Event{}, false, errors.New("invalid event severity")
-	}
 	now := s.now().UnixMilli()
-	if in.OccurredAt == 0 {
-		in.OccurredAt = now
-	}
-	if in.ExpiresAt == 0 {
-		in.ExpiresAt = now + defaultTTL.Milliseconds()
-	}
-	if in.ExpiresAt <= now {
-		return Event{}, false, errors.New("event is already expired")
-	}
-	if len(in.Data) == 0 {
-		in.Data = json.RawMessage(`{}`)
-	}
-	var metadata map[string]json.RawMessage
-	if len(in.Data) > maxDataBytes || json.Unmarshal(in.Data, &metadata) != nil || metadata == nil {
-		return Event{}, false, errors.New("event data must be a JSON object up to 16 KB")
+	var err error
+	in, err = normalizeInput(in, now)
+	if err != nil {
+		return Event{}, false, err
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -228,7 +191,7 @@ func (s *Store) InsertWithAttachments(ctx context.Context, in Input, attachments
 		return Event{}, false, err
 	}
 	defer tx.Rollback()
-	if err := gcTx(tx, now); err != nil {
+	if err := gcTx(tx, now, in.Source); err != nil {
 		return Event{}, false, err
 	}
 	id := "evt_" + randomHex(16)
@@ -289,17 +252,47 @@ func stableAttachmentID(eventID, externalID string, ordinal int) string {
 }
 
 func (s *Store) Snapshot(ctx context.Context, deviceID string, limit int) (Snapshot, error) {
+	return s.snapshot(ctx, deviceID, limit, false)
+}
+func (s *Store) SnapshotIncludingArchived(ctx context.Context, deviceID string, limit int) (Snapshot, error) {
+	return s.snapshot(ctx, deviceID, limit, true)
+}
+func (s *Store) snapshot(ctx context.Context, deviceID string, limit int, archived bool) (Snapshot, error) {
+	return s.snapshotForSources(ctx, deviceID, limit, "", nil, archived)
+}
+func (s *Store) SnapshotForSources(ctx context.Context, deviceID string, limit int, reservedPrefix string, allowed []string) (Snapshot, error) {
+	return s.snapshotForSources(ctx, deviceID, limit, reservedPrefix, allowed, false)
+}
+func (s *Store) SnapshotForSourcesIncludingArchived(ctx context.Context, deviceID string, limit int, reservedPrefix string, allowed []string) (Snapshot, error) {
+	return s.snapshotForSources(ctx, deviceID, limit, reservedPrefix, allowed, true)
+}
+func (s *Store) snapshotForSources(ctx context.Context, deviceID string, limit int, reservedPrefix string, allowed []string, archived bool) (Snapshot, error) {
+
 	if limit <= 0 || limit > defaultListSize {
 		limit = defaultListSize
 	}
 	now := s.now().UnixMilli()
+	filter := ""
+	arguments := []any{deviceID, now, archived}
+	if reservedPrefix != "" {
+		filter = " AND (substr(e.source,1,?)<>?"
+		arguments = append(arguments, len(reservedPrefix), reservedPrefix)
+		if len(allowed) > 0 {
+			filter += " OR e.source IN (" + strings.TrimSuffix(strings.Repeat("?,", len(allowed)), ",") + ")"
+			for _, source := range allowed {
+				arguments = append(arguments, source)
+			}
+		}
+		filter += ")"
+	}
+	arguments = append(arguments, limit)
 	rows, err := s.db.QueryContext(ctx, `SELECT e.id,e.sequence,e.authority_instance_id,e.source,e.event_key,e.kind,e.severity,
     e.title,e.body,e.url,e.data_json,e.occurred_at,e.received_at,e.expires_at,
     COALESCE(d.read,0),COALESCE(d.dismissed,0)
     FROM external_events e
     LEFT JOIN external_event_device_state d ON d.event_id=e.id AND d.device_id=?
-    WHERE e.expires_at>? AND COALESCE(d.dismissed,0)=0
-    ORDER BY e.sequence DESC LIMIT ?`, deviceID, now, limit)
+    WHERE e.expires_at>? AND (? OR COALESCE(d.dismissed,0)=0)
+    `+filter+` ORDER BY e.sequence DESC LIMIT ?`, arguments...)
 	if err != nil {
 		return Snapshot{}, err
 	}
@@ -521,13 +514,13 @@ func scanEvent(row *sql.Row) (Event, error) {
 	return event, nil
 }
 
-func gcTx(tx *sql.Tx, now int64) error {
+func gcTx(tx *sql.Tx, now int64, source string) error {
 	if _, err := tx.Exec("DELETE FROM external_events WHERE expires_at<=?", now); err != nil {
 		return err
 	}
 	_, err := tx.Exec(`DELETE FROM external_events WHERE sequence IN (
-    SELECT sequence FROM external_events ORDER BY sequence DESC LIMIT -1 OFFSET ?
-  )`, maxEvents)
+    SELECT sequence FROM external_events WHERE source=? ORDER BY sequence DESC LIMIT -1 OFFSET ?
+  )`, source, maxEvents)
 	return err
 }
 
@@ -544,4 +537,51 @@ func boolInt(value bool) int {
 		return 1
 	}
 	return 0
+}
+
+func normalizeInput(in Input, now int64) (Input, error) {
+	in.Source = strings.TrimSpace(in.Source)
+	in.EventKey = strings.TrimSpace(in.EventKey)
+	in.Kind = strings.TrimSpace(in.Kind)
+	in.Severity = strings.ToLower(strings.TrimSpace(in.Severity))
+	in.Title = strings.TrimSpace(in.Title)
+	in.URL = strings.TrimSpace(in.URL)
+	if in.Severity == "" {
+		in.Severity = "info"
+	}
+	if in.Source == "" || len(in.Source) > 64 || in.EventKey == "" || len(in.EventKey) > 128 || in.Kind == "" || len(in.Kind) > 64 {
+		return in, errors.New("source, event key, and kind are required and exceed their size limit")
+	}
+	if in.Title == "" || len(in.Title) > 240 || len(in.Body) > 32*1024 || len(in.URL) > 2048 {
+		return in, errors.New("event title, body, or URL exceeds its size limit")
+	}
+	if in.URL != "" {
+		parsed, err := url.Parse(in.URL)
+		if err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" {
+			return in, errors.New("event URL must be an absolute HTTP or HTTPS URL")
+		}
+	}
+	switch in.Severity {
+	case "info", "success", "warning", "error", "critical":
+	default:
+		return in, errors.New("invalid event severity")
+	}
+	if in.OccurredAt == 0 {
+		in.OccurredAt = now
+	}
+	if in.ExpiresAt == 0 {
+		in.ExpiresAt = now + defaultTTL.Milliseconds()
+	}
+	if in.ExpiresAt <= now {
+		return in, errors.New("event is already expired")
+	}
+	if len(in.Data) == 0 {
+		in.Data = json.RawMessage(`{}`)
+	}
+	var metadata map[string]json.RawMessage
+	if len(in.Data) > maxDataBytes || json.Unmarshal(in.Data, &metadata) != nil || metadata == nil {
+		return in, errors.New("event data must be a JSON object up to 16 KB")
+	}
+
+	return in, nil
 }

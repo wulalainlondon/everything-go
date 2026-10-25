@@ -142,6 +142,9 @@ func (h *Hub) pmToken(id string) string {
 	return hex.EncodeToString(mac.Sum(nil))
 }
 func (h *Hub) PMConfiguration(id string) (*backend.PMConfiguration, error) {
+	if h.workspaceReservedSession(id) {
+		return h.workspaceRuntimePolicy(id)
+	}
 	if h.work == nil {
 		if strings.HasPrefix(id, "pm_") {
 			return nil, errors.New("pm_unavailable")
@@ -281,6 +284,12 @@ func (h *Hub) provisionPMProject(p coordination.Project) error {
 // AdmitTurn is called by the mux for ALL dispatch paths, including Work,
 // automation, relay, notifications and recovered user message queues.
 func (h *Hub) AdmitTurn(s *session.Session, requestID, content string) (string, func(), error) {
+	if h.workspaceReservedSession(s.ID) {
+		if _, _, err := h.validateWorkspaceNativeRequest(context.Background(), s.ID, requestID); err != nil {
+			return "", nil, err
+		}
+		return content, func() {}, nil
+	}
 	h.pmMu.Lock()
 	release := func() { h.pmMu.Unlock() }
 	if h.work == nil {

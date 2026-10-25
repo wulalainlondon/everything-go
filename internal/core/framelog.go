@@ -35,6 +35,10 @@ func logOutbound(event any) {
 	if !frameLog {
 		return
 	}
+	if _, private := event.(interface{ PrivatePayload() }); private {
+		log.Printf(">> private frame [private payload redacted]")
+		return
+	}
 	if voice, ok := event.(protocol.RealtimeVoiceEvent); ok {
 		log.Printf(">> codex_voice_event session=%s state=%s signaling=[redacted]", voice.SessionID, voice.State)
 		return
@@ -42,6 +46,10 @@ func logOutbound(event any) {
 	data, err := json.Marshal(event)
 	if err != nil {
 		log.Printf(">> <unmarshalable %T>", event)
+		return
+	}
+	if workspaceFrameHasReservedSession(data) {
+		log.Printf(">> workspace native frame [private payload redacted]")
 		return
 	}
 	if len(data) > frameLogMax {

@@ -7,12 +7,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"everything-go/internal/backend"
 	"everything-go/internal/executor"
 	"everything-go/internal/governance"
+	"everything-go/internal/history"
 	"everything-go/internal/protocol"
 	"everything-go/internal/session"
 )
@@ -21,12 +23,41 @@ import (
 // injectable onSend so a test decides what a "turn" emits (a full turn with
 // done, or a long-running turn that emits nothing until stopped).
 type fakeExec struct {
+	nativeProofs  *correlationHistoryFixture
+	nativeProofMu sync.Mutex
 	sink          executor.Sink
 	onSend        func(s *session.Session, reqID, content string)
 	onSendContext func(ctx context.Context, s *session.Session, reqID, content string)
 	onSteer       func(s *session.Session, reqID, content string) (backend.SteerResult, error)
 	onStop        func(s *session.Session) error
 }
+
+func (f *fakeExec) ProviderFor(*session.Session) (backend.HistoryProvider, bool) {
+	f.nativeProofMu.Lock()
+	defer f.nativeProofMu.Unlock()
+	if f.nativeProofs == nil {
+		return nil, false
+	}
+	return f.nativeProofs, true
+}
+func (f *fakeExec) AllProviders() []backend.HistoryProvider {
+	f.nativeProofMu.Lock()
+	defer f.nativeProofMu.Unlock()
+	if f.nativeProofs == nil {
+		return nil
+	}
+	return []backend.HistoryProvider{f.nativeProofs}
+}
+func (f *fakeExec) seedNativeFixture(p backend.NativeTaskAccepted) {
+	f.nativeProofMu.Lock()
+	defer f.nativeProofMu.Unlock()
+	if f.nativeProofs == nil {
+		f.nativeProofs = &correlationHistoryFixture{Owners: map[string]string{}}
+	}
+	f.nativeProofs.seedNativeFixture(p)
+}
+
+var _ history.Provider = (*correlationHistoryFixture)(nil)
 
 func (f *fakeExec) Send(ctx context.Context, s *session.Session, reqID, content string, _ []backend.ImageAttachment, _ []backend.FileAttachment) error {
 	if f.onSendContext != nil {
@@ -225,7 +256,7 @@ func TestSteerMessageBypassesTurnQueueAndAcknowledgesAcceptedTurn(t *testing.T) 
 			t.Fatalf("unexpected steer args session=%s req=%s content=%q", s.ID, reqID, content)
 		}
 		called <- struct{}{}
-		return backend.SteerResult{TurnID: "turn-1", RequestID: "r-active"}, nil
+		return backend.SteerResult{StrictACK: true, TurnID: "turn-1", RequestID: "r-active"}, nil
 	}
 
 	route(h, c, `{"type":"steer_message","session_id":"s1","request_id":"r-steer","content":"change direction"}`)

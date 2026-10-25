@@ -66,10 +66,11 @@ func captureTaskWorkspace(authority, parent, cwd string, roots []string) ([]stri
 		// directory. Later read_input must match its opened-root identity again.
 		return filepath.Clean(path), identity, nil
 	}
-	cwdName, _, err := capture(cwd)
+	cwdName, cwdIdentity, err := capture(cwd)
 	if err != nil {
 		return nil, nil, "", err
 	}
+	identities[cwdName] = cwdIdentity
 	for _, root := range roots {
 		name, identity, err := capture(root)
 		if err != nil {

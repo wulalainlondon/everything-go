@@ -16,20 +16,27 @@ import (
 )
 
 type Record struct {
-	ID, ParentSessionID, ChildSessionID, ChildRequestID   string
-	OriginRequestID, ToolCallID, IntentHash               string
-	ChildName, Cwd, Instruction, Model, Effort, Sandbox   string
-	ParentRequestID, State, TerminalStatus, Result, Error string
-	DeliveryState, DeliveryError                          string
-	Artifacts                                             []string
-	CreatedAt, UpdatedAt                                  int64
+	RoundVersion                                                            uint64
+	AcceptedBackend                                                         string
+	LogicalID, PreviousID, Authority, GrantDigest, Mode, ExecutionRequestID string
+	ExpectedThread                                                          string
+	ExpectedRevision                                                        uint64
+	WorkspaceIdentity                                                       string
+	SourceThread                                                            string
+	SourceRevision                                                          uint64
+	ID, ParentSessionID, ChildSessionID, ChildRequestID                     string
+	OriginRequestID, ToolCallID, IntentHash                                 string
+	ChildName, Cwd, Instruction, Model, Effort, Sandbox                     string
+	ParentRequestID, State, TerminalStatus, Result, Error                   string
+	DeliveryState, DeliveryError                                            string
+	Artifacts                                                               []string
+	CreatedAt, UpdatedAt                                                    int64
 }
 
 type Store struct{ db *sql.DB }
 
-var ErrParentLimit = errors.New("delegation_parent_active_limit")
-
 const ddl = `
+CREATE TABLE IF NOT EXISTS native_delegation_commitments(id TEXT PRIMARY KEY, committed_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS task_api_child_profiles(session_id TEXT PRIMARY KEY,profile BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS session_delegations (
   id TEXT PRIMARY KEY,
@@ -68,12 +75,16 @@ func Open(dataDir string) (*Store, error) {
 		return nil, errors.New("delegation data directory is required")
 	}
 	db, err := sql.Open("sqlite", "file:"+filepath.Join(dataDir, "everything_go_delegations.db")+
-		"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)")
+		"?_txlock=immediate&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(FULL)")
 	if err != nil {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	if _, err = db.Exec(ddl); err != nil {
+	if _, err = db.Exec(ddl + capacityDDL + handoffDDL + continuityDDL + continuityCommandDDL + reauthorizationDDL); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err := installContinuityEffectBinding(db); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -98,33 +109,18 @@ func (s *Store) Create(ctx context.Context, r Record) error {
 	return err
 }
 
-// CreateBounded checks the parent budget and inserts under one SQLite writer
-// transaction. Concurrent tool calls cannot each observe the same free slot.
-func (s *Store) CreateBounded(ctx context.Context, r Record, maxActive int) error {
-	if r.ID == "" || r.ParentSessionID == "" || r.ChildSessionID == "" || r.ChildRequestID == "" || r.ParentRequestID == "" || maxActive < 1 {
-		return errors.New("incomplete delegation identity")
+// CreateBounded atomically accepts execution or bounded durable waiting work.
+func (s *Store) CreateBounded(ctx context.Context, r Record) error {
+	return s.TaskJournal().Transaction(ctx, func(tx *sql.Tx) error { _, err := insertBounded(ctx, tx, r); return err })
+}
+
+func (s *Store) NativeCommitment(ctx context.Context, id string) (bool, error) {
+	var exists int
+	err := s.db.QueryRowContext(ctx, "SELECT 1 FROM native_delegation_commitments WHERE id=?", id).Scan(&exists)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	var count int
-	if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM session_delegations WHERE parent_session_id=?
-	  AND (state!='terminal' OR delivery_state IN ('pending','queued'))`, r.ParentSessionID).Scan(&count); err != nil {
-		return err
-	}
-	if count >= maxActive {
-		return ErrParentLimit
-	}
-	now := time.Now().UnixMilli()
-	if _, err = tx.ExecContext(ctx, `INSERT INTO session_delegations
-	  (id,parent_session_id,origin_request_id,tool_call_id,intent_hash,child_session_id,child_request_id,child_name,cwd,instruction,model,effort,sandbox,parent_request_id,state,created_at,updated_at)
-	  VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'provisioning',?,?)`, r.ID, r.ParentSessionID, r.OriginRequestID, r.ToolCallID, r.IntentHash,
-		r.ChildSessionID, r.ChildRequestID, r.ChildName, r.Cwd, r.Instruction, r.Model, r.Effort, r.Sandbox, r.ParentRequestID, now, now); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return err == nil, err
 }
 
 func (s *Store) MarkRunning(ctx context.Context, id string) error {
@@ -134,7 +130,7 @@ func (s *Store) MarkRunning(ctx context.Context, id string) error {
 
 func (s *Store) MarkProvisionFailed(ctx context.Context, id, reason string) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE session_delegations SET state='terminal',terminal_status='failed',error=?,updated_at=?
-	  WHERE id=? AND state='provisioning'`, reason, time.Now().UnixMilli(), id)
+	  WHERE id=? AND state IN ('queued','provisioning')`, reason, time.Now().UnixMilli(), id)
 	return err
 }
 
@@ -147,7 +143,7 @@ func (s *Store) Complete(ctx context.Context, childSessionID, childRequestID, st
 		return false, err
 	}
 	res, err := s.db.ExecContext(ctx, `UPDATE session_delegations SET state='terminal',terminal_status=?,result=?,artifacts_json=?,error=?,updated_at=?
-	  WHERE child_session_id=? AND child_request_id=? AND state IN ('provisioning','running')`,
+	  WHERE child_session_id=? AND child_request_id=? AND state IN ('provisioning','running','collecting')`,
 		status, result, string(encoded), reason, time.Now().UnixMilli(), childSessionID, childRequestID)
 	if err != nil {
 		return false, err
@@ -175,7 +171,7 @@ func (s *Store) MarkDelivered(ctx context.Context, parentSessionID, parentReques
 
 func (s *Store) MarkDeliveryFailed(ctx context.Context, parentSessionID, parentRequestID, reason string) (bool, error) {
 	res, err := s.db.ExecContext(ctx, `UPDATE session_delegations SET delivery_state='failed',delivery_error=?,updated_at=?
-	  WHERE parent_session_id=? AND parent_request_id=? AND delivery_state='queued'`,
+	  WHERE parent_session_id=? AND parent_request_id=? AND state='terminal' AND delivery_state IN ('pending','queued')`,
 		reason, time.Now().UnixMilli(), parentSessionID, parentRequestID)
 	if err != nil {
 		return false, err
@@ -270,7 +266,7 @@ func (s *Store) ListByParent(ctx context.Context, sessionID string) ([]Record, e
 func (s *Store) ActiveCountForParent(ctx context.Context, sessionID string) (int, error) {
 	var count int
 	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM session_delegations WHERE parent_session_id=?
-	  AND (state!='terminal' OR delivery_state IN ('pending','queued'))`, sessionID).Scan(&count)
+	  AND state IN ('provisioning','running')`, sessionID).Scan(&count)
 	return count, err
 }
 

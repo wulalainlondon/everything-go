@@ -221,6 +221,7 @@
         "steer_result",
         "stopped",
         "task_api_response",
+        "task_callback",
         "task_killed",
         "tasks_list",
         "text_chunk",
@@ -234,6 +235,8 @@
         "unclaim_ack",
         "usage_report",
         "user_input_request",
+        "voice_prepared",
+        "voice_transfer",
         "webrtc_answer",
         "webrtc_ice",
         "webrtc_ready",
@@ -264,6 +267,7 @@
         "codex_goal_clear",
         "codex_goal_get",
         "codex_goal_set",
+        "codex_voice_media_state",
         "codex_voice_start",
         "codex_voice_stop",
         "codex_voice_text",
@@ -343,9 +347,12 @@
         "stop",
         "switch_session_config",
         "task_api_request",
+        "task_callback_request",
         "tunnel_url_ack",
         "unclaim_bridge",
         "user_input_response",
+        "voice_call_prepare",
+        "voice_transfer_control",
         "webrtc_answer",
         "webrtc_ice",
         "webrtc_offer",
@@ -390,13 +397,6 @@
         "failed",
         "interrupted",
         "closed"
-      ]
-    },
-    "sourceRelationCoverage": {
-      "const": [
-        "trusted_relations_only",
-        "unavailable",
-        "not_requested"
       ]
     }
   },

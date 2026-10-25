@@ -24,30 +24,34 @@ func TestTaskAPIProviderUnloadedUnsupported(t *testing.T) {
 	}
 }
 func TestTaskAPICodexBoundFixtureAndSpoof(t *testing.T) {
-	inv := taskapi.Invocation{Provider: "codex", ThreadID: "thread", TurnID: "turn", CallID: "call"}
-	binding := taskapi.VerifiedContext{Authority: "authority", StableScopeID: "scope", InvocationGeneration: "owned", SourceSessionID: "source", SourceRequestID: "request", BindingKind: "native_tool"}
-	a := &fixtureTaskAuthority{backend.TaskInvocationState{ProviderVersion: "0.160.0", Namespace: "bridge_tasks", SchemaHash: taskcontract.Hash(), Registered: true, Loaded: true, ActiveLease: true, Invocation: inv, Context: binding}}
-	v := CodexTaskAPIVerifier{a}
-	if _, err := taskapi.BindCaller(context.Background(), v, inv); err != nil {
-		t.Fatal(err)
-	}
-	bad := inv
-	bad.TurnID = "forged"
-	if _, err := v.Verify(context.Background(), bad); err == nil {
-		t.Fatal("spoof turn")
-	}
-	a.state.Loaded = false
-	if _, err := v.Verify(context.Background(), inv); err == nil {
-		t.Fatal("namespace alone accepted")
-	}
-	a.state.Loaded = true
-	a.state.ActiveLease = false
-	if _, err := v.Verify(context.Background(), inv); err == nil {
-		t.Fatal("expired lease")
+	for _, version := range []string{"0.160.0", "0.162.1"} {
+		t.Run(version, func(t *testing.T) {
+			inv := taskapi.Invocation{Provider: "codex", ThreadID: "thread", TurnID: "turn", CallID: "call"}
+			binding := taskapi.VerifiedContext{Authority: "authority", StableScopeID: "scope", InvocationGeneration: "owned", SourceSessionID: "source", SourceRequestID: "request", BindingKind: "native_tool"}
+			a := &fixtureTaskAuthority{backend.TaskInvocationState{ProviderVersion: version, Namespace: "bridge_tasks", SchemaHash: taskcontract.Hash(), Registered: true, Loaded: true, ActiveLease: true, Invocation: inv, Context: binding}}
+			v := CodexTaskAPIVerifier{a}
+			if _, err := taskapi.BindCaller(context.Background(), v, inv); err != nil {
+				t.Fatal(err)
+			}
+			bad := inv
+			bad.TurnID = "forged"
+			if _, err := v.Verify(context.Background(), bad); err == nil {
+				t.Fatal("spoof turn")
+			}
+			a.state.Loaded = false
+			if _, err := v.Verify(context.Background(), inv); err == nil {
+				t.Fatal("namespace alone accepted")
+			}
+			a.state.Loaded = true
+			a.state.ActiveLease = false
+			if _, err := v.Verify(context.Background(), inv); err == nil {
+				t.Fatal("expired lease")
+			}
+		})
 	}
 }
 func TestTaskAPIClaudeBoundProcessTagsAndSpoof(t *testing.T) {
-	for _, version := range []string{"2.1.280", "2.1.291"} {
+	for _, version := range []string{"2.1.280", "2.1.291", "2.1.296"} {
 		inv := taskapi.Invocation{Provider: "claude", CallID: "server-mcp-call", ProcessGeneration: "process1"}
 		binding := taskapi.VerifiedContext{Authority: "authority", StableScopeID: "scope", InvocationGeneration: "process1", SourceSessionID: "source", SourceRequestID: "request", BindingKind: "mcp_process_binding"}
 		a := &fixtureTaskAuthority{backend.TaskInvocationState{ProviderVersion: version, Namespace: "bridge_tasks", SchemaHash: taskcontract.Hash(), Registered: true, Loaded: true, ActiveLease: true, Invocation: inv, Context: binding}}

@@ -36,8 +36,9 @@ var ErrConflict = errors.New("request ID already belongs to different message co
 var ErrRejected = errors.New("message request was permanently rejected")
 
 type APIAdmission struct {
-	Command taskapi.AuthorizedCommand
-	Record  taskapi.IntentRecord
+	Command   taskapi.AuthorizedCommand
+	Record    taskapi.IntentRecord
+	CanCommit func() bool
 }
 
 type Entry struct {
@@ -94,6 +95,7 @@ func Open(dataDir string) (*Store, error) {
  CREATE TABLE IF NOT EXISTS task_provider_conflicts(session_id TEXT NOT NULL,request_id TEXT NOT NULL,PRIMARY KEY(session_id,request_id));
  CREATE TABLE IF NOT EXISTS task_native_conflicts (session_id TEXT NOT NULL,request_id TEXT NOT NULL,thread_id TEXT NOT NULL DEFAULT '',turn_id TEXT NOT NULL DEFAULT '',PRIMARY KEY(session_id,request_id));
  CREATE TABLE IF NOT EXISTS task_native_acceptance (session_id TEXT NOT NULL, request_id TEXT NOT NULL, thread_id TEXT NOT NULL, turn_id TEXT NOT NULL, PRIMARY KEY(session_id,request_id));
+ CREATE TABLE IF NOT EXISTS task_native_steer_proofs (session_id TEXT NOT NULL, request_id TEXT NOT NULL, payload_hash TEXT NOT NULL, active_request_id TEXT NOT NULL, turn_id TEXT NOT NULL, strict_ack_version INTEGER NOT NULL, PRIMARY KEY(session_id,request_id));
  CREATE TABLE IF NOT EXISTS queue_rejections (session_id TEXT NOT NULL, request_id TEXT NOT NULL, reason TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(session_id,request_id));`); err != nil {
 		db.Close()
 		return nil, err
@@ -173,6 +175,9 @@ func (s *Store) Enqueue(e Entry) (Entry, bool, error) {
 		return Entry{}, false, err
 	}
 	defer tx.Rollback()
+	if e.API != nil && e.API.CanCommit != nil && !e.API.CanCommit() {
+		return Entry{}, false, taskapi.Failure("permission", "known_none", "refresh_identity")
+	}
 	if e.API != nil {
 		original, created, err := s.TaskJournal().ClaimTx(tx, e.API.Command, e.API.Record)
 		if err != nil {
@@ -195,6 +200,9 @@ func (s *Store) Enqueue(e Entry) (Entry, bool, error) {
 	if previous, found, err := lookup(tx, e.SessionID, e.RequestID); err != nil {
 		return Entry{}, false, err
 	} else if found {
+		if e.API != nil && e.API.Command.Request.Operation == "intake" {
+			return previous, false, ErrConflict // never backfill/rebind a preexisting ordinary or other-device request
+		}
 		if previous.PayloadHash != hashText {
 			return previous, false, ErrConflict
 		}
@@ -224,6 +232,9 @@ func (s *Store) Enqueue(e Entry) (Entry, bool, error) {
 	inserted, _, err := lookup(tx, e.SessionID, e.RequestID)
 	if err != nil {
 		return Entry{}, false, err
+	}
+	if e.API != nil && e.API.CanCommit != nil && !e.API.CanCommit() {
+		return Entry{}, false, taskapi.Failure("permission", "known_none", "refresh_identity")
 	}
 	if err = tx.Commit(); err != nil {
 		return Entry{}, false, err
@@ -255,7 +266,7 @@ func (s *Store) Reject(sessionID, requestID, reason string) error {
 	return tx.Commit()
 }
 
-func (s *Store) Transition(sessionID, requestID string, from []State, to State, message, activeRequestID, turnID string) (Entry, bool, error) {
+func (s *Store) Transition(sessionID, requestID string, from []State, to State, message, activeRequestID, turnID string, strictSteerACK ...bool) (Entry, bool, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return Entry{}, false, err
@@ -277,6 +288,14 @@ func (s *Store) Transition(sessionID, requestID string, from []State, to State, 
 	}
 	if to == Cancelled {
 		if _, err = tx.Exec("INSERT OR IGNORE INTO task_cancel_origins VALUES(?,?,?)", sessionID, requestID, e.State); err != nil {
+			return Entry{}, false, err
+		}
+	}
+	if to == Steered && len(strictSteerACK) == 1 && strictSteerACK[0] {
+		if activeRequestID == "" || activeRequestID == requestID || turnID == "" {
+			return Entry{}, false, errors.New("invalid strict steer tuple")
+		}
+		if _, err = tx.Exec(`INSERT INTO task_native_steer_proofs VALUES(?,?,?,?,?,1)`, sessionID, requestID, e.PayloadHash, activeRequestID, turnID); err != nil {
 			return Entry{}, false, err
 		}
 	}
@@ -302,6 +321,14 @@ func (s *Store) Transition(sessionID, requestID string, from []State, to State, 
 		return Entry{}, false, err
 	}
 	return e, true, nil
+}
+
+// HasUnsettled guards catalog retirement without materializing historical
+// payloads or treating an uncertain original request as completed.
+func (s *Store) HasUnsettled(sessionID string) (bool, error) {
+	var pending bool
+	err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM queue_commands WHERE session_id=? AND state IN ('queued','running','steering','uncertain'))`, sessionID).Scan(&pending)
+	return pending, err
 }
 
 func (s *Store) Snapshot(sessionID string) (Snapshot, error) {

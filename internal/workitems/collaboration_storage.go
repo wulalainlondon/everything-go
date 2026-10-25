@@ -258,6 +258,9 @@ func (s *Store) writeCollaborationRecords(ctx context.Context, tx *sql.Tx, previ
 }
 
 func (s *Service) IsCollaborationItem(ctx context.Context, itemID string) (bool, error) {
+	if roomProjectionItem(itemID) {
+		return true, nil
+	}
 	var exists bool
 	err := s.store.db.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM work_collaboration_records WHERE kind='task' AND work_item_id=?)", itemID).Scan(&exists)
 	return exists, err
@@ -270,6 +273,9 @@ func (s *Service) WorkRevision(ctx context.Context) (uint64, error) {
 }
 
 func collaborationItemTx(ctx context.Context, tx *sql.Tx, itemID string) (bool, error) {
+	if roomProjectionItem(itemID) {
+		return true, nil
+	}
 	var exists bool
 	err := tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM work_collaboration_records WHERE kind='task' AND work_item_id=?)", itemID).Scan(&exists)
 	return exists, err

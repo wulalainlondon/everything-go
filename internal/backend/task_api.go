@@ -2,6 +2,7 @@ package backend
 
 import (
 	"context"
+	"encoding/json"
 	"everything-go/internal/session"
 	"everything-go/internal/taskapi"
 )
@@ -51,4 +52,20 @@ type ExistingTaskScopeEnforcer interface {
 }
 type TaskCapabilitySource interface {
 	TaskAPICapabilities() []taskapi.ProviderCapability
+}
+
+// Original response owner only, optional default-off read evidence sink.
+type NativeTaskResponseCapture interface {
+	CaptureTaskResponse(context.Context, TaskCaller, json.RawMessage, taskapi.Response) error
+}
+
+// TaskQuestionObserver receives provider-observed, source-bound questions.
+// It is an internal port, never a client-supplied authority envelope.
+type TaskQuestionEvidence struct {
+	Session                             *session.Session
+	RequestID, ThreadID, TurnID, CallID string
+	Payload                             UserInputPayload
+}
+type TaskQuestionObserver interface {
+	ObserveTaskQuestion(context.Context, TaskQuestionEvidence)
 }

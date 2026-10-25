@@ -6,10 +6,12 @@ import (
 	"everything-go/internal/backend"
 	"everything-go/internal/coordination"
 	"everything-go/internal/eventinbox"
+	"everything-go/internal/partners"
 	"everything-go/internal/protocol"
 	"everything-go/internal/session"
 	"everything-go/internal/toolenv"
 	"everything-go/internal/workitems"
+	"everything-go/internal/workspace"
 )
 
 // AppV1 builds outbound frames for the mobile app's current JSON protocol.
@@ -21,6 +23,10 @@ func NewAppV1() AppV1 { return AppV1{} }
 
 // Command is the protocol-neutral shape the core router consumes.
 type Command struct {
+	Workspace *workspace.Command
+	// Internal admission hint; never populated by the wire adapter.
+	AutoVoicePhoto  bool
+	Partner         *partners.Request
 	PM              *coordination.Command
 	Collaboration   *coordination.CollaborationCommand
 	ToolEnvironment *toolenv.Request
@@ -44,23 +50,26 @@ type Command struct {
 	ReadEpoch       string
 	ReadToken       string
 
-	Name            string
-	Cwd             string
-	Backend         string
-	Model           string
-	ModelSet        bool
-	Sandbox         string
-	ResumeClaudeID  string
-	MessagePurpose  string
-	TaskRequestIDs  []string
-	TaskTarget      *protocol.TaskTarget
-	TaskOrigin      *protocol.TaskOrigin
-	Content         string
-	UploadRequestID string
-	UploadID        string
-	UploadKind      string
-	MediaType       string
-	SizeBytes       int64
+	Name                                          string
+	Cwd                                           string
+	Backend                                       string
+	Model                                         string
+	ModelSet                                      bool
+	Sandbox                                       string
+	ResumeClaudeID                                string
+	MessagePurpose                                string
+	TaskRequestIDs                                []string
+	TaskTarget                                    *protocol.TaskTarget
+	TaskOrigin                                    *protocol.TaskOrigin
+	VisualPresentation                            string
+	CallbackID, CallbackInvitation, CallbackClaim string
+	CallbackOnComplete                            *bool
+	Content                                       string
+	UploadRequestID                               string
+	UploadID                                      string
+	UploadKind                                    string
+	MediaType                                     string
+	SizeBytes                                     int64
 
 	Effort                 string
 	EffortSet              bool
@@ -75,11 +84,13 @@ type Command struct {
 	GoalStatus             string
 	TokenBudget            *int
 
-	Limit           int
-	KnownLast       string
-	Mode            string
-	Before          string
-	IncludeThinking bool
+	Limit             int
+	KnownLast         string
+	HistoryRequestID  string
+	HistoryContinuity bool
+	Mode              string
+	Before            string
+	IncludeThinking   bool
 
 	ShellID string
 	Data    string
@@ -105,12 +116,37 @@ type Command struct {
 	MsgUUID          string
 	Around           int
 
-	SDP           string
-	VoiceID       string
-	VoiceName     string
-	Candidate     string
-	SDPMid        string
-	SDPMLineIndex *int
+	SDP                       string
+	VoiceExternalMusicCapable bool
+	VoiceMusicProvider        string
+	ExternalMusic             *protocol.ExternalMusicState
+	VoiceMediaCapable         bool
+	VoiceContext              bool
+	VoiceSystemVolumeCapable  bool
+	SystemMediaAudio          *protocol.SystemMediaAudioState
+	VoiceAudioCapable         bool
+	VoiceAudio                *protocol.VoiceAudioState
+	VoiceMediaObserveCapable  bool
+	VoiceDeviceModel          string
+	MediaCommandID            string
+	MediaSequence             uint64
+	MediaState                string
+	MediaErrorCode            string
+	MediaVideoID              string
+	MediaAudio                *protocol.MediaAudioInfo
+	MediaVolume               *int
+	VoiceStartPermit          string
+	VoiceID                   string
+	VoiceName                 string
+	VoiceMode                 string
+	LineHandoffCapable        bool
+	LinePeerName              string
+	LineAccountRef            string
+	LineCallID                string
+	LineTargetRef             string
+	Candidate                 string
+	SDPMid                    string
+	SDPMLineIndex             *int
 
 	Answers   map[string]any
 	Cancelled *bool
@@ -178,6 +214,8 @@ type Command struct {
 
 func (AppV1) ParseCommand(in protocol.Inbound) Command {
 	return Command{
+		Workspace:       in.Workspace,
+		Partner:         in.Partner,
 		ToolEnvironment: in.ToolEnvironment,
 		PM:              in.PM,
 		Collaboration:   in.Collaboration,
@@ -200,18 +238,19 @@ func (AppV1) ParseCommand(in protocol.Inbound) Command {
 		ReadEpoch:       in.ReadEpoch,
 		ReadToken:       in.ReadToken,
 
-		Name:            in.Name,
-		Cwd:             in.Cwd,
-		Backend:         in.Backend,
-		Model:           in.Model,
-		ModelSet:        in.ModelSet,
-		Sandbox:         in.Sandbox,
-		ResumeClaudeID:  in.ResumeClaudeID,
-		MessagePurpose:  in.MessagePurpose,
-		TaskRequestIDs:  in.TaskRequestIDs,
-		TaskTarget:      in.TaskTarget,
-		TaskOrigin:      in.TaskOrigin,
-		Content:         in.Content,
+		Name:               in.Name,
+		Cwd:                in.Cwd,
+		Backend:            in.Backend,
+		Model:              in.Model,
+		ModelSet:           in.ModelSet,
+		Sandbox:            in.Sandbox,
+		ResumeClaudeID:     in.ResumeClaudeID,
+		MessagePurpose:     in.MessagePurpose,
+		TaskRequestIDs:     in.TaskRequestIDs,
+		TaskTarget:         in.TaskTarget,
+		TaskOrigin:         in.TaskOrigin,
+		Content:            in.Content,
+		VisualPresentation: in.VisualPresentation, CallbackOnComplete: in.CallbackOnComplete, CallbackID: in.CallbackID, CallbackInvitation: in.CallbackInvitation, CallbackClaim: in.CallbackClaim,
 		UploadRequestID: in.UploadRequestID,
 		UploadID:        in.UploadID,
 		UploadKind:      in.UploadKind,
@@ -236,11 +275,13 @@ func (AppV1) ParseCommand(in protocol.Inbound) Command {
 		GoalStatus:             in.Status,
 		TokenBudget:            in.TokenBudget,
 
-		Limit:           in.Limit,
-		KnownLast:       in.KnownLast,
-		Mode:            in.Mode,
-		Before:          in.Before,
-		IncludeThinking: in.IncludeThinking,
+		Limit:             in.Limit,
+		KnownLast:         in.KnownLast,
+		HistoryRequestID:  in.HistoryRequestID,
+		HistoryContinuity: in.HistoryContinuity,
+		Mode:              in.Mode,
+		Before:            in.Before,
+		IncludeThinking:   in.IncludeThinking,
 
 		ShellID: in.ShellID,
 		Data:    in.Data,
@@ -266,12 +307,20 @@ func (AppV1) ParseCommand(in protocol.Inbound) Command {
 		MsgUUID:          in.MsgUUID,
 		Around:           in.Around,
 
-		SDP:           in.SDP,
-		VoiceID:       in.VoiceID,
-		VoiceName:     in.VoiceName,
-		Candidate:     in.Candidate,
-		SDPMid:        in.SDPMid,
-		SDPMLineIndex: in.SDPMLineIndex,
+		SDP:                       in.SDP,
+		VoiceStartPermit:          in.VoiceStartPermit,
+		VoiceID:                   in.VoiceID,
+		VoiceExternalMusicCapable: in.VoiceExternalMusicCapable, VoiceMusicProvider: in.VoiceMusicProvider, ExternalMusic: in.ExternalMusic, VoiceMediaCapable: in.VoiceMediaCapable, VoiceMediaObserveCapable: in.VoiceMediaObserveCapable, VoiceContext: in.VoiceContext, VoiceSystemVolumeCapable: in.VoiceSystemVolumeCapable, SystemMediaAudio: in.SystemMediaAudio, VoiceAudioCapable: in.VoiceAudioCapable, VoiceAudio: in.VoiceAudio, VoiceDeviceModel: in.VoiceDeviceModel, MediaCommandID: in.MediaCommandID, MediaSequence: in.MediaSequence, MediaState: in.MediaState, MediaErrorCode: in.MediaErrorCode, MediaVideoID: in.MediaVideoID, MediaVolume: in.MediaVolume, MediaAudio: in.MediaAudio,
+		VoiceName:          in.VoiceName,
+		VoiceMode:          in.VoiceMode,
+		LineHandoffCapable: in.LineHandoffCapable,
+		LinePeerName:       in.LinePeerName,
+		LineAccountRef:     in.LineAccountRef,
+		LineCallID:         in.LineCallID,
+		LineTargetRef:      in.LineTargetRef,
+		Candidate:          in.Candidate,
+		SDPMid:             in.SDPMid,
+		SDPMLineIndex:      in.SDPMLineIndex,
 
 		Answers:   in.Answers,
 		Cancelled: in.Cancelled,

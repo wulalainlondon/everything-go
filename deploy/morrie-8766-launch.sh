@@ -1,6 +1,9 @@
 #!/bin/bash
 set -uo pipefail
 
+# Historical 9453 → 8766 migration template; not the current installed wrapper.
+# Do not use for fresh machines or overwrite the CURRENT-recorded live launcher.
+# Cloudflare requires explicit opt-in.
 # Keep Morrie's established Go data directory in place during the 9453 -> 8766
 # cutover. The directory name is legacy; moving 2+ GiB of live databases is not
 # required to change the listener and would add needless migration risk.
@@ -41,8 +44,13 @@ args=(
   --codex-bin "$CODEX_BIN"
   --discovery
   --mdns
-  --tunnel
 )
+
+case "${EVERYTHING_GO_TUNNEL:-0}" in
+  0) ;;
+  1) args+=(--tunnel) ;;
+  *) log "ERROR: EVERYTHING_GO_TUNNEL must be 0 or 1"; exit 1 ;;
+esac
 
 if [[ -f "$SERVICE_ACCOUNT" ]]; then
   args+=(--service-account "$SERVICE_ACCOUNT")

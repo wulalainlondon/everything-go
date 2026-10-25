@@ -19,6 +19,16 @@ func claudePMSpawnArgs(s session.Snapshot, p backend.PMConfiguration) []string {
 		"--permission-mode", "dontAsk", "--allowedTools", "mcp__bridge_pm__project_get_context,mcp__bridge_pm__project_propose_task,mcp__bridge_pm__project_delegate_task,mcp__bridge_pm__session_read_updates",
 		"--system-prompt", p.Instructions}
 	args = append(args, "--max-turns", "12")
+	if p.Room {
+		for i := 0; i+1 < len(args); i++ {
+			if args[i] == "--tools" {
+				args[i+1] = "WebSearch,WebFetch"
+			}
+			if args[i] == "--allowedTools" {
+				args[i+1] = "WebSearch,WebFetch,mcp__bridge_pm__room_get_context,mcp__bridge_pm__room_read_source"
+			}
+		}
+	}
 	if s.Model != "" {
 		args = append(args, "--model", s.Model)
 	}
@@ -35,6 +45,19 @@ func validPMTools(tools []string) bool {
 	for _, tool := range tools {
 		switch strings.TrimSpace(tool) {
 		case "mcp__bridge_pm__project_get_context", "mcp__bridge_pm__project_propose_task", "mcp__bridge_pm__project_delegate_task", "mcp__bridge_pm__session_read_updates", "ToolSearch", "EndConversation":
+		default:
+			return false
+		}
+	}
+	return true
+}
+func validPMPolicyTools(p *backend.PMConfiguration, tools []string) bool {
+	if p == nil || !p.Room {
+		return validPMTools(tools)
+	}
+	for _, tool := range tools {
+		switch tool {
+		case "WebSearch", "WebFetch", "mcp__bridge_pm__room_get_context", "mcp__bridge_pm__room_read_source", "ToolSearch", "EndConversation":
 		default:
 			return false
 		}

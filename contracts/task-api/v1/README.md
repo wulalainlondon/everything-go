@@ -13,3 +13,12 @@ Target.native_thread compare field means **existing Bridge ResumeID**: public Co
 TaskService, Gateway/Authorizer, SnapshotSource and provider verifier ports are implemented, tested interfaces. There is NO production canonical-store implementation, HTTP/WS/MCP registration, provider load or live model proof in this slice. Original policies/guards remain untouched; unbound/unloaded ports return typed unsupported/caller_unbound. New workers receive explicit codex/gpt-6.1-sol/high defaults before the authorized owner gateway; legacy APIs retain their defaults.
 
 Run: go test ./contracts/task-api/v1 ./internal/taskapi; provider fixture tests: go test ./internal/executor/goexec -run TestTaskAPI. B2/B3/B5/B7 need owner accepted base and hooks; fixture maps exist only in *_test.go. No new task DB/ledger.
+
+Session-continuity candidate extension: delegation `append` retains its original
+scoped journal and adds optional `return_to_parent:true` with `expected_previous_round_id` CAS. The new round has an
+independent return receipt/frozen handoff. Task DTOs expose bounded `continuity`
+round metadata; original command execution/final/QA/delivery axes are preserved.
+Explicit delegated steering uses the original-parent native tool in
+`contracts/delegation/v1`, while controller managed-target refusal stays intact.
+Schema hash must be rebound to the exact candidate during tool registration;
+old/native/unloaded tools are not evidence that this new contract was loaded.

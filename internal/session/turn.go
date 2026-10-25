@@ -3,6 +3,7 @@ package session
 import (
 	"errors"
 	"sync"
+	"time"
 )
 
 // State is the explicit session lifecycle. Transitions:
@@ -77,9 +78,10 @@ func (s *Session) CanDispatchAutomatic() bool {
 // turns for the same session never overlap. Returns false if the session is
 // closed.
 type queuedTurn struct {
-	id   string
-	run  func()
-	held bool
+	id    string
+	run   func()
+	held  bool
+	ready func() bool
 }
 
 var ErrQueueNotWaiting = errors.New("message is no longer waiting")
@@ -92,7 +94,17 @@ func (s *Session) Submit(fn func()) bool { return s.submit("", fn, true) }
 // SubmitNamed never blocks a transport handler if the bounded mailbox is full.
 func (s *Session) SubmitNamed(id string, fn func()) bool { return s.submit(id, fn, false) }
 
+// SubmitNamedWhenReady keeps the head in the cancellable FIFO until admission
+// is ready. The check runs without the session lock and must not submit input.
+func (s *Session) SubmitNamedWhenReady(id string, ready func() bool, fn func()) bool {
+	return s.submitReady(id, fn, false, ready)
+}
+
 func (s *Session) submit(id string, fn func(), wait bool) bool {
+	return s.submitReady(id, fn, wait, nil)
+}
+
+func (s *Session) submitReady(id string, fn func(), wait bool, ready func() bool) bool {
 	for {
 		s.mu.Lock()
 		if s.state == Closed {
@@ -103,7 +115,8 @@ func (s *Session) submit(id string, fn func(), wait bool) bool {
 			s.workerUp = true
 			s.quit = make(chan struct{})
 			s.queueChanged = make(chan struct{})
-			go s.runWorker(s.quit)
+			s.workerDone = make(chan struct{})
+			go s.runWorker(s.quit, s.workerDone)
 		}
 		if id != "" {
 			if s.activeQueuedID == id {
@@ -118,7 +131,7 @@ func (s *Session) submit(id string, fn func(), wait bool) bool {
 			}
 		}
 		if len(s.mailbox) < mailboxSize {
-			s.mailbox = append(s.mailbox, &queuedTurn{id: id, run: fn})
+			s.mailbox = append(s.mailbox, &queuedTurn{id: id, run: fn, ready: ready})
 			s.signalQueueLocked()
 			s.mu.Unlock()
 			return true
@@ -147,18 +160,25 @@ func (s *Session) signalQueueLocked() {
 // finish(true) removes the item; finish(false) restores its original FIFO place.
 // The closure is idempotent and must be called after persisting the outcome.
 func (s *Session) ReserveQueued(id string) (finish func(bool), err error) {
-	return s.reserveQueued(id, true)
+	return s.reserveQueued(id, true, true)
 }
 func (s *Session) ReserveWaiting(id string) (finish func(bool), err error) {
-	return s.reserveQueued(id, false)
+	return s.reserveQueued(id, false, false)
 }
-func (s *Session) reserveQueued(id string, requireActive bool) (finish func(bool), err error) {
+
+// ReserveSteeringCandidate holds the FIFO boundary while the adapter checks
+// an exact native turn. Observed native work does not own this Session worker;
+// only the adapter's strict steer ACK may consume the reserved input.
+func (s *Session) ReserveSteeringCandidate(id string) (finish func(bool), err error) {
+	return s.reserveQueued(id, false, true)
+}
+func (s *Session) reserveQueued(id string, requireActive, exclusive bool) (finish func(bool), err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if requireActive && s.state != Streaming {
 		return nil, ErrQueueNoActiveTurn
 	}
-	if requireActive && s.queueHolds > 0 {
+	if exclusive && s.queueHolds > 0 {
 		return nil, ErrQueueBusy
 	}
 	var target *queuedTurn
@@ -215,7 +235,8 @@ func (s *Session) CancelQueued(id string) error {
 	return ErrQueueNotWaiting
 }
 
-func (s *Session) runWorker(quit <-chan struct{}) {
+func (s *Session) runWorker(quit <-chan struct{}, exited chan<- struct{}) {
+	defer close(exited)
 	for {
 		s.mu.Lock()
 		if s.state == Closed {
@@ -233,6 +254,31 @@ func (s *Session) runWorker(quit <-chan struct{}) {
 			continue
 		}
 		item := s.mailbox[0]
+		if item.ready != nil {
+			s.mu.Unlock()
+			ready := item.ready()
+			s.mu.Lock()
+			// Cancellation, closure, reservations or reordering during the read
+			// invalidate this admission. Never execute the old head afterwards.
+			if s.state == Closed || len(s.mailbox) == 0 || s.mailbox[0] != item || s.queueHolds > 0 {
+				s.mu.Unlock()
+				continue
+			}
+			if !ready {
+				changed := s.queueChanged
+				s.mu.Unlock()
+				timer := time.NewTimer(time.Second)
+				select {
+				case <-changed:
+				case <-timer.C:
+				case <-quit:
+					timer.Stop()
+					return
+				}
+				timer.Stop()
+				continue
+			}
+		}
 		s.mailbox = s.mailbox[1:]
 		s.activeQueuedID = item.id
 		done := s.beginTurnLocked()
@@ -248,6 +294,24 @@ func (s *Session) runWorker(quit <-chan struct{}) {
 		s.activeQueuedID = ""
 		s.mu.Unlock()
 	}
+}
+
+// DeferActiveNamed restores a definitively unsubmitted head after an admission
+// race. Call only after its durable receipt has returned to queued. Unknown or
+// accepted submissions must never enter this path.
+func (s *Session) DeferActiveNamed(id string, ready func() bool, fn func()) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if id == "" || s.activeQueuedID != id || s.state != Streaming || s.turnDone == nil {
+		return false
+	}
+	s.mailbox = append([]*queuedTurn{{id: id, ready: ready, run: fn}}, s.mailbox...)
+	s.state = Idle
+	done := s.turnDone
+	s.turnDone = nil
+	close(done)
+	s.signalQueueLocked()
+	return true
 }
 
 // beginTurn moves Idle→Streaming and arms a fresh completion signal for the
@@ -377,5 +441,18 @@ func (s *Session) HoldQueue() func() {
 			}
 			s.signalQueueLocked()
 		})
+	}
+}
+
+// CloseAndWait joins the session actor after its current callback returns.
+// Callers must first release any executor-owned waits; Close alone deliberately
+// does not wait for an external executor to stop.
+func (s *Session) CloseAndWait() {
+	s.Close()
+	s.mu.Lock()
+	done := s.workerDone
+	s.mu.Unlock()
+	if done != nil {
+		<-done
 	}
 }

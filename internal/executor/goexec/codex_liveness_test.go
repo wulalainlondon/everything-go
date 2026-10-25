@@ -256,7 +256,7 @@ func TestInactivityTerminalCarriesReasonAndNeverEmitsDone(t *testing.T) {
 	w.reply = func(method string, p json.RawMessage) (any, error) {
 		switch method {
 		case "turn/start":
-			return map[string]any{"turn": map[string]string{"id": "turn-1"}}, nil
+			return map[string]any{"turn": map[string]string{"id": "turn-1", "status": "inProgress"}}, nil
 		case "turn/interrupt":
 			completeLivenessTurn(c, "interrupted")
 			return map[string]any{}, nil

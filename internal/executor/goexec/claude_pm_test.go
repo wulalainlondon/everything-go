@@ -78,3 +78,27 @@ func TestReadOnlyCollaborationWorkerRemovesBuiltins(t *testing.T) {
 		t.Fatal("inherited tools remain")
 	}
 }
+
+func TestRoomClaudeToolsExcludeFilesystemAndInheritedPluginsAcrossResume(t *testing.T) {
+	for _, resume := range []string{"", "fixture-existing-native"} {
+		p := backend.PMConfiguration{Room: true, Worker: true, Sandbox: "read-only", Instructions: "room only", MCPURL: "http://127.0.0.1:123/room", Token: "fixture-only"}
+		args := claudePMSpawnArgs(session.Snapshot{Model: "sonnet", ResumeID: resume}, p)
+		values := map[string]string{}
+		for i := 0; i+1 < len(args); i++ {
+			if strings.HasPrefix(args[i], "--") {
+				values[args[i]] = args[i+1]
+			}
+		}
+		if values["--tools"] != "WebSearch,WebFetch" || values["--setting-sources"] != "" || !strings.Contains(strings.Join(args, " "), "--strict-mcp-config") {
+			t.Fatal(args)
+		}
+		for _, tool := range []string{"Bash", "Read", "Glob", "Grep", "Edit", "Write", "Agent", "mcp__bridge_pm__project_delegate_task"} {
+			if validPMPolicyTools(&p, []string{tool}) {
+				t.Fatal("room tool leaked", tool)
+			}
+		}
+		if !validPMPolicyTools(&p, []string{"WebSearch", "WebFetch", "mcp__bridge_pm__room_get_context", "mcp__bridge_pm__room_read_source"}) {
+			t.Fatal("room research/context removed")
+		}
+	}
+}

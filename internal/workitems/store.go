@@ -21,6 +21,12 @@ import (
 const schemaVersion = 7
 
 const schema = `
+CREATE TABLE IF NOT EXISTS work_room_task_links (
+  room_id TEXT NOT NULL, task_id TEXT NOT NULL, project_id TEXT NOT NULL,
+  work_item_id TEXT NOT NULL UNIQUE, run_id TEXT NOT NULL UNIQUE,
+  session_id TEXT NOT NULL, request_id TEXT NOT NULL, config_revision INTEGER NOT NULL,
+  PRIMARY KEY(room_id,task_id), UNIQUE(session_id,request_id)
+);
 CREATE TABLE IF NOT EXISTS work_pm_state (
   id INTEGER PRIMARY KEY CHECK(id=1),
   payload TEXT NOT NULL
@@ -491,6 +497,9 @@ type CreateItemInput struct {
 }
 
 func (s *Store) CreateItem(ctx context.Context, in CreateItemInput) (WorkItem, error) {
+	if roomProjectionItem(in.ID) {
+		return WorkItem{}, errors.New("reserved_room_work_item_identity")
+	}
 	title, err := normalizeTitle(in.Title)
 	if err != nil {
 		return WorkItem{}, err
@@ -1197,7 +1206,7 @@ func (s *Store) Snapshot(ctx context.Context) (Snapshot, error) {
 	if err := rows.Close(); err != nil {
 		return snap, err
 	}
-	rows, err = s.db.QueryContext(ctx, itemSelect+" ORDER BY project_id,lifecycle,sort_key,id")
+	rows, err = s.db.QueryContext(ctx, itemSelect+" WHERE id NOT GLOB 'wi_cw_*' ORDER BY project_id,lifecycle,sort_key,id")
 	if err != nil {
 		return snap, err
 	}
@@ -1213,7 +1222,7 @@ func (s *Store) Snapshot(ctx context.Context) (Snapshot, error) {
 		return snap, err
 	}
 	rows, err = s.db.QueryContext(ctx, `SELECT id,work_item_id,session_id,thread_id_snapshot,role,linked_at,unlinked_at
-		FROM work_item_session_links WHERE unlinked_at IS NULL ORDER BY linked_at,id`)
+		FROM work_item_session_links WHERE work_item_id NOT GLOB 'wi_cw_*' AND unlinked_at IS NULL ORDER BY linked_at,id`)
 	if err != nil {
 		return snap, err
 	}
@@ -1264,7 +1273,7 @@ func (s *Store) Snapshot(ctx context.Context) (Snapshot, error) {
 	}
 	rows, err = s.db.QueryContext(ctx, `SELECT id,work_item_id,session_link_id,request_id,kind,status,
 		started_at,finished_at,terminal_reason,session_id,instruction,available_at,attempt,max_attempts,claimed_at,queue_reason
-		FROM work_item_runs ORDER BY started_at,id`)
+		FROM work_item_runs WHERE work_item_id NOT GLOB 'wi_cw_*' ORDER BY started_at,id`)
 	if err != nil {
 		return snap, err
 	}
@@ -1395,6 +1404,9 @@ type queryRower interface {
 }
 
 func getItemQuery(ctx context.Context, q queryRower, id string) (WorkItem, error) {
+	if roomProjectionItem(id) {
+		return WorkItem{}, ErrNotFound
+	}
 	item, err := scanItem(q.QueryRowContext(ctx, itemSelect+" WHERE id=?", id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return WorkItem{}, ErrNotFound

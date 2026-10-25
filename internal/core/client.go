@@ -57,6 +57,12 @@ type pinger interface {
 
 // addressable is the optional contract a transport implements when it can report
 // a remote peer address, surfaced in connection logs for observability.
+// Control writes on coder/websocket are independently serialized by the library.
+// Waiting for a pong must not hold the application-data write mutex.
+type concurrentControlPinger interface{ ConcurrentControlPing() }
+
+func (w wsConn) ConcurrentControlPing() {}
+
 type addressable interface {
 	RemoteAddr() string
 }
@@ -111,11 +117,14 @@ func (w wsConn) EnrollmentEligible() bool { return w.canEnroll }
 // Client is one logical connection (WS or WebRTC DataChannel). A single write
 // pump goroutine drains the send channel so conn writes are never concurrent.
 type Client struct {
-	hub     *Hub
-	conn    wireConn
-	send    chan []byte
-	urgent  chan []byte // small heartbeat replies must not queue behind snapshots
-	writeMu sync.Mutex  // a bounded data write must not race a shorter ping deadline
+	interactionControl bool // server-owned question delivery; never parsed from client input
+	callbackCapable    atomic.Bool
+	callbackNative     atomic.Bool
+	hub                *Hub
+	conn               wireConn
+	send               chan []byte
+	urgent             chan []byte // small heartbeat replies must not queue behind snapshots
+	writeMu            sync.Mutex  // a bounded data write must not race a shorter ping deadline
 	// quit is closed exactly once when the client is torn down. The send channel
 	// is deliberately NEVER closed: background goroutines (sendHistory, sendUsage,
 	// …) outlive the read loop and may call enqueue after disconnect, so closing
@@ -162,7 +171,9 @@ type Client struct {
 	// is queued on the same TCP stream. A pong can otherwise sit behind several
 	// megabytes of binary frames and look like a dead client on slower mobile
 	// links even though upload bytes are still arriving.
-	uploadActive atomic.Bool
+	uploadActive    atomic.Bool
+	dispatchActive  atomic.Bool
+	dispatchStarted atomic.Int64
 }
 
 func (c *Client) wireAuthority() string {
@@ -252,16 +263,36 @@ func (c *Client) pingLoopEvery(ctx context.Context, interval, timeout time.Durat
 				// control ping behind a slow data write falsely kills live peers.
 				continue
 			}
+			_, independentControl := p.(concurrentControlPinger)
+			if independentControl {
+				c.writeMu.Unlock()
+			}
 			err := pingWithInboundProgress(ctx, p, timeout, 2*time.Minute)
-			c.writeMu.Unlock()
+			if !independentControl {
+				c.writeMu.Unlock()
+			}
 			if err != nil {
+				if ctx.Err() != nil {
+					return
+				} // normal owner shutdown is not a zombie
+
 				select {
 				case <-c.quit: // already being torn down; not a zombie
 					return
 				default:
 				}
-				log.Printf("[conn] ping timeout client=%s device=%s kind=%s addr=%s → dropping zombie",
-					c.clientID, c.deviceID, c.conn.Kind(), c.remoteAddr())
+				inboundAge := int64(-1)
+				if progress, ok := p.(inboundProgress); ok {
+					if last := progress.LastInboundProgress(); !last.IsZero() {
+						inboundAge = time.Since(last).Milliseconds()
+					}
+				}
+				dispatchAge := int64(-1)
+				if c.dispatchActive.Load() {
+					dispatchAge = time.Since(time.Unix(0, c.dispatchStarted.Load())).Milliseconds()
+				}
+				log.Printf("[conn] ping failure client=%s device=%s kind=%s class=%s inbound_age_ms=%d dispatch_active=%t dispatch_age_ms=%d → closing control connection",
+					c.clientID, c.deviceID, c.conn.Kind(), pingFailureClass(err), inboundAge, c.dispatchActive.Load(), dispatchAge)
 				c.conn.Close("ping timeout")
 				c.shutdown()
 				return
@@ -481,6 +512,12 @@ func (c *Client) writePump(ctx context.Context) {
 			}
 		}
 		c.writeMu.Lock()
+		// A queued native/replay frame is not a durable read grant. Membership
+		// may have changed while this socket was backpressured.
+		if c.hub != nil && !c.hub.workspaceNativeFrameAllowed(c, data) {
+			c.writeMu.Unlock()
+			continue
+		}
 		wctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		err := c.conn.Write(wctx, data)
 		cancel()
@@ -512,33 +549,39 @@ func (c *Client) enqueuePong() {
 // readLoop consumes inbound frames until the transport errors, returning that
 // error as the close reason (for observability).
 func (c *Client) readLoop(ctx context.Context) error {
-	for {
-		data, err := c.conn.Read(ctx)
-		if err != nil {
-			return err
-		}
-		if c.uploads.writeFrame(data) {
-			continue
-		}
-		var taskHeader struct {
-			Type string `json:"type"`
-		}
-		if json.Unmarshal(data, &taskHeader) == nil && taskHeader.Type == "task_api_request" {
-			c.hub.handleTaskAPI(ctx, c, data)
-			continue
-		}
-		in, err := protocol.ParseInbound(data)
-		if err != nil {
-			log.Printf("client %s: bad frame: %v", c.clientID, err)
-			continue
-		}
-		if c.offlineDeviceGuard && in.Type == "hello" &&
-			(in.DeviceID != c.deviceID || in.ConnectionProbe || (in.AuthToken != "" && !c.hub.pairing.MatchesDevice(in.AuthToken, c.deviceID))) {
-			c.enqueueEvent(protocol.Error{Type: "error", Code: "offline_device_guard_identity_changed", Message: "The guarded QA connection must retain its original paired identity."})
-			continue
-		}
-		logInbound(in.Type, in.SessionID)
-		c.hub.touchDeviceInventory(c)
-		c.hub.route(ctx, c, c.hub.client.ParseCommand(in))
+	return readAndDispatchFrames(ctx, c.conn, c.dispatchFrame)
+}
+
+func (c *Client) dispatchFrame(ctx context.Context, data []byte) error {
+	c.dispatchStarted.Store(time.Now().UnixNano())
+	c.dispatchActive.Store(true)
+	defer c.dispatchActive.Store(false)
+	if c.uploads.writeFrame(data) {
+		return nil
 	}
+	var taskHeader struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(data, &taskHeader) == nil && taskHeader.Type == "task_callback_request" {
+		c.hub.handleTaskCallback(ctx, c, data)
+		return nil
+	}
+	if json.Unmarshal(data, &taskHeader) == nil && taskHeader.Type == "task_api_request" {
+		c.hub.handleTaskAPI(ctx, c, data)
+		return nil
+	}
+	in, err := protocol.ParseInbound(data)
+	if err != nil {
+		log.Printf("client %s: bad frame: %v", c.clientID, err)
+		return nil
+	}
+	if c.offlineDeviceGuard && in.Type == "hello" &&
+		(in.DeviceID != c.deviceID || in.ConnectionProbe || (in.AuthToken != "" && !c.hub.pairing.MatchesDevice(in.AuthToken, c.deviceID))) {
+		c.enqueueEvent(protocol.Error{Type: "error", Code: "offline_device_guard_identity_changed", Message: "The guarded QA connection must retain its original paired identity."})
+		return nil
+	}
+	logInbound(in.Type, in.SessionID)
+	c.hub.touchDeviceInventory(c)
+	c.hub.route(ctx, c, c.hub.client.ParseCommand(in))
+	return nil
 }

@@ -16,7 +16,6 @@ import (
 	"log"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -26,6 +25,7 @@ import (
 	"everything-go/internal/protocol"
 	"everything-go/internal/runtime"
 	"everything-go/internal/session"
+	"everything-go/internal/sourcepolicy"
 	"everything-go/internal/taskapi"
 )
 
@@ -94,7 +94,7 @@ func (p *proc) currentReqID() string {
 
 func (p *proc) finishTurn() (reqID string, wasCompact bool) {
 	if p.taskLease != nil {
-		p.taskLease.revoke()
+		p.taskLease.endTurn()
 	}
 
 	p.mu.Lock()
@@ -103,6 +103,7 @@ func (p *proc) finishTurn() (reqID string, wasCompact bool) {
 	wasCompact = p.compactInProgress
 	p.reqID = ""
 	p.compactInProgress = false
+	p.inputUUID, p.acceptedUUID, p.finalMessageID, p.finalAssistantText = "", "", "", ""
 	return reqID, wasCompact
 }
 
@@ -133,13 +134,14 @@ type claudeState struct {
 
 // Claude implements executor.Executor over the local `claude` CLI.
 type Claude struct {
-	taskProvider backend.TaskAPIProvider
-	taskMCP      *claudeTaskMCP
-	pmProvider   backend.PMProvider
-	sink         executor.Sink
-	tools        *toolEmitter
-	claudeBin    string
-	projectsDir  string
+	taskProvider      backend.TaskAPIProvider
+	taskMCP           *claudeTaskMCP
+	pmProvider        backend.PMProvider
+	sink              executor.Sink
+	tools             *toolEmitter
+	claudeBin         string
+	projectsDir       string
+	configDirOverride string
 
 	mu     sync.Mutex
 	procs  map[string]*proc // sessionID -> running subprocess
@@ -160,12 +162,13 @@ func NewClaude(sink executor.Sink, claudeBin string) *Claude {
 	if claudeBin == "" {
 		claudeBin = "claude"
 	}
-	projectsDir := ""
-	if home, err := os.UserHomeDir(); err == nil {
-		projectsDir = filepath.Join(home, ".claude", "projects")
+	projectsDir := sourcepolicy.ClaudeProjectsDir()
+	configOverride := ""
+	if strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR")) != "" {
+		configOverride = sourcepolicy.ClaudeConfigDir()
 	}
 	c := &Claude{
-		sink: sink, claudeBin: claudeBin, projectsDir: projectsDir,
+		sink: sink, claudeBin: claudeBin, projectsDir: projectsDir, configDirOverride: configOverride,
 		tools:   newToolEmitter(sink),
 		procs:   make(map[string]*proc),
 		states:  make(map[string]*claudeState),
@@ -198,9 +201,27 @@ func (c *Claude) state(sessionID string) *claudeState {
 // Send writes a user message to the session's claude process (spawning it on
 // first use) and lets the stdout reader stream the response.
 func (c *Claude) Send(ctx context.Context, s *session.Session, reqID, content string, images []backend.ImageAttachment, files []backend.FileAttachment) error {
+	if c.taskProvider != nil && s.ResumeID() != "" {
+		scope, err := c.taskProvider.TaskWorkerScope(s)
+		if err != nil {
+			return err
+		}
+		if scope != nil {
+			if err := c.ValidateExistingTaskScope(s, *scope, s.Snapshot().Cwd); err != nil {
+				return err
+			}
+		}
+	}
+
 	c.mu.Lock()
 	p := c.procs[s.ID]
-	if p != nil && p.taskLease != nil && p.currentReqID() == "" {
+	if p != nil && p.taskLease != nil {
+		if p.taskLease.hasTurn() {
+			c.mu.Unlock()
+			return fmt.Errorf("Claude task request already active; inspect its original receipt")
+		}
+		// A completed business turn may have an internal compact in progress.
+		// Never reuse its process credential for the next admitted request.
 		p.cancel()
 		delete(c.procs, s.ID)
 		p = nil
@@ -235,7 +256,7 @@ func (c *Claude) Send(ctx context.Context, s *session.Session, reqID, content st
 		c.sink.Emit(backend.NewSessionCommandStarted(s.ID, reqID, 0))
 	}
 
-	payload := userMessageJSON(content, images, files)
+	payload := userMessageJSON(backend.PresentationContent(ctx, content), images, files)
 	if p.taskLease != nil {
 		var frame map[string]any
 		json.Unmarshal(payload, &frame)
@@ -510,6 +531,12 @@ func (c *Claude) spawn(s *session.Session) (*proc, error) {
 		cmd.Env = append(os.Environ(), "MCP_TOOL_TIMEOUT=1800000", "ENABLE_CLAUDEAI_MCP_SERVERS=false")
 	}
 	cmd.Env = addTaskEnvironment(cmd.Env, taskLease)
+	if c.configDirOverride != "" {
+		if cmd.Env == nil {
+			cmd.Env = os.Environ()
+		}
+		cmd.Env = append(cmd.Env, "CLAUDE_CONFIG_DIR="+c.configDirOverride)
+	}
 	stdinPipe, err := cmd.StdinPipe()
 	if err != nil {
 		cancel()
@@ -895,7 +922,7 @@ func (c *Claude) readStdout(s *session.Session, p *proc, stdout interface{ Read(
 			}
 			if evt.Subtype == "init" && c.pmProvider != nil {
 				pm, err := c.pmProvider.PMConfiguration(s.ID)
-				if err != nil || (pm != nil && !validPMTools(evt.Tools)) {
+				if err != nil || (pm != nil && !validPMPolicyTools(pm,evt.Tools)) {
 					p.cancel()
 					c.sink.Emit(backend.NewError(s.ID, p.currentReqID(), "pm_tool_policy_mismatch", "PM runtime exposed unexpected tools; execution was stopped."))
 					return

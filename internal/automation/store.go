@@ -130,6 +130,8 @@ type Batch struct {
 }
 
 type Proposal struct {
+	SessionID           string          `json:"session_id,omitempty"`
+	OwnerInstanceID     string          `json:"owner_instance_id,omitempty"`
 	ID                  string          `json:"id"`
 	AuthorityInstanceID string          `json:"authority_instance_id"`
 	AccountID           string          `json:"connector_account_id"`
@@ -154,13 +156,15 @@ type Proposal struct {
 }
 
 type Snapshot struct {
-	Revision  uint64      `json:"revision"`
-	Accounts  []Account   `json:"accounts"`
-	PollState []PollState `json:"poll_state"`
-	Routes    []Route     `json:"routes"`
-	Bindings  []Binding   `json:"bindings"`
-	Batches   []Batch     `json:"batches"`
-	Proposals []Proposal  `json:"proposals"`
+	InboxVersion int               `json:"inbox_version"`
+	Assignments  []EventAssignment `json:"assignments"`
+	Revision     uint64            `json:"revision"`
+	Accounts     []Account         `json:"accounts"`
+	PollState    []PollState       `json:"poll_state"`
+	Routes       []Route           `json:"routes"`
+	Bindings     []Binding         `json:"bindings"`
+	Batches      []Batch           `json:"batches"`
+	Proposals    []Proposal        `json:"proposals"`
 }
 
 type Store struct {
@@ -170,6 +174,10 @@ type Store struct {
 }
 
 const ddl = `
+CREATE TABLE IF NOT EXISTS event_session_policies (id TEXT PRIMARY KEY,payload BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS event_session_assignments (id TEXT PRIMARY KEY,payload BLOB NOT NULL,content TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS event_session_owners (event_id TEXT PRIMARY KEY,assignment_id TEXT NOT NULL REFERENCES event_session_assignments(id));
+
 CREATE TABLE IF NOT EXISTS automation_meta (
   singleton INTEGER PRIMARY KEY CHECK(singleton=1), revision INTEGER NOT NULL
 );
@@ -358,16 +366,22 @@ func (s *Store) UpsertAccount(ctx context.Context, account Account, _ uint64) (A
 }
 
 func (s *Store) UpsertRoute(ctx context.Context, route Route, expectedVersion uint64) (Route, uint64, error) {
+	return s.upsertRoute(ctx, route, expectedVersion, nil)
+}
+func (s *Store) UpsertSessionRoute(ctx context.Context, route Route, expectedVersion uint64, policy EventAssignment) (Route, uint64, error) {
+	return s.upsertRoute(ctx, route, expectedVersion, &policy)
+}
+func (s *Store) upsertRoute(ctx context.Context, route Route, expectedVersion uint64, policy *EventAssignment) (Route, uint64, error) {
 	route.ID, route.Name = strings.TrimSpace(route.ID), strings.TrimSpace(route.Name)
 	route.SourcePattern, route.KindPattern = strings.TrimSpace(route.SourcePattern), strings.TrimSpace(route.KindPattern)
 	if route.ID == "" || route.Name == "" || !validatePattern(route.SourcePattern) || !validatePattern(route.KindPattern) || !validMode(route.HandlingMode) {
 		return Route{}, 0, errors.New("invalid route identity, pattern or handling mode")
 	}
 	remote := strings.TrimSpace(route.TargetInstanceID) != ""
-	if route.HandlingMode != NotifyOnly && !remote && (route.WorkItemID == "" || route.SessionID == "") {
+	if route.HandlingMode != NotifyOnly && !remote && route.SessionID == "" {
 		return Route{}, 0, errors.New("local executable routes require work_item_id and session_id")
 	}
-	if remote && (route.TargetWorkItemID == "" || route.TargetSessionID == "" || !route.ReviewOnly) {
+	if remote && (route.TargetSessionID == "" || !route.ReviewOnly) {
 		return Route{}, 0, errors.New("remote routes require a target work item/session and review_only")
 	}
 	if route.RunKind == "" {
@@ -429,6 +443,19 @@ func (s *Store) UpsertRoute(ctx context.Context, route Route, expectedVersion ui
 	if err != nil {
 		return Route{}, 0, err
 	}
+	if policy != nil {
+		if policy.RuleVersion != route.Version || policy.RuleID != route.ID {
+			return Route{}, 0, ErrConflict
+		}
+		raw, encodeErr := json.Marshal(policy)
+		if encodeErr != nil {
+			return Route{}, 0, encodeErr
+		}
+		if _, err = tx.ExecContext(ctx, "INSERT INTO event_session_policies(id,payload) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload", route.ID, raw); err != nil {
+			return Route{}, 0, err
+		}
+	}
+
 	revision, err := s.bump(tx)
 	if err == nil {
 		err = tx.Commit()
@@ -827,7 +854,7 @@ func (s *Store) CompleteRelay(ctx context.Context, requestID, status, reason, re
 }
 
 func (s *Store) Snapshot(ctx context.Context) (Snapshot, error) {
-	var snapshot Snapshot
+	snapshot := Snapshot{Accounts: []Account{}, PollState: []PollState{}, Routes: []Route{}, Bindings: []Binding{}, Batches: []Batch{}, Proposals: []Proposal{}, Assignments: []EventAssignment{}}
 	if err := s.db.QueryRowContext(ctx, `SELECT revision FROM automation_meta WHERE singleton=1`).Scan(&snapshot.Revision); err != nil {
 		return snapshot, err
 	}
@@ -889,6 +916,13 @@ func (s *Store) Snapshot(ctx context.Context) (Snapshot, error) {
 		}
 		item.Enabled = enabled == 1
 		item.ReviewOnly = reviewOnly == 1
+		// Old persisted routes used "review" for analysis awaiting human review.
+		// Project the current wire spelling without rewriting the original policy,
+		// revision or routing target. One legacy row must not invalidate the phone's
+		// entire snapshot, including unrelated inbox capabilities and approvals.
+		if item.HandlingMode == "review" {
+			item.HandlingMode = AnalyzeForReview
+		}
 		snapshot.Routes = append(snapshot.Routes, item)
 	}
 	rows.Close()
@@ -947,6 +981,12 @@ func (s *Store) Snapshot(ctx context.Context) (Snapshot, error) {
 		snapshot.Proposals = append(snapshot.Proposals, item)
 	}
 	rows.Close()
+	snapshot.InboxVersion = 2
+	snapshot.Assignments, err = s.EventAssignments(ctx)
+	if err != nil {
+		return snapshot, err
+	}
+
 	return snapshot, nil
 }
 

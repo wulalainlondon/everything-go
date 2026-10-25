@@ -18,6 +18,8 @@ import (
 	"strings"
 	"time"
 
+	artifactcontract "everything-go/contracts/task-api/artifacts-v4"
+	interactioncontract "everything-go/contracts/task-api/interactions-v5"
 	contract "everything-go/contracts/task-api/v1"
 	"everything-go/internal/backend"
 	"everything-go/internal/coordination"
@@ -29,6 +31,8 @@ import (
 )
 
 type apiInput struct {
+	ExpectedPreviousRoundID    string `json:"expected_previous_round_id"`
+	ReturnToParent             bool   `json:"return_to_parent"`
 	IncludeRelationCoverage    bool   `json:"include_relation_coverage"`
 	TaskID                     string `json:"task_id"`
 	SessionID                  string `json:"session_id"`
@@ -62,14 +66,17 @@ type apiInput struct {
 	ApprovedPM     json.RawMessage `json:"approved_pm_task_ref"`
 }
 type apiMetadata struct {
-	CanonicalRoots []string
-	CanonicalCwd   string
-	RootIdentities map[string]string
-	Request        taskapi.Request
-	Caller         taskapi.VerifiedContext
-	SourceThread   string
-	SourceRevision uint64
-	Transport      string
+	WorkspaceRoomID string
+	WorkspaceTaskID string
+	CanonicalRoots  []string
+	CanonicalCwd    string
+	RootIdentities  map[string]string
+	Request         taskapi.Request
+	Caller          taskapi.VerifiedContext
+	SourceThread    string
+	SourceRevision  uint64
+	Transport       string
+	Intake          *intakeMetadata
 }
 type apiSeal struct{ Backend, SessionID, RequestID, ThreadID, TurnID, MessageID, Text, Hash, Status string }
 
@@ -150,8 +157,29 @@ func (h *Hub) TaskTools(s *session.Session) ([]map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
+	extra, err := artifactcontract.CompatibleToolInputs()
+	if err != nil {
+		return nil, err
+	}
+	for name, input := range extra {
+		defs[name] = input
+	}
+
+	legacyWorker := false
+	if h.delegations != nil && scope == nil {
+		legacyWorker, err = h.delegations.HasChild(context.Background(), s.ID)
+		if err != nil {
+			return nil, err
+		}
+	}
 	tools := []map[string]any{}
+	if h.interactions != nil {
+		tools = append(tools, map[string]any{"type": "function", "name": "task_interactions", "description": "Original-task questions. ask_parent requests clarification; list/get/wait read exact questions; answer/escalate only for authorized original parent or human; ack confirms the child consumed the exact answer. Use api_version 1.0.0-rc.5 and operation interactions. Agent answers are never human authorization.", "inputSchema": interactioncontract.ToolInput()})
+	}
 	for name, schema := range defs {
+		if legacyWorker && name != "task_capabilities" {
+			continue
+		}
 		if scope != nil && name != "task_read_input" && name != "task_capabilities" {
 			continue
 		}
@@ -166,7 +194,7 @@ func (h *Hub) ExecuteTask(ctx context.Context, c backend.TaskCaller, raw []byte)
 		if !ok || s != c.Session || c.Validate == nil || !c.Validate() || s.ActiveQueuedID() != c.RequestID || s.ResumeID() != c.ThreadID || s.State() == session.Closed || s.Snapshot().Hidden || !h.controls.MobileMayWrite(s.ID) {
 			return taskapi.VerifiedContext{}, taskapi.Failure("caller_unbound", "known_none", "refresh_identity")
 		}
-		if s.Backend() == backend.Codex && (c.ProviderVersion != "0.160.0" || c.ProcessGeneration != "" || c.TurnID == "") || s.Backend() == backend.Claude && ((c.ProviderVersion != "2.1.280" && c.ProviderVersion != "2.1.291") || c.ProcessGeneration == "" || c.TurnID != "") {
+		if s.Backend() == backend.Codex && (!taskapi.SupportedNativeProviderVersion("codex", c.ProviderVersion) || c.ProcessGeneration != "" || c.TurnID == "") || s.Backend() == backend.Claude && (!taskapi.SupportedNativeProviderVersion("claude", c.ProviderVersion) || c.ProcessGeneration == "" || c.TurnID != "") {
 			return taskapi.VerifiedContext{}, taskapi.Failure("unsupported", "known_none", "read_capabilities")
 		}
 		snapshot := s.Snapshot()
@@ -194,7 +222,16 @@ func (h *Hub) ExecuteTask(ctx context.Context, c backend.TaskCaller, raw []byte)
 		}
 	}
 	caller, bindErr := taskapi.BindCaller(ctx, verifier, taskapi.Invocation{})
-	response := h.taskService.Execute(ctx, caller, raw)
+	response, continuityHandled := h.executeInteractions(ctx, caller, raw)
+	if !continuityHandled {
+		response, continuityHandled = h.executeArtifactBytes(ctx, caller, raw)
+	}
+	if !continuityHandled {
+		response, continuityHandled = h.executeNativeContinuity(ctx, caller, c.Session, raw)
+	}
+	if !continuityHandled {
+		response = h.taskService.Execute(ctx, caller, raw)
+	}
 	if bindErr == nil {
 		kind := "native_tool_invoked"
 		if !response.OK {
@@ -212,9 +249,19 @@ func (h *Hub) handleTaskAPI(ctx context.Context, c *Client, raw []byte) {
 		return
 	}
 	caller, _ := h.taskHuman(c)
-	c.enqueueEvent(h.taskService.Execute(ctx, caller, raw))
+	response, handled := h.executeInteractions(ctx, caller, raw)
+	if !handled {
+		response, handled = h.executeArtifactBytes(ctx, caller, raw)
+	}
+	if !handled {
+		response = h.taskService.Execute(ctx, caller, raw)
+	}
+	c.enqueueEvent(response)
 }
 func (h *Hub) Authorize(ctx context.Context, c taskapi.VerifiedContext, r taskapi.Request) (taskapi.Locator, error) {
+	if c.SourceSessionID != "" && (h.workspaceReservedSession(c.SourceSessionID) || h.workspaceManagedRequest(c.SourceSessionID, c.SourceRequestID)) {
+		return taskapi.Locator{}, taskapi.Failure("permission", "known_none", "request_scope_change")
+	}
 	var in apiInput
 	if json.Unmarshal(r.Input, &in) != nil {
 		return taskapi.Locator{}, taskapi.Failure("invalid_argument", "known_none", "correct_input")
@@ -223,16 +270,23 @@ func (h *Hub) Authorize(ctx context.Context, c taskapi.VerifiedContext, r taskap
 	if c.SourceSessionID != "" {
 		if source, ok := h.registry.Get(c.SourceSessionID); ok {
 			worker, e := h.TaskWorkerScope(source)
+			legacyWorker := false
+			if h.delegations != nil && worker == nil {
+				legacyWorker, e = h.delegations.HasChild(ctx, source.ID)
+			}
 			if e != nil {
 				return l, taskapi.Failure("unsupported", "known_none", "read_capabilities")
 			}
-			if worker != nil && r.Operation != "read_input" && r.Operation != "capabilities" {
+			if (legacyWorker && r.Operation != "capabilities") || (worker != nil && r.Operation != "read_input" && r.Operation != "capabilities") {
 				return l, taskapi.Failure("permission", "known_none", "request_scope_change")
 			}
 		}
 	}
 	if c.Authority != h.cfg.InstanceID {
 		return l, taskapi.Failure("wrong_authority", "known_none", "refresh_identity")
+	}
+	if r.Operation == "intake" {
+		return h.authorizeIntake(ctx, c, r, l)
 	}
 	if r.Operation == "legacy_source" {
 		return h.authorizeLegacySource(ctx, c, r, l)
@@ -256,6 +310,9 @@ func (h *Hub) Authorize(ctx context.Context, c taskapi.VerifiedContext, r taskap
 			return l, taskapi.Failure("wrong_authority", "known_none", "refresh_identity")
 		}
 		l.Path = ref[1]
+		if r.Operation == "append" && l.Path != "delegation" && (in.ReturnToParent || in.ExpectedPreviousRoundID != "") {
+			return l, taskapi.Failure("unsupported", "known_none", "read_capabilities")
+		}
 		l.TaskID = in.TaskID
 		record, err := h.apiRecord(ctx, c, in.TaskID)
 		var legacy legacySourceMetadata
@@ -268,6 +325,30 @@ func (h *Hub) Authorize(ctx context.Context, c taskapi.VerifiedContext, r taskap
 		}
 		if err != nil {
 			return l, err
+		}
+		if r.Operation == "cancel" && l.Path == "delegation" {
+			selected, e := h.delegations.TaskJournal().Receipt(ctx, c.StableScopeID, c.NamespaceGeneration, in.CommandReceipt)
+			if e != nil {
+				return l, e
+			}
+			if selected.TaskID != record.TaskID {
+				return l, taskapi.Failure("permission", "known_none", "request_scope_change")
+			}
+			if original, found, e := h.delegations.ByChildRequest(ctx, selected.SessionID, selected.RequestID); e != nil {
+				return l, e
+			} else if found {
+				ns := taskapi.Namespace{Authority: c.Authority, StableScopeID: c.StableScopeID, Generation: c.NamespaceGeneration, Path: l.Path, Operation: r.Operation, TaskID: l.TaskID}
+				if previous, e := h.delegations.TaskJournal().Lookup(ctx, ns, r.IdempotencyKey); e == nil {
+					digest, _ := taskapi.IntentHash(r)
+					if digest != previous.Hash {
+						return l, taskapi.Failure("idempotency_conflict", "known_receipt", "lookup_original")
+					}
+					return l, nil
+				}
+				if original.State == "queued" {
+					return l, h.authorizeQueuedDelegationCancel(ctx, c, r, selected, original, in.Revision)
+				}
+			}
 		}
 		target, ok := h.registry.Get(record.SessionID)
 		if !ok || !h.controllerInScope(target) || target.Snapshot().Hidden {
@@ -312,6 +393,21 @@ func (h *Hub) Authorize(ctx context.Context, c taskapi.VerifiedContext, r taskap
 				}
 				if err := h.enforceExistingScope(target, originalInput); err != nil {
 					return l, err
+				}
+				if l.Path == "delegation" && in.ExpectedPreviousRoundID != "" {
+					if root, found, e := h.delegations.Round(ctx, record.NativeID); e != nil {
+						return l, e
+					} else if !found {
+						return l, taskapi.Failure("not_found", "known_none", "lookup_original")
+					} else {
+						latest, e := h.delegations.LatestRound(ctx, root.LogicalID)
+						if e != nil {
+							return l, e
+						}
+						if latest.ID != in.ExpectedPreviousRoundID {
+							return l, taskapi.Failure("stale_revision", "known_none", "refresh_identity")
+						}
+					}
 				}
 			}
 			if in.Mode == "steer" {
@@ -575,6 +671,9 @@ func (h *Hub) Mutate(ctx context.Context, c taskapi.AuthorizedCommand) (any, err
 	if _, err := h.Authorize(ctx, c.Caller, c.Request); err != nil {
 		return nil, err
 	}
+	if c.Request.Operation == "intake" {
+		return h.mutateIntake(ctx, c)
+	}
 	if c.Request.Operation == "legacy_source" {
 		return h.mutateLegacySource(ctx, c)
 	}
@@ -689,15 +788,33 @@ func (h *Hub) Mutate(ctx context.Context, c taskapi.AuthorizedCommand) (any, err
 			record.SessionID = "s_dg_" + id
 			record.RequestID = "dgtask_" + record.NativeID
 			record.TaskID = apiID(h.cfg.InstanceID, "delegation", record.NativeID)
-			r := delegation.Record{ID: record.NativeID, ParentSessionID: c.Caller.SourceSessionID, OriginRequestID: c.Caller.SourceRequestID, ToolCallID: c.Caller.ToolCallID, IntentHash: c.IntentHash, ChildSessionID: record.SessionID, ChildRequestID: record.RequestID, ChildName: in.New.Name, Cwd: in.Workspace.Cwd, Instruction: in.Instruction, Model: in.New.Profile.Model, Effort: in.New.Profile.Effort, Sandbox: "read-only", ParentRequestID: "dgreturn_" + record.NativeID}
-			stored, created, err := h.delegations.CreateAPI(ctx, c, record, r, in.New.Profile.Backend)
+			r := delegation.Record{ID: record.NativeID, ParentSessionID: c.Caller.SourceSessionID, OriginRequestID: c.Caller.SourceRequestID, ToolCallID: c.Caller.ToolCallID, IntentHash: c.IntentHash, ChildSessionID: record.SessionID, ChildRequestID: record.RequestID, ChildName: in.New.Name, Cwd: canonicalCwd, Instruction: in.Instruction, Model: in.New.Profile.Model, Effort: in.New.Profile.Effort, Sandbox: "read-only", ParentRequestID: "dgreturn_" + record.NativeID, SourceThread: c.Caller.SourceResumeID, SourceRevision: c.Caller.SourceConfigRevision, WorkspaceIdentity: rootIdentities[canonicalCwd], Authority: h.cfg.InstanceID}
+			// Preserve the original policy and caller inside the existing store
+			// transaction. Do not recursively Authorize there: it queries this
+			// same store and would deadlock its single SQLite connection.
+			admission := c
+			admission.Revalidate = func(checkContext context.Context) error {
+				if c.Revalidate == nil {
+					return taskapi.Failure("caller_unbound", "known_none", "refresh_identity")
+				}
+				if err := c.Revalidate(checkContext); err != nil {
+					return err
+				}
+				parent, ok := h.registry.Get(c.Caller.SourceSessionID)
+				if !ok || !h.controllerInScope(parent) || parent.Snapshot().Hidden || parent.State() == session.Closed || parent.ResumeID() != c.Caller.SourceResumeID || (c.Caller.SourceConfigKnown && parent.SettingsSnapshot().ConfigRevision != c.Caller.SourceConfigRevision) {
+					return taskapi.Failure("caller_unbound", "known_none", "refresh_identity")
+				}
+				return nil
+			}
+			stored, created, err := h.delegations.CreateAPI(ctx, admission, record, r, in.New.Profile.Backend)
 			if err != nil {
 				return nil, err
 			}
 			if created {
-				if err = h.provisionDelegation(ctx, r); err != nil {
-					return nil, err
-				}
+				// Provisioning is guarded by the same durable reservation/FIFO path.
+				// A post-ACK retryable error must never masquerade as known-no-effect.
+				_ = h.provisionDelegation(ctx, r)
+				h.wakeDelegations()
 			}
 			return h.apiReceipt(ctx, c, stored)
 		}
@@ -717,6 +834,9 @@ func (h *Hub) Mutate(ctx context.Context, c taskapi.AuthorizedCommand) (any, err
 		payload, _ := json.Marshal(queuedPayload{Content: in.Content, MessagePurpose: "instruction", Configuration: &configuration, ExpectedTarget: &dispatchTargetExpectation{target.ResumeID(), target.SettingsSnapshot().ConfigRevision}})
 		var stored taskapi.IntentRecord
 		created := false
+		if c.Locator.Path == "delegation" {
+			return h.appendCapacityDelegation(ctx, c, record, original, in, target)
+		}
 		if c.Locator.Path == "ordinary" {
 			_, created, err = h.messageQueue.Enqueue(messagequeue.Entry{SessionID: record.SessionID, RequestID: record.RequestID, Content: truncateGraphemes(in.Content, 4000), Payload: payload, API: &messagequeue.APIAdmission{Command: c, Record: record}})
 			if err == nil {
@@ -752,6 +872,33 @@ func (h *Hub) Mutate(ctx context.Context, c taskapi.AuthorizedCommand) (any, err
 		}
 		original = selected
 		record.RequestID = original.RequestID
+		if original.Path == "delegation" {
+			if d, found, e := h.delegations.ByChildRequest(ctx, original.SessionID, original.RequestID); e != nil {
+				return nil, e
+			} else if found && d.State == "queued" {
+				admission := c
+				admission.Revalidate = func(check context.Context) error {
+					if e := c.Revalidate(check); e != nil {
+						return e
+					}
+					return h.checkQueuedCancellationSource(c.Caller, c.Request, d)
+				}
+				h.messageQueueMu.Lock()
+				messageRevision, revisionErr := h.delegationMessageRevision(ctx, original.TaskID)
+				if revisionErr != nil {
+					h.messageQueueMu.Unlock()
+					return nil, revisionErr
+				}
+				stored, e := h.delegations.CancelQueuedAPI(ctx, admission, record, original, in.Revision, messageRevision)
+				h.messageQueueMu.Unlock()
+				if e != nil {
+					return nil, e
+				}
+				h.wakeDelegations()
+				return h.apiReceipt(ctx, c, stored)
+			}
+		}
+
 		var stored taskapi.IntentRecord
 		created := false
 		err = j.Transaction(ctx, func(tx *sql.Tx) error { var e error; stored, created, e = j.ClaimTx(tx, c, record); return e })
@@ -838,7 +985,7 @@ func (h *Hub) Mutate(ctx context.Context, c taskapi.AuthorizedCommand) (any, err
 	return nil, taskapi.Failure("unsupported", "known_none", "read_capabilities")
 }
 func (h *Hub) submitAPINamed(s *session.Session, id string) {
-	if !s.SubmitNamed(id, func() { h.runQueuedMessage(s, id) }) {
+	if !h.submitQueuedMessage(s, id) {
 		h.messageQueue.Transition(s.ID, id, []messagequeue.State{messagequeue.Queued}, messagequeue.Failed, "Actor unavailable", "", "")
 	}
 	h.publishMessageQueue(s.ID)
@@ -884,6 +1031,26 @@ func (h *Hub) TaskWorkerScope(s *session.Session) (*taskapi.ChildScope, error) {
 	if json.Unmarshal(meta.Request.Input, &input) != nil {
 		return nil, errors.New("child scope unavailable")
 	}
+	root, found, err := h.delegations.OriginalRootForChild(context.Background(), s.ID)
+	if err != nil || !found {
+		return nil, errors.New("original bounded profile unavailable")
+	}
+	provider, _, err := h.delegations.APIBackend(context.Background(), s.ID)
+	if err != nil {
+		return nil, err
+	}
+	_, revision, _, err := h.delegations.ExecutionBinding(context.Background(), root.ID)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateDelegationChildProfile(root, s, s.ResumeID(), revision, provider, true); err != nil {
+		return nil, err
+	}
+	for path, want := range meta.RootIdentities {
+		if got, err := taskRootIdentity(path); err != nil || got != want {
+			return nil, errors.New("bounded root identity changed")
+		}
+	}
 	return &taskapi.ChildScope{Roots: meta.CanonicalRoots, Operations: input.Scope.Operations, Sandbox: input.Scope.Sandbox, Network: input.Scope.Network, MaxChildren: input.Scope.MaxChildren}, nil
 }
 
@@ -923,6 +1090,16 @@ func (h *Hub) checkAPIRecord(ctx context.Context, c taskapi.VerifiedContext, r t
 	var meta apiMetadata
 	if json.Unmarshal(r.Metadata, &meta) != nil {
 		return taskapi.Failure("key_expired", "known_receipt", "lookup_original")
+	}
+	if meta.WorkspaceRoomID != "" {
+		if !h.workspaceTaskReader(ctx, c, meta.WorkspaceRoomID) {
+			return taskapi.Failure("permission", "known_none", "request_scope_change")
+		}
+		_, task, err := h.workspace.WorkProjectionState(ctx, meta.WorkspaceRoomID, meta.WorkspaceTaskID)
+		if err != nil || task.SessionID != r.SessionID || task.RequestID != r.RequestID {
+			return taskapi.Failure("permission", "known_none", "request_scope_change")
+		}
+		return nil
 	}
 	if preparingChild {
 		source, found := h.registry.Get(meta.Caller.SourceSessionID)
@@ -1029,4 +1206,12 @@ func apiEffectRequests(operation, request string) []string {
 		return []string{}
 	}
 	return []string{request}
+}
+
+func (h *Hub) existingTargetCreationAvailable() bool {
+	if mode, ok := h.exec.(interface{ ExistingTaskScopeMode() string }); ok && mode.ExistingTaskScopeMode() == "retained_bounded_only" {
+		return false
+	}
+	_, ok := h.exec.(backend.ExistingTaskScopeEnforcer)
+	return ok
 }

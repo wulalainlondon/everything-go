@@ -64,6 +64,9 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		c.enqueueEvent(h.client.Error("", "", "Pairing required before this device can use the bridge"))
 		return
 	}
+	if h.rejectRoomSessionCommand(c, cmd) {
+		return
+	}
 	if h.rejectToolMaintenanceWrite(c, cmd) {
 		return
 	}
@@ -77,12 +80,22 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		}
 	}
 	switch cmd.Kind {
+	case "workspace_request":
+		h.handleWorkspace(c, cmd)
+	case "partner_profile_request":
+		h.handlePartnerProfile(c, cmd)
 	case "task_api_request":
 		return // Strict original frame handled by Client before legacy ParseCommand.
+	case "voice_call_prepare":
+		h.handleVoicePrepare(c, cmd)
+	case "voice_transfer_control":
+		h.handleVoiceTransfer(c, cmd)
 	case "codex_voice_start":
 		h.handleVoiceStart(c, cmd)
 	case "codex_voice_stop":
 		h.handleVoiceStop(c, cmd)
+	case "codex_voice_media_state":
+		h.handleVoiceMediaState(c, cmd)
 	case "codex_voice_text":
 		h.handleVoiceText(c, cmd)
 	case "human_ai_collaboration":
@@ -117,6 +130,15 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 			PairingOpen:  h.pairing.EnrollmentOpen(),
 			InstanceName: h.cfg.InstanceName,
 		}
+		if !c.enrollmentOnly && h.supportsNativeHistoryRanges() {
+			helloInput.Capabilities = append(helloInput.Capabilities, "history_continuity_v1")
+		}
+		if h.partners != nil && h.pairedTaskDevice(c) != "" {
+			helloInput.Capabilities = append(helloInput.Capabilities, "teammate_profile_v1")
+		}
+		if h.workspace != nil && h.pairedTaskDevice(c) != "" {
+			helloInput.Capabilities = append(helloInput.Capabilities, "collaboration_workspace_v1")
+		}
 		if h.sharedReadAuthorized(c) {
 			helloInput.Capabilities = append(helloInput.Capabilities, "session_read_sync_v1")
 		}
@@ -125,7 +147,22 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		}
 		if !c.enrollmentOnly {
 			if _, ok := h.exec.(backend.RealtimeVoiceExecutor); ok && h.cfg.CodexRemote != "" {
-				helloInput.Capabilities = append(helloInput.Capabilities, "codex_realtime_voice_v1", "codex_voice_selection_v1")
+				if h.callbacks != nil {
+					helloInput.Capabilities = append(helloInput.Capabilities, "task_callback_v1", "task_callback_execution_v1", "task_callback_ios_notifications_v1", "task_callback_compact_sync_v1")
+				}
+				if h.transfers != nil && h.pairedTaskDevice(c) != "" {
+					helloInput.Capabilities = append(helloInput.Capabilities, "codex_voice_transfer_confirmation_v1", "codex_voice_transfer_direct_v1")
+				}
+				helloInput.Capabilities = append(helloInput.Capabilities, "codex_voice_prepare_v1", "codex_realtime_voice_v1", "codex_voice_selection_v1", "codex_voice_media_v1", "codex_voice_external_music_v1", "codex_voice_external_music_ios_v1", "codex_voice_apple_music_ios_v1", "codex_voice_audio_control_v1", "codex_voice_attachment_direct_v1", "codex_voice_system_volume_v1", "codex_voice_music_launch_v1")
+			}
+			if h.LineVoiceEnabled() {
+				helloInput.Capabilities = append(helloInput.Capabilities, "line_voice_v2")
+			}
+			if h.LineServiceEnabled() {
+				helloInput.Capabilities = append(helloInput.Capabilities, "line_accounts_v1", "line_service_config_v1", "line_owner_management_v1")
+				if h.lineControl != nil {
+					helloInput.Capabilities = append(helloInput.Capabilities, "line_control_cli_v1")
+				}
 			}
 			if _, ok := h.exec.(backend.RecapExecutor); ok {
 				helloInput.Capabilities = append(helloInput.Capabilities, "session_recap_v1")
@@ -158,6 +195,9 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 			helloInput.Capabilities = append(helloInput.Capabilities, "message_queue_v1", "queue_message_detail_v1", "session_tasks_v1", "queue_receipt_reconciliation_v1")
 			if h.taskService != nil && h.pairedTaskDevice(c) != "" {
 				helloInput.Capabilities = append(helloInput.Capabilities, "task_api_v1_rc1", "task_legacy_source_v1")
+				if h.interactions != nil {
+					helloInput.Capabilities = append(helloInput.Capabilities, "task_interactions_v5")
+				}
 			}
 		}
 		if !c.enrollmentOnly && h.dispatches != nil {
@@ -167,7 +207,10 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 			helloInput.Capabilities = append(helloInput.Capabilities, "device_inventory_v1")
 		}
 		if !c.enrollmentOnly {
-			helloInput.Capabilities = append(helloInput.Capabilities, "session_config_revision_v1", "file_attachments_v1", "next_message_config_v1", "bootstrap_snapshot_v1")
+			helloInput.Capabilities = append(helloInput.Capabilities, "session_config_revision_v1", "file_attachments_v1", "next_message_config_v1", "bootstrap_snapshot_v1", "conversation_visual_v1")
+			if !c.inventoryProbe && !cmd.ConnectionProbe {
+				helloInput.Capabilities = append(helloInput.Capabilities, "machine_resources_v1")
+			}
 		}
 		c.enqueueEvent(h.client.HelloAck(helloInput))
 		if c.inventoryProbe || cmd.ConnectionProbe {
@@ -191,8 +234,8 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		c.enqueueEvent(h.client.SessionsList(h.sessionSummaries()))
 		c.enqueueEvent(h.runtimeSnapshotForClient(c))
 		if h.events != nil {
-			if snapshot, err := h.events.Snapshot(ctx, c.deviceID, 0); err == nil {
-				c.enqueueEvent(h.client.ExternalEventSnapshot(snapshot))
+			if snapshot, err := h.externalSnapshot(ctx, c.deviceID); err == nil {
+				c.enqueueEventUnlogged(h.client.ExternalEventSnapshot(snapshot))
 			} else {
 				log.Printf("[events] snapshot device=%s: %v", c.deviceID, err)
 			}
@@ -308,8 +351,23 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 	case "session_mark_read":
 		h.handleSharedRead(c, cmd)
 
+	case "request_internal_agent_observation":
+		go h.handleInternalAgentObservation(ctx, c, cmd.SessionID, cmd.RequestID)
+
+	case "request_plugin_metadata_status":
+		if h.pairedTaskDevice(c) != "" {
+			c.enqueueEvent(pluginMetadataStatus())
+		} else {
+			c.enqueueEvent(h.client.Error("", "observation_forbidden", "Original paired reader required"))
+		}
+
 	case "request_runtime_snapshot":
 		c.enqueueEvent(h.runtimeSnapshotForClient(c))
+		// Android's native socket may outlive its WebView. A foreground refresh
+		// then has no new hello, so recover the source-scoped inbox snapshot too.
+		if h.automation != nil {
+			c.enqueueEvent(h.automationSnapshotEvent())
+		}
 
 	case "work_sync_request":
 		h.sendWorkSync(c, cmd.Revision)
@@ -545,7 +603,7 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		}
 		// A newly connected reader has not seen the original session_uuid event.
 		// Publish the existing identity without resuming or starting its work.
-		if resumeID := s.ResumeID(); s.Backend() == "codex" && resumeID != "" {
+		if resumeID := s.ResumeID(); (s.Backend() == "codex" || s.Backend() == "claude") && resumeID != "" {
 			c.enqueueEvent(protocol.NewSessionUUID(s.ID, resumeID))
 		}
 		cmd = h.captureHistoryReadBoundary(c, cmd)
@@ -794,7 +852,18 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		go h.saveFile(c, cmd)
 
 	case "request_status":
-		c.enqueueEvent(h.statusResult(cmd.SessionID))
+		if cmd.RequestID == "" {
+			c.enqueueEvent(h.statusResult(cmd.SessionID))
+		} else {
+			// A correlated metadata read must not block chat frames or create
+			// a synthetic message. Sampling is shared and bounded to one second.
+			go func() {
+				result := h.statusResult(cmd.SessionID)
+				result.RequestID = cmd.RequestID
+				result.Status["machine_resources"] = readMachineResources(h.cfg.InstanceID)
+				c.enqueueEvent(result)
+			}()
+		}
 
 	case "get_git_diff":
 		s, ok := h.registry.Get(cmd.SessionID)
@@ -819,7 +888,12 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		}
 
 	case "permission_response":
-		h.perms.Resolve(cmd.RequestID, cmd.Decision, c.deviceID)
+		if err := h.perms.Resolve(cmd.RequestID, cmd.Decision, c.deviceID); err != nil {
+			failure := h.client.Error(cmd.SessionID, "permission_response_rejected", err.Error())
+			failure.RequestID = cmd.RequestID
+			failure.CommandType = "permission_response"
+			c.enqueueEvent(failure)
+		}
 
 	// --- WebRTC P2P signaling --------------------------------------------
 	// Bridge is the answerer: webrtc_offer → webrtc_answer (+ baked ICE),
@@ -915,11 +989,11 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		if h.events == nil {
 			return
 		}
-		if snapshot, err := h.events.Snapshot(ctx, c.deviceID, 0); err == nil {
+		if snapshot, err := h.externalSnapshot(ctx, c.deviceID); err == nil {
 			for index := range snapshot.Items {
 				h.materializeExternalEvent(&snapshot.Items[index].Event)
 			}
-			c.enqueueEvent(h.client.ExternalEventSnapshot(snapshot))
+			c.enqueueEventUnlogged(h.client.ExternalEventSnapshot(snapshot))
 		} else {
 			c.enqueueEvent(h.client.Error("", "", "Event inbox unavailable: "+err.Error()))
 		}
@@ -928,9 +1002,15 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		if h.events == nil {
 			return
 		}
+		if !h.authorizeLineEvent(ctx, c.deviceID, cmd.EventID) {
+			return
+		}
 		read := true
 		if item, err := h.events.Mark(ctx, cmd.EventID, c.deviceID, &read, nil); err == nil {
-			c.enqueueEvent(h.client.ExternalEventState(item))
+			if projected, ok := h.projectLineEvent(ctx, c.deviceID, item.Event); ok {
+				item.Event = projected
+				c.enqueueEventUnlogged(h.client.ExternalEventState(item))
+			}
 		} else {
 			c.enqueueEvent(h.client.Error("", "", "Event update failed: "+err.Error()))
 		}
@@ -939,9 +1019,15 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		if h.events == nil {
 			return
 		}
+		if !h.authorizeLineEvent(ctx, c.deviceID, cmd.EventID) {
+			return
+		}
 		dismissed := true
 		if item, err := h.events.Mark(ctx, cmd.EventID, c.deviceID, nil, &dismissed); err == nil {
-			c.enqueueEvent(h.client.ExternalEventState(item))
+			if projected, ok := h.projectLineEvent(ctx, c.deviceID, item.Event); ok {
+				item.Event = projected
+				c.enqueueEventUnlogged(h.client.ExternalEventState(item))
+			}
 		} else {
 			c.enqueueEvent(h.client.Error("", "", "Event update failed: "+err.Error()))
 		}
@@ -949,6 +1035,9 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 	// --- Interactions: AskUserQuestion ------------------------------------
 
 	case "user_input_response":
+		if h.respondDelegatedInteraction(c, cmd) {
+			return
+		}
 		cancelled := cmd.Cancelled != nil && *cmd.Cancelled
 		if native, ok := h.exec.(backend.NativeAsyncInteractions); ok {
 			sid, content, handled, err := native.PrepareAsyncReply(cmd.RequestID, cmd.Answers, cancelled)
@@ -1059,6 +1148,7 @@ func (h *Hub) sendPendingInteractions(c *Client, cmd clientproto.Command) {
 	if ir, ok := h.exec.(interactionResponder); ok {
 		items = ir.PendingInteractions(cmd.SessionID)
 	}
+	items = h.appendTaskInteractionSnapshot(items, cmd.SessionID)
 	snapshot := h.client.PendingInteractionsList(items)
 	snapshot.ScopeSessionID, snapshot.SnapshotAll = cmd.SessionID, cmd.SessionID == ""
 	c.enqueueEvent(snapshot)
@@ -1074,6 +1164,7 @@ func (h *Hub) sendHistory(c *Client, s *session.Session, cmd clientproto.Command
 	}
 	provider, ok := hr.ProviderFor(s)
 	resumeIDs := s.ResumeIDs()
+	activeHistoryThread := s.Snapshot().ResumeID
 	if !ok || len(resumeIDs) == 0 {
 		// No history backend or no resume id yet → empty snapshot.
 		c.enqueueEvent(h.client.HistorySnapshot(s.ID, []map[string]any{}, 0, false, cmd.KnownLast == "", ""))
@@ -1086,20 +1177,51 @@ func (h *Hub) sendHistory(c *Client, s *session.Session, cmd clientproto.Command
 		thinkFlag = "1"
 	}
 	key := c.deviceID + "|" + s.ID + "|" + strings.Join(resumeIDs, ",") + "|" + cmd.Mode + "|" + cmd.Before + "|" + cmd.KnownLast + "|" + itoa(cmd.Limit) + "|" + thinkFlag + "|" + cmd.ReadEpoch + "|" + strconv.FormatUint(cmd.Revision, 10)
+	deferred := ""
+	if cmd.HistoryContinuity {
+		if views := h.runtimes.Snapshot("", []string{s.ID}); len(views) == 1 {
+			switch views[0].Phase {
+			case "completed", "failed", "cancelled", "idle":
+			default:
+				deferred = views[0].ActiveRequestID
+			}
+		}
+		// A terminal transition must not reuse a cache entry which intentionally
+		// left the exact running request's mutable tool output in the live feed.
+		key += "|scoped-v1|deferred:" + deferred
+	}
 	v := h.coalesce(&h.storm.histSF, h.storm.histCache, key, historyCacheTTL, func() any {
 		res, err := loadLogicalSessionHistory(provider, resumeIDs, history.Opts{
 			Limit: cmd.Limit, KnownLast: cmd.KnownLast, Mode: cmd.Mode, Before: cmd.Before,
-			IncludeThinking: cmd.IncludeThinking,
+			IncludeThinking:            cmd.IncludeThinking,
+			Scoped:                     cmd.HistoryContinuity && cmd.HistoryRequestID != "",
+			DeferredAssistantRequestID: deferred,
 		})
 		if err != nil {
-			return nil
+			return err
 		}
 		return res
 	})
 	if v == nil {
 		return
 	}
+	if err, failed := v.(error); failed {
+		if c.live() {
+			h.historyReadError(c, s.ID, cmd, history.ErrorCode(err), err.Error())
+		}
+		return
+	}
 	res := v.(*history.Result)
+
+	var rangeProof *protocol.HistoryRangeProof
+	if cmd.HistoryContinuity && cmd.HistoryRequestID != "" {
+		var proofErr error
+		rangeProof, proofErr = h.buildHistoryRangeProof(provider, s, resumeIDs, activeHistoryThread, cmd, res)
+		if proofErr != nil {
+			h.historyReadError(c, s.ID, cmd, "history_continuity_unavailable", proofErr.Error())
+			return
+		}
+	}
 	if !c.live() {
 		return // client replaced/gone while loading → drop (#3)
 	}
@@ -1107,7 +1229,50 @@ func (h *Hub) sendHistory(c *Client, s *session.Session, cmd clientproto.Command
 	if msgs == nil {
 		msgs = []map[string]any{}
 	}
+	if rangeProof != nil {
+		// source_session_id is a legacy field recursively projected as a Bridge
+		// SessionKey. Keep it byte-compatible and carry the actual native UUID
+		// in a distinct field whose meaning cannot be rewritten by projection.
+		scoped := make([]map[string]any, len(msgs))
+		for i, m := range msgs {
+			clone := make(map[string]any, len(m)+1)
+			for key, value := range m {
+				clone[key] = value
+			}
+			clone["native_source_thread_id"] = m["source_session_id"]
+			scoped[i] = clone
+		}
+		msgs = scoped
+	}
 	msgs = h.annotateDelegationHistory(s.ID, msgs)
+	if rangeProof != nil {
+		copy := *res
+		copy.Messages = msgs
+		bounded, e := boundScopedHistoryFrame(&copy, cmd)
+		if e != nil {
+			h.historyReadError(c, s.ID, cmd, "history_frame_too_large", e.Error())
+			return
+		}
+		res = bounded
+		msgs = res.Messages
+		rangeProof.First = ""
+		rangeProof.Last = ""
+		if len(msgs) > 0 {
+			rangeProof.First, _ = msgs[0]["source_message_id"].(string)
+			rangeProof.Last, _ = msgs[len(msgs)-1]["source_message_id"].(string)
+		}
+		rangeProof.HasMoreBefore = res.HasMoreBefore
+		rangeProof.HasMoreAfter = res.HasMoreAfter
+	} else {
+		copy := *res
+		copy.Messages = msgs
+		bounded, err := boundOrdinaryHistoryFrame(&copy, cmd)
+		if err != nil {
+			h.historyReadError(c, s.ID, cmd, "history_frame_too_large", err.Error())
+			return
+		}
+		res, msgs = bounded, bounded.Messages
+	}
 	latestAssistantAt := int64(0)
 	latestAssistantText := ""
 	toolOnlyPreviews := make(map[string]struct{})
@@ -1140,7 +1305,7 @@ func (h *Hub) sendHistory(c *Client, s *session.Session, cmd clientproto.Command
 	// Pagination into older history must never move the canonical row backward.
 	// Snapshot/delta requests without a before cursor include the newest tail and
 	// are safe repair sources after a Bridge restart.
-	if latestAssistantAt > 0 && cmd.Before == "" {
+	if latestAssistantAt > 0 && cmd.Before == "" && (!cmd.HistoryContinuity || !res.HasMoreAfter) {
 		if preview := truncateGraphemes(normalizePreviewText(latestAssistantText), 160); preview != "" {
 			current := s.Snapshot()
 			_, invalidToolProjection := toolOnlyPreviews[current.PreviewText]
@@ -1167,17 +1332,18 @@ func (h *Hub) sendHistory(c *Client, s *session.Session, cmd clientproto.Command
 		if h.runtimes.HistoryMatchesReadBoundary(s.ID, cmd.ReadEpoch, cmd.Revision, msgs) {
 			event.HistoryReadEpoch, event.HistoryReadRevision, event.HistoryReadToken = h.confirmHistoryReadBoundary(c, cmd)
 		}
-		c.enqueueEvent(event)
+		h.enqueueHistoryFrame(c, s.ID, cmd, event)
 		if previewProjectionChanged {
 			h.BroadcastSessionSummaries()
 		}
 		return
 	}
 	event := h.client.HistorySnapshot(s.ID, msgs, res.SourceCount, res.HasMoreBefore, res.KnownIDFound, res.SnapshotReason)
-	if res.SnapshotReason != "before_page" && h.runtimes.HistoryMatchesReadBoundary(s.ID, cmd.ReadEpoch, cmd.Revision, msgs) {
+	event.Continuity = rangeProof
+	if res.SnapshotReason != "before_page" && (!cmd.HistoryContinuity || !res.HasMoreAfter) && h.runtimes.HistoryMatchesReadBoundary(s.ID, cmd.ReadEpoch, cmd.Revision, msgs) {
 		event.HistoryReadEpoch, event.HistoryReadRevision, event.HistoryReadToken = h.confirmHistoryReadBoundary(c, cmd)
 	}
-	c.enqueueEvent(event)
+	h.enqueueHistoryFrame(c, s.ID, cmd, event)
 	if previewProjectionChanged {
 		h.BroadcastSessionSummaries()
 	}
@@ -1188,6 +1354,9 @@ func (h *Hub) sendHistory(c *Client, s *session.Session, cmd clientproto.Command
 // once across the logical timeline. A single-generation session keeps the old
 // fast path.
 func loadLogicalSessionHistory(provider backend.HistoryProvider, resumeIDs []string, opts history.Opts) (*history.Result, error) {
+	if opts.Scoped || opts.Mode == "continuation" || len(resumeIDs) > 1 && opts.Before != "" && historySourceThread(opts.Before, resumeIDs) >= 0 {
+		return loadScopedLogicalHistory(provider, resumeIDs, opts)
+	}
 	if len(resumeIDs) == 1 {
 		return provider.LoadHistory(resumeIDs[0], opts)
 	}
@@ -1223,15 +1392,27 @@ func (h *Hub) sendResumable(c *Client, limit int) {
 	}
 	// One provider scan per (limit) within the TTL, shared across reconnect
 	// bursts and browse_dir (#6). Re-check liveness after the (slow) scan (#3).
-	all := h.coalescedResumable(limit)
+	all, err := h.coalescedResumableChecked(limit)
 	if !c.live() {
 		return
+	}
+	if err != nil {
+		c.enqueueEvent(h.client.Error("", history.ErrorCode(err), err.Error()))
+		if len(all) == 0 {
+			return
+		}
 	}
 	c.enqueueEvent(h.client.ResumableSessions(all))
 }
 
 func (h *Hub) sessionSummaries() []protocol.SessionSummary {
-	sessions := h.registry.List()
+	all := h.registry.List()
+	sessions := make([]*session.Session, 0, len(all))
+	for _, s := range all {
+		if !strings.HasPrefix(s.ID, "s_cw_") {
+			sessions = append(sessions, s)
+		}
+	}
 	out := make([]protocol.SessionSummary, 0, len(sessions))
 	runtimeIDs := make([]string, 0, len(sessions))
 	for _, s := range sessions {
@@ -1289,6 +1470,7 @@ func (h *Hub) sessionSummaries() []protocol.SessionSummary {
 			lastActivity = float64(previewAt) / 1000
 		}
 		out = append(out, protocol.SessionSummary{
+			ClaudeUUID:  snap.ResumeID,
 			ContextUsed: knownContextUsed(snap), ContextMax: knownContextMax(snap),
 			ActiveModel: active.Model, ActiveEffort: active.Effort, ActiveServiceTier: active.ServiceTier, ActiveConfigRevision: active.ConfigRevision,
 			ConfigRevision: snap.ConfigRevision,
@@ -1304,6 +1486,7 @@ func (h *Hub) sessionSummaries() []protocol.SessionSummary {
 			PreviewText:    previewText, PreviewRole: previewRole, PreviewVersion: sessionPreviewPolicyVersion,
 		})
 	}
+	h.projectSessionSources(out)
 	return out
 }
 
@@ -1340,6 +1523,9 @@ func (c *Client) enqueueEventUnlogged(event any) {
 	data, err := marshalEvent(event, c.wireAuthority())
 	if err != nil {
 		log.Printf("enqueueEvent marshal: %v", err)
+		return
+	}
+	if !c.hub.workspaceNativeFrameAllowed(c, data) {
 		return
 	}
 	c.enqueue(data)

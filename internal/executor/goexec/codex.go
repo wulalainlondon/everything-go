@@ -27,6 +27,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"everything-go/internal/agentvisibility"
 	"everything-go/internal/backend"
 	"everything-go/internal/executor"
 	"everything-go/internal/protocol"
@@ -63,24 +64,33 @@ var (
 )
 
 type codexState struct {
+	visibility agentvisibility.Channel
+
 	mu       sync.Mutex
 	ensureMu sync.Mutex
 
-	threadID          string
-	currentTurnID     string
-	turnStartPending  bool
-	pendingTerminals  map[string]codexTurnTerminal
-	turnActive        bool
-	turnErr           string
-	turnErrorCode     string
-	turnFailure       *codexFailureDetail
-	failureNoticeKey  string
-	turnDone          chan struct{}
-	stopping          bool
-	reqID             string
-	observedTurnID    string
-	observedRequestID string
-	retiredTurns      []string
+	threadID                            string
+	currentTurnID                       string
+	startAdmission                      *codexStartAdmission
+	submissionEpoch                     uint64
+	nativeBoundary                      uint64
+	unconfirmedActivity                 bool
+	pendingNotifications                []json.RawMessage
+	pendingNotificationBytes            int
+	confirmedRequestID, confirmedTurnID string
+	turnStartPending                    bool
+	pendingTerminals                    map[string]codexTurnTerminal
+	turnActive                          bool
+	turnErr                             string
+	turnErrorCode                       string
+	turnFailure                         *codexFailureDetail
+	failureNoticeKey                    string
+	turnDone                            chan struct{}
+	stopping                            bool
+	reqID                               string
+	observedTurnID                      string
+	observedRequestID                   string
+	retiredTurns                        []string
 	// tempImages is keyed by the owning turn request id. A terminal event can
 	// synchronously release the Session actor and start the next turn before the
 	// previous runTurn defer executes; a flat Session-wide slice lets that older
@@ -165,23 +175,33 @@ func (st *codexState) touch(now time.Time) {
 
 // Codex implements executor.Executor over the codex app-server.
 type Codex struct {
-	taskProvider       backend.TaskAPIProvider
-	voiceMu            sync.Mutex
-	voiceCalls         map[string]*codexVoiceCall
-	recapStoreMu       sync.Mutex
-	recapStore         *recap.Store
-	recapSlots         chan struct{}
-	pmProvider         backend.PMProvider
-	delegationProvider backend.DelegationProvider
-	controlProvider    backend.SessionControlProvider
-	toolEnvironment    toolEnvironmentState
-	toolRPCGate        sync.RWMutex
-	sink               executor.Sink
-	tools              *toolEmitter
-	codexBin           string
-	sessionsRoot       string
-	indexPath          string
-	rpc                *rpcPlumber
+	appSandbox *codexAppSandbox
+	// Optional owned-fixture observer. Nil in production; never grants authority.
+	nativeFixtureObserver func(json.RawMessage)
+	mediaOrigins          mediaOriginState
+	lineOrigins           lineOriginState
+	voiceControlOrigins   voiceOriginState
+	metadataObserverBoot  string
+
+	taskProvider           backend.TaskAPIProvider
+	voiceMu                sync.Mutex
+	voiceCalls             map[string]*codexVoiceCall
+	voicePreparing         map[string]bool
+	voicePermissionSignals map[string]chan json.RawMessage
+	recapStoreMu           sync.Mutex
+	recapStore             *recap.Store
+	recapSlots             chan struct{}
+	pmProvider             backend.PMProvider
+	delegationProvider     backend.DelegationProvider
+	controlProvider        backend.SessionControlProvider
+	toolEnvironment        toolEnvironmentState
+	toolRPCGate            sync.RWMutex
+	sink                   executor.Sink
+	tools                  *toolEmitter
+	codexBin               string
+	sessionsRoot           string
+	indexPath              string
+	rpc                    *rpcPlumber
 
 	startMu               sync.Mutex
 	proc                  *exec.Cmd
@@ -430,10 +450,12 @@ func (c *Codex) ensureServer() error {
 
 func (c *Codex) startServerLocked() error {
 	log.Printf("[codex] connecting app-server mode=%s", c.appServerMode)
-	if changed, err := ensureBrowserElicitationRouting(filepath.Dir(c.sessionsRoot)); err != nil {
-		log.Printf("[codex] browser elicitation routing config failed: %v", err)
-	} else if changed {
-		log.Printf("[codex] Browser Use elicitations routed through bridge policy")
+	if c.appSandbox == nil {
+		if changed, err := ensureBrowserElicitationRouting(filepath.Dir(c.sessionsRoot)); err != nil {
+			log.Printf("[codex] browser elicitation routing config failed: %v", err)
+		} else if changed {
+			log.Printf("[codex] Browser Use elicitations routed through bridge policy")
+		}
 	}
 	codexHome := filepath.Dir(c.sessionsRoot)
 	if c.appServerMode == "daemon" {
@@ -451,8 +473,15 @@ func (c *Codex) startServerLocked() error {
 		return c.startRemoteServerLocked(codexHome)
 	}
 	args := []string{"app-server"}
+	if c.appSandbox != nil {
+		args = append(args, "-c", `cli_auth_credentials_store="ephemeral"`, "-c", "project_root_markers=[]")
+	}
 	cmd := exec.Command(c.codexBin, args...)
 	cmd.Env = append(os.Environ(), "CODEX_HOME="+codexHome)
+	if c.appSandbox != nil {
+		cmd.Env = c.appSandboxEnvironment()
+		cmd.Dir = c.appSandbox.workspace
+	}
 	stdinPipe, err := cmd.StdinPipe()
 	if err != nil {
 		return err
@@ -469,7 +498,7 @@ func (c *Codex) startServerLocked() error {
 		return err
 	}
 	authFingerprint := "shared-daemon"
-	if c.appServerMode != "daemon" {
+	if c.appServerMode != "daemon" && c.appSandbox == nil {
 		var err error
 		authFingerprint, err = codexAuthFingerprint(c.authPath)
 		if err != nil {
@@ -506,6 +535,13 @@ func (c *Codex) startServerLocked() error {
 
 	if err := c.initializeRPC(); err != nil {
 		return err
+	}
+	if c.appSandbox != nil {
+		if err := c.loginExternalChatGPT(); err != nil {
+			_ = c.stopServerLocked()
+			return err
+		}
+		return nil
 	}
 	c.startAuthWatcher()
 	return nil
@@ -751,6 +787,9 @@ func (c *Codex) startAuthWatcher() {
 }
 
 func (c *Codex) authCredentialsChanged() bool {
+	if c.appSandbox != nil {
+		return false
+	}
 	fingerprint, err := codexAuthFingerprint(c.authPath)
 	if err != nil {
 		return false
@@ -1004,6 +1043,10 @@ func (c *Codex) invalidateLiveThreads() {
 // rpcCall sends an RPC and waits for the response. Writes go straight to the
 // pipe, so there is no flush step.
 func (c *Codex) rpcCall(method string, params any, timeout time.Duration) (json.RawMessage, error) {
+	return c.rpcCallAtEpoch(method, params, timeout, nil)
+}
+
+func (c *Codex) rpcCallAtEpoch(method string, params any, timeout time.Duration, epoch *uint64) (json.RawMessage, error) {
 	// A confirmed tool maintenance window serializes our submission RPCs, not
 	// interrupt/release or read-only diagnostics. It never restarts the daemon.
 	if toolMutationMethod(method) {
@@ -1015,7 +1058,7 @@ func (c *Codex) rpcCall(method string, params any, timeout time.Duration) (json.
 			return nil, err
 		}
 	}
-	raw, err := c.rpc.request(method, params, timeout)
+	raw, err := c.rpc.requestAtEpoch(method, params, timeout, epoch)
 	var timeoutErr *rpcTimeoutError
 	if c.appServerMode == "daemon" && (errors.As(err, &timeoutErr) || errors.Is(err, context.DeadlineExceeded)) && healthGatedMethod(method) {
 		c.scheduleHealthCheck(method, params)
@@ -1081,9 +1124,15 @@ type codexTokenUsage struct {
 }
 
 func (c *Codex) dispatch(raw json.RawMessage) {
+	if c.nativeFixtureObserver != nil {
+		c.nativeFixtureObserver(raw)
+	}
 	var m codexMsg
 	if json.Unmarshal(raw, &m) != nil {
 		return
+	}
+	if m.Method == "thread/settings/updated" {
+		c.observeVoicePermissionSettings(m.Params)
 	}
 	// Server→client request (has id + method, no result/error).
 	if len(m.ID) > 0 && string(m.ID) != "null" && m.Method != "" {
@@ -1126,6 +1175,7 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 			Type              string          `json:"type"`
 			Command           json.RawMessage `json:"command"`
 			Output            json.RawMessage `json:"output"`
+			AggregatedOutput  json.RawMessage `json:"aggregatedOutput"`
 			Status            string          `json:"status"`
 			Tool              string          `json:"tool"`
 			SenderThreadID    string          `json:"senderThreadId"`
@@ -1198,6 +1248,37 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 	rootThreadID := st.threadID
 	st.mu.Unlock()
 	isRootThread := p.ThreadID == rootThreadID
+	st.mu.Lock()
+	if isRootThread && (m.Method == "turn/started" || m.Method == "turn/completed") {
+		st.nativeBoundary++
+	}
+	pendingStart := st.turnActive && st.turnStartPending
+	st.mu.Unlock()
+	if pendingStart {
+		st.mu.Lock()
+		if isRootThread && firstNonEmpty(p.TurnID, p.Turn.ID) != "" {
+			st.unconfirmedActivity = true
+		}
+		st.mu.Unlock()
+		if isRootThread && firstNonEmpty(p.TurnID, p.Turn.ID) != "" && (strings.HasPrefix(m.Method, "item/") || m.Method == "turn/plan/updated" || m.Method == "turn/diff/updated") {
+			st.mu.Lock()
+			if st.turnStartPending && len(raw) <= 64<<10 && len(st.pendingNotifications) < 64 && st.pendingNotificationBytes+len(raw) <= 256<<10 {
+				st.pendingNotifications = append(st.pendingNotifications, append(json.RawMessage(nil), raw...))
+				st.pendingNotificationBytes += len(raw)
+			}
+			st.mu.Unlock()
+		}
+		// Notification order does not establish input ownership. Keep only a
+		// bounded terminal candidate; publish no stream/tool/child state yet.
+		if isRootThread && m.Method == "turn/completed" {
+			st.completeOwnedTurn(codexTurnTerminal{ID: p.Turn.ID, Status: p.Turn.Status, Message: p.Turn.Error.Message,
+				ErrorCode: codexErrorCode(p.Turn.Error.Info, p.Turn.Error.Message), Failure: recovery.ClassifyCodex(p.Turn.Error.Info, p.Turn.Error.Message)})
+		} else if isRootThread && m.Method == "error" && p.TurnID != "" && p.WillRetry != nil && !*p.WillRetry {
+			st.completeOwnedTurn(codexTurnTerminal{ID: p.TurnID, Status: "failed", Message: p.Error.Message,
+				ErrorCode: codexErrorCode(p.Error.Info, p.Error.Message), Failure: recovery.ClassifyCodex(p.Error.Info, p.Error.Message), NativeWillRetry: p.WillRetry})
+		}
+		return
+	}
 	if isRootThread {
 		turnID := firstNonEmpty(p.TurnID, p.Turn.ID)
 		if m.Method == "error" && turnID == "" {
@@ -1210,6 +1291,11 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 		}
 	}
 	st.touch(time.Now())
+	if isRootThread {
+		c.observeMediaNative(s, m.Method, m.Params)
+		c.observeLineNative(s, m.Method, m.Params)
+		c.observeVoiceControlNative(s, m.Method, m.Params)
+	}
 
 	switch m.Method {
 	case "mcpServer/startupStatus/updated":
@@ -1257,14 +1343,18 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 			// intermediate assistant updates), not private model reasoning.  Sending
 			// it as thinking_chunk buries every live update in a collapsed thinking
 			// card and makes an active Codex turn look as if it is not streaming.
-			c.sink.Emit(backend.NewTextChunk(s.ID, reqID, p.Delta))
+			chunk := backend.NewTextChunk(s.ID, reqID, p.Delta)
+			chunk.SourceItemID = p.ItemID
+			c.sink.Emit(chunk)
 			return
 		}
 		c.appendCodexAgentOutput(st, p.ThreadID, p.Delta)
 		st.mu.Lock()
 		st.accumulatedText += p.Delta
 		st.mu.Unlock()
-		c.sink.Emit(backend.NewTextChunk(s.ID, reqID, p.Delta))
+		chunk := backend.NewTextChunk(s.ID, reqID, p.Delta)
+		chunk.SourceItemID = p.ItemID
+		c.sink.Emit(chunk)
 
 	case "item/reasoning/textDelta":
 		if !isRootThread {
@@ -1338,6 +1428,9 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 		rawOutput := p.Output
 		if len(rawOutput) == 0 || string(rawOutput) == "null" {
 			rawOutput = p.Item.Output
+		}
+		if len(rawOutput) == 0 || string(rawOutput) == "null" {
+			rawOutput = p.Item.AggregatedOutput
 		}
 		generatedPaths := codexGeneratedImagePaths(rawOutput)
 		output := rawToString(rawOutput)
@@ -1675,6 +1768,9 @@ func (c *Codex) BuildAgentTree(resumeID string) (int, []*protocol.AgentNode) {
 }
 
 func (c *Codex) handleServerRequest(id any, method string, raw json.RawMessage) {
+	if c.handleExternalAuthRefresh(id, method, raw) {
+		return
+	}
 	if c.handleTaskAPIServerRequest(id, method, raw) {
 		return
 	}
@@ -1755,6 +1851,7 @@ func (c *Codex) emitUnsupportedCodexTool(raw json.RawMessage) string {
 
 func (c *Codex) createUserInputRequest(rpcID any, raw json.RawMessage) bool {
 	var p struct {
+		TurnID           string                     `json:"turnId"`
 		ThreadID         string                     `json:"threadId"`
 		ItemID           string                     `json:"itemId"`
 		CallID           string                     `json:"callId"`
@@ -1818,7 +1915,19 @@ func (c *Codex) createUserInputRequest(rpcID any, raw json.RawMessage) bool {
 	c.interactions[reqID] = codexInteraction{payload: payload, rpcID: rpcID, responseKind: responseKind}
 	c.interMu.Unlock()
 	c.sink.Emit(backend.NewUserInputRequest(payload))
+	c.observeOwnedQuestion(s, threadID, p.TurnID, toolID, payload)
 	return true
+}
+
+func (c *Codex) observeOwnedQuestion(s *session.Session, threadID, turnID, callID string, payload backend.UserInputPayload) {
+	st := c.state(s.ID)
+	st.mu.Lock()
+	request, currentTurn := st.reqID, st.currentTurnID
+	owned := st.turnActive && !st.turnStartPending && st.threadID == threadID && turnID != "" && turnID == currentTurn
+	st.mu.Unlock()
+	if observer, ok := c.taskProvider.(backend.TaskQuestionObserver); ok && owned {
+		observer.ObserveTaskQuestion(context.Background(), backend.TaskQuestionEvidence{Session: s, RequestID: request, ThreadID: threadID, TurnID: currentTurn, CallID: callID, Payload: payload})
+	}
 }
 
 func rpcIDKey(value any) string {
@@ -1880,6 +1989,7 @@ func (c *Codex) createMcpElicitationRequest(rpcID any, raw json.RawMessage) bool
 	c.interactions[reqID] = codexInteraction{payload: payload, rpcID: rpcID, responseKind: "mcp", mcpParams: append(json.RawMessage(nil), raw...)}
 	c.interMu.Unlock()
 	c.sink.Emit(backend.NewUserInputRequest(payload))
+	c.observeOwnedQuestion(s, p.ThreadID, p.TurnID, p.ElicitationID, payload)
 	return true
 }
 
@@ -1910,6 +2020,7 @@ func (c *Codex) createDynamicToolRequest(rpcID any, raw json.RawMessage) bool {
 	c.interMu.Unlock()
 	c.tools.Start(s.ID, c.state(s.ID).reqID, p.CallID, name, codexJSON(p.Arguments))
 	c.sink.Emit(backend.NewUserInputRequest(payload))
+	c.observeOwnedQuestion(s, p.ThreadID, p.TurnID, p.CallID, payload)
 	return true
 }
 
@@ -2060,6 +2171,9 @@ func (c *Codex) Send(ctx context.Context, s *session.Session, reqID, content str
 		return err
 	}
 	sandboxOverride, _ := backend.SandboxOverride(ctx)
+	if err := c.validateAppSandbox(s, sandboxOverride); err != nil {
+		return err
+	}
 	if err := c.ensureServer(); err != nil {
 		c.sink.Emit(backend.NewError(s.ID, reqID, backend.ErrProcessDied, "codex app-server failed: "+err.Error()))
 		return err
@@ -2087,6 +2201,13 @@ func (c *Codex) Send(ctx context.Context, s *session.Session, reqID, content str
 	if err := threadErr; err != nil {
 		if !errors.Is(err, backend.ErrThreadActiveWriter) {
 			c.sink.Emit(backend.NewError(s.ID, reqID, backend.ErrProcessDied, "failed to start codex thread: "+err.Error()))
+		}
+		return err
+	}
+	admission, err := c.readStartAdmission(s, st, reqID)
+	if err != nil {
+		if !errors.Is(err, backend.ErrNativeSubmissionBusy) {
+			c.sink.Emit(backend.NativeSubmissionUncertain{SessionID: s.ID, RequestID: reqID, Reason: codexCorrelationReason(err)})
 		}
 		return err
 	}
@@ -2126,6 +2247,7 @@ func (c *Codex) Send(ctx context.Context, s *session.Session, reqID, content str
 
 	st.mu.Lock()
 	st.reqID = reqID
+	st.startAdmission = admission
 	st.stopping = false
 	st.turnErr = ""
 	st.turnErrorCode = ""
@@ -2138,6 +2260,9 @@ func (c *Codex) Send(ctx context.Context, s *session.Session, reqID, content str
 	st.currentTurnID = ""
 	st.turnStartPending = true
 	st.pendingTerminals = nil
+	st.pendingNotifications = nil
+	st.pendingNotificationBytes = 0
+	st.confirmedRequestID, st.confirmedTurnID = "", ""
 	st.lastEventAt = time.Now()
 	st.stallWarned = false
 	st.inactivityStopRequested = false
@@ -2150,7 +2275,7 @@ func (c *Codex) Send(ctx context.Context, s *session.Session, reqID, content str
 		st.finish(err.Error())
 		return err
 	}
-	input := c.codexInput(s, reqID, reqID, content, images, files, st)
+	input := c.codexInput(s, reqID, reqID, backend.PresentationContent(ctx, content), images, files, st)
 	go c.runTurn(s, st, threadID, input, done, sandboxOverride)
 	return nil
 }
@@ -2160,6 +2285,10 @@ func (c *Codex) Send(ctx context.Context, s *session.Session, reqID, content str
 // between the local snapshot and the RPC is safely rejected instead of being
 // attached to the next turn.
 func (c *Codex) Steer(ctx context.Context, s *session.Session, clientUserMessageID, content string, images []backend.ImageAttachment, files []backend.FileAttachment) (backend.SteerResult, error) {
+	override, _ := backend.SandboxOverride(ctx)
+	if err := c.validateAppSandbox(s, override); err != nil {
+		return backend.SteerResult{}, err
+	}
 	if _, err := c.validateAsyncReply(s, clientUserMessageID, content); err != nil {
 		return backend.SteerResult{}, fmt.Errorf("%w: %v", backend.ErrSteerRejected, err)
 	}
@@ -2169,18 +2298,27 @@ func (c *Codex) Steer(ctx context.Context, s *session.Session, clientUserMessage
 	if err := c.ensureServer(); err != nil {
 		return backend.SteerResult{}, fmt.Errorf("%w: %v", backend.ErrSteerRejected, err)
 	}
-	return c.steerActiveTurn(s, clientUserMessageID, content, images, files)
+	return c.steerActiveTurn(s, clientUserMessageID, backend.PresentationContent(ctx, content), images, files)
 }
 
 func (c *Codex) steerActiveTurn(s *session.Session, clientUserMessageID, content string, images []backend.ImageAttachment, files []backend.FileAttachment) (backend.SteerResult, error) {
 	st := c.state(s.ID)
+	source := s.Snapshot()
+	config := session.ConfigurationFrom(source)
 	st.mu.Lock()
-	active := st.turnActive
+	active := st.turnActive && !st.turnStartPending && !st.stopping
 	threadID := st.threadID
 	turnID := st.currentTurnID
 	activeRequestID := st.reqID
+	observed := !st.turnActive && !st.compactActive && !st.stopping && !st.turnStartPending &&
+		st.observedTurnID != "" && st.observedRequestID != "" && st.threadID == source.ResumeID
+	if observed {
+		active = true
+		turnID, activeRequestID = st.observedTurnID, st.observedRequestID
+	}
+	epoch := c.rpc.transportEpoch.Load()
 	st.mu.Unlock()
-	if !active || threadID == "" || turnID == "" {
+	if !active || threadID == "" || turnID == "" || activeRequestID == "" || clientUserMessageID == "" {
 		return backend.SteerResult{}, backend.ErrNoActiveTurn
 	}
 
@@ -2191,7 +2329,7 @@ func (c *Codex) steerActiveTurn(s *session.Session, clientUserMessageID, content
 		"input":               input,
 		"clientUserMessageId": clientUserMessageID,
 	}
-	raw, err := c.rpcCall("turn/steer", params, 15*time.Second)
+	raw, err := c.rpcCallAtEpoch("turn/steer", params, 15*time.Second, &epoch)
 	if err != nil {
 		var rejected *rpcResponseError
 		if errors.As(err, &rejected) {
@@ -2203,19 +2341,30 @@ func (c *Codex) steerActiveTurn(s *session.Session, clientUserMessageID, content
 		TurnID string `json:"turnId"`
 	}
 	decodeErr := json.Unmarshal(raw, &response)
-	if strings.HasPrefix(clientUserMessageID, "ui_async_") && (decodeErr != nil || response.TurnID != turnID) {
+	if decodeErr != nil || response.TurnID != turnID {
 		// A malformed/mismatched ACK is uncertain, not a definitive rejection
 		// that can be automatically replayed into another turn.
 		return backend.SteerResult{}, fmt.Errorf("native async reply acceptance could not be correlated to the expected turn")
 	}
-	if decodeErr != nil || response.TurnID == "" {
-		response.TurnID = turnID
+	st.mu.Lock()
+	current := st.turnActive && !st.turnStartPending && !st.stopping && st.threadID == threadID && st.currentTurnID == turnID && st.reqID == activeRequestID
+	if observed {
+		current = !st.turnActive && !st.compactActive && !st.stopping && !st.turnStartPending &&
+			st.threadID == threadID && st.observedTurnID == turnID && st.observedRequestID == activeRequestID
+	}
+	current = current && c.rpc.transportEpoch.Load() == epoch
+	st.mu.Unlock()
+	if observed {
+		current = current && s.ResumeID() == threadID && session.ConfigurationFrom(s.Snapshot()) == config
+	}
+	if !current {
+		return backend.SteerResult{}, &codexAcceptanceError{Reason: "native_current_request_changed"}
 	}
 	st.touch(time.Now())
 	if strings.HasPrefix(clientUserMessageID, "ui_async_") {
 		c.resolveAsyncReplies(s, threadID, content)
 	}
-	return backend.SteerResult{TurnID: response.TurnID, RequestID: activeRequestID}, nil
+	return backend.SteerResult{TurnID: response.TurnID, RequestID: activeRequestID, StrictACK: true}, nil
 }
 
 func (c *Codex) runTurn(s *session.Session, st *codexState, threadID string, input []map[string]any, done chan struct{}, sandboxOverride string) {
@@ -2229,7 +2378,7 @@ func (c *Codex) runTurn(s *session.Session, st *codexState, threadID string, inp
 		if st.turnActive && st.reqID == requestID {
 			st.turnFailure = codexSubmissionFailure(err)
 			// Contradictory live/terminal notifications defeat rejection proof.
-			if st.currentTurnID != "" || len(st.pendingTerminals) > 0 {
+			if st.currentTurnID != "" || len(st.pendingTerminals) > 0 || st.unconfirmedActivity {
 				st.turnFailure.Acceptance = recovery.AcceptanceUnknown
 				st.turnFailure.IngressRejected = false
 			}
@@ -2272,6 +2421,13 @@ func (c *Codex) runTurn(s *session.Session, st *codexState, threadID string, inp
 		}
 		if detail == nil {
 			detail = &codexFailureDetail{Failure: recovery.ClassifyCodex(nil, turnErr), Acceptance: recovery.AcceptanceUnknown}
+			st.mu.Lock()
+			if st.confirmedRequestID == requestID && st.confirmedTurnID != "" {
+				detail.Acceptance = recovery.Accepted
+				detail.TurnID = st.confirmedTurnID
+				detail.Terminal = true
+			}
+			st.mu.Unlock()
 		}
 		c.recordCodexFailure(s.ID, requestID, completedThreadID, detail.TurnID, detail.Failure, recovery.Context{
 			Owned: true, OrdinaryChat: !codexPinnedRequest(requestID), Acceptance: detail.Acceptance,
@@ -2280,7 +2436,15 @@ func (c *Codex) runTurn(s *session.Session, st *codexState, threadID string, inp
 		})
 		turnErr = detail.Failure.PublicMessage(turnErr)
 		c.releaseActiveThreads(s)
-		c.sink.Emit(backend.NewError(s.ID, requestID, code, turnErr))
+		if detail.Acceptance == recovery.AcceptanceUnknown {
+			reason := detail.Failure.Source
+			if !strings.HasPrefix(reason, "native_") {
+				reason = "native_acceptance_unknown"
+			}
+			c.sink.Emit(backend.NativeSubmissionUncertain{SessionID: s.ID, RequestID: requestID, Reason: reason})
+		} else {
+			c.sink.Emit(backend.NewError(s.ID, requestID, code, turnErr))
+		}
 	default:
 		c.emitExtractedAskUserQuestion(s, st)
 		// Goal state is durable thread metadata, separate from turn/completed.
@@ -2625,6 +2789,13 @@ func (c *Codex) startTurnWithStaleRetry(s *session.Session, st *codexState, thre
 		c.finalizePendingRecovery(s, st, threadID)
 		return nil
 	}
+	pinned, pinErr := c.delegationContextPinned(s)
+	if pinErr != nil {
+		return pinErr
+	}
+	if pinned && isStaleThreadError(err) {
+		return fmt.Errorf("delegation_original_thread_unavailable_successor_required: %w", err)
+	}
 	if !isStaleThreadError(err) || codexPinnedRequest(requestID) {
 		return err
 	}
@@ -2640,6 +2811,13 @@ func (c *Codex) startTurnWithStaleRetry(s *session.Session, st *codexState, thre
 	if err := c.moveActiveThreadClaim(threadID, newThreadID, s); err != nil {
 		return err
 	}
+	admission, err := c.readStartAdmission(s, st, requestID)
+	if err != nil {
+		return err
+	}
+	st.mu.Lock()
+	st.startAdmission = admission
+	st.mu.Unlock()
 	if err := c.startTurn(newThreadID, input, snap, sandboxOverride, requestID); err != nil {
 		return err
 	}
@@ -2753,7 +2931,11 @@ func codexTurnParams(threadID string, input []map[string]any, effort string) map
 
 func (c *Codex) codexTurnParamsForSession(threadID string, input []map[string]any, snap session.Snapshot, sandboxOverride string) map[string]any {
 	params := codexTurnParams(threadID, input, snap.Effort)
-	params["sandboxPolicy"] = codexTurnSandboxPolicy(snap, sandboxOverride)
+	if snap.Model != "" {
+		// Keep the admitted model explicit when resuming an older native thread.
+		params["model"] = snap.Model
+	}
+	params["sandboxPolicy"] = c.sessionSandboxPolicy(snap, sandboxOverride)
 	if snap.ServiceTier != "" {
 		params["serviceTier"] = snap.ServiceTier
 	}
@@ -2772,24 +2954,42 @@ func (c *Codex) startTurn(threadID string, input []map[string]any, snap session.
 		return err
 	}
 	st := c.state(snap.ID)
+	epoch := c.rpc.transportEpoch.Load()
 	st.mu.Lock()
+	if st.startAdmission != nil && (!st.startAdmission.sourceKnown() || st.startAdmission.ThreadID != threadID || st.startAdmission.RequestID != requestID || st.startAdmission.Epoch != epoch || st.startAdmission.Boundary != st.nativeBoundary || snap.ResumeID != threadID || snap.ConfigRevision != st.startAdmission.ConfigRevision) {
+		st.mu.Unlock()
+		return &codexAcceptanceError{Reason: "native_source_changed"}
+	}
+	if !st.turnActive || st.stopping || st.reqID != requestID || st.threadID != threadID {
+		st.mu.Unlock()
+		return &codexAcceptanceError{Reason: "native_current_request_changed"}
+	}
+	st.submissionEpoch = epoch
+	st.unconfirmedActivity = false
 	if st.turnActive && st.reqID == requestID && st.threadID == threadID {
 		st.turnStartPending = true
 	}
 	st.mu.Unlock()
-	raw, err := c.rpcCall("turn/start", params, 30*time.Second)
+	// Keep the existing health/tool policy and atomically guard the transport.
+	raw, err := c.rpcCallAtEpoch("turn/start", params, 30*time.Second, &epoch)
 	if err == nil {
 		var response struct {
 			Turn codexTurnResponse `json:"turn"`
 		}
 		decodeErr := json.Unmarshal(raw, &response)
-		if codexPinnedRequest(requestID) && (decodeErr != nil || response.Turn.ID == "") {
-			return fmt.Errorf("native async reply acceptance did not contain a turn identity")
+		if c.rpc.transportEpoch.Load() != epoch {
+			return &codexAcceptanceError{Reason: "native_source_changed"}
 		}
-		if decodeErr == nil && response.Turn.ID != "" {
-			c.confirmOwnedTurnSubmission(st, threadID, requestID, response.Turn)
+		if decodeErr != nil || response.Turn.ID == "" || (response.Turn.Status != "inProgress" && response.Turn.Status != "completed") {
+			reason := "native_acceptance_unknown"
+			if response.Turn.Status == "failed" || response.Turn.Status == "interrupted" {
+				reason = "native_start_failed_before_acceptance"
+			}
+			return &codexAcceptanceError{Reason: reason, Failure: recovery.ClassifyCodex(response.Turn.Error.Info, "")}
+		}
+		return c.confirmOwnedTurnSubmission(st, threadID, requestID, response.Turn, func() {
 			c.sink.Emit(backend.NativeTaskAccepted{SessionID: snap.ID, RequestID: requestID, ThreadID: threadID, TurnID: response.Turn.ID})
-		}
+		})
 	}
 	return err
 }
@@ -2884,19 +3084,47 @@ func (c *Codex) ensureThread(s *session.Session, st *codexState) error {
 	st.mu.Lock()
 	have := st.threadID
 	st.mu.Unlock()
+	snap := s.Snapshot()
+	preserveContext, pinErr := c.delegationContextPinned(s)
+	if pinErr != nil {
+		return pinErr
+	}
+	if c.taskProvider != nil {
+		scope, e := c.taskProvider.TaskWorkerScope(s)
+		if e != nil {
+			return e
+		}
+		if scope != nil {
+			preserveContext = true
+		}
+	}
+	if preserveContext {
+		if fi, e := os.Stat(runtime.ExpandPath(snap.Cwd)); e != nil || !fi.IsDir() {
+			return errors.New("delegation_original_workspace_unavailable")
+		}
+	}
 	if have != "" && c.taskProvider != nil {
 		scope, err := c.taskProvider.TaskWorkerScope(s)
 		if err != nil {
 			return err
 		}
 		if scope != nil {
+			if err := c.ValidateExistingTaskScope(s, *scope, s.Snapshot().Cwd); err != nil {
+				return err
+			}
 			params := map[string]any{"threadId": have, "excludeTurns": true}
 			if err = c.applyTaskAPIThreadTools(s, params); err != nil {
 				return err
 			}
-			if _, err = c.rpcCall("thread/resume", params, 15*time.Second); err != nil {
+			reply, err := c.rpcCall("thread/resume", params, 15*time.Second)
+			if err != nil {
 				return errors.New("unsupported: bounded task policy rebind failed")
 			}
+			var resumed struct{ Thread struct{ ID string } }
+			if json.Unmarshal(reply, &resumed) != nil || resumed.Thread.ID != have {
+				return errors.New("unsupported: bounded original thread changed")
+			}
+
 		}
 	}
 	if have != "" {
@@ -2920,9 +3148,11 @@ func (c *Codex) ensureThread(s *session.Session, st *codexState) error {
 		return nil
 	}
 
-	snap := s.Snapshot()
 	cwd := runtime.ExpandPath(snap.Cwd)
 	if fi, err := os.Stat(cwd); err != nil || !fi.IsDir() {
+		if preserveContext {
+			return errors.New("delegation_original_workspace_unavailable")
+		}
 		cwd, _ = os.UserHomeDir()
 	}
 	sandbox := codexSandboxForSession(snap)
@@ -2939,6 +3169,9 @@ func (c *Codex) ensureThread(s *session.Session, st *codexState) error {
 		// only for the legacy private stdio transport whose resume response still
 		// contains the complete history.
 		if c.appServerMode != "daemon" && c.rolloverEnabled && rolloutBytes > c.coldResumeMaxBytes {
+			if preserveContext {
+				return errors.New("delegation_context_limit_successor_required")
+			}
 			var err error
 			recovery, err = c.prepareColdRecovery(snap, rolloutPath, rolloutBytes, "cold_resume_hard_limit")
 			if err != nil {
@@ -2969,10 +3202,16 @@ func (c *Codex) ensureThread(s *session.Session, st *codexState) error {
 			raw, err := c.rpcCall("thread/resume", resumeParams, 15*time.Second)
 			if err == nil {
 				threadID = extractThreadID(raw, snap.ResumeID)
+				if preserveContext && threadID != snap.ResumeID {
+					return errors.New("delegation_resume_thread_changed")
+				}
 				threadMetadataRaw = append(json.RawMessage(nil), raw...)
 			} else if isActiveWriterError(err) {
 				return fmt.Errorf("thread/resume refused: %w: %v", backend.ErrThreadActiveWriter, err)
 			} else if isStaleThreadError(err) {
+				if preserveContext {
+					return fmt.Errorf("delegation_original_thread_unavailable_successor_required: %w", err)
+				}
 				recoverySnap, recoveryPath, recoveryBytes, ok := c.latestAvailableRecoverySource(snap)
 				if !ok {
 					return fmt.Errorf("thread not found and no local rollout generation is available: %w", err)
@@ -3038,7 +3277,11 @@ func (c *Codex) ensureThread(s *session.Session, st *codexState) error {
 	c.mu.Lock()
 	c.threadToSession[threadID] = s
 	c.mu.Unlock()
-	c.applyThreadRuntimeMetadata(s, threadMetadataRaw)
+	if !preserveContext {
+		c.applyThreadRuntimeMetadata(s, threadMetadataRaw)
+	}
+	// Retained task/owner profiles are immutable. Thread defaults are not the
+	// admitted turn configuration and must not disable its scoped toolset.
 
 	if recovery == nil {
 		s.SetResumeID(threadID)
@@ -3051,6 +3294,9 @@ func (c *Codex) ensureThread(s *session.Session, st *codexState) error {
 }
 
 func (c *Codex) UpdateSessionSettings(ctx context.Context, s *session.Session) error {
+	if err := c.validateAppSandbox(s, ""); err != nil {
+		return err
+	}
 	if c.pmProvider != nil {
 		p, err := c.pmProvider.PMConfiguration(s.ID)
 		if err != nil {
@@ -3082,6 +3328,9 @@ func (c *Codex) UpdateSessionSettings(ctx context.Context, s *session.Session) e
 		return nil
 	}
 	snap := s.Snapshot()
+	if snap.ResumeID != "" && threadID != snap.ResumeID {
+		return errors.New("session_native_thread_mismatch")
+	}
 	params := map[string]any{
 		"threadId":          threadID,
 		"model":             nil,
@@ -3089,6 +3338,9 @@ func (c *Codex) UpdateSessionSettings(ctx context.Context, s *session.Session) e
 		"serviceTier":       nil,
 		"personality":       nil,
 		"collaborationMode": nil,
+	}
+	for key, value := range c.sessionPermissionSettings(threadID, snap) {
+		params[key] = value
 	}
 	if snap.Model != "" {
 		params["model"] = snap.Model

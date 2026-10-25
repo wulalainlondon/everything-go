@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -23,6 +24,7 @@ import (
 	"everything-go/internal/attachmentjournal"
 	"everything-go/internal/automation"
 	"everything-go/internal/backend"
+	"everything-go/internal/callbacks"
 	"everything-go/internal/clientproto"
 	"everything-go/internal/delegation"
 	"everything-go/internal/deviceinventory"
@@ -31,11 +33,14 @@ import (
 	"everything-go/internal/fcm"
 	"everything-go/internal/feed"
 	"everything-go/internal/governance"
+	"everything-go/internal/handoff"
 	"everything-go/internal/inbox"
+	"everything-go/internal/linebridge"
 	"everything-go/internal/media"
 	"everything-go/internal/messagequeue"
 	"everything-go/internal/nativewatch"
 	"everything-go/internal/notificationreply"
+	"everything-go/internal/partners"
 	"everything-go/internal/protocol"
 	"everything-go/internal/relay"
 	"everything-go/internal/runtime"
@@ -44,19 +49,25 @@ import (
 	"everything-go/internal/session"
 	"everything-go/internal/sessiondispatch"
 	"everything-go/internal/taskapi"
+	"everything-go/internal/taskinteraction"
 	"everything-go/internal/toolenv"
+	"everything-go/internal/voicetransfer"
 	"everything-go/internal/widgetaccess"
 	"everything-go/internal/workitems"
+	"everything-go/internal/workspace"
 )
 
 // Config carries the connection-identity fields surfaced in hello_ack so the
 // app can label the bridge and respect its filesystem jail.
 type Config struct {
-	InstanceName string
-	InstanceID   string
-	RootDir      string
-	DataDir      string
-	LanIP        string
+	WorkspaceEnabled   bool
+	DelegationHandoff  *handoff.Config
+	DelegationCapacity *delegation.CapacityConfig
+	InstanceName       string
+	InstanceID         string
+	RootDir            string
+	DataDir            string
+	LanIP              string
 	// ResolveLANIP is evaluated for each handshake; laptops can change networks
 	// while the hub remains alive. Nil preserves static embedders/tests.
 	ResolveLANIP func() string
@@ -70,6 +81,30 @@ type Config struct {
 // the executor.Sink (Emit broadcasts an event to connected clients, or buffers
 // it when none are connected so a reconnecting client can recover it).
 type Hub struct {
+	workspace            *workspace.Store
+	workspaceScheduler   atomic.Bool
+	workspaceWake        chan struct{}
+	workspaceCancel      context.CancelFunc
+	workspaceWorkers     sync.WaitGroup
+	workspaceAdapters    map[string]workspace.ToolAdapter
+	workspacePush        workspace.PushSender
+	workspaceRequests    sync.Map
+	workspaceEffectWake  chan struct{}
+	workspaceMCPURL      string
+	workspaceMCP         *http.Server
+	partners             *partners.Store
+	transfers            *voicetransfer.Store
+	interactionScheduler atomic.Bool
+	interactionWake      chan struct{}
+
+	interactions *taskinteraction.Store
+
+	callbacks          *callbacks.Store
+	historySequence    atomic.Uint64
+	unifiedMedia       *unifiedVoiceMedia
+	nativeCapture      atomic.Pointer[NativeResponseCapture]
+	continuityCompatMu sync.Mutex
+
 	taskService         *taskapi.Service
 	taskCursor          *taskapi.CursorCodec
 	taskMu              sync.Mutex
@@ -79,6 +114,7 @@ type Hub struct {
 	dispatchScheduler   atomic.Bool
 	voiceMu             sync.Mutex
 	voiceClients        map[*Client]*clientVoiceCall
+	voicePermits        map[string]voiceStartPermit
 	pushSetupMu         sync.Mutex
 	pushSetupCSRF       string
 	pushSetupChallenges map[string]pushSetupPending
@@ -93,6 +129,8 @@ type Hub struct {
 	messageQueue        *messagequeue.Store
 	delegations         *delegation.Store
 	delegationWake      chan struct{}
+	delegationMu        sync.Mutex
+	delegationScheduler atomic.Bool
 	messageQueueMu      sync.Mutex
 	maintenanceHolds    map[string]func()
 	maintenanceCheck    sync.Mutex
@@ -120,6 +158,10 @@ type Hub struct {
 	notificationReplies *notificationreply.Store
 	work                *workitems.Service
 	events              *eventinbox.Store
+	lineService         *linebridge.Service
+	lineVoiceNode       string
+	lineVoiceWorker     string
+	lineControl         *lineLocalControl
 	automation          *automation.Store
 	automationManager   *automation.Manager
 	relay               *relay.Store
@@ -193,6 +235,8 @@ type Hub struct {
 func NewHub(reg *session.Registry, cfg Config, pairing *governance.Pairing, port int) *Hub {
 	cfg.Port = port
 	h := &Hub{
+		workspaceWake:       make(chan struct{}, 1),
+		workspaceEffectWake: make(chan struct{}, 1),
 		recapJobs:           make(chan struct{}, 4),
 		toolOperations:      toolenv.Open(cfg.DataDir),
 		registry:            reg,
@@ -215,10 +259,39 @@ func NewHub(reg *session.Registry, cfg Config, pairing *governance.Pairing, port
 		notificationReplies: notificationreply.NewStore(cfg.DataDir),
 		attachmentReplays:   make(map[string]*attachmentReplayLease),
 		delegationWake:      make(chan struct{}, 1),
+		interactionWake:     make(chan struct{}, 1),
 		workWake:            make(chan struct{}, 1),
 		automationWake:      make(chan struct{}, 1),
 		relayWake:           make(chan struct{}, 1),
 		relayNonces:         make(map[string]int64),
+	}
+	if store, err := partners.Open(cfg.DataDir); err == nil {
+		h.partners = store
+	} else {
+		log.Printf("[partners] storage unavailable: %v", err)
+	}
+	if cfg.WorkspaceEnabled {
+		if store, err := workspace.Open(cfg.DataDir, cfg.InstanceID); err == nil {
+			h.workspace = store
+			store.SetOwnerGrantValidator(h.workspaceGrantCurrent)
+		} else {
+			log.Printf("[workspace] storage unavailable; capability disabled")
+		}
+	}
+	if store, err := taskinteraction.Open(cfg.DataDir); err != nil {
+		log.Printf("[interaction] storage unavailable")
+	} else {
+		h.interactions = store
+	}
+	if store, err := voicetransfer.Open(cfg.DataDir); err == nil {
+		h.transfers = store
+	} else {
+		log.Printf("[voice-transfer] storage unavailable: %v", err)
+	}
+	if store, err := callbacks.Open(cfg.DataDir); err != nil {
+		log.Printf("[callback] storage unavailable: %v", err)
+	} else {
+		h.callbacks = store
 	}
 	if store, err := messagequeue.Open(cfg.DataDir); err != nil {
 		log.Printf("[message-queue] storage unavailable: %v", err)
@@ -231,6 +304,20 @@ func NewHub(reg *session.Registry, cfg Config, pairing *governance.Pairing, port
 	if store, err := delegation.Open(cfg.DataDir); err != nil {
 		log.Printf("[delegation] storage unavailable: %v", err)
 	} else {
+		capacity := delegation.CapacityConfig{Default: delegation.DefaultLimits}
+		if cfg.InstanceID != "" {
+			if err := store.BindAuthority(context.Background(), cfg.InstanceID); err != nil {
+				store.Close()
+				panic(fmt.Sprintf("invalid delegation authority: %v", err))
+			}
+		}
+		if cfg.DelegationCapacity != nil {
+			capacity = *cfg.DelegationCapacity
+		}
+		if err := store.ConfigureCapacity(context.Background(), capacity); err != nil {
+			store.Close()
+			panic(fmt.Sprintf("invalid delegation capacity: %v", err))
+		}
 		h.delegations = store
 	}
 	if store, err := sessiondispatch.Open(cfg.DataDir); err != nil {
@@ -274,6 +361,13 @@ func NewHub(reg *session.Registry, cfg Config, pairing *governance.Pairing, port
 // as its Sink, so the Hub is built first).
 func (h *Hub) SetExecutor(e executor.Executor) {
 	h.exec = e
+	if h.messageQueue != nil {
+		if requests, err := h.messageQueue.ActiveWorkspaceRequests(); err == nil {
+			for _, r := range requests {
+				h.workspaceRequests.Store(r[0]+"\x00"+r[1], true)
+			}
+		}
+	}
 	h.restoreMaintenanceHolds()
 	h.resumeNotificationReplies()
 	h.resumeQueuedMessages()
@@ -314,6 +408,20 @@ func (h *Hub) HTTPAuthorized(r *http.Request) bool {
 func (h *Hub) SetSearch(s *search.Index) {
 	h.search = s
 	if s != nil {
+		if h.workspace != nil {
+			ids, err := h.workspace.PrivateNativeThreadIDs(context.Background())
+			if err != nil {
+				panic("workspace native search isolation unavailable")
+			}
+			for _, id := range ids {
+				s.ProtectNativeSession(id)
+			}
+		}
+		for _, current := range h.registry.List() {
+			if strings.HasPrefix(current.ID, "s_cw_") {
+				s.ProtectNativeSession(current.ResumeID())
+			}
+		}
 		go h.reconcileRestartMarkersFromSearch()
 	}
 }
@@ -458,6 +566,26 @@ func (h *Hub) StartNativeWatcher(ctx context.Context, onTranscriptChange ...func
 			}
 		}
 	}
+	// Native watcher imports are additive; reconcile deletions separately so
+	// startup lookback and transient I/O failures never count as a missing file.
+	go func() {
+		previous, _ := h.reconcileNativeCatalog(opts, nil)
+		ticker := time.NewTicker(opts.PollInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				next, removed := h.reconcileNativeCatalog(opts, previous)
+				previous = next
+				if removed > 0 {
+					h.nativeDirty.Store(true)
+					notifyTranscriptChange("") // Request a full derived-index reconciliation.
+				}
+			}
+		}
+	}()
 	go nativewatch.WatchChanges(ctx, opts, func(ns nativewatch.NativeSession) {
 		if h.cfg.RootDir != "" && !pathInsideRoot(ns.Cwd, h.cfg.RootDir) {
 			return
@@ -506,11 +634,40 @@ func (h *Hub) connectedDeviceIDs(exclude string) []string {
 // event for replay on the next reconnect (the offline-recovery path). Safe for
 // concurrent use.
 func (h *Hub) Emit(event any) {
+	h.observeWorkspaceResearch(event)
+	if e, ok := event.(protocol.InteractionResolved); ok {
+		h.observeInteractionResolution(e)
+	}
+	if unknown, ok := event.(backend.NativeSubmissionUncertain); ok {
+		persisted := false
+		h.messageQueueMu.Lock()
+		if h.messageQueue != nil {
+			_, _, err := h.messageQueue.Transition(unknown.SessionID, unknown.RequestID, []messagequeue.State{messagequeue.Running}, messagequeue.Uncertain, unknown.Reason, "", "")
+			if err != nil {
+				log.Printf("[tasks] uncertain submission persistence failed")
+			} else {
+				persisted = true
+			}
+		}
+		h.messageQueueMu.Unlock()
+		release := func() {}
+		if s, found := h.registry.Get(unknown.SessionID); persisted && found && s.ActiveQueuedID() == unknown.RequestID {
+			release = s.PrepareEndTurn()
+			if view, changed := h.runtimes.Update(s.ID, "idle", unknown.RequestID, s.QueueLen(), "", ""); changed {
+				h.broadcastRuntime(view)
+			}
+		}
+		h.publishMessageQueue(unknown.SessionID)
+		release()
+		return
+	}
 	if proof, ok := event.(backend.NativeProviderEvidence); ok {
 		h.messageQueueMu.Lock()
 		defer h.messageQueueMu.Unlock()
 		if h.messageQueue != nil {
-			_ = h.messageQueue.RecordProviderEvidence(messagequeue.ProviderEvidence{SessionID: proof.SessionID, RequestID: proof.RequestID, Backend: proof.Backend, ConversationID: proof.ConversationID, Token: proof.Token, TokenKind: proof.TokenKind, MessageID: proof.MessageID, Text: proof.Text, Status: proof.Status})
+			if err := h.messageQueue.RecordProviderEvidence(messagequeue.ProviderEvidence{SessionID: proof.SessionID, RequestID: proof.RequestID, Backend: proof.Backend, ConversationID: proof.ConversationID, Token: proof.Token, TokenKind: proof.TokenKind, MessageID: proof.MessageID, Text: proof.Text, Status: proof.Status}); err == nil {
+				h.pinInteractionProviderThread(proof)
+			}
 		}
 		return
 	}
@@ -520,6 +677,16 @@ func (h *Hub) Emit(event any) {
 		if h.messageQueue != nil {
 			if err := h.messageQueue.RecordNativeAcceptance(accepted.SessionID, accepted.RequestID, accepted.ThreadID, accepted.TurnID); err != nil {
 				log.Printf("[tasks] native acceptance persistence failed: %v", err)
+			} else if h.delegations != nil {
+				if r, found, e := h.delegations.ByChildRequest(context.Background(), accepted.SessionID, accepted.RequestID); e == nil && found {
+					_, revision, _, e := h.delegations.ExecutionBinding(context.Background(), r.ID)
+					if e == nil {
+						e = h.delegations.PinNativeThread(context.Background(), r.ChildSessionID, accepted.ThreadID, revision)
+					}
+					if e != nil {
+						log.Printf("[delegation] immutable native binding refused: %v", e)
+					}
+				}
 			}
 		}
 		return
@@ -566,7 +733,11 @@ func (h *Hub) Emit(event any) {
 		mediaEvent.URL = h.mediaScan.LocalURL(mediaEvent.Path)
 		event = mediaEvent
 	}
-	logOutbound(event)
+	if h.workspacePrivateNativeEvent(event) {
+		logOutbound(workspaceWire{Type: "workspace_native_event"})
+	} else {
+		logOutbound(event)
+	}
 	if h.goals.Apply(event) {
 		switch e := event.(type) {
 		case protocol.GoalUpdate:
@@ -613,7 +784,11 @@ func (h *Hub) Emit(event any) {
 	h.mu.RUnlock()
 
 	if n == 0 {
-		h.offline.Append(event)
+		// Room-native stream fragments have their own durable room/task source.
+		// Do not leave private content in the legacy shared replay journal.
+		if !h.workspaceRoomNativeEvent(event) {
+			h.offline.Append(event)
+		}
 	} else {
 		h.mu.RLock()
 		clients := make([]*Client, 0, len(h.clients))
@@ -631,6 +806,21 @@ func (h *Hub) Emit(event any) {
 	// persist-on-turn-complete trigger.
 	switch event.(type) {
 	case protocol.SessionUUID:
+		if observed, ok := event.(protocol.SessionUUID); ok && h.workspace != nil {
+			if current, found := h.registry.Get(observed.SessionID); found && current.ResumeID() == observed.ClaudeUUID {
+				if strings.HasPrefix(observed.SessionID, "s_cw_") && h.search != nil {
+					h.search.ProtectNativeSession(observed.ClaudeUUID)
+				}
+				_ = h.workspace.PinInitialThread(context.Background(), observed.SessionID, observed.ClaudeUUID)
+			}
+		}
+		if observed, ok := event.(protocol.SessionUUID); ok && h.partners != nil {
+			if current, found := h.registry.Get(observed.SessionID); found && current.ResumeID() == observed.ClaudeUUID {
+				if err := h.partners.PinInitialThread(observed.SessionID, observed.ClaudeUUID); err != nil {
+					log.Printf("[partners] native identity pin refused: %v", err)
+				}
+			}
+		}
 		// A changed physical thread is the durable identity of a logical
 		// session. Persist synchronously before the executor can accept another
 		// turn or the service can restart; otherwise a crash can revive the old

@@ -37,8 +37,13 @@ func TestTaskAPIAuthenticatedWSCanonicalStore(t *testing.T) {
 		<-release
 		h.Emit(protocol.NewDone(s.ID, req))
 	}}})
-	conn, ctx, cleanup := dialWS(t, h)
+	conn, _, cleanup := dialWS(t, h)
 	defer cleanup()
+	// This case verifies a full authenticated multi-command transaction chain,
+	// not a three-second performance budget shared by every read/write. Race
+	// instrumentation and contract validation may exceed that handshake budget.
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
 	send := func(value any) {
 		raw, _ := json.Marshal(value)
 		if err := conn.Write(ctx, websocket.MessageText, raw); err != nil {
@@ -130,7 +135,7 @@ func TestTaskAPIAuthenticatedWSCanonicalStore(t *testing.T) {
 	lateReceipt := late["result"].(map[string]any)
 	lateTask := call("get", map[string]any{"task_id": lateReceipt["task_id"]}, "")["result"].(map[string]any)
 	nativeRequest := lateTask["target"].(map[string]any)["request_id"].(string)
-	h.Emit(backend.NativeTaskAccepted{SessionID: target.ID, RequestID: nativeRequest, ThreadID: "fixture-thread", TurnID: "late-already-consumed"})
+	emitVerifiedNativeFixture(h, backend.NativeTaskAccepted{SessionID: target.ID, RequestID: nativeRequest, ThreadID: "fixture-thread", TurnID: "late-already-consumed"})
 	lateTask = call("get", map[string]any{"task_id": lateReceipt["task_id"]}, "")["result"].(map[string]any)
 	blockedInput := map[string]any{"task_id": lateReceipt["task_id"], "command_receipt_id": lateReceipt["receipt_id"], "expected_revision": lateTask["revision"], "target": cancelInput["target"], "mode": "queued"}
 	blocked := call("cancel", blockedInput, "fixture-cancel-late")
@@ -141,7 +146,7 @@ func TestTaskAPIAuthenticatedWSCanonicalStore(t *testing.T) {
 	if afterBlocked["axes"].(map[string]any)["cancellation"] == "confirmed" {
 		t.Fatal("late cancellation became confirmed", afterBlocked)
 	}
-	h.Emit(backend.NativeTaskAccepted{SessionID: target.ID, RequestID: req, ThreadID: "fixture-thread", TurnID: "native-fixture-turn"})
+	emitVerifiedNativeFixture(h, backend.NativeTaskAccepted{SessionID: target.ID, RequestID: req, ThreadID: "fixture-thread", TurnID: "native-fixture-turn"})
 	task = call("get", map[string]any{"task_id": receipt["task_id"]}, "")
 	if task["result"].(map[string]any)["axes"].(map[string]any)["execution"] != "native_consumed" {
 		t.Fatal(task)

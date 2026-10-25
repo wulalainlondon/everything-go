@@ -41,7 +41,7 @@ func TestCapabilityIsSessionBoundPersistentAndExpires(t *testing.T) {
 	}
 }
 
-func TestReplyStoreIsIdempotentAndRecoversDispatching(t *testing.T) {
+func TestReplyStoreIsIdempotentAndQuarantinesDispatching(t *testing.T) {
 	dir := t.TempDir()
 	store := NewStore(dir)
 	if _, created, err := store.Enqueue("r1", "s1", "continue"); err != nil || !created {
@@ -59,11 +59,14 @@ func TestReplyStoreIsIdempotentAndRecoversDispatching(t *testing.T) {
 
 	reloaded := NewStore(dir)
 	pending := reloaded.Pending()
-	if len(pending) != 1 || pending[0].ID != "r1" || pending[0].Status != StatusPending {
+	if len(pending) != 0 {
 		t.Fatalf("recovered=%+v", pending)
 	}
+	if record, _ := reloaded.Get("r1"); record.Status != StatusUncertain || record.RecoveryFrom != StatusDispatching {
+		t.Fatal("uncertain identity/history lost")
+	}
 	reloaded.MarkSent("r1")
-	if record, _ := reloaded.Get("r1"); record.Status != StatusSent {
+	if record, _ := reloaded.Get("r1"); record.Status != StatusUncertain {
 		t.Fatalf("record=%+v", record)
 	}
 }

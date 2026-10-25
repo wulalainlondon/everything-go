@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"strings"
 	"time"
@@ -14,20 +15,35 @@ import (
 	"everything-go/internal/backend"
 	"everything-go/internal/clientproto"
 	"everything-go/internal/messagequeue"
+	"everything-go/internal/partners"
 	"everything-go/internal/protocol"
 	"everything-go/internal/runtimejournal"
 	"everything-go/internal/session"
 )
 
 type queuedPayload struct {
-	ExpectedTarget *dispatchTargetExpectation `json:"expected_target,omitempty"`
-	Configuration  *session.Configuration     `json:"configuration,omitempty"`
-	MessagePurpose string                     `json:"message_purpose,omitempty"`
-	OwnerDevice    string                     `json:"owner_device,omitempty"`
-	Origin         *protocol.TaskOrigin       `json:"task_origin,omitempty"`
-	Content        string                     `json:"content"`
-	Images         []backend.ImageAttachment  `json:"images,omitempty"`
-	Files          []backend.FileAttachment   `json:"files,omitempty"`
+	WorkspaceTask       *workspaceQueueBinding     `json:"workspace_task,omitempty"`
+	VoiceContext        bool                       `json:"voice_context,omitempty"`
+	VoiceID             string                     `json:"voice_id,omitempty"`
+	VoiceThread         string                     `json:"voice_thread,omitempty"`
+	PartnerRole         *partners.RoleSnapshot     `json:"partner_role,omitempty"`
+	CallbackOnComplete  *bool                      `json:"callback_on_complete,omitempty"`
+	CallbackBinding     string                     `json:"callback_binding,omitempty"`
+	ExternalPeer        string                     `json:"external_peer,omitempty"`
+	ExternalReviewOnly  bool                       `json:"external_review_only,omitempty"`
+	ExternalEventIDs    []string                   `json:"external_event_ids,omitempty"`
+	VisualUserHash      string                     `json:"visual_user_hash,omitempty"`
+	VisualEffectiveHash string                     `json:"visual_effective_hash,omitempty"`
+	VisualPresentation  string                     `json:"visual_presentation,omitempty"`
+	FormalIntake        bool                       `json:"formal_intake,omitempty"`
+	ExpectedTarget      *dispatchTargetExpectation `json:"expected_target,omitempty"`
+	Configuration       *session.Configuration     `json:"configuration,omitempty"`
+	MessagePurpose      string                     `json:"message_purpose,omitempty"`
+	OwnerDevice         string                     `json:"owner_device,omitempty"`
+	Origin              *protocol.TaskOrigin       `json:"task_origin,omitempty"`
+	Content             string                     `json:"content"`
+	Images              []backend.ImageAttachment  `json:"images,omitempty"`
+	Files               []backend.FileAttachment   `json:"files,omitempty"`
 }
 
 func (h *Hub) queueError(c *Client, cmd clientproto.Command, code, message string) {
@@ -52,10 +68,23 @@ type dispatchTargetExpectation struct {
 }
 
 func (e *dispatchTargetExpectation) matches(s *session.Session) bool {
-	return e == nil || (s.ResumeID() == e.ThreadID && s.SettingsSnapshot().ConfigRevision == e.Revision && s.State() != session.Closed && !s.Snapshot().Hidden)
+	if e == nil {
+		return true
+	}
+	snap := s.SettingsSnapshot()
+	return snap.ResumeID == e.ThreadID && snap.ConfigRevision == e.Revision && snap.State != session.Closed && !snap.Hidden
 }
 
 func (h *Hub) enqueueChatMessageExpected(c *Client, cmd clientproto.Command, expected *dispatchTargetExpectation) bool {
+	if cmd.VoiceContext && (len(cmd.Images) == 0 || !h.voicePhotoOwner(c, cmd.SessionID, cmd.VoiceID, cmd.ThreadID)) {
+		h.queueError(c, cmd, "voice_context_retired", "原通話或圖片來源已改變，草稿已保留，未改送其他對話")
+		return false
+	}
+
+	if interactionControlID(cmd.RequestID) && !c.interactionControl {
+		h.queueError(c, cmd, "interaction_control_reserved", "This request belongs to the original question delivery")
+		return false
+	}
 	if h.messageQueue == nil {
 		h.queueError(c, cmd, "queue_unavailable", "Message queue storage is unavailable")
 		return false
@@ -71,6 +100,21 @@ func (h *Hub) enqueueChatMessageExpected(c *Client, cmd clientproto.Command, exp
 	}
 	if cmd.RequestID == "" {
 		cmd.RequestID = "legacy_" + randomID()
+	}
+	if err := h.delegationReturnGuard(context.Background(), s, cmd.RequestID, expected); err != nil {
+		h.queueError(c, cmd, "delegation_return_guard", err.Error())
+		return false
+	}
+	if err := h.delegationExecutionGuard(context.Background(), s, cmd.RequestID, false); err != nil {
+		h.queueError(c, cmd, "delegation_capacity_guard", err.Error())
+		return false
+	}
+	if !backend.ValidVisualPresentation(cmd.VisualPresentation) {
+		h.queueError(c, cmd, "visual_presentation_invalid", "Unknown visual presentation mode")
+		return false
+	}
+	if cmd.MessagePurpose != "" && cmd.MessagePurpose != "instruction" {
+		cmd.VisualPresentation = ""
 	}
 	content, files, err := h.resolveUploadedVideos(cmd.SessionID, cmd.Content, cmd.Files)
 	if err != nil {
@@ -90,18 +134,30 @@ func (h *Hub) enqueueChatMessageExpected(c *Client, cmd clientproto.Command, exp
 		h.queueError(c, cmd, "message_purpose_invalid", "Unknown message purpose")
 		return false
 	}
+	role, roleErr := h.partnerRoleForMessage(c, cmd, s)
+	if roleErr != nil {
+		h.queueError(c, cmd, "partner_role_rejected", roleErr.Error())
+		return false
+	}
+	if role != nil && expected == nil {
+		expected = &dispatchTargetExpectation{ThreadID: s.ResumeID(), Revision: config.Revision}
+	}
 	owner, admissionErr := h.admitTaskOrigin(c, cmd)
 	if admissionErr != nil {
 		h.queueError(c, cmd, "task_origin_rejected", admissionErr.Error())
 		return false
 	}
-	intent, err := json.Marshal(queuedPayload{MessagePurpose: cmd.MessagePurpose, Origin: cmd.TaskOrigin, Content: content, Images: cmd.Images, Files: files, ExpectedTarget: expected})
+	userHash, effectiveHash := "", ""
+	if cmd.VisualPresentation != "" || role != nil {
+		userHash, effectiveHash = backend.PresentationHashes(backend.WithPartnerRole(backend.WithVisualPresentation(context.Background(), cmd.VisualPresentation), role), content)
+	}
+	intent, err := json.Marshal(queuedPayload{VoiceContext: cmd.VoiceContext, VoiceID: cmd.VoiceID, VoiceThread: cmd.ThreadID, PartnerRole: role, CallbackOnComplete: cmd.CallbackOnComplete, VisualUserHash: userHash, VisualEffectiveHash: effectiveHash, VisualPresentation: cmd.VisualPresentation, MessagePurpose: cmd.MessagePurpose, Origin: cmd.TaskOrigin, Content: content, Images: cmd.Images, Files: files, ExpectedTarget: expected})
 	if err != nil {
 		h.queueError(c, cmd, "invalid_message", err.Error())
 		return false
 	}
 	intentHash := sha256.Sum256(intent)
-	payload, err := json.Marshal(queuedPayload{MessagePurpose: cmd.MessagePurpose, OwnerDevice: owner, Origin: cmd.TaskOrigin, Content: content, Images: cmd.Images, Files: files, Configuration: &config, ExpectedTarget: expected})
+	payload, err := json.Marshal(queuedPayload{VoiceContext: cmd.VoiceContext, VoiceID: cmd.VoiceID, VoiceThread: cmd.ThreadID, PartnerRole: role, CallbackOnComplete: cmd.CallbackOnComplete, VisualUserHash: userHash, VisualEffectiveHash: effectiveHash, VisualPresentation: cmd.VisualPresentation, MessagePurpose: cmd.MessagePurpose, OwnerDevice: owner, CallbackBinding: callbackBinding(c), Origin: cmd.TaskOrigin, Content: content, Images: cmd.Images, Files: files, Configuration: &config, ExpectedTarget: expected})
 	if err != nil {
 		h.queueError(c, cmd, "invalid_message", err.Error())
 		return false
@@ -129,9 +185,19 @@ func (h *Hub) enqueueChatMessageExpected(c *Client, cmd clientproto.Command, exp
 		h.queueError(c, cmd, "queue_persist_failed", err.Error())
 		return false
 	}
+	if inserted && cmd.CallbackOnComplete != nil && *cmd.CallbackOnComplete {
+		if err := h.armAdmittedCallback(context.Background(), c, s, e.RequestID); err != nil {
+			h.callbackRespond(c, callbackInput{Operation: "callback_admit_" + e.RequestID}, nil, err)
+		}
+	}
 	if inserted {
 		behind := s.State() != session.Idle || s.QueueLen() > 0
-		if !s.SubmitNamed(cmd.RequestID, func() { h.runQueuedMessage(s, cmd.RequestID) }) {
+		// An observed native turn is live without claiming the Session worker.
+		// A queued follow-up must not replace its active request presentation.
+		if views := h.runtimes.Snapshot("", []string{s.ID}); len(views) == 1 && views[0].Phase != "queued" && runtimePhaseActive(views[0].Phase) {
+			behind = true
+		}
+		if !h.submitQueuedMessage(s, cmd.RequestID) {
 			_, _, _ = h.messageQueue.Transition(cmd.SessionID, cmd.RequestID, []messagequeue.State{messagequeue.Queued}, messagequeue.Failed, "Queue is full or session is closed", "", "")
 			h.publishMessageQueue(cmd.SessionID)
 			h.queueError(c, cmd, "queue_full", "Queue is full or session is closed; this message was not started")
@@ -145,6 +211,9 @@ func (h *Hub) enqueueChatMessageExpected(c *Client, cmd clientproto.Command, exp
 	// ACK is durable ownership, independent of how far execution has advanced.
 	c.enqueueEvent(protocol.NewMessageAck(cmd.SessionID, e.RequestID, "queued"))
 	h.publishMessageQueue(cmd.SessionID)
+	if inserted && cmd.VoiceContext {
+		go h.promoteQueuedMessage(c, clientproto.Command{Kind: "promote_queued_message", SessionID: cmd.SessionID, RequestID: cmd.RequestID, AutoVoicePhoto: true})
+	}
 	return true
 }
 
@@ -167,9 +236,31 @@ func (h *Hub) runQueuedMessage(s *session.Session, requestID string) {
 		h.Emit(backend.NewError(s.ID, requestID, "invalid_queued_message", "Queued message could not be decoded"))
 		return
 	}
+	if payload.WorkspaceTask != nil {
+		p, target, err := h.validateWorkspaceNative(context.Background(), payload.WorkspaceTask.RoomID, payload.WorkspaceTask.TaskID)
+		if err != nil || target != s || p.Task.RequestID != requestID {
+			h.Emit(backend.NewError(s.ID, requestID, "room_authorization_changed", "Room authorization or original target changed before native execution"))
+			return
+		}
+		if payload.ExpectedTarget != nil && payload.ExpectedTarget.ThreadID == "" && p.Task.NativeThreadID != "" && h.workspace.KnownThread(context.Background(), s.ID) == p.Task.NativeThreadID {
+			payload.ExpectedTarget.ThreadID = p.Task.NativeThreadID
+		}
+	}
 	if !payload.ExpectedTarget.matches(s) {
 		h.Emit(backend.NewError(s.ID, requestID, "dispatch_target_changed", "Target thread or configuration changed while waiting; this instruction was not sent"))
 		return
+	}
+	if payload.PartnerRole != nil && payload.WorkspaceTask == nil {
+		if err := h.intakeWritePolicy(s); err != nil {
+			h.Emit(backend.NewError(s.ID, requestID, "partner_role_scope_changed", "Role scope changed before native consumption"))
+			return
+		}
+	}
+	if payload.FormalIntake && payload.WorkspaceTask == nil {
+		if err := h.intakeWritePolicy(s); err != nil {
+			h.Emit(backend.NewError(s.ID, requestID, "intake_scope_changed", "Original task intake permission changed before native consumption"))
+			return
+		}
 	}
 	if payload.Configuration != nil {
 		if err = s.ActivateQueuedConfiguration(*payload.Configuration); err != nil {
@@ -191,7 +282,48 @@ func (h *Hub) runQueuedMessage(s *session.Session, requestID string) {
 		h.Emit(backend.NewError(s.ID, requestID, "session_controlled_by_desktop", "Reclaim the conversation before sending another message"))
 		return
 	}
-	if err = h.exec.Send(context.Background(), s, requestID, payload.Content, payload.Images, payload.Files); err != nil {
+
+	// Recheck after activation/events/preview writes, immediately at Send.
+	if !payload.ExpectedTarget.matches(s) || (payload.ExpectedTarget != nil && payload.Configuration != nil && session.ConfigurationFrom(s.Snapshot()) != *payload.Configuration) {
+		h.Emit(backend.NewError(s.ID, requestID, "dispatch_target_changed", "Target changed before Send"))
+		return
+	}
+	if guardErr := h.delegationReturnGuard(context.Background(), s, requestID, payload.ExpectedTarget); guardErr != nil {
+		h.Emit(backend.NewError(s.ID, requestID, "delegation_return_guard", guardErr.Error()))
+		return
+	}
+	if guardErr := h.delegationExecutionGuard(context.Background(), s, requestID, true); guardErr != nil {
+		h.Emit(backend.NewError(s.ID, requestID, "delegation_capacity_guard", guardErr.Error()))
+		return
+	}
+	if !h.eventAssignmentSendAllowed(s, payload) {
+		h.Emit(backend.NewError(s.ID, requestID, "event_target_scope_changed", "Event target is now managed or unavailable"))
+		return
+	}
+	sendContext := backend.WithPartnerRole(backend.WithVisualPresentation(context.Background(), payload.VisualPresentation), payload.PartnerRole)
+	if payload.WorkspaceTask != nil {
+		if _, target, err := h.validateWorkspaceNative(context.Background(), payload.WorkspaceTask.RoomID, payload.WorkspaceTask.TaskID); err != nil || target != s {
+			h.Emit(backend.NewError(s.ID, requestID, "room_authorization_changed", "Room authority changed at Send"))
+			return
+		}
+	}
+	if payload.ExternalReviewOnly {
+		grant, err := h.dispatches.Grant(context.Background(), "peer:"+payload.ExternalPeer)
+		if err != nil || !grant.Allows(h.cfg.InstanceID, h.cfg.InstanceID, s.ID) {
+			h.Emit(backend.NewError(s.ID, requestID, "external_peer_revoked", "Original peer permission revoked"))
+			return
+		}
+		sendContext = backend.WithSandboxOverride(sendContext, "read-only")
+	}
+	if payload.VoiceContext && !h.voicePhotoStillCurrent(s.ID, payload.VoiceID, payload.VoiceThread) {
+		h.Emit(backend.NewError(s.ID, requestID, "voice_context_retired", "原通話已結束，圖片不會自動轉交新的通話"))
+		return
+	}
+	if err = h.exec.Send(sendContext, s, requestID, payload.Content, payload.Images, payload.Files); err != nil {
+		if errors.Is(err, backend.ErrNativeSubmissionBusy) {
+			h.deferUnsubmittedQueuedMessage(s, requestID)
+			return
+		}
 		if errors.Is(err, backend.ErrThreadActiveWriter) {
 			h.markDesktopWriter(s)
 		}
@@ -208,6 +340,53 @@ func (h *Hub) runQueuedMessage(s *session.Session, requestID string) {
 			h.Emit(backend.NewError(s.ID, requestID, code, err.Error()))
 		}
 	}
+	if err == nil && payload.VoiceContext {
+		go h.notifyVoicePhoto(s, payload.VoiceID, payload.VoiceThread, requestID)
+	}
+}
+
+func (h *Hub) queuedSubmissionReady(s *session.Session, requestID string) bool {
+	if !h.controls.MobileMayWrite(s.ID) {
+		return true // The normal start path records the existing ownership refusal.
+	}
+	reader, ok := h.exec.(backend.QueuedSubmissionReader)
+	if !ok {
+		return true
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	defer cancel()
+	return reader.QueuedSubmissionReady(ctx, s, requestID) == nil
+}
+
+func (h *Hub) submitQueuedMessage(s *session.Session, requestID string) bool {
+	return s.SubmitNamedWhenReady(requestID,
+		func() bool { return h.queuedSubmissionReady(s, requestID) },
+		func() { h.runQueuedMessage(s, requestID) })
+}
+
+// Only the adapter's typed pre-input busy result permits restoring the same
+// waiting input. No uncertain, accepted or old failed receipt is replayed.
+func (h *Hub) deferUnsubmittedQueuedMessage(s *session.Session, requestID string) {
+	h.messageQueueMu.Lock()
+	_, accepted, nativeErr := h.messageQueue.ExactNativeAcceptance(s.ID, requestID)
+	var changed bool
+	var err error
+	if nativeErr == nil && !accepted {
+		_, changed, err = h.messageQueue.Transition(s.ID, requestID, []messagequeue.State{messagequeue.Running}, messagequeue.Queued, "native_submission_busy", "", "")
+	}
+	deferred := changed && err == nil && s.DeferActiveNamed(requestID,
+		func() bool { return h.queuedSubmissionReady(s, requestID) },
+		func() { h.runQueuedMessage(s, requestID) })
+	if changed && !deferred {
+		_, _, _ = h.messageQueue.Transition(s.ID, requestID, []messagequeue.State{messagequeue.Queued}, messagequeue.Uncertain, "native_defer_unconfirmed", "", "")
+	}
+	h.messageQueueMu.Unlock()
+	if !deferred {
+		h.Emit(backend.NativeSubmissionUncertain{SessionID: s.ID, RequestID: requestID, Reason: "native_defer_unconfirmed"})
+		return
+	}
+	h.updateRuntime(s.ID, "queued", requestID, s.QueueLen(), "", "")
+	h.publishMessageQueue(s.ID)
 }
 
 func (h *Hub) messageQueueSnapshot(sessionID string) (protocol.MessageQueueSnapshot, error) {
@@ -280,6 +459,10 @@ func (h *Hub) sendMessageQueue(c *Client, cmd clientproto.Command) {
 	c.enqueueEvent(snapshot)
 }
 func (h *Hub) queueResult(c *Client, cmd clientproto.Command, action, status, message string, e messagequeue.Entry) {
+	// Automatic photo intake projects its durable message state, not manual queue controls.
+	if cmd.AutoVoicePhoto {
+		return
+	}
 	if cmd.Kind == "steer_message" {
 		if status == "pending" {
 			return
@@ -444,7 +627,7 @@ func (h *Hub) promoteQueuedMessage(c *Client, cmd clientproto.Command) {
 		h.queueResult(c, cmd, "promote", "retained", "此訊息的設定與本輪不同，保留原本的排隊位置。", e)
 		return
 	}
-	finish, err := s.ReserveQueued(cmd.RequestID)
+	finish, err := s.ReserveSteeringCandidate(cmd.RequestID)
 	if err != nil {
 		h.messageQueueMu.Unlock()
 		h.queueResult(c, cmd, "promote", "retained", err.Error(), e)
@@ -465,7 +648,18 @@ func (h *Hub) promoteQueuedMessage(c *Client, cmd clientproto.Command) {
 		var result backend.SteerResult
 		steerErr := decodeErr
 		if decodeErr == nil {
-			result, steerErr = steerer.Steer(context.Background(), s, cmd.RequestID, payload.Content, payload.Images, payload.Files)
+			if e := h.delegationExecutionGuard(context.Background(), s, cmd.RequestID, false); e != nil {
+				steerErr = fmt.Errorf("%w: %v", backend.ErrSteerRejected, e)
+			}
+		}
+		if payload.VoiceContext && !h.voicePhotoStillCurrent(s.ID, payload.VoiceID, payload.VoiceThread) {
+			steerErr = fmt.Errorf("%w: original voice ended", backend.ErrSteerRejected)
+		}
+		if decodeErr == nil && steerErr == nil {
+			result, steerErr = steerer.Steer(backend.WithPartnerRole(backend.WithVisualPresentation(context.Background(), payload.VisualPresentation), payload.PartnerRole), s, cmd.RequestID, payload.Content, payload.Images, payload.Files)
+			if steerErr == nil && !result.StrictACK {
+				steerErr = errors.New("native steer acceptance unverified")
+			}
 		}
 		h.messageQueueMu.Lock()
 		defer h.messageQueueMu.Unlock()
@@ -479,13 +673,16 @@ func (h *Hub) promoteQueuedMessage(c *Client, cmd clientproto.Command) {
 				message = "Steering result could not be confirmed; automatic resend is paused. Check the current reply before cancelling this item."
 			}
 		}
-		updated, _, persistErr := h.messageQueue.Transition(cmd.SessionID, cmd.RequestID, []messagequeue.State{messagequeue.Steering}, next, message, result.RequestID, result.TurnID)
+		updated, _, persistErr := h.messageQueue.Transition(cmd.SessionID, cmd.RequestID, []messagequeue.State{messagequeue.Steering}, next, message, result.RequestID, result.TurnID, next == messagequeue.Steered && result.StrictACK)
 		if persistErr != nil {
 			// The durable pre-RPC state is steering, which recovers as uncertain. Never
 			// restore the callback after a failed result write.
 			finish(true)
 			h.queueResult(c, cmd, "promote", "uncertain", "Result could not be saved; this item will not be resent automatically", e)
 			return
+		}
+		if next == messagequeue.Steered && payload.VoiceContext {
+			go h.notifyVoicePhoto(s, payload.VoiceID, payload.VoiceThread, e.RequestID)
 		}
 		finish(remove)
 		h.updateRuntimeQueueLength(cmd.SessionID, s.QueueLen())
@@ -548,7 +745,7 @@ func (h *Hub) resumeQueuedMessages() {
 			continue
 		}
 		id := e.RequestID
-		if !s.SubmitNamed(id, func() { h.runQueuedMessage(s, id) }) {
+		if !h.submitQueuedMessage(s, id) {
 			log.Printf("[message-queue] waiting to restore session=%s request=%s", e.SessionID, id)
 		}
 	}

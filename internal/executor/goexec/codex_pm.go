@@ -30,6 +30,13 @@ func (c *Codex) applyPMTurnPolicy(sessionID string, params map[string]any) error
 		return err
 	}
 	if p.Worker {
+		if p.Room {
+			params["sandboxPolicy"] = map[string]any{"type": "readOnly"}
+			params["approvalPolicy"] = "never"
+			params["cwd"] = p.RuntimeDir
+			delete(params, "collaborationMode")
+			return nil
+		}
 		if p.Sandbox != "read-only" && p.Sandbox != "workspace-write" {
 			return errors.New("collaboration_worker_sandbox_unsupported")
 		}
@@ -117,7 +124,20 @@ func (c *Codex) applyPMThreadPolicy(s *session.Session, params map[string]any) e
 	params["baseInstructions"] = p.Instructions
 	params["developerInstructions"] = p.Instructions
 	namespace, description := "bridge_pm", "Project-scoped PM coordination. No implementation or human approval capability."
-	if p.Worker {
+	if p.Room {
+		if !p.Worker || p.Sandbox != "read-only" {
+			return errors.New("room_worker_policy_invalid")
+		}
+		config := codexPMConfig(names)
+		config["web_search"] = "live"
+		params["config"] = config
+		params["model"] = s.Snapshot().Model
+		if params["model"] == "" {
+			return errors.New("room_worker_model_missing")
+		}
+		delete(params, "baseInstructions")
+		namespace, description = "bridge_work", "Room-scoped read-only context. No host filesystem, inherited plugins, account writes, controller or delegation."
+	} else if p.Worker {
 		if p.Sandbox != "read-only" && p.Sandbox != "workspace-write" {
 			return errors.New("collaboration_worker_sandbox_unsupported")
 		}
@@ -191,9 +211,9 @@ func (c *Codex) handlePMServerRequest(id any, method string, raw json.RawMessage
 			if p != nil && p.Worker {
 				st := c.state(s.ID)
 				st.mu.Lock()
-				reqID, turnID := st.reqID, st.currentTurnID
+				reqID, turnID, owned := st.reqID, st.currentTurnID, st.turnActive && !st.turnStartPending
 				st.mu.Unlock()
-				if p.RequestID == "" || p.RequestID != reqID || call.TurnID == "" || (turnID != "" && call.TurnID != turnID) {
+				if !owned || p.RequestID == "" || p.RequestID != reqID || call.TurnID == "" || turnID == "" || call.TurnID != turnID {
 					allowed = false
 				}
 			}

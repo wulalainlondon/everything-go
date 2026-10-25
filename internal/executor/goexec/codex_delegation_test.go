@@ -124,3 +124,71 @@ func TestCodexDelegationToolIsScopedToLiveParentTurn(t *testing.T) {
 		t.Fatal("read_result did not respond")
 	}
 }
+
+type delegationQueueFixture struct {
+	delegationFixtureProvider
+	cancels chan string
+}
+
+func (p delegationQueueFixture) CancelWaitingDelegation(s *session.Session, id string) (map[string]any, error) {
+	p.cancels <- s.ID + ":" + id
+	return map[string]any{"cancellation": "confirmed"}, nil
+}
+func (p delegationQueueFixture) DelegationCapacity(*session.Session) (map[string]int, error) {
+	return map[string]int{"max_active": 6, "max_queued": 64, "max_delivery_reserved": 128}, nil
+}
+func TestCodexDelegationCapacityAndCancelRemainBoundToOriginalTurn(t *testing.T) {
+	c := NewCodex(&capSink{}, "codex")
+	provider := delegationQueueFixture{delegationFixtureProvider: delegationFixtureProvider{calls: make(chan backend.DelegationSpec, 1)}, cancels: make(chan string, 2)}
+	c.SetDelegationProvider(provider)
+	registry := session.NewRegistry()
+	s := registry.Create("parent", "Parent", t.TempDir(), backend.Codex, "", "read-only", "")
+	c.threadToSession["synthetic-thread"] = s
+	st := c.state(s.ID)
+	st.mu.Lock()
+	st.reqID = "synthetic-request"
+	st.currentTurnID = "synthetic-turn"
+	st.turnActive = true
+	st.mu.Unlock()
+	params := map[string]any{}
+	c.applyDelegationThreadTools(s, params)
+	names := map[string]bool{}
+	for _, ns := range params["dynamicTools"].([]map[string]any) {
+		for _, tool := range ns["tools"].([]map[string]any) {
+			names[tool["name"].(string)] = true
+		}
+	}
+	if !names["delegate_session"] || !names["get_capacity"] || !names["cancel_waiting_delegation"] {
+		t.Fatal(names)
+	}
+	writer := &rpcCaptureWriter{writes: make(chan []byte, 8)}
+	c.rpc.setWriter(writer)
+	for _, tc := range []struct {
+		tool, turn string
+		args       any
+		ok         bool
+	}{
+		{"get_capacity", "synthetic-turn", map[string]any{}, true},
+		{"cancel_waiting_delegation", "wrong-turn", map[string]any{"delegation_id": "dg_wait"}, false},
+		{"cancel_waiting_delegation", "synthetic-turn", map[string]any{"delegation_id": "dg_wait"}, true},
+	} {
+		raw, _ := json.Marshal(map[string]any{"threadId": "synthetic-thread", "namespace": "bridge_sessions", "tool": tc.tool, "callId": "synthetic-call", "turnId": tc.turn, "arguments": tc.args})
+		c.handleServerRequest(7, "item/tool/call", raw)
+		select {
+		case response := <-writer.writes:
+			if strings.Contains(string(response), `"success":true`) != tc.ok {
+				t.Fatal(string(response))
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("no bound tool response")
+		}
+	}
+	if got := <-provider.cancels; got != "parent:dg_wait" {
+		t.Fatal(got)
+	}
+	select {
+	case duplicate := <-provider.cancels:
+		t.Fatal("stale turn cancelled", duplicate)
+	default:
+	}
+}
