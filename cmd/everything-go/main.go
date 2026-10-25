@@ -100,6 +100,7 @@ func main() {
 	mdns := flag.Bool("mdns", false, "enable mDNS (_bridge._tcp) registration")
 	mdnsOff := flag.Bool("no-mdns", false, "deprecated: mDNS is disabled by default")
 	disableSearch := flag.Bool("disable-search", false, "disable transcript search and background indexing")
+	workspaceOverviewCompactDisabled := flag.Bool("collaboration-overview-compact-disabled", false, "disable compact v2 projection while retaining v1 overview")
 	workspaceOverviewDisabled := flag.Bool("collaboration-overview-disabled", false, "disable cross-room overview without disabling existing workspace operations")
 	workspaceEnabled := flag.Bool("collaboration-workspace", false, "enable scoped collaboration rooms and the isolated guest transport")
 	workspacePushConfig := flag.String("workspace-push-config", "", "private workspace-only FCM profile with exact original Keychain service/account")
@@ -219,19 +220,20 @@ func main() {
 		log.Fatalf("load instance id: %v", err)
 	}
 	cfg := core.Config{
-		WorkspaceEnabled:          *workspaceEnabled,
-		WorkspaceOverviewDisabled: *workspaceOverviewDisabled,
-		DelegationCapacity:        capacity,
-		DelegationHandoff:         handoffConfig,
-		InstanceName:              *instanceName,
-		InstanceID:                instanceID,
-		RootDir:                   *rootDir,
-		DataDir:                   *dataDir,
-		LanIP:                     detectLanIP(),
-		ResolveLANIP:              detectLanIP,
-		TailscaleIP:               detectTailscaleIP(),
-		Backends:                  backend.DefaultRegistry(*remoteWSURL != ""),
-		CodexRemote:               codexRemoteEndpoint(),
+		WorkspaceEnabled:                 *workspaceEnabled,
+		WorkspaceOverviewDisabled:        *workspaceOverviewDisabled,
+		WorkspaceOverviewCompactDisabled: *workspaceOverviewCompactDisabled,
+		DelegationCapacity:               capacity,
+		DelegationHandoff:                handoffConfig,
+		InstanceName:                     *instanceName,
+		InstanceID:                       instanceID,
+		RootDir:                          *rootDir,
+		DataDir:                          *dataDir,
+		LanIP:                            detectLanIP(),
+		ResolveLANIP:                     detectLanIP,
+		TailscaleIP:                      detectTailscaleIP(),
+		Backends:                         backend.DefaultRegistry(*remoteWSURL != ""),
+		CodexRemote:                      codexRemoteEndpoint(),
 	}
 	hub := core.NewHub(reg, cfg, pairing, *port)
 	if cfg.WorkspaceEnabled && !hub.WorkspaceAvailable() {

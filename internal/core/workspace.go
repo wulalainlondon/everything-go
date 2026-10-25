@@ -51,6 +51,9 @@ func (h *Hub) workspaceCapabilities() []string {
 	caps := []string{workspace.Capability}
 	if !h.cfg.WorkspaceOverviewDisabled {
 		caps = append(caps, workspace.OverviewCapability)
+		if !h.cfg.WorkspaceOverviewCompactDisabled {
+			caps = append(caps, workspace.CompactOverviewCapability)
+		}
 	}
 	return caps
 }
@@ -290,6 +293,14 @@ func (h *Hub) executeWorkspace(ctx context.Context, a workspace.Actor, c workspa
 	}
 	if c.Action == "overview" && h.cfg.WorkspaceOverviewDisabled {
 		return workspace.Result{}, errors.New("workspace_overview_unavailable")
+	}
+	if c.Action == "overview" && h.cfg.WorkspaceOverviewCompactDisabled {
+		var presentation struct {
+			Version int `json:"presentation_version"`
+		}
+		if err := json.Unmarshal(c.Data, &presentation); err == nil && presentation.Version == 2 {
+			return workspace.Result{}, errors.New("workspace_overview_compact_unavailable")
+		}
 	}
 	if c.Authority != h.cfg.InstanceID {
 		return workspace.Result{}, errors.New("workspace_wrong_authority")

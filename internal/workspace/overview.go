@@ -27,12 +27,23 @@ type OverviewTarget struct {
 	Kind  string `json:"kind"`
 	Title string `json:"title"`
 }
+type OverviewPrimaryItem struct {
+	ID        string `json:"id"`
+	Kind      string `json:"kind"`
+	Title     string `json:"title"`
+	Intent    string `json:"intent"`
+	RowState  string `json:"row_state"`
+	UpdatedAt int64  `json:"updated_at"`
+}
 type OverviewRoom struct {
-	Room         Room             `json:"room"`
-	Role         string           `json:"role"`
-	LastActivity int64            `json:"last_activity"`
-	Counts       OverviewCounts   `json:"counts"`
-	Targets      []OverviewTarget `json:"targets,omitempty"`
+	Preview      string               `json:"preview,omitempty"`
+	RowState     string               `json:"row_state,omitempty"`
+	PrimaryItem  *OverviewPrimaryItem `json:"primary_item,omitempty"`
+	Room         Room                 `json:"room"`
+	Role         string               `json:"role"`
+	LastActivity int64                `json:"last_activity"`
+	Counts       OverviewCounts       `json:"counts"`
+	Targets      []OverviewTarget     `json:"targets,omitempty"`
 }
 type OverviewCatalog struct {
 	Items      []Workspace `json:"items"`
@@ -41,23 +52,28 @@ type OverviewCatalog struct {
 	Coverage   string      `json:"coverage"`
 }
 type Overview struct {
-	SchemaVersion int             `json:"schema_version"`
-	Authority     string          `json:"authority"`
-	PrincipalID   string          `json:"principal_id"`
-	AsOf          int64           `json:"as_of"`
-	ScopeRevision string          `json:"scope_revision"`
-	Coverage      string          `json:"coverage"`
-	CountsScope   string          `json:"counts_scope"`
-	Totals        OverviewCounts  `json:"totals"`
-	Rooms         []OverviewRoom  `json:"rooms"`
-	Catalog       OverviewCatalog `json:"workspace_catalog"`
-	HasMore       bool            `json:"has_more"`
-	NextCursor    string          `json:"next_cursor,omitempty"`
+	SummaryTotals  *OverviewCounts `json:"summary_totals,omitempty"`
+	FilteredTotals *OverviewCounts `json:"filtered_totals,omitempty"`
+	SummaryScope   string          `json:"summary_scope,omitempty"`
+	SchemaVersion  int             `json:"schema_version"`
+	Authority      string          `json:"authority"`
+	PrincipalID    string          `json:"principal_id"`
+	AsOf           int64           `json:"as_of"`
+	ScopeRevision  string          `json:"scope_revision"`
+	Coverage       string          `json:"coverage"`
+	CountsScope    string          `json:"counts_scope"`
+	Totals         OverviewCounts  `json:"totals"`
+	Rooms          []OverviewRoom  `json:"rooms"`
+	Catalog        OverviewCatalog `json:"workspace_catalog"`
+	HasMore        bool            `json:"has_more"`
+	NextCursor     string          `json:"next_cursor,omitempty"`
 }
 type overviewInput struct {
-	View          string `json:"view"`
-	CatalogCursor string `json:"catalog_cursor"`
-	CatalogLimit  int    `json:"catalog_limit"`
+	PresentationVersion int    `json:"presentation_version"`
+	Sort                string `json:"sort"`
+	View                string `json:"view"`
+	CatalogCursor       string `json:"catalog_cursor"`
+	CatalogLimit        int    `json:"catalog_limit"`
 }
 
 // e and wf are aliases shared by overview and the actual acceptance guard.
@@ -126,7 +142,18 @@ func (s *Store) overview(ctx context.Context, a Actor, c Command) (Result, error
 	if input.View == "" {
 		input.View = "channels"
 	}
+	if input.PresentationVersion != 0 && input.PresentationVersion != 2 {
+		return Result{}, errors.New("overview_version_invalid")
+	}
+	compact := input.PresentationVersion == 2
+	if input.Sort != "" && input.Sort != "activity" {
+		return Result{}, errors.New("overview_sort_invalid")
+	}
 	switch input.View {
+	case "needs_reply", "needs_acceptance":
+		if !compact {
+			return Result{}, errors.New("overview_filter_invalid")
+		}
 	case "channels", "needs_me", "active", "unread", "recent", "archived":
 	default:
 		return Result{}, errors.New("overview_filter_invalid")
@@ -161,7 +188,11 @@ func (s *Store) overview(ctx context.Context, a Actor, c Command) (Result, error
 		return Result{}, err
 	}
 	now := s.now().UnixMilli()
-	fingerprint := digest([]byte(c.WorkspaceID + "\x00" + input.View + "\x00" + c.Query))
+	fingerprintInput := c.WorkspaceID + "\x00" + input.View + "\x00" + c.Query
+	if compact {
+		fingerprintInput += "\x00presentation=2\x00sort=activity"
+	}
+	fingerprint := digest([]byte(fingerprintInput))
 	parseCursor := func(token, kind string) (cursor, error) {
 		v, e := s.decodeCursor(token)
 		if e != nil {
@@ -200,7 +231,8 @@ func (s *Store) overview(ctx context.Context, a Actor, c Command) (Result, error
  SUM(CASE WHEN kind='message' AND json_extract(body,'$.deleted')=0 AND NOT EXISTS(SELECT 1 FROM read_messages seen WHERE seen.room_id=facts.room_id AND seen.principal_id=(SELECT actor FROM input) AND seen.message_id=facts.id) THEN 1 ELSE 0 END) AS unread
  FROM facts GROUP BY room_id),
  projected AS (SELECT v.*,MAX(v.created_at,COALESCE(stats.activity,v.created_at)) AS last_activity,COALESCE(needs_me,0) AS needs_me,COALESCE(needs_reply,0) AS needs_reply,COALESCE(needs_acceptance,0) AS needs_acceptance,COALESCE(running,0) AS running,COALESCE(waiting,0) AS waiting,COALESCE(unknown,0) AS unknown,COALESCE(unread,0) AS unread FROM visible v LEFT JOIN stats ON stats.room_id=v.id),
- filtered AS (SELECT * FROM projected WHERE (?='' OR workspace_id=?) AND (instr(lower(name||' '||description),lower(?))>0 OR ?='') AND `
+ scoped AS (SELECT * FROM projected WHERE (?='' OR workspace_id=?) AND (instr(lower(name||' '||description),lower(?))>0 OR ?='')),
+ filtered AS (SELECT * FROM scoped WHERE `
 	args := []any{a.ID, a.Owner, now, c.WorkspaceID, c.WorkspaceID, c.Query, c.Query}
 	if input.View == "archived" {
 		base += `(archived=1 OR (expires_at>0 AND expires_at<=` + fmt.Sprint(now) + `))`
@@ -208,6 +240,10 @@ func (s *Store) overview(ctx context.Context, a Actor, c Command) (Result, error
 		base += `archived=0 AND (expires_at=0 OR expires_at>` + fmt.Sprint(now) + `)`
 	}
 	switch input.View {
+	case "needs_reply":
+		base += ` AND needs_reply>0`
+	case "needs_acceptance":
+		base += ` AND needs_acceptance>0`
 	case "needs_me":
 		base += ` AND needs_me>0`
 	case "active":
@@ -222,6 +258,17 @@ func (s *Store) overview(ctx context.Context, a Actor, c Command) (Result, error
 		return Result{}, err
 	}
 	out.Totals = totals
+	if compact {
+		out.SchemaVersion = 2
+		out.FilteredTotals = &totals
+		out.SummaryScope = "authorized_workspace_query_active"
+		summary := new(OverviewCounts)
+		err = tx.QueryRowContext(ctx, base+`SELECT COALESCE(SUM(needs_me),0),COALESCE(SUM(needs_reply),0),COALESCE(SUM(needs_acceptance),0),COALESCE(SUM(running+waiting),0),COALESCE(SUM(running),0),COALESCE(SUM(waiting),0),COALESCE(SUM(unknown),0),COALESCE(SUM(unread),0) FROM scoped WHERE archived=0 AND (expires_at=0 OR expires_at>(SELECT now FROM input))`, args...).Scan(&summary.NeedsMe, &summary.NeedsReply, &summary.NeedsAcceptance, &summary.Active, &summary.Running, &summary.Waiting, &summary.Unknown, &summary.Unread)
+		if err != nil {
+			return Result{}, err
+		}
+		out.SummaryTotals = summary
+	}
 	query := base + `SELECT id,workspace_id,name,description,owner,revision,acl_revision,archived,expires_at,created_at,project_id,pinned,preference_revision,role,last_activity,needs_me,needs_reply,needs_acceptance,running,waiting,unknown,unread FROM filtered`
 	pageArgs := append([]any{}, args...)
 	if c.Cursor != "" {
@@ -272,14 +319,19 @@ func (s *Store) overview(ctx context.Context, a Actor, c Command) (Result, error
 			targetArgs = append(targetArgs, v.Room.ID)
 			roomIndexes[v.Room.ID] = i
 		}
+		targetOrder := "f.updated_at DESC,f.id"
+		if compact {
+			targetOrder = "CASE WHEN f.reply=1 THEN 0 WHEN f.acceptance=1 THEN 1 ELSE 2 END,f.updated_at DESC,f.id"
+		}
 		targetQuery := base + `, target_rows AS (
           SELECT f.room_id,f.id,f.kind,substr(COALESCE(json_extract(f.body,'$.title'),''),1,160) AS title,
-          ROW_NUMBER() OVER(PARTITION BY f.room_id ORDER BY f.updated_at DESC,f.id) AS position
+          f.updated_at,CASE WHEN f.reply=1 THEN 'view_question' WHEN f.acceptance=1 THEN 'view_result' ELSE 'view_approval' END AS intent,
+          ROW_NUMBER() OVER(PARTITION BY f.room_id ORDER BY ` + targetOrder + `) AS position
           FROM facts f JOIN filtered v ON v.id=f.room_id
           WHERE v.archived=0 AND (v.expires_at=0 OR v.expires_at>(SELECT now FROM input))
           AND (f.reply=1 OR f.acceptance=1 OR f.approval=1 OR f.effect_approval=1)
           AND f.room_id IN (` + placeholders + `)
-        ) SELECT room_id,id,kind,title FROM target_rows WHERE position<=3 ORDER BY room_id,position`
+        ) SELECT room_id,id,kind,title,updated_at,intent FROM target_rows WHERE position<=3 ORDER BY room_id,position`
 		targetRows, e := tx.QueryContext(ctx, targetQuery, targetArgs...)
 		if e != nil {
 			return Result{}, e
@@ -287,17 +339,49 @@ func (s *Store) overview(ctx context.Context, a Actor, c Command) (Result, error
 		for targetRows.Next() {
 			var room string
 			var target OverviewTarget
-			if e = targetRows.Scan(&room, &target.ID, &target.Kind, &target.Title); e != nil {
+			var updated int64
+			var intent string
+			if e = targetRows.Scan(&room, &target.ID, &target.Kind, &target.Title, &updated, &intent); e != nil {
 				targetRows.Close()
 				return Result{}, e
 			}
 			i := roomIndexes[room]
 			out.Rooms[i].Targets = append(out.Rooms[i].Targets, target)
+			if compact && out.Rooms[i].PrimaryItem == nil {
+				state := "needs_approval"
+				if intent == "view_question" {
+					state = "needs_reply"
+				} else if intent == "view_result" {
+					state = "needs_acceptance"
+				}
+				out.Rooms[i].PrimaryItem = &OverviewPrimaryItem{ID: target.ID, Kind: target.Kind, Title: target.Title, Intent: intent, RowState: state, UpdatedAt: updated}
+			}
 		}
 		e = targetRows.Err()
 		targetRows.Close()
 		if e != nil {
 			return Result{}, e
+		}
+	}
+	if compact {
+		for i := range out.Rooms {
+			row := &out.Rooms[i]
+			row.Preview = row.Room.Description
+			if row.PrimaryItem != nil {
+				row.RowState = row.PrimaryItem.RowState
+				row.Preview = row.PrimaryItem.Title
+			} else if row.Room.Archived || (row.Room.ExpiresAt > 0 && row.Room.ExpiresAt <= now) {
+				row.RowState = "archived"
+			} else if row.Counts.Running > 0 {
+				row.RowState = "running"
+			} else if row.Counts.Waiting > 0 {
+				row.RowState = "waiting"
+			} else if row.Counts.Unknown > 0 {
+				row.RowState = "unknown"
+			} else {
+				row.RowState = "idle"
+			}
+			row.Preview = string([]rune(row.Preview)[:min(len([]rune(row.Preview)), 160)])
 		}
 	}
 	after := ""

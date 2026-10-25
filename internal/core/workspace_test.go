@@ -637,3 +637,26 @@ func TestWorkspaceOverviewIndependentDisable(t *testing.T) {
 		t.Fatal("legacy workspace disabled", err)
 	}
 }
+
+func TestWorkspaceCompactIndependentRollback(t *testing.T) {
+	f := workspaceSetup(t)
+	f.h.cfg.WorkspaceOverviewCompactDisabled = true
+	v1 := false
+	for _, cap := range f.h.workspaceCapabilities() {
+		if cap == workspace.CompactOverviewCapability {
+			t.Fatal("disabled compact advertised")
+		}
+		if cap == workspace.OverviewCapability {
+			v1 = true
+		}
+	}
+	if !v1 {
+		t.Fatal("v1 capability lost")
+	}
+	if _, err := f.h.executeWorkspace(f.ctx, f.owner, workspace.Command{Authority: f.h.cfg.InstanceID, Action: "overview", Data: json.RawMessage(`{"presentation_version":2}`)}); err == nil || !strings.Contains(err.Error(), "workspace_overview_compact_unavailable") {
+		t.Fatal("compact rollback gate missing", err)
+	}
+	if _, err := f.h.executeWorkspace(f.ctx, f.owner, workspace.Command{Authority: f.h.cfg.InstanceID, Action: "overview"}); err != nil {
+		t.Fatal("v1 disabled", err)
+	}
+}

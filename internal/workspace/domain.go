@@ -18,6 +18,8 @@ import (
 )
 
 const Capability = "collaboration_workspace_v1"
+const CompactOverviewCapability = "collaboration_workspace_overview_compact_v2"
+
 const OverviewCapability = "collaboration_workspace_overview_v1"
 const MaxTextBytes = 65536
 const MaxAttachmentBytes = 8 * 1024 * 1024
