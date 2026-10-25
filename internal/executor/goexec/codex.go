@@ -1424,7 +1424,7 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 			c.emitCodexAgentTree(s)
 			return
 		}
-		if p.Item.Type == "imageGeneration" {
+		if p.Item.Type == "imageGeneration" && (p.Item.SavedPath != "" || p.Item.Status == "failed" || len(firstRaw(p.Output, p.Item.Output, p.Item.AggregatedOutput, p.Item.ContentItems)) == 0) {
 			itemID := firstNonEmpty(p.ItemID, p.Item.ID, "codex_image")
 			c.tools.Start(s.ID, reqID, itemID, "imageGeneration", "")
 			output := "Image generation completed without a verified saved image."

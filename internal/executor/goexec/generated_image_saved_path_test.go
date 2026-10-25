@@ -11,7 +11,7 @@ import (
 )
 
 func TestNativeImageGenerationSavedPathActualProviderShape(t *testing.T) {
-	for _, kind := range []string{"completed", "failed", "foreign-thread", "missing", "unsupported-extension"} {
+	for _, kind := range []string{"completed", "legacy-control", "failed", "foreign-thread", "missing", "unsupported-extension"} {
 		t.Run(kind, func(t *testing.T) {
 			sink := &capSink{}
 			c := NewCodex(sink, "disabled")
@@ -41,6 +41,10 @@ func TestNativeImageGenerationSavedPathActualProviderShape(t *testing.T) {
 				item["failure"] = map[string]any{"message": "failed"}
 			}
 			params := map[string]any{"threadId": "original-thread", "turnId": "original-turn", "item": item}
+			if kind == "legacy-control" {
+				item["savedPath"] = ""
+				params["output"] = []map[string]any{{"type": "input_image", "image_url": "data:image/png;base64,BASE64_MUST_NOT_FORWARD"}, {"type": "input_text", "text": "Saved as " + path}}
+			}
 			raw, _ := json.Marshal(map[string]any{"method": "item/completed", "params": params})
 			c.dispatch(raw)
 			media := 0
@@ -55,10 +59,10 @@ func TestNativeImageGenerationSavedPathActualProviderShape(t *testing.T) {
 					t.Fatal("base64 leaked")
 				}
 			}
-			if kind == "completed" && media != 1 {
+			if (kind == "completed" || kind == "legacy-control") && media != 1 {
 				t.Fatalf("actual native imageGeneration ignored: %d", media)
 			}
-			if kind != "completed" && media != 0 {
+			if kind != "completed" && kind != "legacy-control" && media != 0 {
 				t.Fatalf("invalid native image accepted: %s", kind)
 			}
 		})
