@@ -11,6 +11,7 @@ import (
 	"errors"
 	"everything-go/internal/taskapi"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -58,7 +59,10 @@ type Snapshot struct {
 	Revision uint64
 	Items    []Entry
 }
-type Store struct{ db *sql.DB }
+type Store struct {
+	db    *sql.DB
+	clock elapsedClock
+}
 
 func Open(dataDir string) (*Store, error) {
 	path := ":memory:"
@@ -112,7 +116,12 @@ func Open(dataDir string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-	return &Store{db: db}, nil
+	s := &Store{db: db}
+	if err := s.initElapsed(); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return s, nil
 }
 func (s *Store) Close() error { return s.db.Close() }
 
@@ -319,6 +328,11 @@ func (s *Store) Transition(sessionID, requestID string, from []State, to State, 
 	}
 	if err = tx.Commit(); err != nil {
 		return Entry{}, false, err
+	}
+	if to == Completed || to == Failed || to == Cancelled {
+		if err := s.sealElapsed(sessionID, requestID); err != nil {
+			log.Printf("[tasks] optional elapsed sample unavailable after committed terminal: %v", err)
+		}
 	}
 	return e, true, nil
 }

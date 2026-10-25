@@ -212,6 +212,9 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 				helloInput.Capabilities = append(helloInput.Capabilities, "machine_resources_v1")
 			}
 		}
+		if !c.enrollmentOnly && h.pairedTaskDevice(c) != "" && len(h.jarvisOperations()) > 0 {
+			helloInput.Capabilities = append(helloInput.Capabilities, "jarvis_workbench_v1")
+		}
 		c.enqueueEvent(h.client.HelloAck(helloInput))
 		if c.inventoryProbe || cmd.ConnectionProbe {
 			return

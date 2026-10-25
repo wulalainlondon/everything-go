@@ -150,8 +150,14 @@ func (h *Hub) serveInboxAPI(w http.ResponseWriter, r *http.Request, path string)
 		return true
 	}
 	if path == "assignments" && r.Method == http.MethodPost {
+		var legacy legacyEventAssignment
+		if !decodeAutomationRequest(w, r, &legacy) {
+			return true
+		}
+		raw, _ := json.Marshal(legacy)
 		var a automation.EventAssignment
-		if !decodeAutomationRequest(w, r, &a) {
+		if json.Unmarshal(raw, &a) != nil {
+			http.Error(w, "invalid legacy assignment", 400)
 			return true
 		}
 		if !strings.HasPrefix(a.ID, "r_") || a.OwnerDevice != "" && a.OwnerDevice != device || (a.OwnerInstanceID == "") || (a.Mode != "analyze" && a.Mode != "draft") {
@@ -184,6 +190,12 @@ func (h *Hub) serveInboxAPI(w http.ResponseWriter, r *http.Request, path string)
 			}
 			if cfg, err := h.PMConfiguration(s.ID); err != nil || cfg != nil {
 				http.Error(w, "managed target requires its original workflow", 409)
+				return true
+			}
+		}
+		if a.OwnerInstanceID == h.cfg.InstanceID {
+			if err := h.jarvisFirstEffect(r.Context(), device, a.SessionID, a.ID, "legacy_inbox_assignment", ""); err != nil {
+				http.Error(w, "reserved Jarvis first effect requires original operation", 409)
 				return true
 			}
 		}
@@ -248,6 +260,9 @@ func (h *Hub) drainEventAssignments(ctx context.Context) {
 	}
 }
 func (h *Hub) enqueueEventAssignment(ctx context.Context, a automation.EventAssignment) error {
+	if !h.jarvisAssignmentCurrent(ctx, a) {
+		return errors.New("original assignment credential no longer paired")
+	}
 	paired := h.assignmentPeerAllowed(ctx, a)
 	for _, binding := range h.pairing.DeviceBindings() {
 		if binding.DeviceID == a.OwnerDevice {
@@ -273,7 +288,8 @@ func (h *Hub) enqueueEventAssignment(ctx context.Context, a automation.EventAssi
 		return err
 	}
 	config := session.ConfigurationFrom(s.SettingsSnapshot())
-	payload, err := json.Marshal(queuedPayload{MessagePurpose: "instruction", OwnerDevice: a.OwnerDevice, Content: a.Content, Configuration: &config, ExpectedTarget: &dispatchTargetExpectation{ThreadID: a.ThreadID, Revision: a.ConfigRevision}, ExternalEventIDs: a.EventIDs, ExternalPeer: assignmentPeer(a), ExternalReviewOnly: strings.HasPrefix(a.OwnerDevice, "relay:")})
+	generation, _, _ := h.automation.JarvisAssignmentGeneration(ctx, a.ID)
+	payload, err := json.Marshal(queuedPayload{OwnerCredentialGeneration: generation, MessagePurpose: "instruction", OwnerDevice: a.OwnerDevice, Content: a.Content, Configuration: &config, ExpectedTarget: &dispatchTargetExpectation{ThreadID: a.ThreadID, Revision: a.ConfigRevision}, ExternalEventIDs: a.EventIDs, ExternalPeer: assignmentPeer(a), ExternalReviewOnly: strings.HasPrefix(a.OwnerDevice, "relay:")})
 	if err != nil {
 		return err
 	}
@@ -417,4 +433,23 @@ func (h *Hub) enqueueRelayAssignment(ctx context.Context, a automation.EventAssi
 		h.WakeRelayScheduler()
 	}
 	return err
+}
+
+// Freeze the released DTO. New Jarvis fields are never silently accepted by
+// this older operation, including explicitly empty optional values.
+type legacyEventAssignment struct {
+	SourceInstanceID string   `json:"source_instance_id,omitempty"`
+	RuleVersion      uint64   `json:"rule_version,omitempty"`
+	ID               string   `json:"id"`
+	EventIDs         []string `json:"event_ids"`
+	ReprocessOf      []string `json:"reprocess_of,omitempty"`
+	SessionID        string   `json:"session_id"`
+	OwnerInstanceID  string   `json:"owner_instance_id"`
+	ThreadID         string   `json:"thread_id"`
+	ConfigRevision   uint64   `json:"config_revision"`
+	OwnerDevice      string   `json:"owner_device"`
+	Mode             string   `json:"mode"`
+	RuleID           string   `json:"rule_id,omitempty"`
+	Status           string   `json:"status"`
+	CreatedAt        int64    `json:"created_at"`
 }

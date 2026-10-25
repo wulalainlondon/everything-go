@@ -242,7 +242,7 @@ CREATE INDEX IF NOT EXISTS automation_proposals_status ON outbound_action_propos
 
 func Open(dataDir, instanceID string) (*Store, error) {
 	path := filepath.Join(dataDir, "everything_go_automation.db")
-	dsn := "file:" + path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(ON)"
+	dsn := "file:" + path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(FULL)&_pragma=foreign_keys(ON)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err

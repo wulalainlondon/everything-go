@@ -22,28 +22,29 @@ import (
 )
 
 type queuedPayload struct {
-	WorkspaceTask       *workspaceQueueBinding     `json:"workspace_task,omitempty"`
-	VoiceContext        bool                       `json:"voice_context,omitempty"`
-	VoiceID             string                     `json:"voice_id,omitempty"`
-	VoiceThread         string                     `json:"voice_thread,omitempty"`
-	PartnerRole         *partners.RoleSnapshot     `json:"partner_role,omitempty"`
-	CallbackOnComplete  *bool                      `json:"callback_on_complete,omitempty"`
-	CallbackBinding     string                     `json:"callback_binding,omitempty"`
-	ExternalPeer        string                     `json:"external_peer,omitempty"`
-	ExternalReviewOnly  bool                       `json:"external_review_only,omitempty"`
-	ExternalEventIDs    []string                   `json:"external_event_ids,omitempty"`
-	VisualUserHash      string                     `json:"visual_user_hash,omitempty"`
-	VisualEffectiveHash string                     `json:"visual_effective_hash,omitempty"`
-	VisualPresentation  string                     `json:"visual_presentation,omitempty"`
-	FormalIntake        bool                       `json:"formal_intake,omitempty"`
-	ExpectedTarget      *dispatchTargetExpectation `json:"expected_target,omitempty"`
-	Configuration       *session.Configuration     `json:"configuration,omitempty"`
-	MessagePurpose      string                     `json:"message_purpose,omitempty"`
-	OwnerDevice         string                     `json:"owner_device,omitempty"`
-	Origin              *protocol.TaskOrigin       `json:"task_origin,omitempty"`
-	Content             string                     `json:"content"`
-	Images              []backend.ImageAttachment  `json:"images,omitempty"`
-	Files               []backend.FileAttachment   `json:"files,omitempty"`
+	OwnerCredentialGeneration uint64                     `json:"owner_credential_generation,omitempty"`
+	WorkspaceTask             *workspaceQueueBinding     `json:"workspace_task,omitempty"`
+	VoiceContext              bool                       `json:"voice_context,omitempty"`
+	VoiceID                   string                     `json:"voice_id,omitempty"`
+	VoiceThread               string                     `json:"voice_thread,omitempty"`
+	PartnerRole               *partners.RoleSnapshot     `json:"partner_role,omitempty"`
+	CallbackOnComplete        *bool                      `json:"callback_on_complete,omitempty"`
+	CallbackBinding           string                     `json:"callback_binding,omitempty"`
+	ExternalPeer              string                     `json:"external_peer,omitempty"`
+	ExternalReviewOnly        bool                       `json:"external_review_only,omitempty"`
+	ExternalEventIDs          []string                   `json:"external_event_ids,omitempty"`
+	VisualUserHash            string                     `json:"visual_user_hash,omitempty"`
+	VisualEffectiveHash       string                     `json:"visual_effective_hash,omitempty"`
+	VisualPresentation        string                     `json:"visual_presentation,omitempty"`
+	FormalIntake              bool                       `json:"formal_intake,omitempty"`
+	ExpectedTarget            *dispatchTargetExpectation `json:"expected_target,omitempty"`
+	Configuration             *session.Configuration     `json:"configuration,omitempty"`
+	MessagePurpose            string                     `json:"message_purpose,omitempty"`
+	OwnerDevice               string                     `json:"owner_device,omitempty"`
+	Origin                    *protocol.TaskOrigin       `json:"task_origin,omitempty"`
+	Content                   string                     `json:"content"`
+	Images                    []backend.ImageAttachment  `json:"images,omitempty"`
+	Files                     []backend.FileAttachment   `json:"files,omitempty"`
 }
 
 func (h *Hub) queueError(c *Client, cmd clientproto.Command, code, message string) {
@@ -124,6 +125,10 @@ func (h *Hub) enqueueChatMessageExpected(c *Client, cmd clientproto.Command, exp
 	h.messageQueueMu.Lock()
 	defer h.messageQueueMu.Unlock()
 	config := session.ConfigurationFrom(s.SettingsSnapshot())
+	if err := h.jarvisFirstEffect(context.Background(), h.pairedTaskDevice(c), s.ID, cmd.RequestID, "legacy_message", cmd.Content); err != nil {
+		h.queueError(c, cmd, "jarvis_first_effect_required", err.Error())
+		return false
+	}
 	if expected != nil && (s.ResumeID() != expected.ThreadID || config.Revision != expected.Revision || s.State() == session.Closed || s.Snapshot().Hidden) {
 		h.queueError(c, cmd, "dispatch_target_changed", "Target thread or configuration changed; refresh before dispatching")
 		return false

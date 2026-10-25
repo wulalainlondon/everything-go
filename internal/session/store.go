@@ -157,10 +157,30 @@ func (st *Store) writeRawLocked(raw map[string]map[string]json.RawMessage) error
 		return err
 	}
 	tmp := st.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	file, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, st.path)
+	if _, err = file.Write(data); err != nil {
+		file.Close()
+		return err
+	}
+	if err = file.Sync(); err != nil {
+		file.Close()
+		return err
+	}
+	if err = file.Close(); err != nil {
+		return err
+	}
+	if err = os.Rename(tmp, st.path); err != nil {
+		return err
+	}
+	dir, err := os.Open(filepath.Dir(st.path))
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
 }
 
 func putKnownFields(obj map[string]json.RawMessage, entry savedEntry) {

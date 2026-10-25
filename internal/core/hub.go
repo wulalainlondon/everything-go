@@ -171,6 +171,7 @@ type Hub struct {
 	cfg                 Config
 	client              clientproto.AppV1
 	gen                 string // per-boot generation id
+	jarvisMu            sync.Mutex
 
 	iceServers []webrtc.ICEServer // STUN/TURN for WebRTC answers (default: Google STUN)
 
@@ -679,14 +680,19 @@ func (h *Hub) Emit(event any) {
 		if h.messageQueue != nil {
 			if err := h.messageQueue.RecordNativeAcceptance(accepted.SessionID, accepted.RequestID, accepted.ThreadID, accepted.TurnID); err != nil {
 				log.Printf("[tasks] native acceptance persistence failed: %v", err)
-			} else if h.delegations != nil {
-				if r, found, e := h.delegations.ByChildRequest(context.Background(), accepted.SessionID, accepted.RequestID); e == nil && found {
-					_, revision, _, e := h.delegations.ExecutionBinding(context.Background(), r.ID)
-					if e == nil {
-						e = h.delegations.PinNativeThread(context.Background(), r.ChildSessionID, accepted.ThreadID, revision)
-					}
-					if e != nil {
-						log.Printf("[delegation] immutable native binding refused: %v", e)
+			} else {
+				if err := h.messageQueue.RecordNativeClock(accepted.SessionID, accepted.RequestID, accepted.ConsumedResponseAt); err != nil {
+					log.Printf("[tasks] native clock persistence failed: %v", err)
+				}
+				if h.delegations != nil {
+					if r, found, e := h.delegations.ByChildRequest(context.Background(), accepted.SessionID, accepted.RequestID); e == nil && found {
+						_, revision, _, e := h.delegations.ExecutionBinding(context.Background(), r.ID)
+						if e == nil {
+							e = h.delegations.PinNativeThread(context.Background(), r.ChildSessionID, accepted.ThreadID, revision)
+						}
+						if e != nil {
+							log.Printf("[delegation] immutable native binding refused: %v", e)
+						}
 					}
 				}
 			}

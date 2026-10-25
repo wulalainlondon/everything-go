@@ -13,5 +13,8 @@ func (h *Hub) eventSessionAllowed(s *session.Session) bool {
 	return err == nil && policy == nil
 }
 func (h *Hub) eventAssignmentSendAllowed(s *session.Session, payload queuedPayload) bool {
+	if payload.OwnerCredentialGeneration != 0 && !h.jarvisCredentialCurrent(payload.OwnerDevice, payload.OwnerCredentialGeneration) {
+		return false
+	}
 	return len(payload.ExternalEventIDs) == 0 || h.eventSessionAllowed(s)
 }

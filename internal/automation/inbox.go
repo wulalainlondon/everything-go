@@ -10,24 +10,33 @@ import (
 )
 
 type EventAssignment struct {
-	SourceInstanceID string   `json:"source_instance_id,omitempty"`
-	RuleVersion      uint64   `json:"rule_version,omitempty"`
-	ID               string   `json:"id"`
-	EventIDs         []string `json:"event_ids"`
-	ReprocessOf      []string `json:"reprocess_of,omitempty"`
-	SessionID        string   `json:"session_id"`
-	OwnerInstanceID  string   `json:"owner_instance_id"`
-	ThreadID         string   `json:"thread_id"`
-	ConfigRevision   uint64   `json:"config_revision"`
-	OwnerDevice      string   `json:"owner_device"`
-	Mode             string   `json:"mode"`
-	RuleID           string   `json:"rule_id,omitempty"`
-	Content          string   `json:"-"`
-	Status           string   `json:"status"`
-	CreatedAt        int64    `json:"created_at"`
+	HumanInstruction string            `json:"-"`
+	ImmutableHash    string            `json:"immutable_hash,omitempty"`
+	EventRevisions   map[string]uint64 `json:"event_revisions,omitempty"`
+	SourceInstanceID string            `json:"source_instance_id,omitempty"`
+	RuleVersion      uint64            `json:"rule_version,omitempty"`
+	ID               string            `json:"id"`
+	EventIDs         []string          `json:"event_ids"`
+	ReprocessOf      []string          `json:"reprocess_of,omitempty"`
+	SessionID        string            `json:"session_id"`
+	OwnerInstanceID  string            `json:"owner_instance_id"`
+	ThreadID         string            `json:"thread_id"`
+	ConfigRevision   uint64            `json:"config_revision"`
+	OwnerDevice      string            `json:"owner_device"`
+	Mode             string            `json:"mode"`
+	RuleID           string            `json:"rule_id,omitempty"`
+	Content          string            `json:"-"`
+	Status           string            `json:"status"`
+	CreatedAt        int64             `json:"created_at"`
 }
 
+func (s *Store) SaveJarvisEventAssignment(ctx context.Context, a EventAssignment, generation uint64) (EventAssignment, error) {
+	return s.saveEventAssignment(ctx, a, &generation)
+}
 func (s *Store) SaveEventAssignment(ctx context.Context, a EventAssignment) (EventAssignment, error) {
+	return s.saveEventAssignment(ctx, a, nil)
+}
+func (s *Store) saveEventAssignment(ctx context.Context, a EventAssignment, generation *uint64) (EventAssignment, error) {
 	if a.ID == "" || a.SessionID == "" || a.OwnerDevice == "" || len(a.EventIDs) == 0 || len(a.EventIDs) > 25 {
 		return a, errors.New("invalid event assignment")
 	}
@@ -40,8 +49,17 @@ func (s *Store) SaveEventAssignment(ctx context.Context, a EventAssignment) (Eve
 	var raw []byte
 	err = tx.QueryRowContext(ctx, "SELECT payload FROM event_session_assignments WHERE id=?", a.ID).Scan(&raw)
 	if err == nil {
+		var stored struct {
+			Generation *uint64 `json:"_jarvis_credential_generation"`
+		}
+		if json.Unmarshal(raw, &stored) != nil {
+			return a, ErrConflict
+		}
+		if stored.Generation != nil && (generation == nil || *stored.Generation != *generation) || stored.Generation == nil && generation != nil {
+			return a, ErrConflict
+		}
 		var previous EventAssignment
-		if e := json.Unmarshal(raw, &previous); e != nil {
+		if e := decodeStoredAssignment(raw, &previous); e != nil {
 			return a, e
 		}
 		var content string
@@ -94,6 +112,18 @@ func (s *Store) SaveEventAssignment(ctx context.Context, a EventAssignment) (Eve
 	if err != nil {
 		return a, err
 	}
+	if generation != nil {
+		var stored map[string]json.RawMessage
+		if err = json.Unmarshal(raw, &stored); err != nil {
+			return a, err
+		}
+		stored["_jarvis_credential_generation"], _ = json.Marshal(*generation)
+		stored["_jarvis_human_instruction"], _ = json.Marshal(a.HumanInstruction)
+		raw, err = json.Marshal(stored)
+		if err != nil {
+			return a, err
+		}
+	}
 	_, err = tx.ExecContext(ctx, "INSERT INTO event_session_assignments(id,payload,content) VALUES(?,?,?)", a.ID, raw, a.Content)
 	if err != nil {
 		return a, err
@@ -123,7 +153,7 @@ func (s *Store) EventAssignments(ctx context.Context) ([]EventAssignment, error)
 		if err = rows.Scan(&raw, &content); err != nil {
 			return nil, err
 		}
-		if err = json.Unmarshal(raw, &a); err != nil {
+		if err = decodeStoredAssignment(raw, &a); err != nil {
 			return nil, err
 		}
 		a.Content = content
@@ -147,6 +177,26 @@ func (s *Store) SessionPolicy(ctx context.Context, id string) (EventAssignment, 
 	if err != nil {
 		return a, err
 	}
-	err = json.Unmarshal(raw, &a)
+	err = decodeStoredAssignment(raw, &a)
 	return a, err
+}
+
+func (s *Store) JarvisAssignmentGeneration(ctx context.Context, id string) (uint64, bool, error) {
+	var value sql.NullInt64
+	err := s.db.QueryRowContext(ctx, `SELECT json_extract(CAST(payload AS TEXT),'$._jarvis_credential_generation') FROM event_session_assignments WHERE id=?`, id).Scan(&value)
+	return uint64(value.Int64), value.Valid, err
+}
+
+func decodeStoredAssignment(raw []byte, a *EventAssignment) error {
+	if err := json.Unmarshal(raw, a); err != nil {
+		return err
+	}
+	var private struct {
+		HumanInstruction string `json:"_jarvis_human_instruction"`
+	}
+	if err := json.Unmarshal(raw, &private); err != nil {
+		return err
+	}
+	a.HumanInstruction = private.HumanInstruction
+	return nil
 }

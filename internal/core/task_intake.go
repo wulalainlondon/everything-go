@@ -128,6 +128,9 @@ func (h *Hub) authorizeIntake(ctx context.Context, c taskapi.VerifiedContext, r 
 	} else if failure, ok := e.(*taskapi.APIError); ok && failure.Code == "key_expired" {
 		return l, e
 	}
+	if err := h.jarvisFirstEffect(ctx, strings.TrimPrefix(c.StableScopeID, "device:"), s.ID, in.RequestID, "ordinary_prompt", in.Goal, c.NamespaceGeneration); err != nil {
+		return l, err
+	}
 	if !apiOwnedAdmissionEnabled {
 		return l, taskapi.Failure("busy", "known_none", "read_capabilities")
 	}

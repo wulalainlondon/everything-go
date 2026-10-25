@@ -3000,6 +3000,7 @@ func (c *Codex) startTurn(threadID string, input []map[string]any, snap session.
 	st.mu.Unlock()
 	// Keep the existing health/tool policy and atomically guard the transport.
 	raw, err := c.rpcCallAtEpoch("turn/start", params, 30*time.Second, &epoch)
+	consumedResponseAt := time.Now()
 	if err == nil {
 		var response struct {
 			Turn codexTurnResponse `json:"turn"`
@@ -3016,7 +3017,7 @@ func (c *Codex) startTurn(threadID string, input []map[string]any, snap session.
 			return &codexAcceptanceError{Reason: reason, Failure: recovery.ClassifyCodex(response.Turn.Error.Info, "")}
 		}
 		return c.confirmOwnedTurnSubmission(st, threadID, requestID, response.Turn, func() {
-			c.sink.Emit(backend.NativeTaskAccepted{SessionID: snap.ID, RequestID: requestID, ThreadID: threadID, TurnID: response.Turn.ID})
+			c.sink.Emit(backend.NativeTaskAccepted{SessionID: snap.ID, RequestID: requestID, ThreadID: threadID, TurnID: response.Turn.ID, ConsumedResponseAt: consumedResponseAt})
 		})
 	}
 	return err

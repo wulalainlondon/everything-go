@@ -487,6 +487,7 @@ func main() {
 	mux.HandleFunc("/api/inbox/v1/files/", hub.ServeInboxDownload)
 	mux.HandleFunc("/api/events/v1/events", hub.ServeEventAPI)
 	mux.HandleFunc("/api/automation/v1/", hub.ServeAutomationAPI)
+	mux.HandleFunc("/api/jarvis/v1/", hub.ServeJarvisAPI)
 	mux.HandleFunc("/api/line/v1/", hub.ServeLineAPI)
 	mux.HandleFunc("/api/relay/v1/", hub.ServeRelayAPI)
 	mux.HandleFunc("/api/internal-agents/v1/observation", hub.ServeInternalAgentObservation)
