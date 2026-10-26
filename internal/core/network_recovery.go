@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"everything-go/internal/backend"
@@ -53,6 +54,7 @@ type networkRecovery struct {
 	clock         recovery.ClockAnchor
 	clockMu       sync.Mutex
 	clockLast     int64
+	clockUnsafe   atomic.Bool
 }
 
 func (h *Hub) prepareNetworkRecovery(s *session.Session, e messagequeue.Entry, p queuedPayload) (recovery.AutomaticController, error) {
@@ -222,7 +224,17 @@ func (n *networkRecovery) currentSource(current recovery.AutomaticSource) error 
 }
 
 // Optional executor final predicate, sampled after its last local account read.
-func (n *networkRecovery) WriterSourceCurrent() error { return n.currentSource(n.source) }
+func (n *networkRecovery) WriterSourceCurrent() error {
+	if e := n.currentSource(n.source); e != nil {
+		return e
+	}
+	// A known clock fault retires a previously acquired writer permit even while
+	// its durable pause is waiting for SQLite. No blocking read follows this.
+	if n.clockUnsafe.Load() {
+		return recovery.ErrClock
+	}
+	return nil
+}
 func (n *networkRecovery) BeforeDispatch(ctx context.Context, inputHash string, transport uint64) (recovery.AutomaticNext, error) {
 	if ctx.Err() != nil {
 		return recovery.AutomaticNext{}, ctx.Err()
@@ -463,20 +475,29 @@ func (h *Hub) sampleNetworkClock() (recovery.ClockAnchor, error) {
 	return sample, e
 }
 func (n *networkRecovery) clockTime() (time.Time, error) {
+	// Serialize sampling as well as comparison: completion order from two valid
+	// concurrent samples is not evidence that the platform clock went backwards.
+	n.clockMu.Lock()
+	if n.clockUnsafe.Load() {
+		n.clockMu.Unlock()
+		return time.Time{}, recovery.ErrClock
+	}
 	sample, e := n.hub.sampleNetworkClock()
 	ms := int64(0)
 	if e == nil {
 		ms, e = n.clock.Time(sample)
 	}
-	n.clockMu.Lock()
 	if e == nil && ms < n.clockLast {
 		e = recovery.ErrClock
 	}
 	if e == nil {
 		n.clockLast = ms
+	} else {
+		n.clockUnsafe.Store(true)
 	}
 	n.clockMu.Unlock()
 	if e != nil {
+		// Never hold the sample mutex across SQLite or acquire it in reverse order.
 		if er := n.hub.messageQueue.PauseRecoveryClock(n.source.Session, n.source.Request); er != nil {
 			return time.Time{}, er
 		}

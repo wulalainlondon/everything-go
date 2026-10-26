@@ -2,11 +2,13 @@ package core
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -548,4 +550,192 @@ func TestNetworkRecoveryFinalLocalPredicateRetiresAuthorityAfterDurableRead(t *t
 			s.EndTurn()
 		})
 	}
+}
+
+func TestNetworkRecoveryValidConcurrentClockSamplesCannotFalselyPauseRecovery(t *testing.T) {
+	t.Setenv("EVERYTHING_GO_CODEX_NETWORK_AUTOCONTINUE", "true")
+	t.Setenv("EVERYTHING_GO_CODEX_NETWORK_AUTOCONTINUE_ALL_ORDINARY", "true")
+	h, fe := newTestHub(t)
+	h.cfg.DataDir = t.TempDir()
+	h.networkRecoveryStarted = 0
+	c := sharedReadClient(t, h, "clock-owner")
+	s := h.registry.Create("s1", "ordinary", t.TempDir(), backend.Codex, "gpt-6.1-sol", "read-only", "thread")
+	result := make(chan error, 1)
+	fe.onSendContext = func(ctx context.Context, _ *session.Session, _, _ string) {
+		n, ok := recovery.Automatic(ctx).(*networkRecovery)
+		if !ok {
+			result <- recovery.ErrGuard
+			return
+		}
+		var calls atomic.Int32
+		sampledA := make(chan struct{})
+		releaseA := make(chan struct{})
+		h.networkRecoveryClock = func() (recovery.ClockAnchor, error) {
+			order := calls.Add(1)
+			sample := n.clock
+			sample.ElapsedMS += int64(order) * 100
+			sample.WallMS += int64(order) * 100
+			if order == 1 {
+				close(sampledA)
+				<-releaseA
+			}
+			return sample, nil
+		}
+		a := make(chan error, 1)
+		b := make(chan error, 1)
+		go func() { _, e := n.clockTime(); a <- e }()
+		<-sampledA
+		go func() { _, e := n.clockTime(); b <- e }()
+		var bErr error
+		returnedB := false
+		select {
+		case bErr = <-b:
+			returnedB = true
+		case <-time.After(30 * time.Millisecond):
+		}
+		close(releaseA)
+		aErr := <-a
+		if !returnedB {
+			bErr = <-b
+		}
+		r, e := n.Resume()
+		if e != nil {
+			result <- e
+			return
+		}
+		if aErr != nil || bErr != nil || r.ClockUnsafe {
+			result <- errors.New("valid increasing samples completed out of order falsely persisted clock regression pause")
+			return
+		}
+		result <- nil
+	}
+	enqueueTestMessage(t, h, c, "r_clock_concurrency")
+	select {
+	case e := <-result:
+		if e != nil {
+			t.Fatal(e)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("clock sample ordering deadlock")
+	}
+	s.EndTurn()
+}
+
+func TestNetworkRecoveryClockFaultStickyBeforeDurablePauseAndFinalWriter(t *testing.T) {
+	t.Setenv("EVERYTHING_GO_CODEX_NETWORK_AUTOCONTINUE", "true")
+	t.Setenv("EVERYTHING_GO_CODEX_NETWORK_AUTOCONTINUE_ALL_ORDINARY", "true")
+	h, fe := newTestHub(t)
+	h.cfg.DataDir = t.TempDir()
+	h.networkRecoveryStarted = 0
+	c := sharedReadClient(t, h, "clock-owner")
+	s := h.registry.Create("s1", "ordinary", t.TempDir(), backend.Codex, "gpt-6.1-sol", "read-only", "thread")
+	result := make(chan error, 1)
+	fe.onSendContext = func(ctx context.Context, _ *session.Session, _, _ string) {
+		n, ok := recovery.Automatic(ctx).(*networkRecovery)
+		if !ok {
+			result <- recovery.ErrGuard
+			return
+		}
+		next, e := n.BeforeDispatch(ctx, "input", 1)
+		if e != nil {
+			result <- e
+			return
+		}
+		permit, e := n.WriterGuard()
+		if e != nil {
+			result <- e
+			return
+		}
+		defer permit()
+		held := make(chan struct{})
+		releaseDB := make(chan struct{})
+		dbDone := make(chan error, 1)
+		go func() {
+			dbDone <- h.messageQueue.TaskJournal().Transaction(context.Background(), func(_ *sql.Tx) error { close(held); <-releaseDB; return nil })
+		}()
+		<-held
+		var calls atomic.Int32
+		h.networkRecoveryClock = func() (recovery.ClockAnchor, error) {
+			sample := n.clock
+			if calls.Add(1) == 1 {
+				sample.ElapsedMS--
+			} else {
+				sample.ElapsedMS += 1000
+			}
+			return sample, nil
+		}
+		first := make(chan error, 1)
+		go func() { _, e := n.clockTime(); first <- e }()
+		deadline := time.After(time.Second)
+		for !n.clockUnsafe.Load() {
+			select {
+			case <-deadline:
+				close(releaseDB)
+				<-dbDone
+				result <- errors.New("clock fault not sticky before SQLite")
+				return
+			case <-time.After(time.Millisecond):
+			}
+		}
+		// The first pause cannot have committed while the single DB connection is held.
+		select {
+		case <-first:
+			close(releaseDB)
+			<-dbDone
+			result <- errors.New("fault did not wait for held durable connection")
+			return
+		default:
+		}
+		second := make(chan error, 1)
+		go func() { _, e := n.clockTime(); second <- e }()
+		select {
+		case e = <-second:
+			if !errors.Is(e, recovery.ErrClock) {
+				close(releaseDB)
+				<-dbDone
+				result <- errors.New("second sample revived a pending clock fault")
+				return
+			}
+		case <-time.After(time.Second):
+			close(releaseDB)
+			<-dbDone
+			result <- errors.New("sticky guard waited for durable pause")
+			return
+		}
+		if e = n.WriterSourceCurrent(); !errors.Is(e, recovery.ErrClock) {
+			close(releaseDB)
+			<-dbDone
+			result <- errors.New("previous writer permit survived clock retirement")
+			return
+		}
+		close(releaseDB)
+		if e = <-dbDone; e != nil {
+			result <- e
+			return
+		}
+		if e = <-first; !errors.Is(e, recovery.ErrClock) {
+			result <- errors.New("fault did not return a clock error after persistence")
+			return
+		}
+		r, e := n.Resume()
+		if e != nil || !r.ClockUnsafe || r.State != "dispatching" || r.LastAttempt != next.Attempt.ID {
+			result <- errors.New("known fault not durably paused")
+			return
+		}
+		if calls.Load() != 1 {
+			result <- errors.New("sticky fault sampled clock again")
+			return
+		}
+		result <- nil
+	}
+	enqueueTestMessage(t, h, c, "r_clock_sticky")
+	select {
+	case e := <-result:
+		if e != nil {
+			t.Fatal(e)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("clock fault persistence deadlock")
+	}
+	s.EndTurn()
 }
