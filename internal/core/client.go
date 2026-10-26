@@ -130,8 +130,9 @@ type Client struct {
 	// …) outlive the read loop and may call enqueue after disconnect, so closing
 	// send would risk a send-on-closed-channel panic that crashes the process.
 	// They observe quit instead and drop silently. Mirrors the mailbox fix.
-	quit      chan struct{}
-	closeOnce sync.Once
+	quit         chan struct{}
+	closeOnce    sync.Once
+	overflowOnce sync.Once
 
 	// ctx is cancelled when the client is torn down (disconnect, or replaced by a
 	// newer client from the same device). Heavy background handlers gate on it so
@@ -184,6 +185,13 @@ func (c *Client) wireAuthority() string {
 }
 
 func (c *Client) enqueue(data []byte) {
+	// A disconnected client must not accept late producer output just because
+	// its queue happens to have room (select may otherwise choose that case).
+	select {
+	case <-c.quit:
+		return
+	default:
+	}
 	select {
 	case c.send <- data:
 	case <-c.quit:
@@ -192,10 +200,15 @@ func (c *Client) enqueue(data []byte) {
 	default:
 		// Slow client: drop the connection instead of blocking the hub. Log
 		// enough to spot a storm (which device/transport, how deep the queue).
-		log.Printf("[storm] send buffer full → dropping client=%s device=%s kind=%s queued=%d/%d",
-			c.clientID, c.deviceID, c.conn.Kind(), len(c.send), cap(c.send))
-		c.conn.Close("send buffer overflow")
-		c.shutdown()
+		c.overflowOnce.Do(func() {
+			log.Printf("[storm] send buffer full → dropping client=%s device=%s kind=%s queued=%d/%d",
+				c.clientID, c.deviceID, c.conn.Kind(), len(c.send), cap(c.send))
+			// Close waits for the peer's handshake. Never put that wait on
+			// a broadcast/bootstrap producer, or let concurrent producers
+			// create an unbounded number of close goroutines.
+			c.shutdown()
+			go c.conn.Close("send buffer overflow")
+		})
 	}
 }
 
