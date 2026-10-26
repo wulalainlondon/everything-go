@@ -142,17 +142,11 @@ func TestCodexStartResponseTerminalAndEarlyFailurePreserveStatus(t *testing.T) {
 					return map[string]any{"turn": turn}, nil
 				}
 				err := c.startTurn("root", nil, s.Snapshot(), "", st.reqID)
-				if !early && status != "completed" {
-					if err == nil || st.currentTurnID != "" || !st.turnActive {
-						t.Fatal("unconfirmed failure became accepted", err)
-					}
-					return
-				}
 				if err != nil {
 					t.Fatal(err)
 				}
-				if st.turnActive {
-					t.Fatal("accepted terminal did not finish")
+				if st.turnActive || len(w.methods) != 1 {
+					t.Fatal("accepted terminal did not finish exactly once")
 				}
 				switch status {
 				case "completed":

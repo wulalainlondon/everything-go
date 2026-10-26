@@ -269,8 +269,8 @@ func TestCodexObservationFailureDoesNotMaskTerminalOrTriggerReplay(t *testing.T)
 		return map[string]any{"turn": map[string]any{"id": "turn-1", "status": "failed", "error": map[string]any{"message": "busy", "codexErrorInfo": "serverOverloaded"}}}, nil
 	}
 	c.runTurn(s, st, "root", nil, st.turnDone, "")
-	if len(w.methods) != 1 || sink.count(func(e any) bool { _, ok := e.(backend.NativeSubmissionUncertain); return ok }) != 1 {
-		t.Fatal("diagnostic failure changed execution")
+	if len(w.methods) != 1 || sink.count(func(e any) bool { _, ok := e.(backend.NativeSubmissionUncertain); return ok }) != 0 || sink.count(func(e any) bool { v, ok := e.(protocol.Error); return ok && v.Code == "model_capacity" }) != 1 || sink.count(func(e any) bool { _, ok := e.(protocol.Done); return ok }) != 0 || sink.count(func(e any) bool { _, ok := e.(backend.NativeTaskAccepted); return ok }) != 1 {
+		t.Fatal("diagnostic failure changed exact accepted-terminal execution or replayed")
 	}
 	b, _ := os.ReadFile(path)
 	if string(b) != "corrupt evidence" {

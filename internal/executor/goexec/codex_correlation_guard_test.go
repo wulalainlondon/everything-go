@@ -163,6 +163,20 @@ func TestNativeCorrelationMissingFailedAndTransportChangedACKNoReplay(t *testing
 				return map[string]any{"turn": turn}, nil
 			}
 			err := c.startTurn("root", nil, s.Snapshot(), "", "request-1")
+			// 0.162.1 TurnStartResponse permits exact terminal failed/interrupted
+			// turns. They are accepted, never an ingress rejection/replay proof.
+			if kind == "failed" || kind == "interrupted" {
+				if err != nil || st.turnActive || len(w.methods) != 1 || sink.count(func(e any) bool { _, ok := e.(backend.NativeTaskAccepted); return ok }) != 1 {
+					t.Fatal("valid terminal acceptance lost or replayed", err)
+				}
+				if kind == "failed" && (st.turnFailure == nil || st.turnFailure.Acceptance != recovery.Accepted || !st.turnFailure.Terminal || st.turnFailure.TurnID != "fresh") {
+					t.Fatal("failed native tuple not retained", st.turnFailure)
+				}
+				if kind == "interrupted" && st.turnErr != "stopped" {
+					t.Fatal("interrupted turn became success", st.turnErr)
+				}
+				return
+			}
 			if err == nil {
 				t.Fatal("unproven ACK accepted")
 			}

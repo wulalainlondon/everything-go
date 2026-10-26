@@ -5,6 +5,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -61,6 +63,12 @@ func TestAutomaticNativeCanaryOneReadonlyTurn(t *testing.T) {
 	sink := &capSink{}
 	c := NewCodex(sink, "codex")
 	c.appServerMode = "stdio"
+	privateHome, e := prepareAutomaticCanaryHome(c.authPath, dir)
+	if e != nil {
+		t.Fatal("private original-auth copy failed; no native model submit", e)
+	}
+	c.sessionsRoot = filepath.Join(privateHome, "sessions")
+	c.authPath = filepath.Join(privateHome, "auth.json")
 	c.dataDir = dir
 	if e = c.ensureServer(); e != nil {
 		t.Fatal(e)
@@ -75,6 +83,8 @@ func TestAutomaticNativeCanaryOneReadonlyTurn(t *testing.T) {
 		defer c.startMu.Unlock()
 		if e := c.stopServerLocked(); e != nil {
 			t.Error(e)
+		} else if e = os.Remove(c.authPath); e != nil {
+			t.Error("private auth cleanup failed")
 		}
 	}()
 	actual, e := c.automaticProviderSubject()
@@ -184,7 +194,7 @@ func TestAutomaticNativeCanaryOneReadonlyTurn(t *testing.T) {
 			t.Fatal("unexpected tool execution; no repeat")
 		}
 	}
-	result := map[string]any{"schema": 1, "request_id": request, "thread_id": started.Thread.ID, "turn_id": turn, "native_status": "completed", "exactCanaryReply": true, "finalSHA256": recovery.Hash([]byte(final)), "providerSubjectSHA256": actual, "modelTurns": 1, "nativeToolCalls": 0, "canonicalTurnSHA256": recovery.Hash(full), "realProviderOverload": "NOT_OBSERVED", "faultRecoveryEvidence": "separate fake-daemon/fake-clock tests; not forged native failure", "genericObjectiveVerified": false, "sharedDaemonRestart": 0, "externalMessages": 0, "callOrLINE": 0}
+	result := map[string]any{"schema": 1, "request_id": request, "thread_id": started.Thread.ID, "turn_id": turn, "native_status": "completed", "exactCanaryReply": true, "finalSHA256": recovery.Hash([]byte(final)), "providerSubjectSHA256": actual, "modelTurns": 1, "nativeToolCalls": 0, "canonicalTurnSHA256": recovery.Hash(full), "realProviderOverload": "NOT_OBSERVED", "faultRecoveryEvidence": "separate fake-daemon/fake-clock tests; not forged native failure", "genericObjectiveVerified": false, "scope": "normal native interoperability only; no live automatic recovery run", "privateCodexHome": true, "sharedDaemonRestart": 0, "externalMessages": 0, "callOrLINE": 0}
 	raw, _ = json.MarshalIndent(result, "", "  ")
 	out, e := os.OpenFile(filepath.Join(dir, "native-canary.result.json"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if e != nil {
@@ -196,5 +206,78 @@ func TestAutomaticNativeCanaryOneReadonlyTurn(t *testing.T) {
 	}
 	if e = out.Sync(); e != nil {
 		t.Fatal(e)
+	}
+}
+
+// This setup is pure local-file preparation. It neither contacts a daemon nor
+// reads configuration into reports; the private auth copy is never evidence.
+func prepareAutomaticCanaryHome(originalAuth, dir string) (string, error) {
+	home := filepath.Join(dir, "private-codex-home")
+	if e := os.Mkdir(home, 0700); e != nil {
+		return "", e
+	}
+	original, e := os.Open(originalAuth)
+	if e != nil {
+		return "", e
+	}
+	defer original.Close()
+	st, e := original.Stat()
+	if e != nil || !st.Mode().IsRegular() || st.Size() > 1<<20 {
+		return "", errors.New("unverified original auth file")
+	}
+	raw, e := io.ReadAll(io.LimitReader(original, (1<<20)+1))
+	if e != nil || len(raw) > 1<<20 {
+		return "", errors.New("original auth read failed")
+	}
+	f, e := os.OpenFile(filepath.Join(home, "auth.json"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if e != nil {
+		return "", e
+	}
+	defer f.Close()
+	if _, e = f.Write(raw); e != nil {
+		return "", e
+	}
+	if e = f.Sync(); e != nil {
+		return "", e
+	}
+	return home, nil
+}
+func TestAutomaticCanaryPrivateHomeIsolationAndExclusiveAuthCopy(t *testing.T) {
+	dir := t.TempDir()
+	original := filepath.Join(dir, "original-auth.json")
+	raw := []byte(`{"tokens":{"account_id":"fixture-only"}}`)
+	if e := os.WriteFile(original, raw, 0600); e != nil {
+		t.Fatal(e)
+	}
+	owned := filepath.Join(dir, "owned")
+	if e := os.Mkdir(owned, 0700); e != nil {
+		t.Fatal(e)
+	}
+	home, e := prepareAutomaticCanaryHome(original, owned)
+	if e != nil {
+		t.Fatal(e)
+	}
+	copied, e := os.ReadFile(filepath.Join(home, "auth.json"))
+	if e != nil || string(copied) != string(raw) {
+		t.Fatal("not exact original auth copy", e)
+	}
+	for _, v := range []struct {
+		path string
+		mode os.FileMode
+	}{{home, 0700}, {filepath.Join(home, "auth.json"), 0600}} {
+		st, e := os.Stat(v.path)
+		if e != nil || st.Mode().Perm() != v.mode {
+			t.Fatal("private permissions", v.path, e)
+		}
+	}
+	if _, e = prepareAutomaticCanaryHome(original, owned); e == nil {
+		t.Fatal("private identity overwritten/replayed")
+	}
+	after, e := os.ReadFile(original)
+	if e != nil || string(after) != string(raw) {
+		t.Fatal("original auth modified")
+	}
+	if _, e = os.Stat(filepath.Join(dir, "config.toml")); !os.IsNotExist(e) {
+		t.Fatal("original config touched")
 	}
 }
