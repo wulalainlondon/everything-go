@@ -137,25 +137,10 @@ func (n *networkRecovery) Resume() (recovery.Run, error) {
 func (n *networkRecovery) Guard() error { return n.guardSources(n.source, n.source) }
 
 func (n *networkRecovery) guardSources(current, persisted recovery.AutomaticSource) error {
-	h := n.hub
-	s, ok := h.registry.Get(current.Session)
-	if !ok || s != n.session || !h.networkRecoveryEnabled(s.ID) || s.State() == session.Closed || s.State() == session.Stopping || s.ActiveQueuedID() != current.Request || s.ResumeID() != current.Thread || s.Cwd() != n.cwd || s.Snapshot().SourceRevision != current.SourceRevision || h.controls.Get(s.ID).Revision != current.ControlRevision || session.ConfigurationFrom(s.Snapshot()) != n.configuration || session.ConfigurationFrom(s.SettingsSnapshot()) != n.configuration || s.Snapshot().Hidden || !h.controls.MobileMayWrite(s.ID) {
-		return recovery.ErrGuard
+	if e := n.currentSource(current); e != nil {
+		return e
 	}
-	if e := h.intakeWritePolicy(s); e != nil {
-		return recovery.ErrGuard
-	}
-	paired := false
-	for _, b := range h.pairing.DeviceBindings() {
-		if b.DeviceID == n.owner && recovery.Hash([]byte(b.Token)) == current.Principal && b.Generation == current.CredentialGeneration {
-			paired = true
-			break
-		}
-	}
-	if !paired {
-		return recovery.ErrGuard
-	}
-	if n.payload.OwnerCredentialGeneration != 0 && !h.jarvisCredentialCurrent(n.owner, n.payload.OwnerCredentialGeneration) {
+	if e := n.hub.intakeWritePolicy(n.session); e != nil {
 		return recovery.ErrGuard
 	}
 	r, e := n.Resume()
@@ -165,12 +150,47 @@ func (n *networkRecovery) guardSources(current, persisted recovery.AutomaticSour
 	if r.Generation != n.generation || r.OwnerEpoch != n.epoch || r.Source != persisted || r.State == "cancelled" || r.State == "disabled" || r.LeaseUntil <= n.now().UnixMilli() {
 		return recovery.ErrGuard
 	}
-	if e = h.messageQueue.RecoveryNoNewInput(s.ID, current.Request); e != nil {
+	if e = n.hub.messageQueue.RecoveryNoNewInput(current.Session, current.Request); e != nil {
 		return e
 	}
 
+	// SQLite, policy and clock reads above may block. Never return a permit
+	// from the earlier source snapshot after authority changed during them.
+	return n.currentSource(current)
+}
+
+// Local snapshots only: no SQLite, native RPC, token broker or tool-policy read.
+func (n *networkRecovery) currentSource(current recovery.AutomaticSource) error {
+	h := n.hub
+	// Read the local disable marker before the in-memory generation snapshots.
+	if !h.networkRecoveryEnabled(current.Session) || h.networkRecoveryEpoch != n.epoch {
+		return recovery.ErrGuard
+	}
+	paired := false
+	for _, b := range h.pairing.DeviceBindings() {
+		if b.DeviceID == n.owner && recovery.Hash([]byte(b.Token)) == current.Principal && b.Generation == current.CredentialGeneration && (n.payload.OwnerCredentialGeneration == 0 || jarvisTokenGeneration(b.Token) == n.payload.OwnerCredentialGeneration) {
+			paired = true
+			break
+		}
+	}
+	if !paired || !h.controls.MobileMayWrite(current.Session) {
+		return recovery.ErrGuard
+	}
+	control := h.controls.Get(current.Session)
+	settings := n.session.SettingsSnapshot()
+	active := n.session.ActiveQueuedID()
+	s, found := h.registry.Get(current.Session)
+	// This coherent session snapshot is the last local read; no SQLite, policy,
+	// token broker or file metadata await follows it before the caller's write.
+	snap := n.session.Snapshot()
+	if !found || s != n.session || active != current.Request || snap.SourceRevision != current.SourceRevision || snap.ResumeID != current.Thread || snap.Cwd != n.cwd || snap.State == session.Closed || snap.State == session.Stopping || snap.Hidden || session.ConfigurationFrom(snap) != n.configuration || session.ConfigurationFrom(settings) != n.configuration || control.Revision != current.ControlRevision || h.networkRecoveryEpoch != n.epoch {
+		return recovery.ErrGuard
+	}
 	return nil
 }
+
+// Optional executor final predicate, sampled after its last local account read.
+func (n *networkRecovery) WriterSourceCurrent() error { return n.currentSource(n.source) }
 func (n *networkRecovery) BeforeDispatch(ctx context.Context, inputHash string, transport uint64) (recovery.AutomaticNext, error) {
 	if ctx.Err() != nil {
 		return recovery.AutomaticNext{}, ctx.Err()

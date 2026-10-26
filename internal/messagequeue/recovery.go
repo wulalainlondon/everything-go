@@ -202,9 +202,24 @@ func (s *Store) ClaimRecovery(sid, rid string, generation uint64, epoch string, 
 		return r, recovery.Attempt{}, e
 	}
 	isRetry := r.LastAttempt != ""
+	// Only previously registered, still eligible same-scope waiters hold FIFO
+	// priority. Ordering is the immutable original queue sequence, not which
+	// goroutine happens to wake first or a wall clock that can move backwards.
+	var olderWaiters int
+	if isRetry {
+		e = tx.QueryRow(`SELECT count(*) FROM recovery_runs waiting JOIN queue_commands q USING(session_id,request_id)
+          WHERE waiting.state='retry_wait' AND q.state IN ('queued','running') AND q.seq<?
+          AND json_extract(waiting.payload,'$.source.scope_hash')=? AND json_extract(waiting.payload,'$.scope_waiting')=1
+          AND json_extract(waiting.payload,'$.input_lease_until')>? AND (COALESCE(json_extract(waiting.payload,'$.deadline'),0)=0 OR json_extract(waiting.payload,'$.deadline')>?)
+          AND NOT EXISTS(SELECT 1 FROM queue_commands newer WHERE newer.session_id=q.session_id AND newer.seq>q.seq)`, queueSequence, r.Source.Scope, now, now).Scan(&olderWaiters)
+		if e != nil {
+			return r, recovery.Attempt{}, e
+		}
+	}
 	// A dispatched/accepted/unknown probe is held until durable settlement,
 	// including restart and cancellation. Wall-clock lease expiry is not proof.
-	if isRetry && (cooldown > now || owner != "" && owner != sid+":"+rid || last > now-10000) {
+	if isRetry && (olderWaiters > 0 || cooldown > now || owner != "" && owner != sid+":"+rid || last > now-10000) {
+		r.ScopeWaiting = true
 		r.NextAt = now + 1000
 		if r.NextAt < cooldown {
 			r.NextAt = cooldown
@@ -247,6 +262,7 @@ func (s *Store) ClaimRecovery(sid, rid string, generation uint64, epoch string, 
 		return r, a, e
 	}
 	r.LastAttempt = a.ID
+	r.ScopeWaiting = false
 	r.State = "dispatching"
 	r.NextAt = 0
 	if isRetry {
@@ -350,6 +366,7 @@ func (s *Store) ScheduleRecovery(sid, rid string, generation uint64, epoch strin
 		}
 	}
 	r.Reason = reason
+	r.ScopeWaiting = false
 	r.Kind = kind
 	r.ParentTurn = o.Turn
 	if a.Number > 0 && kind == "continue" {
@@ -454,6 +471,7 @@ func (s *Store) InvalidateRecovery(sid, rid, reason string) error {
 			continue
 		}
 		r.Generation++
+		r.ScopeWaiting = false
 		r.State = "cancelled"
 		if reason == "disabled" {
 			r.State = "disabled"
@@ -513,6 +531,7 @@ func (s *Store) FinishRecovery(sid, rid, status string) error {
 	}
 	// Native completed is deliberately distinct from objective verification.
 	r.NativeStatus = status
+	r.ScopeWaiting = false
 	r.ObjectiveVerified = false
 	r.NextAt = 0
 	if status == "disabled" {

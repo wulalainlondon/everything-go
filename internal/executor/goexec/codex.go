@@ -3177,7 +3177,35 @@ func (c *Codex) startTurn(threadID string, input []map[string]any, snap session.
 			if !valid {
 				return nil, recovery.ErrGuard
 			}
-			return automatic.WriterGuard()
+			release, e := automatic.WriterGuard()
+			if e != nil {
+				return nil, e
+			}
+			fail := func(err error) (func(), error) {
+				if release != nil {
+					release()
+				}
+				return nil, err
+			}
+			// Core durable/policy reads may have yielded after the first local
+			// subject read. Recheck account and native tuple, then source-only
+			// snapshots; no further SQLite/native RPC follows these predicates.
+			subject, e = c.automaticLocalSubject()
+			if e != nil || subject != r.Source.Provider {
+				return fail(recovery.ErrGuard)
+			}
+			st.mu.Lock()
+			valid = st.turnActive && !st.stopping && st.reqID == requestID && st.threadID == threadID && st.startAdmission.sourceKnown() && (st.startAdmission == nil || st.startAdmission.Boundary == st.nativeBoundary)
+			st.mu.Unlock()
+			if !valid {
+				return fail(recovery.ErrGuard)
+			}
+			if final, ok := automatic.(interface{ WriterSourceCurrent() error }); ok {
+				if e = final.WriterSourceCurrent(); e != nil {
+					return fail(e)
+				}
+			}
+			return release, nil
 		})
 	} else {
 		raw, err = c.rpcCallAtEpoch("turn/start", params, 30*time.Second, &epoch)

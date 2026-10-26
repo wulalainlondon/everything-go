@@ -315,3 +315,108 @@ func TestNetworkRecoveryFinalWriterDoesNotWaitForCoreTransportLockInversion(t *t
 	}
 	s.EndTurn()
 }
+
+func TestNetworkRecoveryFinalWriterRechecksSourceAfterDurableGuardReads(t *testing.T) {
+	t.Setenv("EVERYTHING_GO_CODEX_NETWORK_AUTOCONTINUE", "true")
+	t.Setenv("EVERYTHING_GO_CODEX_NETWORK_AUTOCONTINUE_ALL_ORDINARY", "true")
+	h, fe := newTestHub(t)
+	h.cfg.DataDir = t.TempDir()
+	h.networkRecoveryStarted = 0
+	c := sharedReadClient(t, h, "qa-owner")
+	s := h.registry.Create("s1", "ordinary", t.TempDir(), backend.Codex, "gpt-6.1-sol", "read-only", "thread")
+	result := make(chan error, 1)
+	fe.onSendContext = func(ctx context.Context, _ *session.Session, _, _ string) {
+		a := recovery.Automatic(ctx)
+		if a == nil {
+			result <- recovery.ErrGuard
+			return
+		}
+		calls := 0
+		// Deterministically inject source retirement at the time-check after the
+		// final guard's durable Resume read, equivalent to mutation during that read.
+		h.networkRecoveryNow = func() time.Time {
+			calls++
+			if calls == 2 {
+				old := s.Snapshot().Model
+				s.SetModel("retired-model")
+				s.SetModel(old)
+			}
+			return time.Now()
+		}
+		release, e := a.WriterGuard()
+		if release != nil {
+			release()
+		}
+		result <- e
+	}
+	enqueueTestMessage(t, h, c, "r_qa_finalguard")
+	select {
+	case e := <-result:
+		if e == nil {
+			t.Fatal("final core writer permit survived model ABA during its durable guard reads")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("no final writer observation")
+	}
+	s.EndTurn()
+}
+
+func TestNetworkRecoveryFinalLocalPredicateRetiresAuthorityAfterDurableRead(t *testing.T) {
+	for _, kind := range []string{"pairing-ABA", "control-ABA", "hidden-ABA", "epoch"} {
+		t.Run(kind, func(t *testing.T) {
+			t.Setenv("EVERYTHING_GO_CODEX_NETWORK_AUTOCONTINUE", "true")
+			t.Setenv("EVERYTHING_GO_CODEX_NETWORK_AUTOCONTINUE_ALL_ORDINARY", "true")
+			h, fe := newTestHub(t)
+			h.cfg.DataDir = t.TempDir()
+			h.networkRecoveryStarted = 0
+			c := sharedReadClient(t, h, "owner")
+			s := h.registry.Create("s1", "ordinary", t.TempDir(), backend.Codex, "gpt-6.1-sol", "read-only", "thread")
+			result := make(chan error, 1)
+			fe.onSendContext = func(ctx context.Context, _ *session.Session, _, _ string) {
+				a := recovery.Automatic(ctx)
+				if a == nil {
+					result <- recovery.ErrGuard
+					return
+				}
+				calls := 0
+				h.networkRecoveryNow = func() time.Time {
+					calls++
+					if calls == 2 {
+						switch kind {
+						case "pairing-ABA":
+							for _, b := range h.pairing.DeviceBindings() {
+								h.pairing.Unclaim(b.Token)
+								h.pairing.Claim(b.Token, b.DeviceID)
+							}
+						case "control-ABA":
+							h.controls.MarkDesktopOwner(s.ID, s.ResumeID())
+							h.controls.Reclaim(s.ID, s.ResumeID())
+						case "hidden-ABA":
+							yes, no := true, false
+							s.SetMeta(nil, &yes)
+							s.SetMeta(nil, &no)
+						case "epoch":
+							h.networkRecoveryEpoch = "retired-epoch"
+						}
+					}
+					return time.Now()
+				}
+				release, e := a.WriterGuard()
+				if release != nil {
+					release()
+				}
+				result <- e
+			}
+			enqueueTestMessage(t, h, c, "r_final_local")
+			select {
+			case e := <-result:
+				if e == nil {
+					t.Fatal("retired final local authority permitted writer", kind)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("no final writer observation")
+			}
+			s.EndTurn()
+		})
+	}
+}

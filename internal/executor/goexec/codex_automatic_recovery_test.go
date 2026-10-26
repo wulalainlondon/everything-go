@@ -29,6 +29,7 @@ type automaticSQLFixture struct {
 	failFinish   bool
 	failAccepted bool
 	waitHook     func() error
+	writerHook   func()
 }
 
 func (a *automaticSQLFixture) Resume() (recovery.Run, error) {
@@ -84,6 +85,9 @@ func (a *automaticSQLFixture) VerifyInputs() error { return a.Guard() }
 func (a *automaticSQLFixture) WriterGuard() (func(), error) {
 	if e := a.Guard(); e != nil {
 		return nil, e
+	}
+	if a.writerHook != nil {
+		a.writerHook()
 	}
 	return func() {}, nil
 }
@@ -672,6 +676,56 @@ func TestAutomaticFinalWriterRejectsEpochOrContextRetiredInsideLocalGuard(t *tes
 			})
 			if e == nil || writes != 0 || released != 1 {
 				t.Fatal("retired guard evidence wrote or leaked permit", e, writes, released)
+			}
+		})
+	}
+}
+
+func TestAutomaticFinalWriterRechecksLocalAccountAndOwnedTupleAfterCoreReads(t *testing.T) {
+	for _, kind := range []string{"account", "native-boundary", "stopped"} {
+		t.Run(kind, func(t *testing.T) {
+			c, a, w, sink, run := automaticExecutionFixture(t)
+			a.writerHook = func() {
+				switch kind {
+				case "account":
+					if e := os.WriteFile(c.authPath, []byte(`{"tokens":{"account_id":"foreign"}}`), 0600); e != nil {
+						t.Fatal(e)
+					}
+				case "native-boundary":
+					st := c.state(a.src.Session)
+					st.mu.Lock()
+					st.nativeBoundary++
+					st.mu.Unlock()
+				case "stopped":
+					st := c.state(a.src.Session)
+					st.mu.Lock()
+					st.stopping = true
+					st.mu.Unlock()
+				}
+			}
+			w.call = func(method string, _ json.RawMessage) (json.RawMessage, error) {
+				switch method {
+				case "account/read":
+					return autoResult(map[string]any{"account": map[string]string{"type": "chatgpt"}}), nil
+				case "account/rateLimits/read":
+					return autoResult(map[string]any{"accountId": "original"}), nil
+				case "thread/read":
+					return autoResult(map[string]any{"thread": map[string]any{"id": "root", "status": map[string]string{"type": "idle"}}}), nil
+				case "turn/start":
+					t.Fatal("retired account/tuple reached actual writer")
+				}
+				return autoResult(map[string]any{}), nil
+			}
+			s := c.sessionForThread("root")
+			st := c.state(s.ID)
+			admission, e := c.readStartAdmission(s, st, st.reqID)
+			if e != nil {
+				t.Fatal(e)
+			}
+			st.startAdmission = admission
+			run()
+			if len(w.starts) != 0 || sink.count(func(v any) bool { _, ok := v.(protocol.Done); return ok }) != 0 {
+				t.Fatal("retired authority sent or completed")
 			}
 		})
 	}

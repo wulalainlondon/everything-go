@@ -33,6 +33,7 @@ type AutomaticSource struct {
 	Scope                string `json:"scope_hash"`
 }
 type Run struct {
+	ScopeWaiting      bool            `json:"scope_waiting,omitempty"`
 	Source            AutomaticSource `json:"source"`
 	Revision          uint64          `json:"revision"`
 	Generation        uint64          `json:"generation"`

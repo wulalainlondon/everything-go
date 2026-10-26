@@ -610,3 +610,136 @@ func TestAutomaticScopeDeferralDeadlineConsumesNoDispatch(t *testing.T) {
 		t.Fatal("waiting input discarded", e)
 	}
 }
+
+func TestAutomaticSharedRecoveryWaitersPreserveFIFOAcrossSchedulingRace(t *testing.T) {
+	s, e := Open(t.TempDir())
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer s.Close()
+	now := int64(1700000000000)
+	for _, sid := range []string{"older", "newer", "probe"} {
+		src := recovery.AutomaticSource{Authority: "a", Session: sid, Request: "r", Thread: "t" + sid, Configuration: "c", Principal: "p", Scope: "shared"}
+		s.Enqueue(Entry{SessionID: sid, RequestID: "r", Payload: []byte(`{"content":"owned"}`)})
+		s.Transition(sid, "r", []State{Queued}, Running, "", "", "")
+		s.BeginRecovery(src, "boot", now)
+		s.ClaimRecovery(sid, "r", 1, "boot", 1, "input", now)
+		if _, _, e = s.ScheduleRecovery(sid, "r", 1, "boot", rejectedOutcome(), now, 0); e != nil {
+			t.Fatal(e)
+		}
+	}
+	if _, _, e = s.ClaimRecovery("probe", "r", 1, "boot", 1, "input", now+60000); e != nil {
+		t.Fatal(e)
+	}
+	if _, _, e = s.ClaimRecovery("older", "r", 1, "boot", 1, "input", now+61000); !errors.Is(e, recovery.ErrDispatchDeferred) {
+		t.Fatal(e)
+	}
+	if _, _, e = s.ClaimRecovery("newer", "r", 1, "boot", 1, "input", now+62000); !errors.Is(e, recovery.ErrDispatchDeferred) {
+		t.Fatal(e)
+	}
+	if _, _, e = s.ScheduleRecovery("probe", "r", 1, "boot", rejectedOutcome(), now+70000, 0); e != nil {
+		t.Fatal(e)
+	}
+	// Newer goroutine gets CPU first after settlement; persistent FIFO must still
+	// reserve the earlier queued same-scope run, not choose whichever goroutine wins.
+	if _, _, e = s.ClaimRecovery("newer", "r", 1, "boot", 1, "input", now+71000); e == nil {
+		t.Fatal("newer same-scope retry overtook the older registered waiter after probe settlement")
+	}
+}
+
+func TestAutomaticScopeFIFOEligibleWaiterSurvivesRestartAndGhostHeadsAreSkipped(t *testing.T) {
+	for _, kind := range []string{"eligible-restart", "cancelled", "expired-lease", "expired-deadline", "failed-queue", "new-input"} {
+		t.Run(kind, func(t *testing.T) {
+			dir := t.TempDir()
+			s, e := Open(dir)
+			if e != nil {
+				t.Fatal(e)
+			}
+			defer func() { s.Close() }()
+			now := int64(1700000000000)
+			for _, sid := range []string{"older", "newer", "probe"} {
+				src := recovery.AutomaticSource{Authority: "a", Session: sid, Request: "r", Thread: "t" + sid, Configuration: "c", Principal: "p", Scope: "shared"}
+				s.Enqueue(Entry{SessionID: sid, RequestID: "r", Payload: []byte(`{"content":"original"}`)})
+				s.Transition(sid, "r", []State{Queued}, Running, "", "", "")
+				s.BeginRecovery(src, "boot", now)
+				s.ClaimRecovery(sid, "r", 1, "boot", 1, "input", now)
+				if _, _, e = s.ScheduleRecovery(sid, "r", 1, "boot", rejectedOutcome(), now, 0); e != nil {
+					t.Fatal(e)
+				}
+			}
+			if _, _, e = s.ClaimRecovery("probe", "r", 1, "boot", 1, "input", now+60000); e != nil {
+				t.Fatal(e)
+			}
+			for i, sid := range []string{"older", "newer"} {
+				if _, _, e = s.ClaimRecovery(sid, "r", 1, "boot", 1, "input", now+61000+int64(i)*1000); !errors.Is(e, recovery.ErrDispatchDeferred) {
+					t.Fatal(e)
+				}
+			}
+			if _, _, e = s.ScheduleRecovery("probe", "r", 1, "boot", rejectedOutcome(), now+70000, 0); e != nil {
+				t.Fatal(e)
+			}
+			epoch := "boot"
+			switch kind {
+			case "eligible-restart":
+				s.Close()
+				s, e = Open(dir)
+				if e != nil {
+					t.Fatal(e)
+				}
+				if e = s.Recover(); e != nil {
+					t.Fatal(e)
+				}
+				epoch = "boot2"
+				for _, sid := range []string{"older", "newer"} {
+					s.Transition(sid, "r", []State{Queued}, Running, "", "", "")
+					if e = s.AdoptRecovery(sid, "r", 1, epoch); e != nil {
+						t.Fatal(e)
+					}
+				}
+			case "cancelled":
+				s.InvalidateRecovery("older", "r", "cancel")
+			case "failed-queue":
+				s.Transition("older", "r", []State{Running}, Failed, "", "", "")
+			case "new-input":
+				s.Enqueue(Entry{SessionID: "older", RequestID: "r_new", Payload: []byte(`{"content":"new"}`)})
+			case "expired-lease", "expired-deadline":
+				tx, e := s.db.Begin()
+				if e != nil {
+					t.Fatal(e)
+				}
+				r, _, e := recoveryLookup(tx, "older", "r")
+				if e != nil {
+					t.Fatal(e)
+				}
+				if kind == "expired-lease" {
+					r.LeaseUntil = now + 71000
+				} else {
+					r.Deadline = now + 71000
+				}
+				if e = saveRecovery(tx, &r); e != nil {
+					t.Fatal(e)
+				}
+				if e = tx.Commit(); e != nil {
+					t.Fatal(e)
+				}
+			}
+			r, a, e := s.ClaimRecovery("newer", "r", 1, epoch, 2, "input", now+71000)
+			if kind == "eligible-restart" {
+				if !errors.Is(e, recovery.ErrDispatchDeferred) || a.ID != "" || r.Attempts != 0 {
+					t.Fatal("registered older waiter lost FIFO across restart", r, a, e)
+				}
+				if _, _, e = s.ClaimRecovery("older", "r", 1, epoch, 2, "input", now+72000); e != nil {
+					t.Fatal("FIFO head did not claim", e)
+				}
+				if _, _, e = s.ScheduleRecovery("older", "r", 1, epoch, rejectedOutcome(), now+72000, 0); e != nil {
+					t.Fatal(e)
+				}
+				if _, _, e = s.ClaimRecovery("newer", "r", 1, epoch, 2, "input", now+82000); e != nil {
+					t.Fatal("FIFO successor did not progress after head settled", e)
+				}
+			} else if e != nil || a.ID == "" || r.Attempts != 1 {
+				t.Fatal("ineligible ghost head blocked live waiter", kind, r, a, e)
+			}
+		})
+	}
+}
