@@ -17,10 +17,17 @@ var errCodexTurnOwnerConflict = errors.New("native_acceptance_conflict")
 // A transcript's native turn ID is not the Bridge command request ID. Persist
 // their exact association from turn/start's RPC response before it is lost on
 // process exit. Never reconstruct this association from content or timestamps.
+type automaticTurnLineage struct {
+	ParentRequest string `json:"parent_request_id"`
+	Attempt       string `json:"attempt_id"`
+	Ordinal       int    `json:"ordinal"`
+	Continuation  bool   `json:"continuation"`
+}
 type codexTurnRequests struct {
-	Version  int               `json:"version"`
-	ThreadID string            `json:"thread_id"`
-	Requests map[string]string `json:"requests"`
+	Recovery map[string]automaticTurnLineage `json:"recovery,omitempty"`
+	Version  int                             `json:"version"`
+	ThreadID string                          `json:"thread_id"`
+	Requests map[string]string               `json:"requests"`
 }
 
 func (c *Codex) turnRequestsPath(threadID string) string {
@@ -86,6 +93,11 @@ func (c *Codex) saveTurnRequest(threadID, turnID, requestID string, accepted boo
 		}
 	}
 	r.Requests[turnID] = requestID
+	return c.writeTurnRequestsLocked(r)
+}
+
+func (c *Codex) writeTurnRequestsLocked(r codexTurnRequests) error {
+	threadID := r.ThreadID
 	data, err := json.Marshal(r)
 	if err != nil {
 		return err
@@ -131,18 +143,84 @@ func (c *Codex) withHistoryRequestIDs(messages []map[string]any, threadID string
 		log.Printf("[codex] history request identity unavailable: %v", err)
 		return messages
 	}
-	out := make([]map[string]any, len(messages))
-	for i, message := range messages {
-		out[i] = message
+	out := make([]map[string]any, 0, len(messages))
+	for _, message := range messages {
 		turnID, _ := message["source_turn_id"].(string)
+		if lineage, ok := r.Recovery[turnID]; ok && lineage.Continuation && message["role"] == "user" {
+			continue
+		}
+		mapped := message
 		if requestID := r.Requests[turnID]; requestID != "" {
 			copy := make(map[string]any, len(message)+1)
 			for key, value := range message {
 				copy[key] = value
 			}
 			copy["request_id"] = requestID
-			out[i] = copy
+			mapped = copy
 		}
+		out = append(out, mapped)
 	}
 	return out
+}
+
+func (c *Codex) rememberAutomaticTurn(thread, turn, request, attempt string, ordinal int, continuation bool) error {
+	if ordinal < 0 || ordinal > 5 || attempt == "" {
+		return errCodexTurnOwnerConflict
+	}
+	c.historyRequestMu.Lock()
+	defer c.historyRequestMu.Unlock()
+	r, e := c.loadTurnRequests(thread)
+	if e != nil {
+		return e
+	}
+	if r.Requests[turn] != request {
+		return errCodexTurnOwnerConflict
+	}
+	if r.Recovery == nil {
+		r.Recovery = map[string]automaticTurnLineage{}
+	}
+	lineage := automaticTurnLineage{ParentRequest: request, Attempt: attempt, Ordinal: ordinal, Continuation: continuation}
+	if prior, ok := r.Recovery[turn]; ok && prior != lineage {
+		return errCodexTurnOwnerConflict
+	}
+	r.Recovery[turn] = lineage
+	return c.writeTurnRequestsLocked(r)
+}
+func (c *Codex) sessionIDForThread(thread string) string {
+	if s := c.sessionForThread(thread); s != nil {
+		return s.ID
+	}
+	return ""
+}
+func mappedRequestTurn(r codexTurnRequests, request string) (string, error) {
+	found := ""
+	best := -1
+	count := 0
+	seen := map[int]bool{}
+	for turn, id := range r.Requests {
+		if id != request {
+			continue
+		}
+		count++
+		lineage, ok := r.Recovery[turn]
+		if !ok {
+			if found != "" {
+				return "", fmt.Errorf("ambiguous native request mapping")
+			}
+			found = turn
+			continue
+		}
+		if lineage.ParentRequest != request || lineage.Attempt == "" || seen[lineage.Ordinal] {
+			return "", errCodexTurnOwnerConflict
+		}
+		seen[lineage.Ordinal] = true
+		if lineage.Ordinal > best {
+			best = lineage.Ordinal
+			found = turn
+		}
+	}
+	if count > 1 && len(seen) != count {
+		return "", fmt.Errorf("ambiguous native request mapping")
+	}
+	return found, nil
 }

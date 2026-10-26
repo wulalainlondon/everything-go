@@ -1929,15 +1929,30 @@ type QueueReceiptsReconciled struct {
 	Status     string                 `json:"status"`
 	Receipts   []QueueReceiptEvidence `json:"receipts"`
 }
+type AutomaticRecoverySnapshot struct {
+	RequestID         string `json:"request_id"`
+	Mode              string `json:"mode"`
+	Revision          uint64 `json:"revision"`
+	Generation        uint64 `json:"generation"`
+	State             string `json:"state"`
+	Reason            string `json:"reason,omitempty"`
+	Attempts          int    `json:"attempts"`
+	MaxAttempts       int    `json:"max_attempts"`
+	NextAt            int64  `json:"next_at_ms,omitempty"`
+	Deadline          int64  `json:"deadline_ms,omitempty"`
+	NativeStatus      string `json:"native_status,omitempty"`
+	ObjectiveVerified bool   `json:"objective_verified"`
+}
 type MessageQueueSnapshot struct {
-	DetailRequestID string             `json:"detail_request_id,omitempty"`
-	Detail          *MessageQueueItem  `json:"detail,omitempty"`
-	Type            string             `json:"type"`
-	SessionID       string             `json:"session_id"`
-	Revision        uint64             `json:"revision"`
-	Items           []MessageQueueItem `json:"items"`
-	Maintenance     any                `json:"maintenance,omitempty"`
-	Diagnostics     any                `json:"diagnostics,omitempty"`
+	Recovery        []AutomaticRecoverySnapshot `json:"recovery,omitempty"`
+	DetailRequestID string                      `json:"detail_request_id,omitempty"`
+	Detail          *MessageQueueItem           `json:"detail,omitempty"`
+	Type            string                      `json:"type"`
+	SessionID       string                      `json:"session_id"`
+	Revision        uint64                      `json:"revision"`
+	Items           []MessageQueueItem          `json:"items"`
+	Maintenance     any                         `json:"maintenance,omitempty"`
+	Diagnostics     any                         `json:"diagnostics,omitempty"`
 }
 type QueueActionResult struct {
 	Type            string `json:"type"`

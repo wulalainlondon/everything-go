@@ -17,6 +17,7 @@ import (
 	"everything-go/internal/messagequeue"
 	"everything-go/internal/partners"
 	"everything-go/internal/protocol"
+	"everything-go/internal/recovery"
 	"everything-go/internal/runtimejournal"
 	"everything-go/internal/session"
 )
@@ -196,6 +197,7 @@ func (h *Hub) enqueueChatMessageExpected(c *Client, cmd clientproto.Command, exp
 		}
 	}
 	if inserted {
+		h.releaseNetworkRecoveryBarrier(s.ID)
 		behind := s.State() != session.Idle || s.QueueLen() > 0
 		// An observed native turn is live without claiming the Session worker.
 		// A queued follow-up must not replace its active request presentation.
@@ -324,6 +326,14 @@ func (h *Hub) runQueuedMessage(s *session.Session, requestID string) {
 		h.Emit(backend.NewError(s.ID, requestID, "voice_context_retired", "原通話已結束，圖片不會自動轉交新的通話"))
 		return
 	}
+	automatic, automaticErr := h.prepareNetworkRecovery(s, e, payload)
+	if automaticErr != nil {
+		h.Emit(backend.NewError(s.ID, requestID, "recovery_admission_failed", automaticErr.Error()))
+		return
+	}
+	if automatic != nil {
+		sendContext = recovery.WithAutomatic(sendContext, automatic)
+	}
 	if err = h.exec.Send(sendContext, s, requestID, payload.Content, payload.Images, payload.Files); err != nil {
 		if errors.Is(err, backend.ErrNativeSubmissionBusy) {
 			h.deferUnsubmittedQueuedMessage(s, requestID)
@@ -401,6 +411,11 @@ func (h *Hub) messageQueueSnapshot(sessionID string) (protocol.MessageQueueSnaps
 		return event, err
 	}
 	event.Revision = snapshot.Revision
+	if runs, e := h.messageQueue.RecoverySnapshots(sessionID); e == nil {
+		for _, r := range runs {
+			event.Recovery = append(event.Recovery, recoveryPublic(r))
+		}
+	}
 	if p, ok := h.exec.(backend.MaintenanceProvider); ok {
 		for _, r := range p.MaintenanceRecords() {
 			if r.SessionID == sessionID {
@@ -413,6 +428,14 @@ func (h *Hub) messageQueueSnapshot(sessionID string) (protocol.MessageQueueSnaps
 	}
 	for _, e := range snapshot.Items {
 		event.Items = append(event.Items, protocol.MessageQueueItem{PayloadHash: e.PayloadHash, RequestID: e.RequestID, State: string(e.State), Content: e.Content, Sequence: e.Sequence, ImageCount: e.ImageCount, FileNames: e.FileNames, CreatedAt: e.CreatedAt, UpdatedAt: e.UpdatedAt, Message: e.Message, ActiveRequestID: e.ActiveRequestID, TurnID: e.TurnID})
+	}
+	for i := range event.Items {
+		for _, r := range event.Recovery {
+			if r.RequestID == event.Items[i].RequestID && (r.State == "retry_wait" || r.State == "paused_budget" || r.State == "paused_uncertain" || r.State == "waiting_user" || r.State == "reconciling") {
+				event.Items[i].State = "queued"
+				event.Items[i].Message = recoveryUserMessage(r)
+			}
+		}
 	}
 	return event, nil
 }
@@ -500,6 +523,9 @@ func (h *Hub) cancelQueuedMessage(c *Client, cmd clientproto.Command) {
 			h.queueResult(c, cmd, "cancel", "rejected", "Queue revision changed; refresh the original receipt", e)
 			return
 		}
+	}
+	if h.cancelNetworkRecovery(c, cmd, e) {
+		return
 	}
 	if !h.queueInputCancellable(c, e) {
 		h.queueResult(c, cmd, "cancel", "rejected", "Only a confirmed waiting input owned by this paired device can be cancelled", e)

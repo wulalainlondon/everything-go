@@ -116,6 +116,10 @@ func Open(dataDir string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	if err = installRecovery(db); err != nil {
+		db.Close()
+		return nil, err
+	}
 	s := &Store{db: db}
 	if err := s.initElapsed(); err != nil {
 		db.Close()
@@ -229,6 +233,9 @@ func (s *Store) Enqueue(e Entry) (Entry, bool, error) {
 	if err != nil {
 		return Entry{}, false, err
 	}
+	if _, err = tx.Exec(`UPDATE recovery_runs SET generation=generation+1,revision=revision+1,state='cancelled',payload=json_set(payload,'$.generation',generation+1,'$.revision',revision+1,'$.state','cancelled','$.reason','superseded_by_new_input','$.next_at',0) WHERE session_id=? AND request_id!=? AND state NOT IN ('native_completed','cancelled','failed_permanent','disabled')`, e.SessionID, e.RequestID); err != nil {
+		return Entry{}, false, err
+	}
 	if err = taskapi.ChangeTx(tx, e.SessionID, e.RequestID, "admission"); err != nil {
 		return Entry{}, false, err
 	}
@@ -322,6 +329,9 @@ func (s *Store) Transition(sessionID, requestID string, from []State, to State, 
 	if err = taskapi.ChangeTx(tx, sessionID, requestID, string(to)); err != nil {
 		return Entry{}, false, err
 	}
+	if err = retireRecoveryInputsTx(tx); err != nil {
+		return Entry{}, false, err
+	}
 	e, _, err = lookup(tx, sessionID, requestID)
 	if err != nil {
 		return Entry{}, false, err
@@ -401,6 +411,9 @@ func (s *Store) Recover() error {
 		return err
 	}
 	defer tx.Rollback()
+	if err = recoverAutomaticTx(tx); err != nil {
+		return err
+	}
 	rows, err := tx.Query(`SELECT session_id,request_id FROM queue_commands WHERE state IN ('running','steering')`)
 	if err != nil {
 		return err

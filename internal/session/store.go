@@ -12,6 +12,7 @@ import (
 // saved_sessions.json. Store writes known fields back into the original raw JSON
 // object so Python-only metadata survives Go updates.
 type savedEntry struct {
+	SourceRevision      uint64   `json:"source_revision,omitempty"`
 	ConfigRevision      uint64   `json:"config_revision,omitempty"`
 	Name                string   `json:"name"`
 	MetadataRevision    uint64   `json:"metadata_revision,omitempty"`
@@ -103,7 +104,7 @@ func (st *Store) Save(sessions []*Session) error {
 		}
 		entry := savedEntry{
 			Name: snap.Name, ResumeID: snap.ResumeID, ClaudeUUID: snap.ResumeID,
-			ConfigRevision: snap.ConfigRevision, MetadataRevision: snap.MetadataRevision, NameUpdatedAt: snap.NameUpdatedAt,
+			ConfigRevision: snap.ConfigRevision, SourceRevision: snap.SourceRevision, MetadataRevision: snap.MetadataRevision, NameUpdatedAt: snap.NameUpdatedAt,
 			NameUpdatedBy: snap.NameUpdatedBy, LastNameMutationID: snap.LastNameMutationID,
 			LastUsed: lastUsed, Cwd: snap.Cwd, Backend: snap.Backend, Model: snap.Model,
 			PreviewText: snap.PreviewText, PreviewRole: snap.PreviewRole,

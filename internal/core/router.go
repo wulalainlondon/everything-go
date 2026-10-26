@@ -552,6 +552,7 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		}()
 
 	case "stop":
+		h.invalidateNetworkRecovery(cmd.SessionID, "user_stop")
 		if s, ok := h.registry.Get(cmd.SessionID); ok {
 			releaseQueue := s.HoldQueue()
 			requestID := s.ActiveQueuedID()
@@ -579,6 +580,7 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		}
 
 	case "clear_session":
+		h.invalidateNetworkRecovery(cmd.SessionID, "user_stop")
 		if s, ok := h.registry.Get(cmd.SessionID); ok {
 			releaseQueue := s.HoldQueue()
 			go func() {
@@ -589,6 +591,7 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		}
 
 	case "close_session":
+		h.invalidateNetworkRecovery(cmd.SessionID, "closed")
 		if s, ok := h.registry.Get(cmd.SessionID); ok {
 			go func() { _ = h.exec.Close(context.Background(), s) }()
 			h.closeQueuedMessages(cmd.SessionID)

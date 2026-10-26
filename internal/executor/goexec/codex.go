@@ -64,6 +64,12 @@ var (
 )
 
 type codexState struct {
+	automatic               recovery.AutomaticController
+	automaticAttempt        string
+	automaticOrdinal        int
+	automaticIsContinuation bool
+	automaticInput          []map[string]any
+
 	visibility agentvisibility.Channel
 
 	mu       sync.Mutex
@@ -83,6 +89,7 @@ type codexState struct {
 	turnActive                          bool
 	turnErr                             string
 	turnErrorCode                       string
+	automaticAcceptanceUncertain        bool
 	turnFailure                         *codexFailureDetail
 	failureNoticeKey                    string
 	turnDone                            chan struct{}
@@ -1046,7 +1053,7 @@ func (c *Codex) rpcCall(method string, params any, timeout time.Duration) (json.
 	return c.rpcCallAtEpoch(method, params, timeout, nil)
 }
 
-func (c *Codex) rpcCallAtEpoch(method string, params any, timeout time.Duration, epoch *uint64) (json.RawMessage, error) {
+func (c *Codex) rpcCallAtEpoch(method string, params any, timeout time.Duration, epoch *uint64, guards ...func() (func(), error)) (json.RawMessage, error) {
 	// A confirmed tool maintenance window serializes our submission RPCs, not
 	// interrupt/release or read-only diagnostics. It never restarts the daemon.
 	if toolMutationMethod(method) {
@@ -1058,7 +1065,13 @@ func (c *Codex) rpcCallAtEpoch(method string, params any, timeout time.Duration,
 			return nil, err
 		}
 	}
-	raw, err := c.rpc.requestAtEpoch(method, params, timeout, epoch)
+	var raw json.RawMessage
+	var err error
+	if len(guards) == 1 {
+		raw, err = c.rpc.requestAtEpochGuarded(context.Background(), method, params, timeout, epoch, guards[0])
+	} else {
+		raw, err = c.rpc.requestAtEpoch(method, params, timeout, epoch)
+	}
 	var timeoutErr *rpcTimeoutError
 	if c.appServerMode == "daemon" && (errors.As(err, &timeoutErr) || errors.Is(err, context.DeadlineExceeded)) && healthGatedMethod(method) {
 		c.scheduleHealthCheck(method, params)
@@ -2232,6 +2245,23 @@ func (c *Codex) Send(ctx context.Context, s *session.Session, reqID, content str
 		}
 		return err
 	}
+	if auto := recovery.Automatic(ctx); auto != nil {
+		if e := auto.BindThread(s.ResumeID()); e != nil {
+			return e
+		}
+	}
+	if auto := recovery.Automatic(ctx); auto != nil {
+		subject, e := c.automaticProviderSubject()
+		if e != nil {
+			_ = auto.NativeFinished("disabled")
+			if errors.Is(e, errAutomaticUsageBlocked) {
+				return e
+			}
+			ctx = recovery.WithAutomatic(ctx, nil)
+		} else if e = auto.BindProvider(subject); e != nil {
+			return e
+		}
+	}
 	admission, err := c.readStartAdmission(s, st, reqID)
 	if err != nil {
 		if !errors.Is(err, backend.ErrNativeSubmissionBusy) {
@@ -2275,6 +2305,9 @@ func (c *Codex) Send(ctx context.Context, s *session.Session, reqID, content str
 
 	st.mu.Lock()
 	st.reqID = reqID
+	st.automatic = recovery.Automatic(ctx)
+	st.automaticAttempt = ""
+	st.automaticAcceptanceUncertain = false
 	st.startAdmission = admission
 	st.stopping = false
 	st.turnErr = ""
@@ -2304,6 +2337,9 @@ func (c *Codex) Send(ctx context.Context, s *session.Session, reqID, content str
 		return err
 	}
 	input := c.codexInput(s, reqID, reqID, backend.PresentationContent(ctx, content), images, files, st)
+	st.mu.Lock()
+	st.automaticInput = input
+	st.mu.Unlock()
 	go c.runTurn(s, st, threadID, input, done, sandboxOverride)
 	return nil
 }
@@ -2399,38 +2435,108 @@ func (c *Codex) runTurn(s *session.Session, st *codexState, threadID string, inp
 	st.mu.Lock()
 	requestID := st.reqID
 	st.mu.Unlock()
-	defer c.cleanupTempImages(st, requestID)
-	c.sink.Emit(backend.NewTurnProgress(s.ID, requestID, "waiting_model", "Waiting for Codex to accept the turn"))
-	if err := c.startTurnWithStaleRetry(s, st, threadID, input, sandboxOverride); err != nil {
+	defer func() {
 		st.mu.Lock()
-		if st.turnActive && st.reqID == requestID {
-			st.turnFailure = codexSubmissionFailure(err)
-			// Contradictory live/terminal notifications defeat rejection proof.
-			if st.currentTurnID != "" || len(st.pendingTerminals) > 0 || st.unconfirmedActivity {
-				st.turnFailure.Acceptance = recovery.AcceptanceUnknown
-				st.turnFailure.IngressRejected = false
-			}
-			st.turnErrorCode = st.turnFailure.Failure.ErrorCode()
-			st.finishTurnLocked("turn/start failed: " + err.Error())
-		}
+		d := st.turnFailure
 		st.mu.Unlock()
+		if d == nil || d.Acceptance != recovery.AcceptanceUnknown {
+			c.cleanupTempImages(st, requestID)
+		}
+	}()
+	st.mu.Lock()
+	auto := st.automatic
+	st.mu.Unlock()
+	if auto != nil {
+		if r, e := auto.Resume(); e == nil && r.State == "retry_wait" {
+			if e = auto.Wait(context.Background()); e != nil {
+				c.releaseActiveThreads(s)
+				c.sink.Emit(backend.NewStopped(s.ID, requestID))
+				return
+			}
+			var resetErr error
+			input, done, resetErr = c.resetAutomaticTurn(s, st)
+			if resetErr != nil {
+				c.releaseActiveThreads(s)
+				c.sink.Emit(backend.NewError(s.ID, requestID, "recovery_guard_failed", "原工作恢復條件已改變；未重送。"))
+				return
+			}
+		}
 	}
+	for {
+		c.sink.Emit(backend.NewTurnProgress(s.ID, requestID, "waiting_model", "Waiting for Codex to accept the turn"))
+		if err := c.startTurnWithStaleRetry(s, st, threadID, input, sandboxOverride); err != nil {
+			st.mu.Lock()
+			if st.turnActive && st.reqID == requestID {
+				st.turnFailure = codexSubmissionFailure(err)
+				// Contradictory live/terminal notifications defeat rejection proof.
+				if st.currentTurnID != "" || len(st.pendingTerminals) > 0 || st.unconfirmedActivity {
+					st.turnFailure.Acceptance = recovery.AcceptanceUnknown
+					st.turnFailure.IngressRejected = false
+				}
+				st.turnErrorCode = st.turnFailure.Failure.ErrorCode()
+				st.finishTurnLocked("turn/start failed: " + err.Error())
+			}
+			st.mu.Unlock()
+		}
 
-	stallTicker := time.NewTicker(c.stallCheckEvery)
-	defer stallTicker.Stop()
-	// Long turns remain live while progress continues. Only inactivity (not
-	// total wall-clock runtime) is subject to the watchdog.
-	c.waitForCodexTurn(s, st, done, stallTicker.C)
+		stallTicker := time.NewTicker(c.stallCheckEvery)
+		defer stallTicker.Stop()
+		// Long turns remain live while progress continues. Only inactivity (not
+		// total wall-clock runtime) is subject to the watchdog.
+		c.waitForCodexTurn(s, st, done, stallTicker.C)
 
+		st.mu.Lock()
+		completedThreadID := st.threadID
+		st.mu.Unlock()
+		c.finalizePendingRecovery(s, st, completedThreadID)
+
+		st.mu.Lock()
+		retryDetail := st.turnFailure
+		retryStopped := st.stopping
+		acceptanceUncertain := st.automaticAcceptanceUncertain
+		st.mu.Unlock()
+		if acceptanceUncertain {
+			break
+		}
+		if auto != nil && retryDetail != nil && !retryStopped {
+			again, e := c.automaticTryAgain(s, st, retryDetail)
+			if e == nil && again {
+				var resetErr error
+				input, done, resetErr = c.resetAutomaticTurn(s, st)
+				if resetErr == nil {
+					continue
+				}
+			}
+			if e != nil {
+				_ = auto.NativeFinished("failed")
+			}
+		}
+		break
+	}
 	st.mu.Lock()
 	completedThreadID := st.threadID
-	st.mu.Unlock()
-	c.finalizePendingRecovery(s, st, completedThreadID)
-
-	st.mu.Lock()
 	stopping, turnErr := st.stopping, st.turnErr
+	acceptanceUncertain := st.automaticAcceptanceUncertain
 	st.mu.Unlock()
 
+	if acceptanceUncertain {
+		c.releaseActiveThreads(s)
+		c.sink.Emit(backend.NativeSubmissionUncertain{SessionID: s.ID, RequestID: requestID, Reason: "native_recovery_acceptance_persistence_failed"})
+		return
+	}
+	if auto != nil {
+		status := "completed"
+		if turnErr == "stopped" {
+			status = "cancelled"
+		} else if turnErr != "" {
+			status = "failed"
+		}
+		if e := auto.NativeFinished(status); e != nil {
+			c.releaseActiveThreads(s)
+			c.sink.Emit(backend.NativeSubmissionUncertain{SessionID: s.ID, RequestID: requestID, Reason: "native_recovery_terminal_persistence_failed"})
+			return
+		}
+	}
 	// Release before emitting the terminal event. Hub.Emit(done/error/stopped)
 	// immediately unlocks the per-session queue, so a deferred release could
 	// race the next turn from the same session and delete its newly acquired
@@ -2804,6 +2910,12 @@ func (c *Codex) shouldAutoCompact(st *codexState) bool {
 }
 
 func (c *Codex) startTurnWithStaleRetry(s *session.Session, st *codexState, threadID string, input []map[string]any, sandboxOverride string) error {
+	st.mu.Lock()
+	automatic := st.automatic
+	st.mu.Unlock()
+	if automatic != nil {
+		return c.startTurn(threadID, input, s.Snapshot(), sandboxOverride, st.reqID)
+	}
 	snap := s.Snapshot()
 	st.mu.Lock()
 	requestID := st.reqID
@@ -2999,7 +3111,56 @@ func (c *Codex) startTurn(threadID string, input []map[string]any, snap session.
 	}
 	st.mu.Unlock()
 	// Keep the existing health/tool policy and atomically guard the transport.
-	raw, err := c.rpcCallAtEpoch("turn/start", params, 30*time.Second, &epoch)
+	st.mu.Lock()
+	automatic := st.automatic
+	st.mu.Unlock()
+	if automatic != nil {
+		if e := automatic.VerifyInputs(); e != nil {
+			return &codexAcceptanceError{Reason: "native_recovery_input_lease_changed"}
+		}
+		subject, e := c.automaticProviderSubject()
+		if e != nil {
+			return &codexAcceptanceError{Reason: "native_provider_subject_unavailable"}
+		}
+		if e = automatic.BindProvider(subject); e != nil {
+			return &codexAcceptanceError{Reason: "native_provider_subject_changed"}
+		}
+	}
+	if automatic != nil {
+		rawInput, _ := json.Marshal(input)
+		next, e := automatic.BeforeDispatch(context.Background(), recovery.Hash(rawInput), epoch)
+		if e != nil {
+			return &codexAcceptanceError{Reason: "native_recovery_guard_failed"}
+		}
+		st.mu.Lock()
+		st.automaticAttempt = next.Attempt.ID
+		st.automaticOrdinal = next.Attempt.Number
+		st.automaticIsContinuation = next.Continuation
+		st.mu.Unlock()
+	}
+	var raw json.RawMessage
+	var err error
+	if automatic != nil {
+		raw, err = c.rpcCallAtEpoch("turn/start", params, 30*time.Second, &epoch, func() (func(), error) {
+			subject, e := c.automaticLocalSubject()
+			if e != nil {
+				return nil, e
+			}
+			r, e := automatic.Resume()
+			if e != nil || subject != r.Source.Provider {
+				return nil, recovery.ErrGuard
+			}
+			st.mu.Lock()
+			valid := st.turnActive && !st.stopping && st.reqID == requestID && st.threadID == threadID && st.startAdmission.sourceKnown() && (st.startAdmission == nil || st.startAdmission.Boundary == st.nativeBoundary)
+			st.mu.Unlock()
+			if !valid {
+				return nil, recovery.ErrGuard
+			}
+			return automatic.WriterGuard()
+		})
+	} else {
+		raw, err = c.rpcCallAtEpoch("turn/start", params, 30*time.Second, &epoch)
+	}
 	consumedResponseAt := time.Now()
 	if err == nil {
 		var response struct {
@@ -3009,7 +3170,7 @@ func (c *Codex) startTurn(threadID string, input []map[string]any, snap session.
 		if c.rpc.transportEpoch.Load() != epoch {
 			return &codexAcceptanceError{Reason: "native_source_changed"}
 		}
-		if decodeErr != nil || response.Turn.ID == "" || (response.Turn.Status != "inProgress" && response.Turn.Status != "completed") {
+		if decodeErr != nil || response.Turn.ID == "" || !codexTerminalStatus(response.Turn.Status) && response.Turn.Status != "inProgress" {
 			reason := "native_acceptance_unknown"
 			if response.Turn.Status == "failed" || response.Turn.Status == "interrupted" {
 				reason = "native_start_failed_before_acceptance"
@@ -3017,6 +3178,24 @@ func (c *Codex) startTurn(threadID string, input []map[string]any, snap session.
 			return &codexAcceptanceError{Reason: reason, Failure: recovery.ClassifyCodex(response.Turn.Error.Info, "")}
 		}
 		return c.confirmOwnedTurnSubmission(st, threadID, requestID, response.Turn, func() {
+			if automatic != nil {
+				st.mu.Lock()
+				attempt := st.automaticAttempt
+				ordinal, continuation := st.automaticOrdinal, st.automaticIsContinuation
+				st.mu.Unlock()
+				if e := automatic.Accepted(attempt, threadID, response.Turn.ID); e != nil {
+					st.mu.Lock()
+					st.automaticAcceptanceUncertain = true
+					st.mu.Unlock()
+					return
+				}
+				if e := c.rememberAutomaticTurn(threadID, response.Turn.ID, requestID, attempt, ordinal, continuation); e != nil {
+					st.mu.Lock()
+					st.automaticAcceptanceUncertain = true
+					st.mu.Unlock()
+					return
+				}
+			}
 			c.sink.Emit(backend.NativeTaskAccepted{SessionID: snap.ID, RequestID: requestID, ThreadID: threadID, TurnID: response.Turn.ID, ConsumedResponseAt: consumedResponseAt})
 		})
 	}
@@ -3440,6 +3619,18 @@ func (c *Codex) Stop(ctx context.Context, s *session.Session) error {
 		turnID = st.compactTurnID
 	}
 	st.mu.Unlock()
+	st.mu.Lock()
+	automatic := st.automatic
+	st.mu.Unlock()
+	if automatic != nil && !active && !compacting {
+		r, e := automatic.Resume()
+		if e == nil && (r.State == "cancelled" || r.State == "disabled") {
+			st.mu.Lock()
+			st.turnErr = "stopped"
+			st.mu.Unlock()
+			return nil
+		}
+	}
 	if !active && !compacting && observedTurnID != "" {
 		if threadID == "" {
 			threadID = s.ResumeID()

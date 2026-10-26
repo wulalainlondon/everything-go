@@ -27,14 +27,5 @@ func (c *Codex) NativeTurnForRequest(s *session.Session, request string) (string
 	if err != nil {
 		return "", err
 	}
-	found := ""
-	for turn, id := range r.Requests {
-		if id == request {
-			if found != "" && found != turn {
-				return "", errors.New("ambiguous native request mapping")
-			}
-			found = turn
-		}
-	}
-	return found, nil
+	return mappedRequestTurn(r, request)
 }

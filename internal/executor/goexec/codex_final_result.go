@@ -30,14 +30,9 @@ func (c *Codex) finalForExactRequest(threadID, requestID, expectedTurn string) (
 	if err != nil {
 		return "", false, err
 	}
-	turnID := ""
-	for nativeID, bridgeID := range requests.Requests {
-		if bridgeID == requestID {
-			if turnID != "" && turnID != nativeID {
-				return "", false, errors.New("ambiguous native request mapping")
-			}
-			turnID = nativeID
-		}
+	turnID, err := mappedRequestTurn(requests, requestID)
+	if err != nil {
+		return "", false, err
 	}
 	if turnID == "" {
 		return "", false, nil

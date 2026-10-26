@@ -558,6 +558,7 @@ func (h *Hub) statusResult(sessionID string) protocol.StatusResult {
 		"queued_commands":    queued,
 		"permission_mode":    "enforce",
 	}
+	status["network_auto_continue"] = h.networkRecoveryReadiness()
 	if provider, ok := h.exec.(interface{ RuntimeDiagnostics() map[string]any }); ok {
 		if diagnostics := provider.RuntimeDiagnostics(); len(diagnostics) > 0 {
 			status["backend_runtimes"] = diagnostics

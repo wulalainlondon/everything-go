@@ -252,6 +252,7 @@ func (h *Hub) mutateIntake(ctx context.Context, c taskapi.AuthorizedCommand) (an
 		return nil, e
 	}
 	if created {
+		h.releaseNetworkRecoveryBarrier(s.ID)
 		h.submitAPINamed(s, entry.RequestID)
 	}
 	return h.apiReceipt(ctx, c, stored)

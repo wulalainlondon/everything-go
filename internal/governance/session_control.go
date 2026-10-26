@@ -18,6 +18,7 @@ const (
 )
 
 type SessionControl struct {
+	Revision  uint64 `json:"revision,omitempty"`
 	SessionID string `json:"session_id"`
 	ThreadID  string `json:"thread_id"`
 	Owner     string `json:"owner"`
@@ -59,7 +60,7 @@ func (s *SessionControlStore) BeginDesktopHandoff(sessionID, threadID string) (S
 	if current.Owner == ControlDesktop || current.State == ControlPending {
 		return current, errors.New("session is already handed off or handoff is pending")
 	}
-	entry := SessionControl{SessionID: sessionID, ThreadID: threadID, Owner: ControlMobile, State: ControlPending, UpdatedAt: time.Now().UnixMilli()}
+	entry := SessionControl{SessionID: sessionID, ThreadID: threadID, Owner: ControlMobile, State: ControlPending, Revision: current.Revision + 1, UpdatedAt: time.Now().UnixMilli()}
 	s.entries[sessionID] = entry
 	s.saveLocked()
 	return entry, nil
@@ -72,6 +73,7 @@ func (s *SessionControlStore) CompleteDesktopHandoff(sessionID string) SessionCo
 	entry.SessionID = sessionID
 	entry.Owner = ControlDesktop
 	entry.State = ControlActive
+	entry.Revision++
 	entry.UpdatedAt = time.Now().UnixMilli()
 	s.entries[sessionID] = entry
 	s.saveLocked()
@@ -89,7 +91,7 @@ func (s *SessionControlStore) MarkDesktopOwner(sessionID, threadID string) (Sess
 	if current.Owner == ControlDesktop && current.State == ControlActive && current.ThreadID == threadID {
 		return current, false
 	}
-	entry := SessionControl{SessionID: sessionID, ThreadID: threadID, Owner: ControlDesktop, State: ControlActive, UpdatedAt: time.Now().UnixMilli()}
+	entry := SessionControl{SessionID: sessionID, ThreadID: threadID, Owner: ControlDesktop, State: ControlActive, Revision: current.Revision + 1, UpdatedAt: time.Now().UnixMilli()}
 	s.entries[sessionID] = entry
 	s.saveLocked()
 	return entry, true
@@ -102,6 +104,7 @@ func (s *SessionControlStore) CancelPending(sessionID string) SessionControl {
 	entry.SessionID = sessionID
 	entry.Owner = ControlMobile
 	entry.State = ControlActive
+	entry.Revision++
 	entry.UpdatedAt = time.Now().UnixMilli()
 	s.entries[sessionID] = entry
 	s.saveLocked()
@@ -111,7 +114,7 @@ func (s *SessionControlStore) CancelPending(sessionID string) SessionControl {
 func (s *SessionControlStore) Reclaim(sessionID, threadID string) SessionControl {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	entry := SessionControl{SessionID: sessionID, ThreadID: threadID, Owner: ControlMobile, State: ControlActive, UpdatedAt: time.Now().UnixMilli()}
+	entry := SessionControl{SessionID: sessionID, ThreadID: threadID, Owner: ControlMobile, State: ControlActive, Revision: s.entries[sessionID].Revision + 1, UpdatedAt: time.Now().UnixMilli()}
 	s.entries[sessionID] = entry
 	s.saveLocked()
 	return entry

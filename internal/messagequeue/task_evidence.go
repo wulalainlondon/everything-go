@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"everything-go/internal/recovery"
 	"everything-go/internal/taskapi"
 	"strings"
 )
@@ -67,6 +68,22 @@ func (s *Store) ExactNativeAcceptance(session, request string) (NativeReceipt, b
 	}
 	if conflict {
 		return NativeReceipt{}, false, ErrNativeConflict
+	}
+	if run, ok, e := s.Recovery(session, request); e != nil {
+		return NativeReceipt{}, false, e
+	} else if ok && run.LastAttempt != "" {
+		var raw []byte
+		e = s.db.QueryRow(`SELECT payload FROM recovery_attempts WHERE session_id=? AND request_id=? AND attempt_id=?`, session, request, run.LastAttempt).Scan(&raw)
+		if e != nil {
+			return NativeReceipt{}, false, e
+		}
+		var attempt recovery.Attempt
+		if e = json.Unmarshal(raw, &attempt); e != nil {
+			return NativeReceipt{}, false, e
+		}
+		if attempt.Acceptance == recovery.Accepted && attempt.Thread != "" && attempt.Turn != "" {
+			return NativeReceipt{attempt.Thread, attempt.Turn}, true, nil
+		}
 	}
 	if !found {
 		return NativeReceipt{}, false, nil

@@ -100,6 +100,10 @@ func (p *rpcPlumber) requestAtEpoch(method string, params any, timeout time.Dura
 // server operation nor closes/replaces the shared writer. Writes retain the
 // original transport's locking and I/O bounds; ctx bounds the response wait.
 func (p *rpcPlumber) requestAtEpochContext(ctx context.Context, method string, params any, timeout time.Duration, expected *uint64) (json.RawMessage, error) {
+	return p.requestAtEpochGuarded(ctx, method, params, timeout, expected, nil)
+}
+
+func (p *rpcPlumber) requestAtEpochGuarded(ctx context.Context, method string, params any, timeout time.Duration, expected *uint64, guard func() (func(), error)) (json.RawMessage, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -119,7 +123,17 @@ func (p *rpcPlumber) requestAtEpochContext(ctx context.Context, method string, p
 	if params != nil {
 		req["params"] = params
 	}
-	if err := p.writeAtEpoch(req, expected); err != nil {
+	release := func() {}
+	if guard != nil {
+		var e error
+		release, e = guard()
+		if e != nil {
+			return nil, e
+		}
+	}
+	err := p.writeAtEpoch(req, expected)
+	release()
+	if err != nil {
 		return nil, err
 	}
 

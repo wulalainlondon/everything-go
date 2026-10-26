@@ -3,6 +3,8 @@
 package governance
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -21,15 +23,17 @@ const pairingSchemaVersion = 2
 const initialEnrollmentDuration = 10 * time.Minute
 
 type pairedDevice struct {
-	Token    string `json:"token"`
-	DeviceID string `json:"device_id"`
-	PairedAt int64  `json:"paired_at"`
+	Generation string `json:"generation,omitempty"`
+	Token      string `json:"token"`
+	DeviceID   string `json:"device_id"`
+	PairedAt   int64  `json:"paired_at"`
 }
 
 // DeviceBinding is an internal snapshot. Credentials are never JSON-encoded.
 type DeviceBinding struct {
-	Token    string `json:"-"`
-	DeviceID string `json:"-"`
+	Generation string `json:"-"`
+	Token      string `json:"-"`
+	DeviceID   string `json:"-"`
 }
 
 func (p *Pairing) DeviceBindings() []DeviceBinding {
@@ -37,7 +41,7 @@ func (p *Pairing) DeviceBindings() []DeviceBinding {
 	defer p.mu.Unlock()
 	out := make([]DeviceBinding, 0, len(p.devices))
 	for _, device := range p.devices {
-		out = append(out, DeviceBinding{Token: device.Token, DeviceID: device.DeviceID})
+		out = append(out, DeviceBinding{Token: device.Token, DeviceID: device.DeviceID, Generation: device.Generation})
 	}
 	return out
 }
@@ -135,6 +139,13 @@ func (p *Pairing) Claim(token, deviceID string) error {
 		return ErrTokenMismatch
 	}
 	if existing, ok := p.devices[token]; ok {
+		if existing.DeviceID != deviceID {
+			generation, e := newPairingGeneration()
+			if e != nil {
+				return e
+			}
+			existing.Generation = generation
+		}
 		existing.DeviceID = deviceID
 		p.devices[token] = existing
 		return p.saveLocked()
@@ -142,7 +153,11 @@ func (p *Pairing) Claim(token, deviceID string) error {
 	if len(p.devices) > 0 && !time.Now().Before(p.enrollUntil) {
 		return ErrClaimedByAnother
 	}
-	p.devices[token] = pairedDevice{Token: token, DeviceID: deviceID, PairedAt: time.Now().Unix()}
+	generation, e := newPairingGeneration()
+	if e != nil {
+		return e
+	}
+	p.devices[token] = pairedDevice{Token: token, DeviceID: deviceID, PairedAt: time.Now().Unix(), Generation: generation}
 	p.closeEnrollmentLocked() // one newly trusted device per explicit window
 	return p.saveLocked()
 }
@@ -190,4 +205,15 @@ func (p *Pairing) saveLocked() error {
 		return err
 	}
 	return os.Rename(tmp, p.path)
+}
+
+// A re-pair using the same credential/device text is a new authorization epoch.
+// Existing files load without mutation; legacy empty epochs stay bound until a
+// real new pairing changes them. Token refresh is not part of device pairing.
+func newPairingGeneration() (string, error) {
+	var b [16]byte
+	if _, e := rand.Read(b[:]); e != nil {
+		return "", e
+	}
+	return hex.EncodeToString(b[:]), nil
 }

@@ -29,6 +29,7 @@ type Session struct {
 	mu             sync.Mutex
 	configUpdating bool
 	configRevision uint64
+	sourceRevision uint64
 	futureConfig   *Configuration
 
 	// ID and CreatedAt are set once at construction and never change, so they
@@ -80,6 +81,7 @@ type Session struct {
 // Snapshot is an immutable, lock-free copy of a session's fields for callers
 // that need several at once (summaries, task listings, spawn argument building).
 type Snapshot struct {
+	SourceRevision      uint64
 	ConfigRevision      uint64
 	ID                  string
 	Name                string
@@ -123,8 +125,8 @@ func (s *Session) Snapshot() Snapshot {
 
 func (s *Session) snapshotLocked() Snapshot {
 	return Snapshot{
-		ConfigRevision: s.configRevision,
-		ID:             s.ID, Name: s.name, Cwd: s.cwd, Backend: s.backend,
+		ConfigRevision: s.configRevision, SourceRevision: s.sourceRevision,
+		ID: s.ID, Name: s.name, Cwd: s.cwd, Backend: s.backend,
 		MetadataRevision: s.metadataRevision, NameUpdatedAt: s.nameUpdatedAt,
 		NameUpdatedBy: s.nameUpdatedBy, LastNameMutationID: s.lastNameMutationID,
 		Model: s.model, Sandbox: s.sandbox, Effort: s.effort, ResumeID: s.resumeID,
@@ -167,6 +169,9 @@ func (s *Session) SetName(name string) {
 // SetEffort stores the reasoning effort applied on the next claude spawn.
 func (s *Session) SetEffort(effort string) {
 	s.mu.Lock()
+	if s.effort != effort {
+		s.sourceRevision++
+	}
 	s.effort = effort
 	s.mu.Unlock()
 }
@@ -175,6 +180,9 @@ func (s *Session) SetEffort(effort string) {
 // default, so it cannot use ApplyConfig's omit-empty semantics.
 func (s *Session) SetModel(model string) {
 	s.mu.Lock()
+	if s.model != model {
+		s.sourceRevision++
+	}
 	s.model = model
 	s.mu.Unlock()
 }
@@ -185,12 +193,21 @@ func (s *Session) SetModel(model string) {
 func (s *Session) ApplyCodexSettings(serviceTier, collaborationMode, personality *string) {
 	s.mu.Lock()
 	if serviceTier != nil {
+		if s.serviceTier != *serviceTier {
+			s.sourceRevision++
+		}
 		s.serviceTier = *serviceTier
 	}
 	if collaborationMode != nil {
+		if s.collaborationMode != *collaborationMode {
+			s.sourceRevision++
+		}
 		s.collaborationMode = *collaborationMode
 	}
 	if personality != nil {
+		if s.personality != *personality {
+			s.sourceRevision++
+		}
 		s.personality = *personality
 	}
 	s.mu.Unlock()
@@ -201,6 +218,9 @@ func (s *Session) ApplyCodexSettings(serviceTier, collaborationMode, personality
 // It is used to roll back a switch that the active runtime rejected.
 func (s *Session) RestoreConfig(snap Snapshot) {
 	s.mu.Lock()
+	if s.backend != snap.Backend || s.model != snap.Model || s.sandbox != snap.Sandbox || s.effort != snap.Effort || s.serviceTier != snap.ServiceTier || s.collaborationMode != snap.CollaborationMode || s.personality != snap.Personality {
+		s.sourceRevision++
+	}
 	s.backend = snap.Backend
 	s.model = snap.Model
 	s.sandbox = snap.Sandbox
@@ -218,6 +238,9 @@ func (s *Session) SetMeta(pinned, hidden *bool) {
 		s.pinned = *pinned
 	}
 	if hidden != nil {
+		if s.hidden != *hidden {
+			s.sourceRevision++
+		}
 		s.hidden = *hidden
 	}
 	s.mu.Unlock()
@@ -228,12 +251,21 @@ func (s *Session) SetMeta(pinned, hidden *bool) {
 func (s *Session) ApplyConfig(backend, model, sandbox string) {
 	s.mu.Lock()
 	if backend != "" {
+		if s.backend != backend {
+			s.sourceRevision++
+		}
 		s.backend = backend
 	}
 	if model != "" {
+		if s.model != model {
+			s.sourceRevision++
+		}
 		s.model = model
 	}
 	if sandbox != "" {
+		if s.sandbox != sandbox {
+			s.sourceRevision++
+		}
 		s.sandbox = sandbox
 	}
 	s.mu.Unlock()
@@ -246,6 +278,9 @@ func (s *Session) SetResumeID(id string) {
 	if id != "" && s.resumeID != "" && s.resumeID != id {
 		s.historicalResumeIDs = appendUniqueResumeID(s.historicalResumeIDs, s.resumeID, id)
 	}
+	if s.resumeID != id {
+		s.sourceRevision++
+	}
 	s.resumeID = id
 	s.mu.Unlock()
 }
@@ -255,6 +290,9 @@ func (s *Session) SetResumeID(id string) {
 // call SetResumeID("") so archived generations remain readable.
 func (s *Session) ClearResumeIDs() {
 	s.mu.Lock()
+	if s.resumeID != "" {
+		s.sourceRevision++
+	}
 	s.resumeID = ""
 	s.historicalResumeIDs = nil
 	s.mu.Unlock()
@@ -350,8 +388,8 @@ func (r *Registry) AttachStore(store *Store) {
 			created = float64(e.LastUsed)
 		}
 		s := &Session{
-			configRevision: e.ConfigRevision,
-			ID:             id, CreatedAt: created,
+			configRevision: e.ConfigRevision, sourceRevision: e.SourceRevision,
+			ID: id, CreatedAt: created,
 			name: e.Name, cwd: e.Cwd, backend: e.Backend,
 			metadataRevision: e.MetadataRevision, nameUpdatedAt: e.NameUpdatedAt,
 			nameUpdatedBy: e.NameUpdatedBy, lastNameMutationID: e.LastNameMutationID,
@@ -790,6 +828,9 @@ func (r *Registry) UpsertExternal(id, name, cwd, backend, resumeID string, lastU
 			s.cwd = cwd
 		}
 		if s.backend == "" {
+			if s.backend != backend {
+				s.sourceRevision++
+			}
 			s.backend = backend
 		}
 		if activity > s.lastActivity {
@@ -819,6 +860,9 @@ func (r *Registry) UpsertExternal(id, name, cwd, backend, resumeID string, lastU
 				s.name = name
 			}
 			s.cwd = cwd
+			if s.backend != backend {
+				s.sourceRevision++
+			}
 			s.backend = backend
 		} else if s.resumeID != resumeID {
 			beforeCount := len(s.historicalResumeIDs)
@@ -834,6 +878,9 @@ func (r *Registry) UpsertExternal(id, name, cwd, backend, resumeID string, lastU
 				s.name = name
 			}
 			s.cwd = cwd
+			if s.backend != backend {
+				s.sourceRevision++
+			}
 			s.backend = backend
 		}
 		if activity > s.lastActivity {

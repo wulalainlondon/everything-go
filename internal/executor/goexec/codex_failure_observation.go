@@ -103,6 +103,12 @@ func (c *Codex) observeCodexRetryHint(s *session.Session, st *codexState, thread
 	}
 	st.failureNoticeKey = key
 	st.mu.Unlock()
+	st.mu.Lock()
+	auto := st.automatic
+	st.mu.Unlock()
+	if auto != nil && owned {
+		_ = auto.ObserveFailure(recovery.AutomaticOutcome{Failure: failure, NativeWillRetry: willRetry, Acceptance: recovery.Accepted, Thread: threadID, Turn: turnID})
+	}
 	context := recovery.Context{Owned: owned, OrdinaryChat: owned && !codexPinnedRequest(requestID),
 		Acceptance: recovery.Accepted, NativeWillRetry: willRetry}
 	c.recordCodexFailure(s.ID, requestID, threadID, turnID, failure, context)

@@ -398,6 +398,77 @@
         "interrupted",
         "closed"
       ]
+    },
+    "automaticRecoverySnapshot": {
+      "description": "Optional message_queue_snapshot.recovery[] projection. Existing queue state/action and runtime phase/stage enums remain unchanged. Native completed never implies objective verified. Unknown submit is reconciled without replay. Epoch milliseconds are server values.",
+      "type": "object",
+      "required": [
+        "request_id",
+        "mode",
+        "revision",
+        "generation",
+        "state",
+        "attempts",
+        "max_attempts",
+        "objective_verified"
+      ],
+      "properties": {
+        "request_id": {
+          "type": "string"
+        },
+        "mode": {
+          "const": "network_auto_continue"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "ready",
+            "dispatching",
+            "accepted",
+            "retry_wait",
+            "reconciling",
+            "paused_uncertain",
+            "paused_budget",
+            "waiting_user",
+            "native_completed",
+            "cancelled",
+            "failed_permanent",
+            "disabled"
+          ]
+        },
+        "reason": {
+          "type": "string"
+        },
+        "attempts": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5
+        },
+        "max_attempts": {
+          "const": 5
+        },
+        "next_at_ms": {
+          "type": "integer"
+        },
+        "deadline_ms": {
+          "type": "integer"
+        },
+        "native_status": {
+          "type": "string"
+        },
+        "objective_verified": {
+          "const": false
+        }
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": false

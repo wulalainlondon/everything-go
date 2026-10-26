@@ -1,0 +1,305 @@
+package goexec
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"os"
+	"time"
+
+	"everything-go/internal/recovery"
+	"everything-go/internal/session"
+)
+
+const automaticContinuation = "上一輪因已確認的暫時連線或容量錯誤終止。請先核對原任務、已完成項目、工具結果與仍在執行的操作，只接續尚未完成部分，依原驗收條件驗證並回報；若需要使用者回答或權限，請停止並說明。"
+
+// Read the latest exact canonical turn and every item page. We deliberately do
+// not treat opaque exec/MCP/dynamic tool results as proof of no external effect.
+func (c *Codex) automaticCanonical(s *session.Session, st *codexState, turn string) (recovery.CanonicalEvidence, error) {
+	p := recovery.CanonicalEvidence{Thread: s.ResumeID(), Turn: turn}
+	if c.hasPendingInteraction(s.ID) {
+		p.WaitingUser = true
+		return p, recovery.ErrGuard
+	}
+	epoch := c.rpc.transportEpoch.Load()
+	admission, e := c.readStartAdmission(s, st, st.reqID)
+	if e != nil {
+		return p, e
+	}
+	if admission.Epoch != epoch {
+		return p, recovery.ErrGuard
+	}
+	p.Idle = true
+	raw, e := c.rpc.requestAtEpoch("thread/turns/list", map[string]any{"threadId": p.Thread, "limit": 1, "sortDirection": "desc", "itemsView": "full"}, 15*time.Second, &epoch)
+	if e != nil || len(raw) > 8<<20 {
+		return p, recovery.ErrGuard
+	}
+	var page struct {
+		Data []struct {
+			ID        string            `json:"id"`
+			Status    string            `json:"status"`
+			ItemsView string            `json:"itemsView"`
+			Items     []json.RawMessage `json:"items"`
+		} `json:"data"`
+		Next *string `json:"nextCursor"`
+	}
+	if json.Unmarshal(raw, &page) != nil || len(page.Data) != 1 || page.Data[0].ID != turn || page.Data[0].Status != "failed" || page.Data[0].ItemsView != "full" || page.Data[0].Items == nil {
+		return p, recovery.ErrGuard
+	}
+	p.Status = "failed"
+	// The cursor on a one-turn page refers to older turns. All items of THIS
+	// turn are separately paged by the exact current public thread/items/list.
+	cursor := ""
+	seen := map[string]bool{}
+	var itemEvidence []json.RawMessage
+	progress := []json.RawMessage{}
+	for pages := 0; pages < 64; pages++ {
+		params := map[string]any{"threadId": p.Thread, "turnId": turn, "limit": 100, "sortDirection": "asc"}
+		if cursor != "" {
+			params["cursor"] = cursor
+		}
+		raw, e = c.rpc.requestAtEpoch("thread/items/list", params, 15*time.Second, &epoch)
+		if e != nil || len(raw) > 8<<20 {
+			return p, recovery.ErrGuard
+		}
+		var items struct {
+			Data []struct {
+				Item json.RawMessage `json:"item"`
+				Turn string          `json:"turnId"`
+			} `json:"data"`
+			Next *string `json:"nextCursor"`
+		}
+		if json.Unmarshal(raw, &items) != nil || items.Data == nil {
+			return p, recovery.ErrGuard
+		}
+		for _, entry := range items.Data {
+			if entry.Turn != turn {
+				return p, recovery.ErrGuard
+			}
+			var item struct {
+				Type  string `json:"type"`
+				Phase string `json:"phase"`
+				ID    string `json:"id"`
+			}
+			if json.Unmarshal(entry.Item, &item) != nil || item.ID == "" {
+				return p, recovery.ErrGuard
+			}
+			if seen[item.ID] {
+				return p, recovery.ErrGuard
+			}
+			seen[item.ID] = true
+			switch item.Type {
+			case "userMessage", "agentMessage", "reasoning":
+				// Conversation content alone cannot prove externally delivered artifacts.
+				if item.Type == "agentMessage" && item.Phase == "final_answer" {
+					progress = append(progress, entry.Item)
+				}
+			default:
+				return p, errors.New("canonical tool/background/provider coverage not independently verifiable")
+			}
+			itemEvidence = append(itemEvidence, entry.Item)
+		}
+		if items.Next == nil || *items.Next == "" {
+			p.Complete = true
+			break
+		}
+		if *items.Next == cursor {
+			return p, recovery.ErrGuard
+		}
+		cursor = *items.Next
+	}
+	if !p.Complete || c.rpc.transportEpoch.Load() != epoch {
+		return p, recovery.ErrGuard
+	}
+	if _, e = c.readStartAdmission(s, st, st.reqID); e != nil {
+		return p, e
+	}
+	if len(page.Data[0].Items) != len(itemEvidence) {
+		return p, recovery.ErrGuard
+	}
+	canonicalIDs := map[string]bool{}
+	for _, raw := range page.Data[0].Items {
+		var it struct {
+			ID string `json:"id"`
+		}
+		if json.Unmarshal(raw, &it) != nil || !seen[it.ID] || canonicalIDs[it.ID] {
+			return p, recovery.ErrGuard
+		}
+		canonicalIDs[it.ID] = true
+	}
+	b, _ := json.Marshal(itemEvidence)
+	p.EvidenceHash = recovery.Hash(b)
+	if c.hasPendingInteraction(s.ID) {
+		p.WaitingUser = true
+		return p, recovery.ErrGuard
+	}
+	p.ToolCoverage = true
+	p.NoUnresolvedEffects = true
+	// A failed turn's commentary/reasoning is NOT objective progress. Only
+	// canonical independently verifiable deliverables could improve this hash;
+	// this conservative first adapter counts none, bounding repeated no-progress.
+	_ = progress
+	p.ProgressHash = ""
+	return p, nil
+}
+
+func (c *Codex) automaticTryAgain(s *session.Session, st *codexState, detail *codexFailureDetail) (bool, error) {
+	st.mu.Lock()
+	a := st.automatic
+	stopping := st.stopping
+	st.mu.Unlock()
+	if a == nil || stopping {
+		return false, nil
+	}
+	o := recovery.AutomaticOutcome{Failure: detail.Failure, Acceptance: detail.Acceptance, IngressRejected: detail.IngressRejected, Terminal: detail.Terminal, NativeWillRetry: detail.NativeWillRetry, Thread: s.ResumeID(), Turn: detail.TurnID}
+	if o.Acceptance == recovery.Accepted && o.Terminal {
+		proof, e := c.automaticCanonical(s, st, o.Turn)
+		if e == nil {
+			o.Canonical = proof
+		}
+	}
+	retry, e := a.Failed(o)
+	if e != nil || !retry {
+		return false, e
+	}
+	if e = a.Wait(context.Background()); e != nil {
+		return false, e
+	}
+	if e = a.Guard(); e != nil {
+		return false, e
+	}
+	r, e := a.Resume()
+	if e != nil {
+		return false, e
+	}
+	if r.Kind == "continue" {
+		if _, e = c.automaticCanonical(s, st, r.ParentTurn); e != nil {
+			return false, e
+		}
+	}
+	return true, nil
+}
+func (c *Codex) resetAutomaticTurn(s *session.Session, st *codexState) ([]map[string]any, chan struct{}, error) {
+	st.mu.Lock()
+	auto := st.automatic
+	req := st.reqID
+	stopping := st.stopping
+	st.mu.Unlock()
+	if auto == nil || stopping {
+		return nil, nil, recovery.ErrGuard
+	}
+	if e := auto.Guard(); e != nil {
+		return nil, nil, e
+	}
+	r, e := auto.Resume()
+	if e != nil {
+		return nil, nil, e
+	}
+	admission, e := c.readStartAdmission(s, st, req)
+	if e != nil {
+		return nil, nil, e
+	}
+	input := st.automaticInput
+	if r.Kind == "continue" {
+		if _, e = c.automaticCanonical(s, st, r.ParentTurn); e != nil {
+			return nil, nil, e
+		}
+		input = []map[string]any{{"type": "text", "text": automaticContinuation}}
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.stopping {
+		return nil, nil, recovery.ErrGuard
+	}
+	st.startAdmission = admission
+	st.turnErr = ""
+	st.turnErrorCode = ""
+	st.turnFailure = nil
+	st.turnActive = true
+	st.turnDone = make(chan struct{})
+	st.currentTurnID = ""
+	st.turnStartPending = true
+	st.pendingTerminals = nil
+	st.pendingNotifications = nil
+	st.pendingNotificationBytes = 0
+	st.confirmedRequestID = ""
+	st.confirmedTurnID = ""
+	st.unconfirmedActivity = false
+	st.accumulatedText = ""
+	st.lastEventAt = time.Now()
+	st.stallWarned = false
+	return input, st.turnDone, nil
+}
+
+// account/read deliberately has no stable account ID. Only the provider's
+// actual account/rateLimits/read accountId binds retries; token bytes/email are
+// neither a subject nor a model-level cooldown key. Unknown means no recovery.
+func (c *Codex) automaticProviderSubject() (string, error) {
+	epoch := c.rpc.transportEpoch.Load()
+	raw, e := c.rpc.requestAtEpoch("account/read", map[string]any{"refreshToken": false}, 5*time.Second, &epoch)
+	if e != nil || len(raw) > 64<<10 {
+		return "", recovery.ErrGuard
+	}
+	var account struct {
+		Account *struct {
+			Type string `json:"type"`
+		} `json:"account"`
+	}
+	if json.Unmarshal(raw, &account) != nil || account.Account == nil || account.Account.Type != "chatgpt" {
+		return "", recovery.ErrGuard
+	}
+	raw, e = c.rpc.requestAtEpoch("account/rateLimits/read", map[string]any{}, 5*time.Second, &epoch)
+	if e != nil || len(raw) > 256<<10 {
+		return "", recovery.ErrGuard
+	}
+	var usage struct {
+		AccountID *string `json:"accountId"`
+		Allowed   *bool   `json:"ordinaryUsageAllowed"`
+	}
+	if json.Unmarshal(raw, &usage) != nil {
+		return "", recovery.ErrGuard
+	}
+	if usage.Allowed != nil && !*usage.Allowed {
+		return "", errAutomaticUsageBlocked
+	}
+	if usage.AccountID == nil || *usage.AccountID == "" || c.rpc.transportEpoch.Load() != epoch {
+		return "", recovery.ErrGuard
+	}
+	if usage.Allowed != nil && !*usage.Allowed {
+		return "", errAutomaticUsageBlocked
+	}
+	return recovery.Hash([]byte("chatgpt:" + *usage.AccountID)), nil
+}
+
+var errAutomaticUsageBlocked = errors.New("provider ordinary usage is explicitly blocked")
+
+func (c *Codex) automaticLocalSubject() (string, error) {
+	if c.appSandbox != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		tokens, e := c.appSandbox.tokens(ctx)
+		if e != nil || tokens.AccountID == "" {
+			return "", recovery.ErrGuard
+		}
+		return recovery.Hash([]byte("chatgpt:" + tokens.AccountID)), nil
+	}
+	f, e := os.Open(c.authPath)
+	if e != nil {
+		return "", recovery.ErrGuard
+	}
+	defer f.Close()
+	raw, e := io.ReadAll(io.LimitReader(f, 1<<20))
+	if e != nil || len(raw) >= 1<<20 {
+		return "", recovery.ErrGuard
+	}
+	var auth struct {
+		Tokens struct {
+			AccountID string `json:"account_id"`
+		} `json:"tokens"`
+	}
+	if json.Unmarshal(raw, &auth) != nil || auth.Tokens.AccountID == "" {
+		return "", recovery.ErrGuard
+	}
+	return recovery.Hash([]byte("chatgpt:" + auth.Tokens.AccountID)), nil
+}

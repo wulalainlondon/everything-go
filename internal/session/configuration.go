@@ -29,6 +29,9 @@ func (c Configuration) applySnapshot(s Snapshot) Snapshot {
 }
 
 func (s *Session) applyConfigurationLocked(c Configuration) {
+	if ConfigurationFrom(s.snapshotLocked()) != c {
+		s.sourceRevision++
+	}
 	s.configRevision, s.backend, s.model, s.sandbox, s.effort = c.Revision, c.Backend, c.Model, c.Sandbox, c.Effort
 	s.serviceTier, s.collaborationMode, s.personality = c.ServiceTier, c.CollaborationMode, c.Personality
 }
@@ -145,5 +148,8 @@ func (s *Session) ReserveConfiguration(expected *uint64) (Snapshot, func(), erro
 func (s *Session) SetConfigRevision(revision uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.configRevision != revision {
+		s.sourceRevision++
+	}
 	s.configRevision = revision
 }

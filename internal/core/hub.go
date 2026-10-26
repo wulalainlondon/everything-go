@@ -83,21 +83,25 @@ type Config struct {
 // the executor.Sink (Emit broadcasts an event to connected clients, or buffers
 // it when none are connected so a reconnecting client can recover it).
 type Hub struct {
-	workspace            *workspace.Store
-	workspaceScheduler   atomic.Bool
-	workspaceWake        chan struct{}
-	workspaceCancel      context.CancelFunc
-	workspaceWorkers     sync.WaitGroup
-	workspaceAdapters    map[string]workspace.ToolAdapter
-	workspacePush        workspace.PushSender
-	workspaceRequests    sync.Map
-	workspaceEffectWake  chan struct{}
-	workspaceMCPURL      string
-	workspaceMCP         *http.Server
-	partners             *partners.Store
-	transfers            *voicetransfer.Store
-	interactionScheduler atomic.Bool
-	interactionWake      chan struct{}
+	networkRecoveryBarriers sync.Map
+	networkRecoveryNow      func() time.Time
+	networkRecoveryEpoch    string
+	networkRecoveryStarted  int64
+	workspace               *workspace.Store
+	workspaceScheduler      atomic.Bool
+	workspaceWake           chan struct{}
+	workspaceCancel         context.CancelFunc
+	workspaceWorkers        sync.WaitGroup
+	workspaceAdapters       map[string]workspace.ToolAdapter
+	workspacePush           workspace.PushSender
+	workspaceRequests       sync.Map
+	workspaceEffectWake     chan struct{}
+	workspaceMCPURL         string
+	workspaceMCP            *http.Server
+	partners                *partners.Store
+	transfers               *voicetransfer.Store
+	interactionScheduler    atomic.Bool
+	interactionWake         chan struct{}
 
 	interactions *taskinteraction.Store
 
@@ -238,6 +242,7 @@ type Hub struct {
 func NewHub(reg *session.Registry, cfg Config, pairing *governance.Pairing, port int) *Hub {
 	cfg.Port = port
 	h := &Hub{
+		networkRecoveryEpoch: randomID(), networkRecoveryStarted: time.Now().UnixMilli(),
 		workspaceWake:       make(chan struct{}, 1),
 		workspaceEffectWake: make(chan struct{}, 1),
 		recapJobs:           make(chan struct{}, 4),
@@ -654,10 +659,23 @@ func (h *Hub) Emit(event any) {
 		}
 		h.messageQueueMu.Unlock()
 		release := func() {}
-		if s, found := h.registry.Get(unknown.SessionID); persisted && found && s.ActiveQueuedID() == unknown.RequestID {
+		managed := false
+		if h.messageQueue != nil {
+			_, managed, _ = h.messageQueue.Recovery(unknown.SessionID, unknown.RequestID)
+			if managed {
+				_ = h.messageQueue.MarkRecoveryReconciling(unknown.SessionID, unknown.RequestID, unknown.Reason)
+			}
+		}
+		if s, found := h.registry.Get(unknown.SessionID); persisted && !managed && found && s.ActiveQueuedID() == unknown.RequestID {
 			release = s.PrepareEndTurn()
 			if view, changed := h.runtimes.Update(s.ID, "idle", unknown.RequestID, s.QueueLen(), "", ""); changed {
 				h.broadcastRuntime(view)
+			}
+		}
+		if managed {
+			if s, found := h.registry.Get(unknown.SessionID); found {
+				h.updateRuntime(s.ID, "queued", unknown.RequestID, s.QueueLen(), "", "")
+				h.Emit(backend.NewTurnProgress(s.ID, unknown.RequestID, "waiting_model", "連線中斷，正在核對原任務；未重送。"))
 			}
 		}
 		h.publishMessageQueue(unknown.SessionID)
@@ -678,6 +696,13 @@ func (h *Hub) Emit(event any) {
 		h.messageQueueMu.Lock()
 		defer h.messageQueueMu.Unlock()
 		if h.messageQueue != nil {
+			if managed, e := h.messageQueue.RecoveryNativeOwned(accepted.SessionID, accepted.RequestID, accepted.ThreadID, accepted.TurnID); e != nil {
+				log.Printf("[recovery] native acceptance not durably bound")
+				return
+			} else if managed {
+				_ = h.messageQueue.RecordNativeClock(accepted.SessionID, accepted.RequestID, accepted.ConsumedResponseAt)
+				return
+			}
 			if err := h.messageQueue.RecordNativeAcceptance(accepted.SessionID, accepted.RequestID, accepted.ThreadID, accepted.TurnID); err != nil {
 				log.Printf("[tasks] native acceptance persistence failed: %v", err)
 			} else {
@@ -776,6 +801,7 @@ func (h *Hub) Emit(event any) {
 	}
 	releaseTurn := func() {}
 	if terminalEvent {
+		h.holdNetworkRecoveryBarrier(terminalView.SessionID, terminalView.ActiveRequestID)
 		h.finishQueuedMessage(terminalView)
 		// After a Bridge restart the native daemon can still be executing the
 		// accepted request. Its correlated terminal settles the recovered queue
