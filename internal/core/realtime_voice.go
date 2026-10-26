@@ -30,6 +30,7 @@ type clientVoiceCall struct {
 	callbackReport        string
 	callbackReporting     bool
 	callbackExpected      string
+	callbackSpeechVersion int
 	callbackSpoken        string
 	callbackSpeechSettled bool
 	externalMusicCapable  bool
@@ -167,6 +168,7 @@ func (h *Hub) handleVoiceStart(c *Client, cmd clientproto.Command) {
 			h.stopClientVoice(c, call)
 			return
 		}
+		call.callbackSpeechVersion = r.Invite.SpeechVersion
 		speakerInstructions = callbacks.SpeakerPrompt(call.callbackExpected)
 	}
 	if h.lineControl != nil {

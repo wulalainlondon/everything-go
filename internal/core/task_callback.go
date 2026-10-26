@@ -578,6 +578,7 @@ func (h *Hub) speakCallback(c *Client, s *session.Session, r callbacks.Record, i
 	call.callbackPolicy = r.ID
 	call.callbackReporting = true
 	call.callbackExpected = text
+	call.callbackSpeechVersion = r.Invite.SpeechVersion
 	call.callbackSpoken = ""
 	call.callbackSpeechSettled = false
 	h.voiceMu.Unlock()

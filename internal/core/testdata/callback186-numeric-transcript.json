@@ -1,0 +1,10 @@
+{
+  "expected": "這次任務的結果已經出來了。\nJ486 底線 S10 底線 CAMERA 底線 OK 照片主要可見綠色瓶蓋的透明瓶子、前方模糊的藍色物件，以及白色紋理牆面。\n",
+  "actual": "這次任務的結果已經出來了。J四八六底線 S十底線 CAMERA 底線 OK 照片主要可見綠色瓶蓋的透明瓶子、前方模糊的藍色物件,以及白色紋理牆面。",
+  "originalNativeRowSHA256": "1064873a5183912fb28bb74ec2b30d5e71802ea56350857ad1a70b27a72ec414",
+  "originalSpeechHash": "65477fd69a0a3cf9c13a0d16b0ddfe843c4b912d29b5940b8463b845c2b7a4f3",
+  "originalSpeechSourceHash": "8f385e57decd60704ad43f9c21f299b70525b895a4b51a76149df1a30bcbea1f",
+  "originalVersion186State": "report_delivery_mismatch",
+  "originalVoice": "28d84f6f-5b94-4102-8506-4909d80fb28c",
+  "scope": "Immutable regression fixture from original186 failed call; not new acceptance"
+}

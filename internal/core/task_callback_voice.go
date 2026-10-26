@@ -7,7 +7,6 @@ import (
 	"everything-go/internal/callbacks"
 	"everything-go/internal/clientproto"
 	"everything-go/internal/session"
-	"strings"
 	"time"
 )
 
@@ -52,12 +51,12 @@ func (h *Hub) observeCallbackSpeech(call *clientVoiceCall, event backend.Realtim
 		return
 	}
 	call.callbackSpoken += event.Text
-	want, got := callbacks.SpokenKey(call.callbackExpected), callbacks.SpokenKey(call.callbackSpoken)
-	if got == "" || (got != want && strings.HasPrefix(want, got)) {
+	got := callbacks.SpokenKey(call.callbackSpoken)
+	verified, prefix := callbacks.CompareSpeech(call.callbackExpected, call.callbackSpoken, call.callbackSpeechVersion)
+	if got == "" || prefix {
 		h.voiceMu.Unlock()
 		return
 	}
-	verified := got == want
 	call.callbackSpeechSettled = true
 	policy, invitation := call.callbackPolicy, call.callbackReport
 	h.voiceMu.Unlock()
@@ -66,7 +65,7 @@ func (h *Hub) observeCallbackSpeech(call *clientVoiceCall, event backend.Realtim
 			return callbacks.ErrUnavailable
 		}
 		expected, err := callbacks.InvitationSpeech(*x)
-		if err != nil || expected != call.callbackExpected {
+		if err != nil || expected != call.callbackExpected || x.Invite.SpeechVersion != call.callbackSpeechVersion {
 			return callbacks.ErrUnavailable
 		}
 		x.Invite.ContentVerified = verified
@@ -137,19 +136,20 @@ func (h *Hub) refreshCallbackSpeech(r callbacks.Record) {
 			if err != nil {
 				return
 			}
-			want, got := callbacks.SpokenKey(expected), callbacks.SpokenKey(proof.Text)
-			if got == want || !strings.HasPrefix(want, got) {
+			got := callbacks.SpokenKey(proof.Text)
+			verified, prefix := callbacks.CompareSpeech(expected, proof.Text, r.Invite.SpeechVersion)
+			if !prefix {
 				updated, e := h.callbacks.Mutate(ctx, "readback_"+r.Invite.ID, "readback_"+callbacks.Digest(got+r.Report.Hash), r.ID, callbacks.AnyRevision, func(x *callbacks.Record, _ bool) error {
 					if x.Invite == nil || x.Report == nil || x.Invite.ID != r.Invite.ID || x.Invite.Voice != proof.VoiceID || x.Report.Hash != r.Report.Hash || x.Report.ID != r.Report.ID || x.Report.Turn != r.Report.Turn || x.Report.Thread != proof.ThreadID || x.Thread != r.Thread || x.Config != r.Config || x.Epoch != r.Epoch || x.Invite.ContentVerified || x.Invite.ContentMismatch {
 						return callbacks.ErrUnavailable
 					}
 					currentExpected, err := callbacks.InvitationSpeech(*x)
-					if err != nil || currentExpected != expected {
+					if err != nil || currentExpected != expected || x.Invite.SpeechVersion != r.Invite.SpeechVersion {
 						return callbacks.ErrUnavailable
 					}
-					x.Invite.ContentVerified = got == want
-					x.Invite.ContentMismatch = got != want
-					if got == want {
+					x.Invite.ContentVerified = verified
+					x.Invite.ContentMismatch = !verified
+					if verified {
 						x.State = "report_text_verified"
 						if x.Invite.AudioObserved {
 							x.State = "report_audio_observed"
