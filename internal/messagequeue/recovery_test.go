@@ -856,10 +856,10 @@ func TestAutomaticContinuousBudgetAcrossSameBootStoreReopenAndSleep(t *testing.T
 	if _, e = s.BeginRecoveryClock(src, "bridge-one", anchor); e != nil {
 		t.Fatal(e)
 	}
-	if _, _, e = s.ClaimRecovery("s", "r", 1, "bridge-one", 1, "input", anchor.WallMS); e != nil {
+	if _, _, e = s.ClaimRecovery("s", "r", 1, "bridge-one", 1, "input", anchor.ElapsedMS); e != nil {
 		t.Fatal(e)
 	}
-	original, _, e := s.ScheduleRecovery("s", "r", 1, "bridge-one", rejectedOutcome(), anchor.WallMS, 0)
+	original, _, e := s.ScheduleRecovery("s", "r", 1, "bridge-one", rejectedOutcome(), anchor.ElapsedMS, 0)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -927,5 +927,143 @@ func TestAutomaticFailureClockHighWaterSurvivesRollbackAndReopen(t *testing.T) {
 	r, _, e := s.Recovery("s", "r")
 	if e != nil || !r.ClockUnsafe || r.State != "accepted" || r.FirstFailureAt != now+600000 || r.LastAttempt != a.ID {
 		t.Fatal("accepted native or first failure changed", r, e)
+	}
+}
+
+func TestAutomaticForwardWallCannotBypassBackoffOrRetryAfter(t *testing.T) {
+	for _, kind := range []string{"backoff10s", "retry-after60s"} {
+		t.Run(kind, func(t *testing.T) {
+			s, e := Open(t.TempDir())
+			if e != nil {
+				t.Fatal(e)
+			}
+			defer s.Close()
+			anchor := recovery.ClockAnchor{Boot: "boot", Kind: "continuous", WallMS: 1700000000000, ElapsedMS: 1000}
+			src := recovery.AutomaticSource{Authority: "a", Session: "s", Request: "r", Thread: "t", Configuration: "c", Principal: "p", Scope: "shared"}
+			s.Enqueue(Entry{SessionID: "s", RequestID: "r", Payload: []byte(`{"content":"fixed"}`)})
+			s.Transition("s", "r", []State{Queued}, Running, "", "", "")
+			s.BeginRecoveryClock(src, "process", anchor)
+			s.ClaimRecovery("s", "r", 1, "process", 1, "input", anchor.ElapsedMS)
+			o := rejectedOutcome()
+			if kind == "retry-after60s" {
+				o.RetryAfter = time.Minute
+			}
+			if _, _, e = s.ScheduleRecovery("s", "r", 1, "process", o, anchor.ElapsedMS, 0); e != nil {
+				t.Fatal(e)
+			}
+			sample := anchor
+			sample.ElapsedMS++
+			sample.WallMS += 120000 // only1ms elapsed, wall+2min
+			effective, e := anchor.Time(sample)
+			if e != nil {
+				t.Fatal(e)
+			}
+			_, a, e := s.ClaimRecovery("s", "r", 1, "process", 1, "input", effective)
+			if e == nil || a.ID != "" {
+				t.Fatalf("wall forward bypassed required lower-bound: %s actualElapsed1ms newAttempt=%s", kind, a.ID)
+			}
+		})
+	}
+}
+func TestAutomaticDifferentAdmissionWallAnchorsCannotBypassSharedRate(t *testing.T) {
+	s, e := Open(t.TempDir())
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer s.Close()
+	wall := int64(1700000000000)
+	anchors := []recovery.ClockAnchor{{Boot: "boot", Kind: "continuous", WallMS: wall, ElapsedMS: 1000}, {Boot: "boot", Kind: "continuous", WallMS: wall + 120000, ElapsedMS: 2000}}
+	for i, sid := range []string{"a", "b"} {
+		src := recovery.AutomaticSource{Authority: "a", Session: sid, Request: "r", Thread: "t" + sid, Configuration: "c", Principal: "p", Scope: "shared"}
+		s.Enqueue(Entry{SessionID: sid, RequestID: "r", Payload: []byte(`{"content":"fixed"}`)})
+		s.Transition(sid, "r", []State{Queued}, Running, "", "", "")
+		s.BeginRecoveryClock(src, "process", anchors[i])
+		s.ClaimRecovery(sid, "r", 1, "process", 1, "input", anchors[i].ElapsedMS)
+		if _, _, e = s.ScheduleRecovery(sid, "r", 1, "process", rejectedOutcome(), anchors[i].ElapsedMS, 0); e != nil {
+			t.Fatal(e)
+		}
+	}
+	// Wall moved forward before b's admission, then returned. Both now share
+	// one boot/continuous domain but their virtual wall admission anchors differ.
+	sampleA := recovery.ClockAnchor{Boot: "boot", Kind: "continuous", WallMS: wall + 10000, ElapsedMS: 11000}
+	atA, e := anchors[0].Time(sampleA)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, _, e = s.ClaimRecovery("a", "r", 1, "process", 1, "input", atA); e != nil {
+		t.Fatal(e)
+	}
+	if _, _, e = s.ScheduleRecovery("a", "r", 1, "process", rejectedOutcome(), atA, 0); e != nil {
+		t.Fatal(e)
+	}
+	sampleB := sampleA
+	sampleB.ElapsedMS += 1000
+	sampleB.WallMS += 1000
+	atB, e := anchors[1].Time(sampleB)
+	if e != nil {
+		t.Fatal(e)
+	}
+	_, a, e := s.ClaimRecovery("b", "r", 1, "process", 1, "input", atB)
+	if e == nil || a.ID != "" {
+		t.Fatalf("same-scope dispatches only1000ms apart bypassed10s rate: effectiveA=%d effectiveB=%d attempt=%s", atA, atB, a.ID)
+	}
+}
+
+func TestAutomaticScopeClockDomainCannotResetOrReleaseAcceptedProbe(t *testing.T) {
+	s, e := Open(t.TempDir())
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer s.Close()
+	anchor := recovery.ClockAnchor{Boot: "old-boot", Kind: "continuous", WallMS: 1700000000000, ElapsedMS: 1000}
+	admit := func(sid string, clock recovery.ClockAnchor) {
+		t.Helper()
+		src := recovery.AutomaticSource{Authority: "a", Session: sid, Request: "r", Thread: "t" + sid, Configuration: "c", Principal: "p", Scope: "scope"}
+		s.Enqueue(Entry{SessionID: sid, RequestID: "r", Payload: []byte(`{"content":"fixed"}`)})
+		s.Transition(sid, "r", []State{Queued}, Running, "", "", "")
+		if _, e := s.BeginRecoveryClock(src, "process", clock); e != nil {
+			t.Fatal(e)
+		}
+		if _, _, e := s.ClaimRecovery(sid, "r", 1, "process", 1, "input", clock.ElapsedMS); e != nil {
+			t.Fatal(e)
+		}
+	}
+	admit("probe", anchor)
+	if _, _, e = s.ScheduleRecovery("probe", "r", 1, "process", rejectedOutcome(), 1000, 0); e != nil {
+		t.Fatal(e)
+	}
+	_, a, e := s.ClaimRecovery("probe", "r", 1, "process", 1, "input", 11000)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e = s.RecoveryAccepted("probe", "r", a.ID, "tprobe", "active", 1, "process", 11000); e != nil {
+		t.Fatal(e)
+	}
+	next := anchor
+	next.Boot = "new-boot"
+	next.ElapsedMS = 2000
+	admit("normal", next) // a user's first send does not steal the recovery probe
+	r, retry, e := s.ScheduleRecovery("normal", "r", 1, "process", rejectedOutcome(), 2000, 0)
+	if e != nil || retry || r.State != "paused_uncertain" || r.Reason != "scope_clock_domain_unavailable" {
+		t.Fatal(r, retry, e)
+	}
+	var owner, domain string
+	if e = s.db.QueryRow(`SELECT owner,clock_domain FROM recovery_scopes WHERE scope='scope'`).Scan(&owner, &domain); e != nil {
+		t.Fatal(e)
+	}
+	if owner != "probe:r" || domain != anchor.Domain() {
+		t.Fatal("new domain released/reset old native probe", owner, domain)
+	}
+	// Exact settlement can release ownership, but cannot make old and new clock
+	// timers comparable or authorize a fresh cross-domain retry.
+	settled := failedOutcome("active")
+	settled.Thread = "tprobe"
+	settled.Canonical.Thread = "tprobe"
+	if _, _, e = s.ScheduleRecovery("probe", "r", 1, "process", settled, 12000, 0); e != nil {
+		t.Fatal(e)
+	}
+	admit("after-settlement", next)
+	if r, retry, e = s.ScheduleRecovery("after-settlement", "r", 1, "process", rejectedOutcome(), 2000, 0); e != nil || retry || r.State != "paused_uncertain" {
+		t.Fatal(r, retry, e)
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"everything-go/internal/backend"
@@ -50,6 +51,8 @@ type networkRecovery struct {
 	payload       queuedPayload
 	fileLeases    []recovery.FileLease
 	clock         recovery.ClockAnchor
+	clockMu       sync.Mutex
+	clockLast     int64
 }
 
 func (h *Hub) prepareNetworkRecovery(s *session.Session, e messagequeue.Entry, p queuedPayload) (recovery.AutomaticController, error) {
@@ -86,9 +89,10 @@ func (h *Hub) prepareNetworkRecovery(s *session.Session, e messagequeue.Entry, p
 	if (clockErr != nil || !clock.Valid()) && !found {
 		return nil, nil
 	} // original single send, no unsafe wall fallback
-	n := &networkRecovery{hub: h, session: s, source: source, generation: 1, epoch: h.networkRecoveryEpoch, owner: p.OwnerDevice, configuration: cfg, cwd: s.Cwd(), payload: p, clock: clock}
+	n := &networkRecovery{hub: h, session: s, source: source, generation: 1, epoch: h.networkRecoveryEpoch, owner: p.OwnerDevice, configuration: cfg, cwd: s.Cwd(), payload: p, clock: clock, clockLast: clock.ElapsedMS}
 	if found {
 		n.clock = existing.Clock
+		n.clockLast = existing.ClockLast
 		if clockErr != nil || existing.ClockUnsafe || !existing.Clock.Valid() {
 			if err = h.messageQueue.PauseRecoveryClock(s.ID, e.RequestID); err != nil {
 				return nil, err
@@ -166,7 +170,10 @@ func (n *networkRecovery) guardSources(current, persisted recovery.AutomaticSour
 		return e
 	}
 	now, clockErr := n.clockTime()
-	if clockErr != nil || r.ClockUnsafe || now.UnixMilli() < r.ClockLast {
+	if clockErr != nil {
+		return clockErr
+	}
+	if r.ClockUnsafe || now.UnixMilli() < r.ClockLast {
 		if e = n.hub.messageQueue.PauseRecoveryClock(n.source.Session, n.source.Request); e != nil {
 			return e
 		}
@@ -248,7 +255,9 @@ func (n *networkRecovery) BeforeDispatch(ctx context.Context, inputHash string, 
 func (n *networkRecovery) Accepted(attempt, thread, turn string) error {
 	now, e := n.clockTime()
 	if e != nil {
-		now = time.Now()
+		n.clockMu.Lock()
+		now = time.UnixMilli(n.clockLast)
+		n.clockMu.Unlock()
 	} // receipt of an already accepted native turn must survive
 	return n.hub.messageQueue.RecoveryAccepted(n.source.Session, n.source.Request, attempt, thread, turn, n.generation, n.epoch, now.UnixMilli())
 }
@@ -411,7 +420,7 @@ func (h *Hub) cancelNetworkRecovery(c *Client, cmd clientproto.Command, e messag
 	return true
 }
 func recoveryPublic(r recovery.Run) protocol.AutomaticRecoverySnapshot {
-	return protocol.AutomaticRecoverySnapshot{RequestID: r.Source.Request, Mode: recovery.AutomaticMode, Revision: r.Revision, Generation: r.Generation, State: r.State, Reason: r.Reason, Attempts: r.Attempts, MaxAttempts: r.MaxAttempts, NextAt: r.NextAt, Deadline: r.Deadline, NativeStatus: r.NativeStatus, ObjectiveVerified: r.ObjectiveVerified}
+	return protocol.AutomaticRecoverySnapshot{RequestID: r.Source.Request, Mode: recovery.AutomaticMode, Revision: r.Revision, Generation: r.Generation, State: r.State, Reason: r.Reason, Attempts: r.Attempts, MaxAttempts: r.MaxAttempts, NextAt: r.Clock.PublicWall(r.NextAt), Deadline: r.Clock.PublicWall(r.Deadline), NativeStatus: r.NativeStatus, ObjectiveVerified: r.ObjectiveVerified}
 }
 
 func (n *networkRecovery) BindThread(thread string) error {
@@ -455,12 +464,23 @@ func (h *Hub) sampleNetworkClock() (recovery.ClockAnchor, error) {
 }
 func (n *networkRecovery) clockTime() (time.Time, error) {
 	sample, e := n.hub.sampleNetworkClock()
-	if e != nil {
-		return time.Time{}, recovery.ErrClock
+	ms := int64(0)
+	if e == nil {
+		ms, e = n.clock.Time(sample)
 	}
-	ms, e := n.clock.Time(sample)
+	n.clockMu.Lock()
+	if e == nil && ms < n.clockLast {
+		e = recovery.ErrClock
+	}
+	if e == nil {
+		n.clockLast = ms
+	}
+	n.clockMu.Unlock()
 	if e != nil {
-		return time.Time{}, e
+		if er := n.hub.messageQueue.PauseRecoveryClock(n.source.Session, n.source.Request); er != nil {
+			return time.Time{}, er
+		}
+		return time.Time{}, recovery.ErrClock
 	}
 	return time.UnixMilli(ms), nil
 }

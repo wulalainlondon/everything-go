@@ -17,15 +17,31 @@ func (a ClockAnchor) Valid() bool {
 	return a.Boot != "" && a.Kind != "" && a.WallMS > 0 && a.ElapsedMS > 0
 }
 
-// Time retains the original admission epoch across Bridge restart. Wall jumps
-// forward may shorten a budget; backwards jumps cannot extend elapsed time.
+// Time returns a same-boot common continuous coordinate, never a per-run wall
+// offset. Wall jumps cannot shorten lower-bound waits or shared rate spacing.
 func (a ClockAnchor) Time(sample ClockAnchor) (int64, error) {
 	if !a.Valid() || !sample.Valid() || a.Boot != sample.Boot || a.Kind != sample.Kind || sample.ElapsedMS < a.ElapsedMS {
 		return 0, ErrClock
 	}
-	delta := sample.ElapsedMS - a.ElapsedMS
-	if delta > (1<<63-1)-a.WallMS {
-		return 0, ErrClock
+	return sample.ElapsedMS, nil
+}
+
+func (a ClockAnchor) Domain() string {
+	if !a.Valid() {
+		return "unqualified_wall_fixture"
 	}
-	return max(sample.WallMS, a.WallMS+delta), nil
+	return Hash([]byte(a.Boot + "\x00" + a.Kind))
+}
+
+// PublicWall projects a private continuous timestamp for legacy UTC fields.
+// It is display provenance only and never enters scheduling comparisons.
+func (a ClockAnchor) PublicWall(v int64) int64 {
+	if v == 0 || !a.Valid() {
+		return v
+	}
+	delta := v - a.ElapsedMS
+	if delta < 0 || delta > (1<<63-1)-a.WallMS {
+		return 0
+	}
+	return a.WallMS + delta
 }

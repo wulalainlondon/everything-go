@@ -17,7 +17,34 @@ func installRecovery(db *sql.DB) error {
  CREATE TABLE IF NOT EXISTS recovery_file_leases(session_id TEXT NOT NULL,request_id TEXT NOT NULL,payload BLOB NOT NULL,PRIMARY KEY(session_id,request_id));
  CREATE TABLE IF NOT EXISTS recovery_inputs(session_id TEXT NOT NULL,request_id TEXT NOT NULL,hash TEXT NOT NULL,lease_until INTEGER NOT NULL,payload BLOB NOT NULL,PRIMARY KEY(session_id,request_id));
  CREATE TABLE IF NOT EXISTS recovery_attempts(session_id TEXT NOT NULL,request_id TEXT NOT NULL,attempt_id TEXT NOT NULL,generation INTEGER NOT NULL,phase TEXT NOT NULL,payload BLOB NOT NULL,PRIMARY KEY(session_id,request_id,attempt_id));
- CREATE TABLE IF NOT EXISTS recovery_scopes(scope TEXT PRIMARY KEY,owner TEXT NOT NULL DEFAULT '',lease_until INTEGER NOT NULL DEFAULT 0,cooldown_until INTEGER NOT NULL DEFAULT 0,window_start INTEGER NOT NULL DEFAULT 0,rejections INTEGER NOT NULL DEFAULT 0,last_dispatch INTEGER NOT NULL DEFAULT 0);`)
+ CREATE TABLE IF NOT EXISTS recovery_scopes(scope TEXT PRIMARY KEY,owner TEXT NOT NULL DEFAULT '',lease_until INTEGER NOT NULL DEFAULT 0,cooldown_until INTEGER NOT NULL DEFAULT 0,window_start INTEGER NOT NULL DEFAULT 0,rejections INTEGER NOT NULL DEFAULT 0,last_dispatch INTEGER NOT NULL DEFAULT 0,clock_domain TEXT NOT NULL DEFAULT '');`)
+	if e != nil {
+		return e
+	}
+	// Source preparation databases may predate this private provenance column.
+	rows, e := db.Query(`PRAGMA table_info(recovery_scopes)`)
+	if e != nil {
+		return e
+	}
+	found := false
+	for rows.Next() {
+		var id, notnull, pk int
+		var name, typ string
+		var def any
+		if e = rows.Scan(&id, &name, &typ, &notnull, &def, &pk); e != nil {
+			rows.Close()
+			return e
+		}
+		found = found || name == "clock_domain"
+	}
+	e = rows.Err()
+	rows.Close()
+	if e != nil {
+		return e
+	}
+	if !found {
+		_, e = db.Exec(`ALTER TABLE recovery_scopes ADD COLUMN clock_domain TEXT NOT NULL DEFAULT ''`)
+	}
 	return e
 }
 func recoveryLookup(tx interface{ QueryRow(string, ...any) *sql.Row }, sid, rid string) (recovery.Run, bool, error) {
@@ -79,7 +106,7 @@ func (s *Store) BeginRecoveryClock(source recovery.AutomaticSource, epoch string
 	if !clock.Valid() {
 		return recovery.Run{}, recovery.ErrClock
 	}
-	return s.beginRecovery(source, epoch, clock.WallMS, clock, files...)
+	return s.beginRecovery(source, epoch, clock.ElapsedMS, clock, files...)
 }
 
 func (s *Store) beginRecovery(source recovery.AutomaticSource, epoch string, now int64, clock recovery.ClockAnchor, files ...recovery.FileLease) (recovery.Run, error) {
@@ -227,15 +254,26 @@ func (s *Store) ClaimRecovery(sid, rid string, generation uint64, epoch string, 
 	if newer > 0 {
 		return r, recovery.Attempt{}, recovery.ErrGuard
 	}
-	if _, e = tx.Exec(`INSERT OR IGNORE INTO recovery_scopes(scope) VALUES(?)`, r.Source.Scope); e != nil {
+	if _, e = tx.Exec(`INSERT OR IGNORE INTO recovery_scopes(scope,clock_domain) VALUES(?,?)`, r.Source.Scope, r.Clock.Domain()); e != nil {
 		return r, recovery.Attempt{}, e
 	}
-	var owner string
+	var owner, clockDomain string
 	var lease, cooldown, last int64
-	if e = tx.QueryRow(`SELECT owner,lease_until,cooldown_until,last_dispatch FROM recovery_scopes WHERE scope=?`, r.Source.Scope).Scan(&owner, &lease, &cooldown, &last); e != nil {
+	if e = tx.QueryRow(`SELECT owner,lease_until,cooldown_until,last_dispatch,clock_domain FROM recovery_scopes WHERE scope=?`, r.Source.Scope).Scan(&owner, &lease, &cooldown, &last, &clockDomain); e != nil {
 		return r, recovery.Attempt{}, e
 	}
 	isRetry := r.LastAttempt != ""
+	if isRetry && clockDomain != r.Clock.Domain() {
+		r.State, r.Reason, r.NextAt = "paused_uncertain", "scope_clock_domain_unavailable", 0
+		if e = saveRecovery(tx, &r); e != nil {
+			return r, recovery.Attempt{}, e
+		}
+		if e = tx.Commit(); e != nil {
+			return r, recovery.Attempt{}, e
+		}
+		return r, recovery.Attempt{}, recovery.ErrDispatchPaused
+	}
+
 	// Only previously registered, still eligible same-scope waiters hold FIFO
 	// priority. Ordering is the immutable original queue sequence, not which
 	// goroutine happens to wake first or a wall clock that can move backwards.
@@ -244,8 +282,9 @@ func (s *Store) ClaimRecovery(sid, rid string, generation uint64, epoch string, 
 		e = tx.QueryRow(`SELECT count(*) FROM recovery_runs waiting JOIN queue_commands q USING(session_id,request_id)
           WHERE waiting.state='retry_wait' AND q.state IN ('queued','running') AND q.seq<?
           AND json_extract(waiting.payload,'$.source.scope_hash')=? AND json_extract(waiting.payload,'$.scope_waiting')=1
+          AND COALESCE(json_extract(waiting.payload,'$.clock.boot'),'')=? AND COALESCE(json_extract(waiting.payload,'$.clock.kind'),'')=?
           AND json_extract(waiting.payload,'$.input_lease_until')>? AND (COALESCE(json_extract(waiting.payload,'$.deadline'),0)=0 OR json_extract(waiting.payload,'$.deadline')>?)
-          AND NOT EXISTS(SELECT 1 FROM queue_commands newer WHERE newer.session_id=q.session_id AND newer.seq>q.seq)`, queueSequence, r.Source.Scope, now, now).Scan(&olderWaiters)
+          AND NOT EXISTS(SELECT 1 FROM queue_commands newer WHERE newer.session_id=q.session_id AND newer.seq>q.seq)`, queueSequence, r.Source.Scope, r.Clock.Boot, r.Clock.Kind, now, now).Scan(&olderWaiters)
 		if e != nil {
 			return r, recovery.Attempt{}, e
 		}
@@ -394,6 +433,11 @@ func (s *Store) ScheduleRecovery(sid, rid string, generation uint64, epoch strin
 	if _, e = tx.Exec(`UPDATE recovery_attempts SET phase=?,payload=? WHERE session_id=? AND request_id=? AND attempt_id=?`, a.State, raw, sid, rid, a.ID); e != nil {
 		return r, false, e
 	}
+	var scopeDomain string
+	if e = tx.QueryRow(`SELECT clock_domain FROM recovery_scopes WHERE scope=?`, r.Source.Scope).Scan(&scopeDomain); e != nil {
+		return r, false, e
+	}
+	comparableScope := scopeDomain == r.Clock.Domain()
 	if r.FirstFailureAt == 0 {
 		r.FirstFailureAt = now
 		r.Deadline = now + int64(30*time.Minute/time.Millisecond)
@@ -415,7 +459,9 @@ func (s *Store) ScheduleRecovery(sid, rid string, generation uint64, epoch strin
 	if o.Canonical.ProgressHash != "" {
 		r.ProgressHash = o.Canonical.ProgressHash
 	}
-	if r.ClockUnsafe {
+	if !comparableScope {
+		r.State, r.Reason, r.NextAt = "paused_uncertain", "scope_clock_domain_unavailable", 0
+	} else if r.ClockUnsafe {
 		r.State, r.Reason, r.NextAt = "paused_uncertain", "clock_provenance_unavailable", 0
 	} else if kind == "" {
 		r.State = "paused_uncertain"
@@ -438,28 +484,31 @@ func (s *Store) ScheduleRecovery(sid, rid string, generation uint64, epoch strin
 			return r, false, e
 		}
 	}
-	if _, e = tx.Exec(`UPDATE recovery_scopes SET window_start=CASE WHEN window_start<? THEN ? ELSE window_start END,rejections=CASE WHEN window_start<? THEN 1 ELSE rejections+1 END WHERE scope=?`, now-60000, now, now-60000, r.Source.Scope); e != nil {
-		return r, false, e
-	}
-	if _, e = tx.Exec(`UPDATE recovery_scopes SET cooldown_until=MAX(cooldown_until,?) WHERE scope=? AND rejections>=3`, now+60000, r.Source.Scope); e != nil {
-		return r, false, e
-	}
-	if r.State == "retry_wait" {
-		var cooldown, last int64
-		if e = tx.QueryRow(`SELECT cooldown_until,last_dispatch FROM recovery_scopes WHERE scope=?`, r.Source.Scope).Scan(&cooldown, &last); e != nil {
+	if comparableScope {
+		if _, e = tx.Exec(`UPDATE recovery_scopes SET window_start=CASE WHEN window_start<? THEN ? ELSE window_start END,rejections=CASE WHEN window_start<? THEN 1 ELSE rejections+1 END WHERE scope=?`, now-60000, now, now-60000, r.Source.Scope); e != nil {
 			return r, false, e
 		}
-		if r.NextAt < cooldown {
-			r.NextAt = cooldown
+		if _, e = tx.Exec(`UPDATE recovery_scopes SET cooldown_until=MAX(cooldown_until,?) WHERE scope=? AND rejections>=3`, now+60000, r.Source.Scope); e != nil {
+			return r, false, e
 		}
-		if r.NextAt < last+10000 {
-			r.NextAt = last + 10000
-		}
-		if r.NextAt >= r.Deadline {
-			r.State = "paused_budget"
-			r.Reason = "scope_cooldown_exceeds_budget"
+		if r.State == "retry_wait" {
+			var cooldown, last int64
+			if e = tx.QueryRow(`SELECT cooldown_until,last_dispatch FROM recovery_scopes WHERE scope=?`, r.Source.Scope).Scan(&cooldown, &last); e != nil {
+				return r, false, e
+			}
+			if r.NextAt < cooldown {
+				r.NextAt = cooldown
+			}
+			if r.NextAt < last+10000 {
+				r.NextAt = last + 10000
+			}
+			if r.NextAt >= r.Deadline {
+				r.State = "paused_budget"
+				r.Reason = "scope_cooldown_exceeds_budget"
+			}
 		}
 	}
+
 	if e = saveRecovery(tx, &r); e != nil {
 		return r, false, e
 	}

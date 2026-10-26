@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,7 +17,7 @@ import (
 )
 
 func TestNetworkRecoveryClockFaultPausesOnlyNewDispatchAndPreservesNative(t *testing.T) {
-	for _, kind := range []string{"waiting-boot", "waiting-unavailable", "accepted-boot"} {
+	for _, kind := range []string{"waiting-boot", "waiting-unavailable", "accepted-boot", "waiting-regression", "accepted-regression"} {
 		t.Run(kind, func(t *testing.T) {
 			t.Setenv("EVERYTHING_GO_CODEX_NETWORK_AUTOCONTINUE", "true")
 			t.Setenv("EVERYTHING_GO_CODEX_NETWORK_AUTOCONTINUE_ALL_ORDINARY", "true")
@@ -45,7 +46,7 @@ func TestNetworkRecoveryClockFaultPausesOnlyNewDispatchAndPreservesNative(t *tes
 					done <- e
 					return
 				}
-				if kind == "accepted-boot" {
+				if strings.HasPrefix(kind, "accepted-") {
 					e = a.Accepted(next.Attempt.ID, "thread", "original-active")
 				} else {
 					_, e = a.Failed(recovery.AutomaticOutcome{Acceptance: recovery.Rejected, IngressRejected: true, Failure: recovery.Failure{Category: recovery.ModelCapacity, Source: "codex_ingress"}})
@@ -61,6 +62,15 @@ func TestNetworkRecoveryClockFaultPausesOnlyNewDispatchAndPreservesNative(t *tes
 				}
 				if kind == "waiting-unavailable" {
 					unavailable = true
+				} else if strings.HasSuffix(kind, "-regression") {
+					clock.ElapsedMS += 10000
+					if e = a.Guard(); e != nil {
+						done <- e
+						return
+					}
+					// Still after admission, and wall advances: only a sample high-water catches it.
+					clock.ElapsedMS -= 1000
+					clock.WallMS += 60000
 				} else {
 					clock.Boot = "new-boot"
 				}
@@ -78,7 +88,7 @@ func TestNetworkRecoveryClockFaultPausesOnlyNewDispatchAndPreservesNative(t *tes
 					done <- errors.New("clock fault changed original attempt/generation")
 					return
 				}
-				if kind == "accepted-boot" {
+				if strings.HasPrefix(kind, "accepted-") {
 					if after.State != "accepted" || after.NativeStatus != "" {
 						done <- errors.New("clock fault finished accepted native")
 						return
