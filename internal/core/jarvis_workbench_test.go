@@ -551,7 +551,7 @@ func TestJarvisCredentialRotationSameDeviceDoesNotInheritPrivateReceipts(t *test
 	r.Header.Set("X-Bridge-Device-ID", "phone")
 	w := httptest.NewRecorder()
 	h.ServeJarvisAPI(w, r)
-	if w.Code != 403 {
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"code":"scope_unavailable"`) || !strings.Contains(w.Body.String(), `"items":[]`) {
 		t.Fatal(w.Code, w.Body.String())
 	}
 	a, err := h.automation.EventAssignment(t.Context(), in.IntentID)

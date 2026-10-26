@@ -500,6 +500,9 @@ func (h *Hub) executeTaskCallback(ctx context.Context, c *Client, in callbackInp
 					if r.Report == nil || r.Report.Thread != s.ResumeID() {
 						return errors.New("callback_result_changed")
 					}
+					if _, err := callbacks.InvitationSpeech(*r); err != nil {
+						return err
+					}
 					i.ReportOperation = in.Operation
 					i.State = "report_requested"
 					r.State = "report_requested"
@@ -557,7 +560,10 @@ func (h *Hub) executeTaskCallback(ctx context.Context, c *Client, in callbackInp
 }
 
 func (h *Hub) speakCallback(c *Client, s *session.Session, r callbacks.Record, in callbackInput) {
-	text := callbacks.Speech(r.Name, r.Report.Status, r.Report.Text)
+	text, err := callbacks.InvitationSpeech(r)
+	if err != nil {
+		return
+	}
 	h.voiceMu.Lock()
 	call := h.voiceClients[c]
 	if call == nil || call.voiceID != in.Voice {

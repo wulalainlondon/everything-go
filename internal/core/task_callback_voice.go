@@ -62,7 +62,11 @@ func (h *Hub) observeCallbackSpeech(call *clientVoiceCall, event backend.Realtim
 	policy, invitation := call.callbackPolicy, call.callbackReport
 	h.voiceMu.Unlock()
 	r, e := h.callbacks.Mutate(context.Background(), "transcript_"+invitation, "transcript_"+callbacks.Digest(got), policy, callbacks.AnyRevision, func(x *callbacks.Record, _ bool) error {
-		if x.Invite == nil || x.Invite.ID != invitation || x.Invite.Voice != call.voiceID || x.Invite.ContentVerified || x.Invite.ContentMismatch {
+		if x.Invite == nil || x.Invite.ID != invitation || x.Invite.Voice != call.voiceID || x.Report == nil || x.Report.Thread != call.session.ResumeID() || x.Thread != call.session.ResumeID() || x.Config != call.session.SettingsSnapshot().ConfigRevision || x.Invite.ReportOperation == "" || x.Invite.ContentVerified || x.Invite.ContentMismatch {
+			return callbacks.ErrUnavailable
+		}
+		expected, err := callbacks.InvitationSpeech(*x)
+		if err != nil || expected != call.callbackExpected {
 			return callbacks.ErrUnavailable
 		}
 		x.Invite.ContentVerified = verified
@@ -129,10 +133,18 @@ func (h *Hub) refreshCallbackSpeech(r callbacks.Record) {
 			return
 		}
 		if proof.ThreadID == r.Thread && proof.VoiceID == r.Invite.Voice && proof.Text != "" {
-			want, got := callbacks.SpokenKey(callbacks.Speech(r.Name, r.Report.Status, r.Report.Text)), callbacks.SpokenKey(proof.Text)
+			expected, err := callbacks.InvitationSpeech(r)
+			if err != nil {
+				return
+			}
+			want, got := callbacks.SpokenKey(expected), callbacks.SpokenKey(proof.Text)
 			if got == want || !strings.HasPrefix(want, got) {
 				updated, e := h.callbacks.Mutate(ctx, "readback_"+r.Invite.ID, "readback_"+callbacks.Digest(got+r.Report.Hash), r.ID, callbacks.AnyRevision, func(x *callbacks.Record, _ bool) error {
-					if x.Invite == nil || x.Report == nil || x.Invite.ID != r.Invite.ID || x.Invite.Voice != proof.VoiceID || x.Report.Hash != r.Report.Hash || x.Invite.ContentVerified || x.Invite.ContentMismatch {
+					if x.Invite == nil || x.Report == nil || x.Invite.ID != r.Invite.ID || x.Invite.Voice != proof.VoiceID || x.Report.Hash != r.Report.Hash || x.Report.ID != r.Report.ID || x.Report.Turn != r.Report.Turn || x.Report.Thread != proof.ThreadID || x.Thread != r.Thread || x.Config != r.Config || x.Epoch != r.Epoch || x.Invite.ContentVerified || x.Invite.ContentMismatch {
+						return callbacks.ErrUnavailable
+					}
+					currentExpected, err := callbacks.InvitationSpeech(*x)
+					if err != nil || currentExpected != expected {
 						return callbacks.ErrUnavailable
 					}
 					x.Invite.ContentVerified = got == want

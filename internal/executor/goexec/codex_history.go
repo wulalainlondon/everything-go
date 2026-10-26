@@ -69,7 +69,7 @@ func (c *Codex) LoadHistory(resumeID string, opts history.Opts) (*history.Result
 	if fi, err := os.Stat(path); err == nil && !fi.IsDir() {
 		key := history.FileKey{Path: path, MtimeNS: fi.ModTime().UnixNano(), Size: fi.Size()}
 		// Reparse older tails whose typed tool-output parts were saved empty.
-		cacheName := "codex:turns-v6-generated-images:" + resumeID
+		cacheName := "codex:turns-v7-user-images:" + resumeID
 		if messages, ok := history.DefaultCache().Load(cacheName, key); ok {
 			if !opts.IncludeThinking {
 				messages = history.StripThinkingBlocks(messages)
@@ -440,8 +440,13 @@ func parseCodexHistoryWindow(lines []history.TailLine, resumeID string, truncate
 		if role != "user" && role != "assistant" {
 			continue
 		}
-		text := stripCodexBridgeHandoff(extractCodexText(payload.Content))
-		if text == "" || (role == "user" && isCodexBootstrapText(text)) {
+		text := extractCodexText(payload.Content)
+		var images []map[string]string
+		if role == "user" {
+			text, images = codexHistoryInputImages(payload.Content)
+		}
+		text = stripCodexBridgeHandoff(text)
+		if (text == "" && len(images) == 0) || (role == "user" && isCodexBootstrapText(text)) {
 			continue
 		}
 		ts := parseCodexISOms(rc.row.Timestamp)
@@ -468,6 +473,9 @@ func parseCodexHistoryWindow(lines []history.TailLine, resumeID string, truncate
 			"codex", resumeID, "codex:"+resumeID+":line:"+itoa(rc.lineNo),
 			role, text, ts, blocks,
 		)
+		if len(images) > 0 {
+			message["images"] = images
+		}
 		message["history_read_result_verified"] = role == "assistant" && payload.Phase == "final_answer"
 		messages = append(messages, message)
 	}

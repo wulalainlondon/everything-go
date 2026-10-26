@@ -162,7 +162,11 @@ func (h *Hub) handleVoiceStart(c *Client, cmd clientproto.Command) {
 			h.stopClientVoice(c, call)
 			return
 		}
-		call.callbackExpected = callbacks.Speech(r.Name, r.Report.Status, r.Report.Text)
+		call.callbackExpected, e = callbacks.InvitationSpeech(r)
+		if e != nil {
+			h.stopClientVoice(c, call)
+			return
+		}
 		speakerInstructions = callbacks.SpeakerPrompt(call.callbackExpected)
 	}
 	if h.lineControl != nil {

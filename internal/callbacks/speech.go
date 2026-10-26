@@ -2,6 +2,7 @@ package callbacks
 
 import (
 	"encoding/json"
+	"errors"
 	"regexp"
 	"strings"
 	"unicode"
@@ -61,4 +62,33 @@ func Speech(name, status, text string) string {
 		prefix = "這次工作沒有完成，我來說明原因。"
 	}
 	return prefix + "\n" + body + "\n" + tail
+}
+
+// ReadableSpeech preserves meaningful identifier punctuation as spoken words.
+// Removing underscores during comparison would accept a different identifier.
+// This presentation is versioned and frozen on each new invitation instead.
+func ReadableSpeech(name, status, text string) string {
+	return strings.ReplaceAll(Speech(name, status, text), "_", " 底線 ")
+}
+
+// InvitationSpeech never upgrades a persisted legacy invitation in place.
+func InvitationSpeech(r Record) (string, error) {
+	if r.Invite == nil || r.Report == nil {
+		return "", errors.New("callback_speech_source_missing")
+	}
+	if r.Invite.SpeechVersion == 0 {
+		return Speech(r.Name, r.Report.Status, r.Report.Text), nil
+	}
+	i := r.Invite
+	if i.SpeechVersion != 2 || i.SpeechText == "" || i.SpeechReportHash != r.Report.Hash || i.SpeechSourceHash != speechSourceHash(r) || i.SpeechHash != Digest(i.SpeechText) || i.SpeechText != ReadableSpeech(r.Name, r.Report.Status, r.Report.Text) {
+		return "", errors.New("callback_speech_source_changed")
+	}
+	return i.SpeechText, nil
+}
+
+func speechSourceHash(r Record) string {
+	// Include native lineage, canonical report identity and source revision, not
+	// merely text: another task may legitimately have identical final text.
+	b, _ := json.Marshal([]any{r.ID, r.Authority, r.Session, r.Request, r.Thread, r.Epoch, r.Config, r.Report})
+	return Digest(string(b))
 }

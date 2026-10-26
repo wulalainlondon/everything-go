@@ -485,14 +485,28 @@ func (h *Hub) jarvisResolve(w http.ResponseWriter, r *http.Request, device strin
 	}
 	h.jarvisWriteOperation(w, o)
 }
+
+type jarvisWorkRef struct {
+	SessionID    string `json:"session_id"`
+	RequestID    string `json:"request_id"`
+	AssignmentID string `json:"assignment_id,omitempty"`
+}
+type jarvisWorkError struct {
+	jarvisWorkRef
+	Code      string `json:"code"`
+	Status    int    `json:"status"`
+	Retryable bool   `json:"retryable"`
+}
+type jarvisWorkReadCheck struct {
+	session  *session.Session
+	thread   string
+	revision uint64
+}
+
 func (h *Hub) jarvisReadWork(w http.ResponseWriter, r *http.Request, device string) {
 	var in struct {
-		Authority string `json:"authority_instance_id"`
-		Refs      []struct {
-			SessionID    string `json:"session_id"`
-			RequestID    string `json:"request_id"`
-			AssignmentID string `json:"assignment_id,omitempty"`
-		} `json:"refs"`
+		Authority string          `json:"authority_instance_id"`
+		Refs      []jarvisWorkRef `json:"refs"`
 	}
 	if !jarvisDecode(w, r, &in) {
 		return
@@ -502,111 +516,131 @@ func (h *Hub) jarvisReadWork(w http.ResponseWriter, r *http.Request, device stri
 		return
 	}
 	items := []any{}
-	type readCheck struct {
-		session  *session.Session
-		thread   string
-		revision uint64
+	failures := []jarvisWorkError{}
+	type pendingRow struct {
+		ref   jarvisWorkRef
+		item  map[string]any
+		check *jarvisWorkReadCheck
 	}
-	checks := []readCheck{}
+	pending := []pendingRow{}
 	for _, ref := range in.Refs {
-		if ref.RequestID == "" && ref.AssignmentID != "" {
-			a, err := h.automationAssignment(ref.AssignmentID)
-			if err != nil || !h.jarvisAssignmentOwned(r, a, device) || a.SessionID != ref.SessionID {
-				http.Error(w, "original assignment unavailable", 403)
-				return
-			}
-			ref.RequestID = a.ID
-		}
-		s, err := h.intakeSession(ref.SessionID)
-		if err != nil || !h.eventSessionAllowed(s) {
-			http.Error(w, "work scope unavailable", 403)
-			return
-		}
-		checks = append(checks, readCheck{s, s.ResumeID(), s.SettingsSnapshot().ConfigRevision})
-		e, found, err := h.messageQueue.Get(ref.SessionID, ref.RequestID)
-		if err != nil {
-			http.Error(w, "original work unavailable", 503)
-			return
-		}
-		if !found {
-			a, err := h.automationAssignment(ref.RequestID)
-			if err != nil || !h.jarvisAssignmentOwned(r, a, device) || a.SessionID != ref.SessionID {
-				http.Error(w, "original work unavailable", 404)
-				return
-			}
-			resolutionRevision, err := h.jarvisResolutionRevision(r, a)
-			if err != nil {
-				http.Error(w, "resolution revision unavailable", 503)
-				return
-			}
-			items = append(items, map[string]any{"session_id": ref.SessionID, "request_id": a.ID, "assignment_id": a.ID, "revision": 1, "state": "accepted", "result_ref": nil, "resolution_revision": resolutionRevision, "elapsed": map[string]any{"authority_instance_id": h.cfg.InstanceID, "boot_generation": h.gen, "clock_domain": h.gen, "provenance": "original_assignment_outbox", "quality": "unavailable", "unavailable_reason": "not_native_consumed", "sampled_server_now_ms": time.Now().UnixMilli(), "elapsed_at_sample_ms": nil, "terminal_elapsed_ms": nil}})
+		item, check, failure := h.jarvisReadOneWork(r, device, ref)
+		if failure != nil {
+			failures = append(failures, *failure)
 			continue
 		}
-		// Paired-human intake metadata or the owned original assignment is required.
-		owned := false
-		if a, err := h.automationAssignment(ref.RequestID); err == nil && h.jarvisAssignmentOwned(r, a, device) && a.SessionID == ref.SessionID {
-			if a.ImmutableHash != "" {
-				if _, err = h.jarvisEvents(r, device, assignmentEventRefs(a)); err != nil {
-					http.Error(w, "event scope unavailable", 403)
-					return
-				}
-			}
-			owned = true
-			if ref.AssignmentID != "" && ref.AssignmentID != a.ID {
-				owned = false
-			}
-		}
-		if !owned {
-			owned = h.jarvisIntakeOwned(r, device, ref.SessionID, ref.RequestID)
-		}
-		if !owned {
-			http.Error(w, "work principal mismatch", 403)
-			return
-		}
-		revision, err := h.messageQueue.TaskRevision(r.Context(), ref.SessionID, ref.RequestID)
-		if err != nil {
-			http.Error(w, "revision unavailable", 503)
-			return
-		}
-		elapsed, err := h.messageQueue.Elapsed(ref.SessionID, ref.RequestID)
-		if err != nil {
-			http.Error(w, "elapsed unavailable", 503)
-			return
-		}
-		elapsed.Authority = h.cfg.InstanceID
-		elapsed.BootGeneration = h.gen
-		var resultRef any
-		if seal, err := h.jarvisResultSeal(r.Context(), s, ref.RequestID, ""); err == nil {
-			resultRef = map[string]string{"session_id": ref.SessionID, "request_id": ref.RequestID, "seal_id": seal.ID}
-		}
-		var resolution any
-		if h.automation != nil {
-			if o, err := h.automation.WorkbenchResolutionForAssignment(r.Context(), ref.RequestID, jarvisRequestPrincipal(r, device)); err == nil {
-				resolution = map[string]any{"intent_id": o.IntentID, "status": o.Status, "commit_revision": o.Revision, "committed_at_ms": o.CommittedAtMS, "input": o.Input}
-			}
-		}
-		resolutionRevision := uint64(0)
-		if a, err := h.automationAssignment(ref.RequestID); err == nil {
-			resolutionRevision, err = h.jarvisResolutionRevision(r, a)
-			if err != nil {
-				http.Error(w, "resolution revision unavailable", 503)
-				return
-			}
-		}
-		items = append(items, map[string]any{"resolution_revision": resolutionRevision, "human_resolution": resolution, "result_ref": resultRef, "session_id": ref.SessionID, "request_id": ref.RequestID, "assignment_id": ref.AssignmentID, "revision": revision, "state": e.State, "elapsed": elapsed})
+		pending = append(pending, pendingRow{ref, item, check})
 	}
+	for _, row := range pending {
+		ref, item, check := row.ref, row.item, row.check
+		// A changed target invalidates only its own projection. Never return a
+		// partial-scope row as empty/not-found or discard unrelated valid results.
+		current, found := h.registry.Get(check.session.ID)
+		if !found || current != check.session || !h.eventSessionAllowed(current) || current.ResumeID() != check.thread || current.SettingsSnapshot().ConfigRevision != check.revision {
+			failures = append(failures, jarvisWorkError{ref, "scope_changed", 409, true})
+			continue
+		}
+		items = append(items, item)
+	}
+	// Authentication revocation invalidates the entire response, including rows
+	// that were valid before the principal changed.
 	if h.inboxDevice(r) != device {
 		http.Error(w, "pairing changed", 403)
 		return
 	}
-	for _, check := range checks {
-		current, found := h.registry.Get(check.session.ID)
-		if !found || current != check.session || !h.eventSessionAllowed(current) || current.ResumeID() != check.thread || current.SettingsSnapshot().ConfigRevision != check.revision {
-			http.Error(w, "work target changed during read", 409)
-			return
+	_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": 1, "items": items, "errors": failures})
+}
+
+func (h *Hub) jarvisReadOneWork(r *http.Request, device string, ref jarvisWorkRef) (map[string]any, *jarvisWorkReadCheck, *jarvisWorkError) {
+	original := ref
+	if ref.RequestID == "" && ref.AssignmentID != "" {
+		a, err := h.automationAssignment(ref.AssignmentID)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return nil, nil, &jarvisWorkError{jarvisWorkRef: original, Code: "read_unavailable", Status: 503, Retryable: true}
+		}
+		if err != nil || !h.jarvisAssignmentOwned(r, a, device) || a.SessionID != ref.SessionID {
+			return nil, nil, &jarvisWorkError{jarvisWorkRef: original, Code: "scope_unavailable", Status: 403, Retryable: false}
+		}
+		ref.RequestID = a.ID
+	}
+	s, err := h.intakeSession(ref.SessionID)
+	if err != nil || !h.eventSessionAllowed(s) {
+		return nil, nil, &jarvisWorkError{jarvisWorkRef: original, Code: "scope_unavailable", Status: 403, Retryable: false}
+	}
+	check := &jarvisWorkReadCheck{s, s.ResumeID(), s.SettingsSnapshot().ConfigRevision}
+	e, found, err := h.messageQueue.Get(ref.SessionID, ref.RequestID)
+	if err != nil {
+		return nil, nil, &jarvisWorkError{jarvisWorkRef: original, Code: "read_unavailable", Status: 503, Retryable: true}
+	}
+	if !found {
+		a, err := h.automationAssignment(ref.RequestID)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return nil, nil, &jarvisWorkError{jarvisWorkRef: original, Code: "read_unavailable", Status: 503, Retryable: true}
+		}
+		if err != nil || !h.jarvisAssignmentOwned(r, a, device) || a.SessionID != ref.SessionID {
+			return nil, nil, &jarvisWorkError{jarvisWorkRef: original, Code: "work_unavailable", Status: 404, Retryable: false}
+		}
+		resolutionRevision, err := h.jarvisResolutionRevision(r, a)
+		if err != nil {
+			return nil, nil, &jarvisWorkError{jarvisWorkRef: original, Code: "read_unavailable", Status: 503, Retryable: true}
+		}
+		return map[string]any{"session_id": ref.SessionID, "request_id": a.ID, "assignment_id": a.ID, "revision": 1, "state": "accepted", "result_ref": nil, "resolution_revision": resolutionRevision, "elapsed": map[string]any{"authority_instance_id": h.cfg.InstanceID, "boot_generation": h.gen, "clock_domain": h.gen, "provenance": "original_assignment_outbox", "quality": "unavailable", "unavailable_reason": "not_native_consumed", "sampled_server_now_ms": time.Now().UnixMilli(), "elapsed_at_sample_ms": nil, "terminal_elapsed_ms": nil}}, check, nil
+	}
+	// Paired-human intake metadata or the owned original assignment is required.
+	owned := false
+	a, assignmentErr := h.automationAssignment(ref.RequestID)
+	if assignmentErr == nil && h.jarvisAssignmentOwned(r, a, device) && a.SessionID == ref.SessionID {
+		if a.ImmutableHash != "" {
+			if _, err = h.jarvisEvents(r, device, assignmentEventRefs(a)); err != nil {
+				return nil, nil, &jarvisWorkError{jarvisWorkRef: original, Code: "scope_unavailable", Status: 403, Retryable: false}
+			}
+		}
+		owned = true
+		if ref.AssignmentID != "" && ref.AssignmentID != a.ID {
+			owned = false
 		}
 	}
-	_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": 1, "items": items})
+	if !owned {
+		var err error
+		owned, err = h.jarvisIntakeOwned(r, device, ref.SessionID, ref.RequestID)
+		if err != nil {
+			return nil, nil, &jarvisWorkError{jarvisWorkRef: original, Code: "read_unavailable", Status: 503, Retryable: true}
+		}
+	}
+	if !owned && assignmentErr != nil && !errors.Is(assignmentErr, sql.ErrNoRows) {
+		return nil, nil, &jarvisWorkError{jarvisWorkRef: original, Code: "read_unavailable", Status: 503, Retryable: true}
+	}
+	if !owned {
+		return nil, nil, &jarvisWorkError{jarvisWorkRef: original, Code: "principal_mismatch", Status: 403, Retryable: false}
+	}
+	revision, err := h.messageQueue.TaskRevision(r.Context(), ref.SessionID, ref.RequestID)
+	if err != nil {
+		return nil, nil, &jarvisWorkError{jarvisWorkRef: original, Code: "read_unavailable", Status: 503, Retryable: true}
+	}
+	elapsed, err := h.messageQueue.Elapsed(ref.SessionID, ref.RequestID)
+	if err != nil {
+		return nil, nil, &jarvisWorkError{jarvisWorkRef: original, Code: "read_unavailable", Status: 503, Retryable: true}
+	}
+	elapsed.Authority = h.cfg.InstanceID
+	elapsed.BootGeneration = h.gen
+	var resultRef any
+	if seal, err := h.jarvisResultSeal(r.Context(), s, ref.RequestID, ""); err == nil {
+		resultRef = map[string]string{"session_id": ref.SessionID, "request_id": ref.RequestID, "seal_id": seal.ID}
+	}
+	var resolution any
+	if h.automation != nil {
+		if o, err := h.automation.WorkbenchResolutionForAssignment(r.Context(), ref.RequestID, jarvisRequestPrincipal(r, device)); err == nil {
+			resolution = map[string]any{"intent_id": o.IntentID, "status": o.Status, "commit_revision": o.Revision, "committed_at_ms": o.CommittedAtMS, "input": o.Input}
+		}
+	}
+	resolutionRevision := uint64(0)
+	if a, err := h.automationAssignment(ref.RequestID); err == nil {
+		resolutionRevision, err = h.jarvisResolutionRevision(r, a)
+		if err != nil {
+			return nil, nil, &jarvisWorkError{jarvisWorkRef: original, Code: "read_unavailable", Status: 503, Retryable: true}
+		}
+	}
+	return map[string]any{"resolution_revision": resolutionRevision, "human_resolution": resolution, "result_ref": resultRef, "session_id": ref.SessionID, "request_id": ref.RequestID, "assignment_id": ref.AssignmentID, "revision": revision, "state": e.State, "elapsed": elapsed}, check, nil
 }
 func (h *Hub) automationAssignment(id string) (automation.EventAssignment, error) {
 	if h.automation == nil {
@@ -615,19 +649,19 @@ func (h *Hub) automationAssignment(id string) (automation.EventAssignment, error
 	return h.automation.EventAssignment(context.Background(), id)
 }
 
-func (h *Hub) jarvisIntakeOwned(r *http.Request, device, sessionID, requestID string) bool {
+func (h *Hub) jarvisIntakeOwned(r *http.Request, device, sessionID, requestID string) (bool, error) {
 	digest := sha256.Sum256([]byte(strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))))
 	generation := binary.BigEndian.Uint64(digest[:8]) & ((1 << 53) - 1)
 	records, err := h.messageQueue.TaskJournal().List(r.Context(), "device:"+device, generation)
 	if err != nil {
-		return false
+		return false, err
 	}
 	for _, record := range records {
 		if record.SessionID == sessionID && record.RequestID == requestID {
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
 func (h *Hub) jarvisWriteAssignment(w http.ResponseWriter, a automation.EventAssignment) {

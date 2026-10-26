@@ -44,21 +44,26 @@ type Report struct {
 	Turn             string `json:"turn"`
 }
 type Invitation struct {
-	ClaimedAt       int64  `json:"claimed_at,omitempty"`
-	Manual          bool   `json:"manual,omitempty"`
-	AudioObserved   bool   `json:"audio_observed,omitempty"`
-	ContentVerified bool   `json:"content_verified,omitempty"`
-	ContentMismatch bool   `json:"content_mismatch,omitempty"`
-	ID              string `json:"id"`
-	Generation      uint64 `json:"generation"`
-	State           string `json:"state"`
-	Issued          int64  `json:"issued_at"`
-	Expires         int64  `json:"expires_at"`
-	Claim           string `json:"claim_operation,omitempty"`
-	Voice           string `json:"voice_id,omitempty"`
-	ReportOperation string `json:"report_operation,omitempty"`
-	Reason          string `json:"reason,omitempty"`
-	PresentedAt     int64  `json:"presented_at,omitempty"`
+	SpeechVersion    int    `json:"speech_version,omitempty"`
+	SpeechText       string `json:"speech_text,omitempty"`
+	SpeechHash       string `json:"speech_hash,omitempty"`
+	SpeechReportHash string `json:"speech_report_hash,omitempty"`
+	SpeechSourceHash string `json:"speech_source_hash,omitempty"`
+	ClaimedAt        int64  `json:"claimed_at,omitempty"`
+	Manual           bool   `json:"manual,omitempty"`
+	AudioObserved    bool   `json:"audio_observed,omitempty"`
+	ContentVerified  bool   `json:"content_verified,omitempty"`
+	ContentMismatch  bool   `json:"content_mismatch,omitempty"`
+	ID               string `json:"id"`
+	Generation       uint64 `json:"generation"`
+	State            string `json:"state"`
+	Issued           int64  `json:"issued_at"`
+	Expires          int64  `json:"expires_at"`
+	Claim            string `json:"claim_operation,omitempty"`
+	Voice            string `json:"voice_id,omitempty"`
+	ReportOperation  string `json:"report_operation,omitempty"`
+	Reason           string `json:"reason,omitempty"`
+	PresentedAt      int64  `json:"presented_at,omitempty"`
 }
 type Record struct {
 	RequesterBinding  string      `json:"-"`
@@ -298,6 +303,13 @@ func NewInvitation(r *Record, now int64, operation string) {
 		g = r.Invite.Generation + 1
 	}
 	r.Invite = &Invitation{ID: ID(r.ID, operation), Generation: g, State: "delivery_pending", Issued: now, Expires: now + 60_000}
+	if r.Report != nil {
+		r.Invite.SpeechVersion = 2
+		r.Invite.SpeechText = ReadableSpeech(r.Name, r.Report.Status, r.Report.Text)
+		r.Invite.SpeechHash = Digest(r.Invite.SpeechText)
+		r.Invite.SpeechReportHash = r.Report.Hash
+		r.Invite.SpeechSourceHash = speechSourceHash(*r)
+	}
 	r.State = "invitation_pending"
 }
 func Claim(r *Record, device, binding, invitation, operation string, now int64) error {

@@ -243,3 +243,48 @@ func TestAttachmentUploadRejectsUnsupportedFile(t *testing.T) {
 		t.Fatalf("unexpected error: %v", event)
 	}
 }
+
+// This is the released Task IntakeFile contract: attachment_id is the exact
+// CBV2 completion's upload_id, not remote_path or upload_request_id.
+func TestCBV2CompletionIDResolvesTaskIntakeWithoutRemotePath(t *testing.T) {
+	root := t.TempDir()
+	reg := session.NewRegistry()
+	reg.Create("s_video_qa", "QA", root, backend.Codex, "", "read-only", "")
+	reg.Create("s_other", "Other", root, backend.Codex, "", "read-only", "")
+	h := NewHub(reg, Config{InstanceID: "qa", DataDir: root}, governance.NewPairing(filepath.Join(root, "pairing.json")), 0)
+	c := newTestClient(h)
+	c.deviceID = "qa-phone"
+	c.uploads = newAttachmentUploads(c, root)
+	bytes := append([]byte("\x00\x00\x00\x18ftypmp42"), []byte("immutable original QA video")...)
+	c.uploads.init("s_video_qa", "upload-original", "QA.mp4", "video/mp4", int64(len(bytes)))
+	ready := waitForType(t, c, "attachment_upload_ready")
+	id := ready["upload_id"].(string)
+	if !c.uploads.writeFrame(makeV2AttachmentFrame(id, 0, bytes)) {
+		t.Fatal("frame refused")
+	}
+	waitForType(t, c, "attachment_upload_ack")
+	c.uploads.finish(id)
+	complete := waitForType(t, c, "attachment_upload_complete")
+	var wire intakeFile
+	raw, _ := json.Marshal(map[string]any{"attachment_id": complete["upload_id"], "name": "QA.mp4", "content": "", "media_type": "video/mp4", "size_bytes": len(bytes)})
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		t.Fatal(err)
+	}
+	file := backend.FileAttachment{AttachmentID: wire.AttachmentID, Name: wire.Name, Content: wire.Content, MediaType: wire.MediaType, SizeBytes: wire.SizeBytes}
+	content, inline, err := h.resolveUploadedVideos("s_video_qa", "inspect original QA video", []backend.FileAttachment{file})
+	if err != nil || len(inline) != 0 || !strings.Contains(content, complete["sha256"].(string)) || !strings.Contains(content, complete["remote_path"].(string)) {
+		t.Fatal(content, inline, err)
+	}
+	if _, _, err := h.resolveUploadedVideos("s_other", "inspect", []backend.FileAttachment{file}); err == nil {
+		t.Fatal("foreign session upload accepted")
+	}
+	path := complete["remote_path"].(string)
+	corrupted := append([]byte(nil), bytes...)
+	corrupted[len(corrupted)-1] ^= 1
+	if err := os.WriteFile(path, corrupted, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := h.resolveUploadedVideos("s_video_qa", "inspect", []backend.FileAttachment{file}); err == nil {
+		t.Fatal("same-size changed bytes accepted")
+	}
+}
