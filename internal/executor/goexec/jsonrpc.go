@@ -70,6 +70,10 @@ func (p *rpcPlumber) write(obj any) error {
 // The expected generation is checked under the same lock as the write. A
 // reconnected transport must not reuse a read admission from an older peer.
 func (p *rpcPlumber) writeAtEpoch(obj any, expected *uint64) error {
+	return p.writeAtEpochGuarded(obj, expected, nil)
+}
+
+func (p *rpcPlumber) writeAtEpochGuarded(obj any, expected *uint64, guard func() (func(), error)) error {
 	data, err := json.Marshal(obj)
 	if err != nil {
 		return err
@@ -81,6 +85,20 @@ func (p *rpcPlumber) writeAtEpoch(obj any, expected *uint64) error {
 	}
 	if p.w == nil {
 		return fmt.Errorf("[%s] no writer", p.name)
+	}
+	if guard != nil {
+		release, e := guard()
+		if e != nil {
+			return e
+		}
+		if release != nil {
+			defer release()
+		}
+	}
+	// failAll can retire an epoch independently of wmu while a bounded local
+	// guard reads its evidence. Recheck after that read, immediately at bytes.
+	if expected != nil && p.transportEpoch.Load() != *expected {
+		return &codexAcceptanceError{Reason: "native_source_changed"}
 	}
 	_, err = p.w.Write(append(data, '\n'))
 	return err
@@ -123,16 +141,25 @@ func (p *rpcPlumber) requestAtEpochGuarded(ctx context.Context, method string, p
 	if params != nil {
 		req["params"] = params
 	}
-	release := func() {}
-	if guard != nil {
-		var e error
-		release, e = guard()
-		if e != nil {
+	err := p.writeAtEpochGuarded(req, expected, func() (func(), error) {
+		if e := ctx.Err(); e != nil {
 			return nil, e
 		}
-	}
-	err := p.writeAtEpoch(req, expected)
-	release()
+		if guard != nil {
+			release, e := guard()
+			if e != nil {
+				return nil, e
+			}
+			if e = ctx.Err(); e != nil {
+				if release != nil {
+					release()
+				}
+				return nil, e
+			}
+			return release, nil
+		}
+		return nil, nil
+	})
 	if err != nil {
 		return nil, err
 	}

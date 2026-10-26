@@ -11,6 +11,11 @@ import (
 const AutomaticMode = "network_auto_continue"
 const MaxInputBytes = 256 << 20
 
+// These are proven pre-writer scheduling outcomes, not provider failures or
+// unknown acceptance. No new dispatch tombstone exists for either outcome.
+var ErrDispatchDeferred = errors.New("automatic recovery scheduling deferred")
+var ErrDispatchPaused = errors.New("automatic recovery scheduling budget exhausted")
+
 var ErrGuard = errors.New("automatic recovery ownership or evidence changed")
 
 // AutomaticSource is a private immutable admission snapshot, never a credential.

@@ -509,3 +509,104 @@ func TestAutomaticInputRetirementDoesNotClearCancelledOpaqueEffects(t *testing.T
 		t.Fatal("cancel erased unresolved tool input", e)
 	}
 }
+
+func TestAutomaticScopeProbeSurvivesLeaseExpiryRestartAndUnrelatedInitialSend(t *testing.T) {
+	for _, kind := range []string{"accepted", "unknown"} {
+		t.Run(kind, func(t *testing.T) {
+			s, e := Open(t.TempDir())
+			if e != nil {
+				t.Fatal(e)
+			}
+			defer s.Close()
+			now := int64(1700000000000)
+			for _, sid := range []string{"first", "third"} {
+				src := recovery.AutomaticSource{Authority: "a", Session: sid, Request: "r", Thread: "t" + sid, Configuration: "c", Principal: "p", Scope: "same-provider-model"}
+				s.Enqueue(Entry{SessionID: sid, RequestID: "r", Payload: []byte(`{"content":"original"}`)})
+				s.Transition(sid, "r", []State{Queued}, Running, "", "", "")
+				s.BeginRecovery(src, "boot", now)
+				s.ClaimRecovery(sid, "r", 1, "boot", 1, "input", now)
+				if _, _, e = s.ScheduleRecovery(sid, "r", 1, "boot", rejectedOutcome(), now, 0); e != nil {
+					t.Fatal(e)
+				}
+			}
+			_, a, e := s.ClaimRecovery("first", "r", 1, "boot", 1, "input", now+10000)
+			if e != nil {
+				t.Fatal(e)
+			}
+			if kind == "accepted" {
+				if e = s.RecoveryAccepted("first", "r", a.ID, "tfirst", "owned-probe", 1, "boot", now+10000); e != nil {
+					t.Fatal(e)
+				}
+			}
+			fresh := recovery.AutomaticSource{Authority: "a", Session: "fresh", Request: "r", Thread: "tfresh", Configuration: "c", Principal: "different-device", Scope: "same-provider-model"}
+			s.Enqueue(Entry{SessionID: "fresh", RequestID: "r", Payload: []byte(`{"content":"new ordinary"}`)})
+			s.Transition("fresh", "r", []State{Queued}, Running, "", "", "")
+			s.BeginRecovery(fresh, "boot", now+41000)
+			_, f, e := s.ClaimRecovery("fresh", "r", 1, "boot", 1, "input", now+41000)
+			if e != nil {
+				t.Fatal("normal initial send blocked", e)
+			}
+			s.RecoveryAccepted("fresh", "r", f.ID, "tfresh", "normal-complete", 1, "boot", now+41000)
+			if e = s.FinishRecovery("fresh", "r", "completed"); e != nil {
+				t.Fatal(e)
+			}
+			var owner string
+			s.db.QueryRow(`SELECT owner FROM recovery_scopes WHERE scope='same-provider-model'`).Scan(&owner)
+			if owner != "first:r" {
+				t.Fatal("unrelated initial send stole/released probe", owner)
+			}
+			r, _, e := s.ClaimRecovery("third", "r", 1, "boot", 1, "input", now+41000)
+			if !errors.Is(e, recovery.ErrDispatchDeferred) || r.State != "retry_wait" || r.Attempts != 0 {
+				t.Fatal("lease expiry bypassed probe", r, e)
+			}
+			if e = s.Recover(); e != nil {
+				t.Fatal(e)
+			}
+			s.Transition("third", "r", []State{Queued}, Running, "", "", "")
+			if e = s.AdoptRecovery("third", "r", 1, "boot2"); e != nil {
+				t.Fatal(e)
+			}
+			if _, _, e = s.ClaimRecovery("third", "r", 1, "boot2", 2, "input", now+90000); !errors.Is(e, recovery.ErrDispatchDeferred) {
+				t.Fatal("restart expired unresolved probe", e)
+			}
+			if kind == "accepted" {
+				if e = s.FinishRecovery("first", "r", "completed"); e != nil {
+					t.Fatal(e)
+				}
+				if _, _, e = s.ClaimRecovery("third", "r", 1, "boot2", 2, "input", now+91000); e != nil {
+					t.Fatal("exact native settlement did not release probe", e)
+				}
+			} else {
+				s.InvalidateRecovery("first", "r", "cancel")
+				s.FinishRecovery("first", "r", "cancelled")
+				if _, _, e = s.ClaimRecovery("third", "r", 1, "boot2", 2, "input", now+120000); !errors.Is(e, recovery.ErrDispatchDeferred) {
+					t.Fatal("cancel discarded unknown dispatch ownership", e)
+				}
+			}
+		})
+	}
+}
+
+func TestAutomaticScopeDeferralDeadlineConsumesNoDispatch(t *testing.T) {
+	s, src, now := automaticFixture(t)
+	s.ClaimRecovery("s", src.Request, 1, "boot1", 1, "input", now)
+	before, _, e := s.ScheduleRecovery("s", src.Request, 1, "boot1", rejectedOutcome(), now, 0)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e = s.db.Exec(`UPDATE recovery_scopes SET owner='other:request',lease_until=0 WHERE scope=?`, src.Scope); e != nil {
+		t.Fatal(e)
+	}
+	r, a, e := s.ClaimRecovery("s", src.Request, 1, "boot1", 1, "input", before.Deadline)
+	if !errors.Is(e, recovery.ErrDispatchPaused) || a.ID != "" || r.State != "paused_budget" || r.Attempts != before.Attempts || r.LastAttempt != before.LastAttempt {
+		t.Fatal("pure scheduling expiry became a dispatch", r, a, e)
+	}
+	var count int
+	s.db.QueryRow(`SELECT count(*) FROM recovery_attempts WHERE session_id='s'`).Scan(&count)
+	if count != 1 {
+		t.Fatal("new tombstone on known-none expiry", count)
+	}
+	if _, e = s.RecoveryInput("s", src.Request); e != nil {
+		t.Fatal("waiting input discarded", e)
+	}
+}

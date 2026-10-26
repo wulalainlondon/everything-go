@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -26,6 +28,7 @@ type automaticSQLFixture struct {
 	epoch        string
 	failFinish   bool
 	failAccepted bool
+	waitHook     func() error
 }
 
 func (a *automaticSQLFixture) Resume() (recovery.Run, error) {
@@ -85,6 +88,11 @@ func (a *automaticSQLFixture) WriterGuard() (func(), error) {
 	return func() {}, nil
 }
 func (a *automaticSQLFixture) Wait(context.Context) error {
+	if a.waitHook != nil {
+		if e := a.waitHook(); e != nil {
+			return e
+		}
+	}
 	r, e := a.Resume()
 	if e != nil {
 		return e
@@ -379,6 +387,291 @@ func TestAutomaticCanonicalFullPaginationRejectsUnknownProviderEffects(t *testin
 				}
 			} else if e == nil && proof.Complete && proof.ToolCoverage && !proof.WaitingUser {
 				t.Fatal("unverified canonical coverage allowed continuation", kind, proof)
+			}
+		})
+	}
+}
+
+func TestAutomaticCanonicalContradictoryToolPayloadCannotBeSafe(t *testing.T) {
+	c, s, st, w, _ := livenessFixture(t)
+	st.turnActive = false
+	st.currentTurnID = ""
+	st.turnStartPending = false
+	w.reply = func(method string, _ json.RawMessage) (any, error) {
+		switch method {
+		case "thread/read":
+			return map[string]any{"thread": map[string]any{"id": "root", "status": map[string]string{"type": "idle"}}}, nil
+		case "thread/turns/list":
+			return map[string]any{"data": []any{map[string]any{"id": "failed", "status": "failed", "itemsView": "full", "items": []any{map[string]any{"id": "same", "type": "commandExecution", "status": "completed", "command": "external-effect"}}}}, "nextCursor": nil}, nil
+		case "thread/items/list":
+			return map[string]any{"data": []any{map[string]any{"turnId": "failed", "item": map[string]any{"id": "same", "type": "reasoning"}}}, "nextCursor": nil}, nil
+		}
+		t.Fatal(method)
+		return nil, nil
+	}
+	proof, e := c.automaticCanonical(s, st, "failed")
+	if e == nil && proof.ToolCoverage && proof.NoUnresolvedEffects {
+		t.Fatal("full canonical turn contains opaque command but item-ID-only join certified no unresolved effects", proof)
+	}
+}
+
+func TestAutomaticCanonicalNewerCompletedTurnDuringPaginationRetiresParent(t *testing.T) {
+	c, s, st, w, _ := livenessFixture(t)
+	st.turnActive = false
+	st.currentTurnID = ""
+	st.turnStartPending = false
+	latest := "failed"
+	user := map[string]any{"id": "user", "type": "userMessage"}
+	w.reply = func(method string, _ json.RawMessage) (any, error) {
+		switch method {
+		case "thread/read":
+			return map[string]any{"thread": map[string]any{"id": "root", "status": map[string]string{"type": "idle"}}}, nil
+		case "thread/turns/list":
+			return map[string]any{"data": []any{map[string]any{"id": latest, "status": "failed", "itemsView": "full", "items": []any{user}}}, "nextCursor": nil}, nil
+		case "thread/items/list":
+			latest = "foreign-completed"
+			return map[string]any{"data": []any{map[string]any{"turnId": "failed", "item": user}}, "nextCursor": nil}, nil
+		}
+		t.Fatal(method)
+		return nil, nil
+	}
+	proof, e := c.automaticCanonical(s, st, "failed")
+	if e == nil && proof.ToolCoverage {
+		t.Fatal("proof remained valid after provider's latest turn changed during pagination", proof)
+	}
+}
+
+func TestAutomaticWriterRechecksAuthorityAfterTransportMutexWait(t *testing.T) {
+	p := newRPCPlumber("fixture")
+	var valid atomic.Bool
+	valid.Store(true)
+	var checked atomic.Int32
+	var writes atomic.Int32
+	p.setWriter(automaticWriterFunc(func(raw []byte) (int, error) { writes.Add(1); return len(raw), nil }))
+	p.wmu.Lock()
+	started := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		close(started)
+		_, e := p.requestAtEpochGuarded(context.Background(), "turn/start", nil, time.Millisecond, nil, func() (func(), error) {
+			checked.Add(1)
+			if !valid.Load() {
+				return nil, recovery.ErrGuard
+			}
+			return func() {}, nil
+		})
+		done <- e
+	}()
+	<-started
+	time.Sleep(20 * time.Millisecond)
+	if checked.Load() != 0 {
+		p.wmu.Unlock()
+		t.Fatal("guard ran before actual transport ownership")
+	}
+	valid.Store(false)
+	p.wmu.Unlock()
+	if e := <-done; !errors.Is(e, recovery.ErrGuard) {
+		t.Fatal(e)
+	}
+	if writes.Load() != 0 || checked.Load() != 1 {
+		t.Fatal("retired authority wrote after mutex wait", writes.Load(), checked.Load())
+	}
+}
+
+type automaticWriterFunc func([]byte) (int, error)
+
+func (f automaticWriterFunc) Write(b []byte) (int, error) { return f(b) }
+
+func TestAutomaticScopeContentionWaitsWithoutWriterOrUnknownThenSettlesOnce(t *testing.T) {
+	for _, kind := range []string{"release", "cancel"} {
+		t.Run(kind, func(t *testing.T) {
+			_, a, w, sink, run := automaticExecutionFixture(t)
+			subject := recovery.Hash([]byte("chatgpt:original"))
+			if e := a.BindProvider(subject); e != nil {
+				t.Fatal(e)
+			}
+			now := a.now
+			rejected := recovery.AutomaticOutcome{Acceptance: recovery.Rejected, IngressRejected: true, Failure: recovery.Failure{Category: recovery.ModelCapacity, Source: "codex_ingress"}}
+			a.store.ClaimRecovery(a.src.Session, a.src.Request, 1, a.epoch, 1, "input", now)
+			waiting, _, e := a.store.ScheduleRecovery(a.src.Session, a.src.Request, 1, a.epoch, rejected, now, 0)
+			if e != nil {
+				t.Fatal(e)
+			}
+			other := recovery.AutomaticSource{Authority: "a", Session: "other", Request: "r_other", Thread: "other-thread", Configuration: "fixed", Principal: "other-device", Scope: "model"}
+			a.store.Enqueue(messagequeue.Entry{SessionID: other.Session, RequestID: other.Request, Payload: []byte(`{"content":"other"}`)})
+			a.store.Transition(other.Session, other.Request, []messagequeue.State{messagequeue.Queued}, messagequeue.Running, "", "", "")
+			a.store.BeginRecovery(other, a.epoch, now)
+			a.store.BindRecoveryProvider(other.Session, other.Request, subject, 1, a.epoch)
+			a.store.ClaimRecovery(other.Session, other.Request, 1, a.epoch, 1, "input", now)
+			a.store.ScheduleRecovery(other.Session, other.Request, 1, a.epoch, rejected, now, 0)
+			if _, _, e = a.store.ClaimRecovery(other.Session, other.Request, 1, a.epoch, 1, "input", waiting.NextAt); e != nil {
+				t.Fatal(e)
+			}
+			blocked := make(chan struct{})
+			release := make(chan struct{})
+			waits := 0
+			a.waitHook = func() error {
+				waits++
+				if waits == 2 {
+					close(blocked)
+					<-release
+				}
+				return nil
+			}
+			w.call = func(method string, _ json.RawMessage) (json.RawMessage, error) {
+				switch method {
+				case "account/read":
+					return autoResult(map[string]any{"account": map[string]string{"type": "chatgpt"}}), nil
+				case "account/rateLimits/read":
+					return autoResult(map[string]any{"accountId": "original"}), nil
+				case "thread/read":
+					return autoResult(map[string]any{"thread": map[string]any{"id": "root", "status": map[string]string{"type": "idle"}}}), nil
+				case "turn/start":
+					return autoResult(map[string]any{"turn": map[string]string{"id": "final", "status": "completed"}}), nil
+				}
+				return autoResult(map[string]any{}), nil
+			}
+			done := make(chan struct{})
+			go func() { run(); close(done) }()
+			select {
+			case <-blocked:
+			case <-time.After(3 * time.Second):
+				t.Fatal("did not reach persistent scheduling wait")
+			}
+			r, _ := a.Resume()
+			w.mu.Lock()
+			writes := len(w.starts)
+			w.mu.Unlock()
+			if r.State != "retry_wait" || r.Attempts != 0 || r.LastAttempt != waiting.LastAttempt || writes != 0 || sink.count(func(v any) bool {
+				switch v.(type) {
+				case backend.NativeSubmissionUncertain, protocol.Done, protocol.Error:
+					return true
+				}
+				return false
+			}) != 0 {
+				t.Fatal("scope contention changed native/terminal facts", r, writes)
+			}
+			if kind == "release" {
+				if _, _, e = a.store.ScheduleRecovery(other.Session, other.Request, 1, a.epoch, rejected, waiting.NextAt, 0); e != nil {
+					t.Fatal(e)
+				}
+			} else {
+				if e = a.store.InvalidateRecovery(a.src.Session, a.src.Request, "cancel"); e != nil {
+					t.Fatal(e)
+				}
+			}
+			close(release)
+			select {
+			case <-done:
+			case <-time.After(3 * time.Second):
+				t.Fatal("settled contention did not unblock")
+			}
+			w.mu.Lock()
+			writes = len(w.starts)
+			w.mu.Unlock()
+			if sink.count(func(v any) bool { _, ok := v.(backend.NativeSubmissionUncertain); return ok }) != 0 {
+				t.Fatal("known pre-writer wait became native unknown")
+			}
+			if kind == "release" {
+				if writes != 1 || sink.count(func(v any) bool { _, ok := v.(protocol.Done); return ok }) != 1 {
+					t.Fatal("not exactly one eventual writer/final", writes)
+				}
+			} else {
+				if writes != 0 || sink.count(func(v any) bool { _, ok := v.(protocol.Stopped); return ok }) != 1 {
+					t.Fatal("cancelled wait wrote or did not stop", writes)
+				}
+			}
+		})
+	}
+}
+func TestAutomaticCanonicalStrictJSONAndExactItemEvidence(t *testing.T) {
+	for _, raw := range []string{`{"id":"i","type":"reasoning","type":"commandExecution"}`, `{"id":"i","type":"reasoning","summary":{"a":1,"a":2}}`, `{"id":"i","type":"reasoning"} {}`} {
+		if _, e := automaticCanonicalItem(json.RawMessage(raw)); e == nil {
+			t.Fatal("ambiguous canonical item accepted", raw)
+		}
+	}
+	a, e := automaticCanonicalItem(json.RawMessage(`{"id":"i","type":"reasoning","summary":["one"]}`))
+	if e != nil {
+		t.Fatal(e)
+	}
+	b, e := automaticCanonicalItem(json.RawMessage(`{"summary":["one"],"type":"reasoning","id":"i"}`))
+	if e != nil || !reflect.DeepEqual(a, b) {
+		t.Fatal("key ordering changed evidence", e)
+	}
+	c, e := automaticCanonicalItem(json.RawMessage(`{"id":"i","type":"reasoning","summary":["two"]}`))
+	if e != nil || reflect.DeepEqual(a, c) {
+		t.Fatal("same-ID changed content not distinguished", e)
+	}
+}
+
+func TestAutomaticCanonicalFullAndPagedContentAndLatestEvidenceMustMatch(t *testing.T) {
+	for _, kind := range []string{"equal", "item-content", "latest-content", "latest-status", "latest-error"} {
+		t.Run(kind, func(t *testing.T) {
+			c, s, st, w, _ := livenessFixture(t)
+			st.turnActive = false
+			st.currentTurnID = ""
+			st.turnStartPending = false
+			reads := 0
+			w.reply = func(method string, _ json.RawMessage) (any, error) {
+				full := map[string]any{"id": "reason", "type": "reasoning", "summary": []string{"original"}}
+				switch method {
+				case "thread/read":
+					return map[string]any{"thread": map[string]any{"id": "root", "status": map[string]string{"type": "idle"}}}, nil
+				case "thread/turns/list":
+					reads++
+					row := map[string]any{"id": "failed", "status": "failed", "itemsView": "full", "items": []any{full}, "error": map[string]string{"codexErrorInfo": "serverOverloaded"}}
+					if reads > 1 {
+						switch kind {
+						case "latest-content":
+							full["summary"] = []string{"foreign"}
+						case "latest-status":
+							row["status"] = "completed"
+						case "latest-error":
+							row["error"] = map[string]string{"codexErrorInfo": "usageLimitExceeded"}
+						}
+					}
+					return map[string]any{"data": []any{row}, "nextCursor": nil}, nil
+				case "thread/items/list":
+					if kind == "item-content" {
+						full["summary"] = []string{"different"}
+					}
+					return map[string]any{"data": []any{map[string]any{"turnId": "failed", "item": full}}, "nextCursor": nil}, nil
+				}
+				t.Fatal(method)
+				return nil, nil
+			}
+			proof, e := c.automaticCanonical(s, st, "failed")
+			if kind == "equal" {
+				if e != nil || !proof.ToolCoverage || reads != 2 {
+					t.Fatal(proof, e, reads)
+				}
+			} else if e == nil && proof.ToolCoverage {
+				t.Fatal("contradictory native evidence qualified", kind, proof)
+			}
+		})
+	}
+}
+
+func TestAutomaticFinalWriterRejectsEpochOrContextRetiredInsideLocalGuard(t *testing.T) {
+	for _, kind := range []string{"epoch", "context"} {
+		t.Run(kind, func(t *testing.T) {
+			p := newRPCPlumber("fixture")
+			writes := 0
+			released := 0
+			p.setWriter(automaticWriterFunc(func(b []byte) (int, error) { writes++; return len(b), nil }))
+			epoch := p.transportEpoch.Load()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			_, e := p.requestAtEpochGuarded(ctx, "turn/start", nil, time.Millisecond, &epoch, func() (func(), error) {
+				if kind == "epoch" {
+					p.failAll(errors.New("retired"))
+				} else {
+					cancel()
+				}
+				return func() { released++ }, nil
+			})
+			if e == nil || writes != 0 || released != 1 {
+				t.Fatal("retired guard evidence wrote or leaked permit", e, writes, released)
 			}
 		})
 	}

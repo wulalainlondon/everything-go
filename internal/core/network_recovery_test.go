@@ -218,3 +218,100 @@ func TestNetworkRecoveryNewInputReleasesOnlyOriginalActorPause(t *testing.T) {
 	}
 	h.releaseNetworkRecoveryBarrier(s.ID) // an idempotent release cannot underflow.
 }
+
+func TestNetworkRecoveryInitialThreadBindDoesNotResetConfigABARetirement(t *testing.T) {
+	t.Setenv("EVERYTHING_GO_CODEX_NETWORK_AUTOCONTINUE", "true")
+	t.Setenv("EVERYTHING_GO_CODEX_NETWORK_AUTOCONTINUE_ALL_ORDINARY", "true")
+	h, fe := newTestHub(t)
+	h.cfg.DataDir = t.TempDir()
+	h.networkRecoveryStarted = 0
+	c := sharedReadClient(t, h, "qa-owner")
+	s := h.registry.Create("s1", "ordinary", t.TempDir(), backend.Codex, "gpt-6.1-sol", "read-only", "")
+	result := make(chan error, 1)
+	fe.onSendContext = func(ctx context.Context, _ *session.Session, _, _ string) {
+		a := recovery.Automatic(ctx)
+		if a == nil {
+			result <- recovery.ErrGuard
+			return
+		}
+		original := s.Snapshot().Model
+		s.SetModel("foreign-model")
+		s.SetModel(original) // while async initial ensureThread is outstanding
+		s.SetResumeID("new-thread")
+		result <- a.BindThread("new-thread")
+	}
+	enqueueTestMessage(t, h, c, "r_qa_bind")
+	select {
+	case e := <-result:
+		if e == nil {
+			t.Fatal("BindThread adopted post-ABA SourceRevision and revived retired config authority")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("fixture did not reach core Send")
+	}
+	s.EndTurn()
+}
+
+func TestNetworkRecoveryExactInitialThreadBindingAcceptsOnlySingleTransition(t *testing.T) {
+	t.Setenv("EVERYTHING_GO_CODEX_NETWORK_AUTOCONTINUE", "true")
+	t.Setenv("EVERYTHING_GO_CODEX_NETWORK_AUTOCONTINUE_ALL_ORDINARY", "true")
+	h, fe := newTestHub(t)
+	h.cfg.DataDir = t.TempDir()
+	h.networkRecoveryStarted = 0
+	c := sharedReadClient(t, h, "owner")
+	s := h.registry.Create("s1", "ordinary", t.TempDir(), backend.Codex, "gpt-6.1-sol", "read-only", "")
+	result := make(chan error, 1)
+	fe.onSendContext = func(ctx context.Context, _ *session.Session, _, _ string) {
+		a := recovery.Automatic(ctx)
+		if a == nil {
+			result <- recovery.ErrGuard
+			return
+		}
+		s.SetResumeID("owned-thread")
+		result <- a.BindThread("owned-thread")
+	}
+	enqueueTestMessage(t, h, c, "r_initial_bind")
+	select {
+	case e := <-result:
+		if e != nil {
+			t.Fatal(e)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("no core send")
+	}
+	s.EndTurn()
+}
+func TestNetworkRecoveryFinalWriterDoesNotWaitForCoreTransportLockInversion(t *testing.T) {
+	t.Setenv("EVERYTHING_GO_CODEX_NETWORK_AUTOCONTINUE", "true")
+	t.Setenv("EVERYTHING_GO_CODEX_NETWORK_AUTOCONTINUE_ALL_ORDINARY", "true")
+	h, fe := newTestHub(t)
+	h.cfg.DataDir = t.TempDir()
+	h.networkRecoveryStarted = 0
+	c := sharedReadClient(t, h, "owner")
+	s := h.registry.Create("s1", "ordinary", t.TempDir(), backend.Codex, "gpt-6.1-sol", "read-only", "thread")
+	result := make(chan error, 1)
+	fe.onSendContext = func(ctx context.Context, _ *session.Session, _, _ string) {
+		a := recovery.Automatic(ctx)
+		if a == nil {
+			result <- recovery.ErrGuard
+			return
+		}
+		h.messageQueueMu.Lock()
+		defer h.messageQueueMu.Unlock()
+		release, e := a.WriterGuard()
+		if release != nil {
+			release()
+		}
+		result <- e
+	}
+	enqueueTestMessage(t, h, c, "r_lock_order")
+	select {
+	case e := <-result:
+		if e == nil {
+			t.Fatal("busy lock should refuse final writer")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("final writer deadlocked on core lock")
+	}
+	s.EndTurn()
+}

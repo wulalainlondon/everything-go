@@ -1,11 +1,13 @@
 package goexec
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"os"
+	"reflect"
 	"time"
 
 	"everything-go/internal/recovery"
@@ -36,22 +38,29 @@ func (c *Codex) automaticCanonical(s *session.Session, st *codexState, turn stri
 		return p, recovery.ErrGuard
 	}
 	var page struct {
-		Data []struct {
-			ID        string            `json:"id"`
-			Status    string            `json:"status"`
-			ItemsView string            `json:"itemsView"`
-			Items     []json.RawMessage `json:"items"`
-		} `json:"data"`
-		Next *string `json:"nextCursor"`
+		Data []json.RawMessage `json:"data"`
+		Next *string           `json:"nextCursor"`
 	}
-	if json.Unmarshal(raw, &page) != nil || len(page.Data) != 1 || page.Data[0].ID != turn || page.Data[0].Status != "failed" || page.Data[0].ItemsView != "full" || page.Data[0].Items == nil {
+	if _, e = automaticCanonicalJSON(raw); e != nil {
+		return p, e
+	}
+	if json.Unmarshal(raw, &page) != nil || len(page.Data) != 1 {
+		return p, recovery.ErrGuard
+	}
+	var parent struct {
+		ID        string            `json:"id"`
+		Status    string            `json:"status"`
+		ItemsView string            `json:"itemsView"`
+		Items     []json.RawMessage `json:"items"`
+	}
+	if json.Unmarshal(page.Data[0], &parent) != nil || parent.ID != turn || parent.Status != "failed" || parent.ItemsView != "full" || parent.Items == nil {
 		return p, recovery.ErrGuard
 	}
 	p.Status = "failed"
 	// The cursor on a one-turn page refers to older turns. All items of THIS
 	// turn are separately paged by the exact current public thread/items/list.
 	cursor := ""
-	seen := map[string]bool{}
+	seen := map[string]any{}
 	var itemEvidence []json.RawMessage
 	progress := []json.RawMessage{}
 	for pages := 0; pages < 64; pages++ {
@@ -70,6 +79,9 @@ func (c *Codex) automaticCanonical(s *session.Session, st *codexState, turn stri
 			} `json:"data"`
 			Next *string `json:"nextCursor"`
 		}
+		if _, e = automaticCanonicalJSON(raw); e != nil {
+			return p, e
+		}
 		if json.Unmarshal(raw, &items) != nil || items.Data == nil {
 			return p, recovery.ErrGuard
 		}
@@ -85,10 +97,14 @@ func (c *Codex) automaticCanonical(s *session.Session, st *codexState, turn stri
 			if json.Unmarshal(entry.Item, &item) != nil || item.ID == "" {
 				return p, recovery.ErrGuard
 			}
-			if seen[item.ID] {
+			if _, exists := seen[item.ID]; exists {
 				return p, recovery.ErrGuard
 			}
-			seen[item.ID] = true
+			value, er := automaticCanonicalItem(entry.Item)
+			if er != nil {
+				return p, er
+			}
+			seen[item.ID] = value
 			switch item.Type {
 			case "userMessage", "agentMessage", "reasoning":
 				// Conversation content alone cannot prove externally delivered artifacts.
@@ -115,18 +131,43 @@ func (c *Codex) automaticCanonical(s *session.Session, st *codexState, turn stri
 	if _, e = c.readStartAdmission(s, st, st.reqID); e != nil {
 		return p, e
 	}
-	if len(page.Data[0].Items) != len(itemEvidence) {
+	if len(parent.Items) != len(itemEvidence) {
 		return p, recovery.ErrGuard
 	}
 	canonicalIDs := map[string]bool{}
-	for _, raw := range page.Data[0].Items {
+	for _, raw := range parent.Items {
 		var it struct {
 			ID string `json:"id"`
 		}
-		if json.Unmarshal(raw, &it) != nil || !seen[it.ID] || canonicalIDs[it.ID] {
+		if json.Unmarshal(raw, &it) != nil || it.ID == "" || canonicalIDs[it.ID] {
+			return p, recovery.ErrGuard
+		}
+		full, er := automaticCanonicalItem(raw)
+		paged, exists := seen[it.ID]
+		if er != nil || !exists || !reflect.DeepEqual(full, paged) {
 			return p, recovery.ErrGuard
 		}
 		canonicalIDs[it.ID] = true
+	}
+	// A provider can append another terminal turn without a local notification
+	// while pages are read. Idle alone does not preserve the parent identity.
+	latest, er := c.rpc.requestAtEpoch("thread/turns/list", map[string]any{"threadId": p.Thread, "limit": 1, "sortDirection": "desc", "itemsView": "full"}, 15*time.Second, &epoch)
+	if er != nil || len(latest) > 8<<20 {
+		return p, recovery.ErrGuard
+	}
+	var check struct {
+		Data []json.RawMessage `json:"data"`
+	}
+	if json.Unmarshal(latest, &check) != nil || len(check.Data) != 1 {
+		return p, recovery.ErrGuard
+	}
+	beforeValue, er := automaticCanonicalJSON(page.Data[0])
+	afterValue, afterErr := automaticCanonicalJSON(check.Data[0])
+	if er != nil || afterErr != nil || !reflect.DeepEqual(beforeValue, afterValue) {
+		return p, recovery.ErrGuard
+	}
+	if _, er = c.readStartAdmission(s, st, st.reqID); er != nil || c.rpc.transportEpoch.Load() != epoch {
+		return p, recovery.ErrGuard
 	}
 	b, _ := json.Marshal(itemEvidence)
 	p.EvidenceHash = recovery.Hash(b)
@@ -302,4 +343,92 @@ func (c *Codex) automaticLocalSubject() (string, error) {
 		return "", recovery.ErrGuard
 	}
 	return recovery.Hash([]byte("chatgpt:" + auth.Tokens.AccountID)), nil
+}
+
+// Compare every field of each canonical item, not just its ID. Both source
+// projections must independently be whitelisted and structurally identical.
+func automaticCanonicalItem(raw json.RawMessage) (any, error) {
+	var item struct {
+		ID   string `json:"id"`
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(raw, &item) != nil || item.ID == "" {
+		return nil, recovery.ErrGuard
+	}
+	switch item.Type {
+	case "userMessage", "agentMessage", "reasoning":
+	default:
+		return nil, recovery.ErrGuard
+	}
+	return automaticCanonicalJSON(raw)
+}
+
+// Strict, bounded semantic JSON equality: key ordering is irrelevant, but a
+// duplicate key, changed type/content/number, or omitted field is uncertainty.
+func automaticCanonicalJSON(raw json.RawMessage) (any, error) {
+	d := json.NewDecoder(bytes.NewReader(raw))
+	d.UseNumber()
+	var read func(int) (any, error)
+	read = func(depth int) (any, error) {
+		if depth > 64 {
+			return nil, recovery.ErrGuard
+		}
+		token, e := d.Token()
+		if e != nil {
+			return nil, e
+		}
+		switch token {
+		case json.Delim('{'):
+			value := map[string]any{}
+			for d.More() {
+				k, e := d.Token()
+				if e != nil {
+					return nil, e
+				}
+				key, ok := k.(string)
+				if !ok {
+					return nil, recovery.ErrGuard
+				}
+				if _, ok = value[key]; ok {
+					return nil, recovery.ErrGuard
+				}
+				v, e := read(depth + 1)
+				if e != nil {
+					return nil, e
+				}
+				value[key] = v
+			}
+			end, e := d.Token()
+			if e != nil || end != json.Delim('}') {
+				return nil, recovery.ErrGuard
+			}
+			return value, nil
+		case json.Delim('['):
+			value := []any{}
+			for d.More() {
+				v, e := read(depth + 1)
+				if e != nil {
+					return nil, e
+				}
+				value = append(value, v)
+			}
+			end, e := d.Token()
+			if e != nil || end != json.Delim(']') {
+				return nil, recovery.ErrGuard
+			}
+			return value, nil
+		}
+		if _, ok := token.(json.Delim); ok {
+			return nil, recovery.ErrGuard
+		}
+		return token, nil
+	}
+	value, e := read(0)
+	if e != nil {
+		return nil, e
+	}
+	if _, e = d.Token(); e != io.EOF {
+		return nil, recovery.ErrGuard
+	}
+	return value, nil
 }

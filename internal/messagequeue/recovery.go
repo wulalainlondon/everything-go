@@ -161,28 +161,33 @@ func (s *Store) ClaimRecovery(sid, rid string, generation uint64, epoch string, 
 	if r.State != "ready" && r.State != "retry_wait" {
 		return r, recovery.Attempt{}, recovery.ErrGuard
 	}
-	if now < r.NextAt || (r.Deadline > 0 && now >= r.Deadline) || r.Attempts >= r.MaxAttempts && r.LastAttempt != "" {
-		return r, recovery.Attempt{}, recovery.ErrGuard
+	if now < r.NextAt {
+		return r, recovery.Attempt{}, recovery.ErrDispatchDeferred
 	}
-	var raw []byte
-	var hash string
-	if e = tx.QueryRow(`SELECT payload,hash FROM recovery_inputs WHERE session_id=? AND request_id=?`, sid, rid).Scan(&raw, &hash); e != nil {
+	if (r.Deadline > 0 && now >= r.Deadline) || r.Attempts >= r.MaxAttempts && r.LastAttempt != "" {
+		r.State = "paused_budget"
+		r.Reason = "retry_budget_exhausted"
+		r.NextAt = 0
+		if e = saveRecovery(tx, &r); e != nil {
+			return r, recovery.Attempt{}, e
+		}
+		if e = tx.Commit(); e != nil {
+			return r, recovery.Attempt{}, e
+		}
+		return r, recovery.Attempt{}, recovery.ErrDispatchPaused
+	}
+	var queueState State
+	var queueSequence int64
+	if e = tx.QueryRow(`SELECT state,seq FROM queue_commands WHERE session_id=? AND request_id=?`, sid, rid).Scan(&queueState, &queueSequence); e != nil {
 		return r, recovery.Attempt{}, e
 	}
-	if hash != r.InputHash || recovery.Hash(raw) != hash {
-		return r, recovery.Attempt{}, recovery.ErrGuard
-	}
-	q, ok, e := lookup(tx, sid, rid)
-	if e != nil {
-		return r, recovery.Attempt{}, e
-	}
-	if !ok || q.State != Running {
+	if queueState != Running {
 		return r, recovery.Attempt{}, recovery.ErrGuard
 	}
 	// A newer ordinary input invalidates the recovery generation even if the
 	// same source/configuration later returns (ABA).
 	var newer int
-	if e = tx.QueryRow(`SELECT count(*) FROM queue_commands WHERE session_id=? AND seq>?`, sid, q.Sequence).Scan(&newer); e != nil {
+	if e = tx.QueryRow(`SELECT count(*) FROM queue_commands WHERE session_id=? AND seq>?`, sid, queueSequence).Scan(&newer); e != nil {
 		return r, recovery.Attempt{}, e
 	}
 	if newer > 0 {
@@ -196,8 +201,40 @@ func (s *Store) ClaimRecovery(sid, rid string, generation uint64, epoch string, 
 	if e = tx.QueryRow(`SELECT owner,lease_until,cooldown_until,last_dispatch FROM recovery_scopes WHERE scope=?`, r.Source.Scope).Scan(&owner, &lease, &cooldown, &last); e != nil {
 		return r, recovery.Attempt{}, e
 	}
-	if r.LastAttempt != "" && (cooldown > now || lease > now && owner != sid+":"+rid || last > now-10000) {
-		return r, recovery.Attempt{}, errors.New("recovery scope cooling down")
+	isRetry := r.LastAttempt != ""
+	// A dispatched/accepted/unknown probe is held until durable settlement,
+	// including restart and cancellation. Wall-clock lease expiry is not proof.
+	if isRetry && (cooldown > now || owner != "" && owner != sid+":"+rid || last > now-10000) {
+		r.NextAt = now + 1000
+		if r.NextAt < cooldown {
+			r.NextAt = cooldown
+		}
+		if r.NextAt < last+10000 {
+			r.NextAt = last + 10000
+		}
+		result := recovery.ErrDispatchDeferred
+		if r.Deadline > 0 && r.NextAt >= r.Deadline {
+			r.State = "paused_budget"
+			r.Reason = "scope_wait_exceeds_budget"
+			r.NextAt = 0
+			result = recovery.ErrDispatchPaused
+		}
+		if e = saveRecovery(tx, &r); e != nil {
+			return r, recovery.Attempt{}, e
+		}
+		if e = tx.Commit(); e != nil {
+			return r, recovery.Attempt{}, e
+		}
+		return r, recovery.Attempt{}, result
+	}
+	_ = lease // diagnostic timer only; never retires unresolved scope ownership.
+	var raw []byte
+	var hash string
+	if e = tx.QueryRow(`SELECT payload,hash FROM recovery_inputs WHERE session_id=? AND request_id=?`, sid, rid).Scan(&raw, &hash); e != nil {
+		return r, recovery.Attempt{}, e
+	}
+	if hash != r.InputHash || recovery.Hash(raw) != hash {
+		return r, recovery.Attempt{}, recovery.ErrGuard
 	}
 	n := 0
 	if r.LastAttempt != "" {
@@ -212,8 +249,10 @@ func (s *Store) ClaimRecovery(sid, rid string, generation uint64, epoch string, 
 	r.LastAttempt = a.ID
 	r.State = "dispatching"
 	r.NextAt = 0
-	if _, e = tx.Exec(`UPDATE recovery_scopes SET owner=?,lease_until=?,last_dispatch=? WHERE scope=?`, sid+":"+rid, now+30000, now, r.Source.Scope); e != nil {
-		return r, a, e
+	if isRetry {
+		if _, e = tx.Exec(`UPDATE recovery_scopes SET owner=?,lease_until=?,last_dispatch=? WHERE scope=?`, sid+":"+rid, now+30000, now, r.Source.Scope); e != nil {
+			return r, a, e
+		}
 	}
 	if e = saveRecovery(tx, &r); e != nil {
 		return r, a, e
@@ -339,7 +378,12 @@ func (s *Store) ScheduleRecovery(sid, rid string, generation uint64, epoch strin
 			r.Reason = "retry_after_exceeds_budget"
 		}
 	}
-	if _, e = tx.Exec(`UPDATE recovery_scopes SET owner='',lease_until=0,window_start=CASE WHEN window_start<? THEN ? ELSE window_start END,rejections=CASE WHEN window_start<? THEN 1 ELSE rejections+1 END WHERE scope=?`, now-60000, now, now-60000, r.Source.Scope); e != nil {
+	if a.Acceptance == recovery.Rejected || a.Acceptance == recovery.Accepted && a.Terminal {
+		if _, e = tx.Exec(`UPDATE recovery_scopes SET owner='',lease_until=0 WHERE scope=? AND owner=?`, r.Source.Scope, sid+":"+rid); e != nil {
+			return r, false, e
+		}
+	}
+	if _, e = tx.Exec(`UPDATE recovery_scopes SET window_start=CASE WHEN window_start<? THEN ? ELSE window_start END,rejections=CASE WHEN window_start<? THEN 1 ELSE rejections+1 END WHERE scope=?`, now-60000, now, now-60000, r.Source.Scope); e != nil {
 		return r, false, e
 	}
 	if _, e = tx.Exec(`UPDATE recovery_scopes SET cooldown_until=MAX(cooldown_until,?) WHERE scope=? AND rejections>=3`, now+60000, r.Source.Scope); e != nil {
@@ -457,6 +501,9 @@ func (s *Store) FinishRecovery(sid, rid, status string) error {
 				}
 				raw, _ = json.Marshal(a)
 				if _, e = tx.Exec(`UPDATE recovery_attempts SET phase='terminal',payload=? WHERE session_id=? AND request_id=? AND attempt_id=?`, raw, sid, rid, a.ID); e != nil {
+					return e
+				}
+				if _, e = tx.Exec(`UPDATE recovery_scopes SET owner='',lease_until=0 WHERE scope=? AND owner=?`, r.Source.Scope, sid+":"+rid); e != nil {
 					return e
 				}
 			}
@@ -681,10 +728,11 @@ func (s *Store) BindRecoveryThread(sid, rid, thread string, generation uint64, e
 	if r.Source.Thread != "" || r.State != "ready" || r.LastAttempt != "" {
 		return recovery.ErrGuard
 	}
-	r.Source.Thread = thread
-	if len(sourceRevision) > 0 {
-		r.Source.SourceRevision = sourceRevision[0]
+	if len(sourceRevision) != 1 || sourceRevision[0] != r.Source.SourceRevision+1 || sourceRevision[0] == 0 {
+		return recovery.ErrGuard
 	}
+	r.Source.Thread = thread
+	r.Source.SourceRevision = sourceRevision[0]
 	if e = saveRecovery(tx, &r); e != nil {
 		return e
 	}

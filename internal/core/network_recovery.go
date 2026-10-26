@@ -134,10 +134,12 @@ func (n *networkRecovery) Resume() (recovery.Run, error) {
 	}
 	return r, nil
 }
-func (n *networkRecovery) Guard() error {
+func (n *networkRecovery) Guard() error { return n.guardSources(n.source, n.source) }
+
+func (n *networkRecovery) guardSources(current, persisted recovery.AutomaticSource) error {
 	h := n.hub
-	s, ok := h.registry.Get(n.source.Session)
-	if !ok || s != n.session || !h.networkRecoveryEnabled(s.ID) || s.State() == session.Closed || s.State() == session.Stopping || s.ActiveQueuedID() != n.source.Request || s.ResumeID() != n.source.Thread || s.Cwd() != n.cwd || s.Snapshot().SourceRevision != n.source.SourceRevision || h.controls.Get(s.ID).Revision != n.source.ControlRevision || session.ConfigurationFrom(s.Snapshot()) != n.configuration || session.ConfigurationFrom(s.SettingsSnapshot()) != n.configuration || s.Snapshot().Hidden || !h.controls.MobileMayWrite(s.ID) {
+	s, ok := h.registry.Get(current.Session)
+	if !ok || s != n.session || !h.networkRecoveryEnabled(s.ID) || s.State() == session.Closed || s.State() == session.Stopping || s.ActiveQueuedID() != current.Request || s.ResumeID() != current.Thread || s.Cwd() != n.cwd || s.Snapshot().SourceRevision != current.SourceRevision || h.controls.Get(s.ID).Revision != current.ControlRevision || session.ConfigurationFrom(s.Snapshot()) != n.configuration || session.ConfigurationFrom(s.SettingsSnapshot()) != n.configuration || s.Snapshot().Hidden || !h.controls.MobileMayWrite(s.ID) {
 		return recovery.ErrGuard
 	}
 	if e := h.intakeWritePolicy(s); e != nil {
@@ -145,7 +147,7 @@ func (n *networkRecovery) Guard() error {
 	}
 	paired := false
 	for _, b := range h.pairing.DeviceBindings() {
-		if b.DeviceID == n.owner && recovery.Hash([]byte(b.Token)) == n.source.Principal && b.Generation == n.source.CredentialGeneration {
+		if b.DeviceID == n.owner && recovery.Hash([]byte(b.Token)) == current.Principal && b.Generation == current.CredentialGeneration {
 			paired = true
 			break
 		}
@@ -160,10 +162,10 @@ func (n *networkRecovery) Guard() error {
 	if e != nil {
 		return e
 	}
-	if r.Generation != n.generation || r.OwnerEpoch != n.epoch || r.Source != n.source || r.State == "cancelled" || r.State == "disabled" || r.LeaseUntil <= n.now().UnixMilli() {
+	if r.Generation != n.generation || r.OwnerEpoch != n.epoch || r.Source != persisted || r.State == "cancelled" || r.State == "disabled" || r.LeaseUntil <= n.now().UnixMilli() {
 		return recovery.ErrGuard
 	}
-	if e = h.messageQueue.RecoveryNoNewInput(s.ID, n.source.Request); e != nil {
+	if e = h.messageQueue.RecoveryNoNewInput(s.ID, current.Request); e != nil {
 		return e
 	}
 
@@ -184,6 +186,11 @@ func (n *networkRecovery) BeforeDispatch(ctx context.Context, inputHash string, 
 		return recovery.AutomaticNext{}, e
 	}
 	_, a, e := h.messageQueue.ClaimRecovery(n.source.Session, n.source.Request, n.generation, n.epoch, transport, inputHash, n.now().UnixMilli())
+	if errors.Is(e, recovery.ErrDispatchDeferred) || errors.Is(e, recovery.ErrDispatchPaused) {
+		h.updateRuntime(n.source.Session, "queued", n.source.Request, n.session.QueueLen(), "", "")
+		h.updateRuntimeProgress(n.source.Session, n.source.Request, "queued", "模型恢復正在等待共用容量；尚未重送。")
+		h.publishMessageQueue(n.source.Session)
+	}
 	if e != nil {
 		return recovery.AutomaticNext{}, e
 	}
@@ -215,6 +222,13 @@ func (n *networkRecovery) NativeFinished(status string) error {
 func (n *networkRecovery) Wait(ctx context.Context) error {
 	for {
 		if e := n.Guard(); e != nil {
+			reason := "source_changed"
+			if !n.hub.networkRecoveryEnabled(n.source.Session) {
+				reason = "disabled"
+			}
+			if er := n.hub.messageQueue.InvalidateRecovery(n.source.Session, n.source.Request, reason); er != nil {
+				return er
+			}
 			return e
 		}
 		r, e := n.Resume()
@@ -258,7 +272,11 @@ func (n *networkRecovery) WriterGuard() (func(), error) {
 		}
 	}
 	h := n.hub
-	h.messageQueueMu.Lock()
+	// Transport wmu is already held. Never wait for a core operation which may
+	// itself need the transport; this final check performs no native RPC.
+	if !h.messageQueueMu.TryLock() {
+		return nil, recovery.ErrGuard
+	}
 	if e := n.Guard(); e != nil {
 		h.messageQueueMu.Unlock()
 		return nil, e
@@ -333,16 +351,30 @@ func recoveryPublic(r recovery.Run) protocol.AutomaticRecoverySnapshot {
 }
 
 func (n *networkRecovery) BindThread(thread string) error {
-	if n.source.Thread != "" && n.source.Thread != thread {
+	if thread == "" {
 		return recovery.ErrGuard
 	}
-	if e := n.hub.messageQueue.BindRecoveryThread(n.source.Session, n.source.Request, thread, n.generation, n.epoch, n.session.Snapshot().SourceRevision); e != nil {
+	if n.source.Thread != "" {
+		if n.source.Thread != thread {
+			return recovery.ErrGuard
+		}
+		return n.Guard()
+	}
+	// Only the one admitted empty->owned thread transition may advance source.
+	// Any config/hidden/thread ABA creates additional revisions and stays retired.
+	candidate := n.source
+	candidate.Thread = thread
+	candidate.SourceRevision++
+	if candidate.SourceRevision == 0 {
+		return recovery.ErrGuard
+	}
+	if e := n.guardSources(candidate, n.source); e != nil {
 		return e
 	}
-	if n.source.Thread == "" {
-		n.source.SourceRevision = n.session.Snapshot().SourceRevision
+	if e := n.hub.messageQueue.BindRecoveryThread(n.source.Session, n.source.Request, thread, n.generation, n.epoch, candidate.SourceRevision); e != nil {
+		return e
 	}
-	n.source.Thread = thread
+	n.source = candidate
 	return n.Guard()
 }
 

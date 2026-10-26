@@ -2465,6 +2465,24 @@ func (c *Codex) runTurn(s *session.Session, st *codexState, threadID string, inp
 	for {
 		c.sink.Emit(backend.NewTurnProgress(s.ID, requestID, "waiting_model", "Waiting for Codex to accept the turn"))
 		if err := c.startTurnWithStaleRetry(s, st, threadID, input, sandboxOverride); err != nil {
+			if auto != nil && errors.Is(err, recovery.ErrDispatchDeferred) {
+				// Claim did not create a new attempt or invoke turn/start.
+				// Preserve the prior exact rejection/terminal evidence and actor.
+				c.sink.Emit(backend.NewTurnProgress(s.ID, requestID, "queued", "模型恢復正在等待共用容量；尚未重送。"))
+				if e := auto.Wait(context.Background()); e == nil {
+					if e = auto.Guard(); e == nil {
+						continue
+					}
+				}
+				st.finish("stopped")
+				break
+			}
+			if auto != nil && errors.Is(err, recovery.ErrDispatchPaused) {
+				st.finish("recovery scheduling budget exhausted")
+				c.releaseActiveThreads(s)
+				c.sink.Emit(backend.NewError(s.ID, requestID, "recovery_paused", "自動恢復已暫停：等待容量已達原時間或次數上限。"))
+				return
+			}
 			st.mu.Lock()
 			if st.turnActive && st.reqID == requestID {
 				st.turnFailure = codexSubmissionFailure(err)
@@ -3130,6 +3148,9 @@ func (c *Codex) startTurn(threadID string, input []map[string]any, snap session.
 		rawInput, _ := json.Marshal(input)
 		next, e := automatic.BeforeDispatch(context.Background(), recovery.Hash(rawInput), epoch)
 		if e != nil {
+			if errors.Is(e, recovery.ErrDispatchDeferred) || errors.Is(e, recovery.ErrDispatchPaused) {
+				return e
+			}
 			return &codexAcceptanceError{Reason: "native_recovery_guard_failed"}
 		}
 		st.mu.Lock()
