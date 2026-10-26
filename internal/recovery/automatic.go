@@ -33,6 +33,9 @@ type AutomaticSource struct {
 	Scope                string `json:"scope_hash"`
 }
 type Run struct {
+	Clock             ClockAnchor     `json:"clock,omitempty"`
+	ClockLast         int64           `json:"clock_high_water,omitempty"`
+	ClockUnsafe       bool            `json:"clock_unsafe,omitempty"`
 	ScopeWaiting      bool            `json:"scope_waiting,omitempty"`
 	Source            AutomaticSource `json:"source"`
 	Revision          uint64          `json:"revision"`

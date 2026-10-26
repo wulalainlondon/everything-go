@@ -743,3 +743,189 @@ func TestAutomaticScopeFIFOEligibleWaiterSurvivesRestartAndGhostHeadsAreSkipped(
 		})
 	}
 }
+
+func TestAutomaticObservedWallRollbackCannotExtendElapsedBudgetAfterRestart(t *testing.T) {
+	for _, kind := range []string{"before-origin", "within-window"} {
+		t.Run(kind, func(t *testing.T) {
+			dir := t.TempDir()
+			s, e := Open(dir)
+			if e != nil {
+				t.Fatal(e)
+			}
+			defer func() { s.Close() }()
+			wall0 := int64(1700000000000)
+			src := recovery.AutomaticSource{Authority: "a", Session: "s", Request: "r", Thread: "t", Configuration: "c", Principal: "p", Scope: "scope"}
+			s.Enqueue(Entry{SessionID: "s", RequestID: "r", Payload: []byte(`{"content":"immutable"}`)})
+			s.Transition("s", "r", []State{Queued}, Running, "", "", "")
+			s.BeginRecovery(src, "boot1", wall0)
+			s.ClaimRecovery("s", "r", 1, "boot1", 1, "input", wall0)
+			original, _, e := s.ScheduleRecovery("s", "r", 1, "boot1", rejectedOutcome(), wall0, 0)
+			if e != nil {
+				t.Fatal(e)
+			}
+			rollbackWall := wall0 - 600000
+			if kind == "within-window" {
+				if _, _, e = s.ClaimRecovery("s", "r", 1, "boot1", 1, "input", wall0+1200000); e != nil {
+					t.Fatal(e)
+				}
+				if _, _, e = s.ScheduleRecovery("s", "r", 1, "boot1", rejectedOutcome(), wall0+1200000, 0); e != nil {
+					t.Fatal(e)
+				}
+				rollbackWall = wall0 + 600000 // still after first error, but before last observed scheduling time
+			}
+			// Explicitly observed ten-minute backwards movement, no dispatch allowed.
+			if _, _, e = s.ClaimRecovery("s", "r", 1, "boot1", 1, "input", rollbackWall); e == nil {
+				t.Fatal("clock rollback immediately dispatched")
+			}
+			s.Close()
+			s, e = Open(dir)
+			if e != nil {
+				t.Fatal(e)
+			}
+			if e = s.Recover(); e != nil {
+				t.Fatal(e)
+			}
+			q, _, _ := s.Get("s", "r")
+			if q.State == Queued {
+				s.Transition("s", "r", []State{Queued}, Running, "", "", "")
+			}
+			r, _, _ := s.Recovery("s", "r")
+			if r.State == "retry_wait" {
+				if e = s.AdoptRecovery("s", "r", 1, "boot2"); e != nil {
+					t.Fatal(e)
+				}
+			}
+			// Fake elapsed oracle=31min; wall clock is only21min after original failure
+			// because of the already observed rollback. No real sleeping or model call.
+			elapsed := int64(31 * 60000)
+			wallNow := wall0 + elapsed - 600000
+			_, a, e := s.ClaimRecovery("s", "r", 1, "boot2", 2, "input", wallNow)
+			if e == nil || a.ID != "" {
+				t.Fatalf("observed rollback then restart extended30min elapsed budget: kind=%s elapsed=%d wallElapsed=%d deadline=%d attempt=%s", kind, elapsed, wallNow-wall0, original.Deadline, a.ID)
+			}
+		})
+	}
+}
+func TestAutomaticForwardClockPausesNewDispatchButNeverFinishesAcceptedNative(t *testing.T) {
+	for _, kind := range []string{"waiting", "accepted"} {
+		t.Run(kind, func(t *testing.T) {
+			s, src, now := automaticFixture(t)
+			_, a, e := s.ClaimRecovery("s", src.Request, 1, "boot1", 1, "input", now)
+			if e != nil {
+				t.Fatal(e)
+			}
+			if kind == "waiting" {
+				if _, _, e = s.ScheduleRecovery("s", src.Request, 1, "boot1", rejectedOutcome(), now, 0); e != nil {
+					t.Fatal(e)
+				}
+			} else {
+				if e = s.RecoveryAccepted("s", src.Request, a.ID, "thread", "active", 1, "boot1", now); e != nil {
+					t.Fatal(e)
+				}
+				if e = s.ObserveRecoveryFailure("s", src.Request, failedOutcome("active"), now); e != nil {
+					t.Fatal(e)
+				}
+			}
+			before, _, _ := s.Recovery("s", src.Request)
+			_, next, e := s.ClaimRecovery("s", src.Request, 1, "boot1", 1, "input", now+3600000)
+			if e == nil || next.ID != "" {
+				t.Fatal("forward deadline allowed newwriter")
+			}
+			after, _, _ := s.Recovery("s", src.Request)
+			if after.Attempts != before.Attempts || after.LastAttempt != before.LastAttempt {
+				t.Fatal("clock jump consumed attempt")
+			}
+			if kind == "accepted" && (after.State != "accepted" || after.NativeStatus != "") {
+				t.Fatal("clock expiry falsely finished existing native work", after)
+			}
+		})
+	}
+}
+
+func TestAutomaticContinuousBudgetAcrossSameBootStoreReopenAndSleep(t *testing.T) {
+	dir := t.TempDir()
+	s, e := Open(dir)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer func() { s.Close() }()
+	anchor := recovery.ClockAnchor{Boot: "same-kernel-boot", Kind: "fake-continuous", WallMS: 1700000000000, ElapsedMS: 1000}
+	src := recovery.AutomaticSource{Authority: "a", Session: "s", Request: "r", Thread: "t", Configuration: "c", Principal: "p", Scope: "scope"}
+	s.Enqueue(Entry{SessionID: "s", RequestID: "r", Payload: []byte(`{"content":"original"}`)})
+	s.Transition("s", "r", []State{Queued}, Running, "", "", "")
+	if _, e = s.BeginRecoveryClock(src, "bridge-one", anchor); e != nil {
+		t.Fatal(e)
+	}
+	if _, _, e = s.ClaimRecovery("s", "r", 1, "bridge-one", 1, "input", anchor.WallMS); e != nil {
+		t.Fatal(e)
+	}
+	original, _, e := s.ScheduleRecovery("s", "r", 1, "bridge-one", rejectedOutcome(), anchor.WallMS, 0)
+	if e != nil {
+		t.Fatal(e)
+	}
+	s.Close()
+	s, e = Open(dir)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e = s.Recover(); e != nil {
+		t.Fatal(e)
+	}
+	s.Transition("s", "r", []State{Queued}, Running, "", "", "")
+	if e = s.AdoptRecovery("s", "r", 1, "bridge-two"); e != nil {
+		t.Fatal(e)
+	}
+	r, _, e := s.Recovery("s", "r")
+	if e != nil || r.Clock != anchor || r.FirstFailureAt != original.FirstFailureAt {
+		t.Fatal(r, e)
+	}
+	sample := anchor
+	sample.ElapsedMS += 31 * 60000
+	sample.WallMS += 21 * 60000
+	now, e := r.Clock.Time(sample)
+	if e != nil {
+		t.Fatal(e)
+	}
+	after, a, e := s.ClaimRecovery("s", "r", 1, "bridge-two", 2, "input", now)
+	if !errors.Is(e, recovery.ErrDispatchPaused) || a.ID != "" || after.Attempts != 0 || after.Deadline != original.Deadline || after.FirstFailureAt != original.FirstFailureAt {
+		t.Fatal("sleep/restart extended budget", after, a, e)
+	}
+}
+
+func TestAutomaticFailureClockHighWaterSurvivesRollbackAndReopen(t *testing.T) {
+	dir := t.TempDir()
+	s, e := Open(dir)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer func() { s.Close() }()
+	now := int64(1700000000000)
+	src := recovery.AutomaticSource{Authority: "a", Session: "s", Request: "r", Thread: "t", Configuration: "c", Principal: "p", Scope: "scope"}
+	s.Enqueue(Entry{SessionID: "s", RequestID: "r", Payload: []byte(`{"content":"original"}`)})
+	s.Transition("s", "r", []State{Queued}, Running, "", "", "")
+	s.BeginRecovery(src, "boot", now)
+	_, a, e := s.ClaimRecovery("s", "r", 1, "boot", 1, "input", now)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e = s.RecoveryAccepted("s", "r", a.ID, "t", "active", 1, "boot", now); e != nil {
+		t.Fatal(e)
+	}
+	o := failedOutcome("active")
+	o.Thread = "t"
+	if e = s.ObserveRecoveryFailure("s", "r", o, now+600000); e != nil {
+		t.Fatal(e)
+	}
+	s.Close()
+	s, e = Open(dir)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, _, e = s.ClaimRecovery("s", "r", 1, "boot", 2, "input", now+300000); !errors.Is(e, recovery.ErrClock) {
+		t.Fatal("first known failure lost clock high-water", e)
+	}
+	r, _, e := s.Recovery("s", "r")
+	if e != nil || !r.ClockUnsafe || r.State != "accepted" || r.FirstFailureAt != now+600000 || r.LastAttempt != a.ID {
+		t.Fatal("accepted native or first failure changed", r, e)
+	}
+}

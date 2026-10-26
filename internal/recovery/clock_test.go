@@ -1,0 +1,51 @@
+package recovery
+
+import (
+	"errors"
+	"testing"
+)
+
+func TestContinuousClockPreservesAdmissionEpochAcrossWallChangeAndRestart(t *testing.T) {
+	a := ClockAnchor{Boot: "boot", Kind: "continuous", WallMS: 1700000000000, ElapsedMS: 1000}
+	for _, tc := range []struct {
+		name                string
+		elapsed, wall, want int64
+	}{
+		{"rollback", 31 * 60000, -10 * 60000, 31 * 60000},
+		{"sleep-same-boot-restart", 31 * 60000, 21 * 60000, 31 * 60000},
+		{"forward-conservative", 60000, 3600000, 3600000},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := a
+			s.ElapsedMS += tc.elapsed
+			s.WallMS += tc.wall
+			n, e := a.Time(s)
+			if e != nil || n != a.WallMS+tc.want {
+				t.Fatal(n, e)
+			}
+		})
+	}
+}
+
+func TestContinuousClockUnknownBootDomainOrRegressionNeverFallsBackToWall(t *testing.T) {
+	a := ClockAnchor{Boot: "boot", Kind: "continuous", WallMS: 1700000000000, ElapsedMS: 1000}
+	for _, kind := range []string{"boot", "domain", "regression", "missing"} {
+		t.Run(kind, func(t *testing.T) {
+			s := a
+			s.WallMS += 3600000
+			switch kind {
+			case "boot":
+				s.Boot = "new"
+			case "domain":
+				s.Kind = "other"
+			case "regression":
+				s.ElapsedMS--
+			case "missing":
+				s = ClockAnchor{}
+			}
+			if _, e := a.Time(s); !errors.Is(e, ErrClock) {
+				t.Fatal(e)
+			}
+		})
+	}
+}

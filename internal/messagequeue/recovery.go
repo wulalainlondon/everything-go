@@ -71,6 +71,18 @@ func (s *Store) RecoverySnapshots(sid string) ([]recovery.Run, error) {
 // BeginRecovery owns the exact canonical queue payload and its run in one DB
 // transaction. It cannot backfill failed/unknown work or change a prior input.
 func (s *Store) BeginRecovery(source recovery.AutomaticSource, epoch string, now int64, files ...recovery.FileLease) (recovery.Run, error) {
+	return s.beginRecovery(source, epoch, now, recovery.ClockAnchor{}, files...)
+}
+
+// BeginRecoveryClock binds production admission to verified same-boot elapsed time.
+func (s *Store) BeginRecoveryClock(source recovery.AutomaticSource, epoch string, clock recovery.ClockAnchor, files ...recovery.FileLease) (recovery.Run, error) {
+	if !clock.Valid() {
+		return recovery.Run{}, recovery.ErrClock
+	}
+	return s.beginRecovery(source, epoch, clock.WallMS, clock, files...)
+}
+
+func (s *Store) beginRecovery(source recovery.AutomaticSource, epoch string, now int64, clock recovery.ClockAnchor, files ...recovery.FileLease) (recovery.Run, error) {
 	tx, e := s.db.Begin()
 	if e != nil {
 		return recovery.Run{}, e
@@ -104,7 +116,7 @@ func (s *Store) BeginRecovery(source recovery.AutomaticSource, epoch string, now
 	if total+int64(len(q.Payload)) > recovery.MaxInputBytes {
 		return recovery.Run{}, ErrRecoveryInputPressure
 	}
-	r := recovery.Run{Source: source, Revision: 1, Generation: 1, OwnerEpoch: epoch, State: "ready", InputHash: recovery.Hash(q.Payload), LeaseUntil: now + int64((24*time.Hour)/time.Millisecond), MaxAttempts: 5}
+	r := recovery.Run{Clock: clock, ClockLast: now, Source: source, Revision: 1, Generation: 1, OwnerEpoch: epoch, State: "ready", InputHash: recovery.Hash(q.Payload), LeaseUntil: now + int64((24*time.Hour)/time.Millisecond), MaxAttempts: 5}
 	raw, _ := json.Marshal(r)
 	if _, e = tx.Exec(`INSERT INTO recovery_runs VALUES(?,?,?,?,?,?)`, source.Session, source.Request, r.Generation, r.Revision, r.State, raw); e != nil {
 		return r, e
@@ -158,10 +170,32 @@ func (s *Store) ClaimRecovery(sid, rid string, generation uint64, epoch string, 
 	if e = checkRecovery(r, generation, epoch, now); e != nil {
 		return r, recovery.Attempt{}, e
 	}
+	// Even an unsuccessful due-time check records observed clock order. Once a
+	// backwards sample is observed, restart cannot make this run dispatchable.
+	if r.ClockUnsafe || now < r.ClockLast {
+		r.ClockUnsafe = true
+		if r.State == "ready" || r.State == "retry_wait" {
+			r.State, r.Reason, r.NextAt = "paused_uncertain", "clock_provenance_unavailable", 0
+		}
+		if e = saveRecovery(tx, &r); e != nil {
+			return r, recovery.Attempt{}, e
+		}
+		if e = tx.Commit(); e != nil {
+			return r, recovery.Attempt{}, e
+		}
+		return r, recovery.Attempt{}, recovery.ErrClock
+	}
+	r.ClockLast = now
 	if r.State != "ready" && r.State != "retry_wait" {
 		return r, recovery.Attempt{}, recovery.ErrGuard
 	}
 	if now < r.NextAt {
+		if e = saveRecovery(tx, &r); e != nil {
+			return r, recovery.Attempt{}, e
+		}
+		if e = tx.Commit(); e != nil {
+			return r, recovery.Attempt{}, e
+		}
 		return r, recovery.Attempt{}, recovery.ErrDispatchDeferred
 	}
 	if (r.Deadline > 0 && now >= r.Deadline) || r.Attempts >= r.MaxAttempts && r.LastAttempt != "" {
@@ -347,6 +381,8 @@ func (s *Store) ScheduleRecovery(sid, rid string, generation uint64, epoch strin
 	if o.Acceptance == recovery.Accepted && (a.Acceptance != recovery.Accepted || a.Turn != o.Turn || a.Thread != o.Thread) {
 		return r, false, recovery.ErrGuard
 	}
+	r.ClockUnsafe = r.ClockUnsafe || now < r.ClockLast
+	r.ClockLast = max(now, r.ClockLast)
 	kind, reason := recovery.Recoverable(o)
 	a.State = "terminal"
 	a.Failure = o.Failure
@@ -379,7 +415,9 @@ func (s *Store) ScheduleRecovery(sid, rid string, generation uint64, epoch strin
 	if o.Canonical.ProgressHash != "" {
 		r.ProgressHash = o.Canonical.ProgressHash
 	}
-	if kind == "" {
+	if r.ClockUnsafe {
+		r.State, r.Reason, r.NextAt = "paused_uncertain", "clock_provenance_unavailable", 0
+	} else if kind == "" {
 		r.State = "paused_uncertain"
 		if reason == "waiting_user" {
 			r.State = "waiting_user"
@@ -825,6 +863,8 @@ func (s *Store) ObserveRecoveryFailure(sid, rid string, o recovery.AutomaticOutc
 	if !ok || r.FirstFailureAt != 0 || r.State == "cancelled" || r.State == "disabled" {
 		return nil
 	}
+	r.ClockUnsafe = r.ClockUnsafe || now < r.ClockLast
+	r.ClockLast = max(now, r.ClockLast)
 	r.FirstFailureAt = now
 	r.Deadline = now + 1800000
 	if r.Deadline > r.LeaseUntil {
@@ -850,4 +890,31 @@ func (s *Store) RecoveryWaitingCancellable(sid, rid string) (bool, error) {
 		return false, e
 	}
 	return a.Acceptance == recovery.Rejected || a.Acceptance == recovery.Accepted && a.Terminal, nil
+}
+
+// PauseRecoveryClock only retires NEW dispatch authority. Existing accepted or
+// unknown native ownership and its scope lease remain untouched.
+func (s *Store) PauseRecoveryClock(sid, rid string) error {
+	tx, e := s.db.Begin()
+	if e != nil {
+		return e
+	}
+	defer tx.Rollback()
+	r, ok, e := recoveryLookup(tx, sid, rid)
+	if e != nil {
+		return e
+	}
+	if !ok {
+		return recovery.ErrGuard
+	}
+	r.ClockUnsafe = true
+	if r.State == "ready" || r.State == "retry_wait" {
+		r.State = "paused_uncertain"
+		r.Reason = "clock_provenance_unavailable"
+		r.NextAt = 0
+	}
+	if e = saveRecovery(tx, &r); e != nil {
+		return e
+	}
+	return tx.Commit()
 }

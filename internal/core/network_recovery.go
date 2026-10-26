@@ -49,6 +49,7 @@ type networkRecovery struct {
 	cwd           string
 	payload       queuedPayload
 	fileLeases    []recovery.FileLease
+	clock         recovery.ClockAnchor
 }
 
 func (h *Hub) prepareNetworkRecovery(s *session.Session, e messagequeue.Entry, p queuedPayload) (recovery.AutomaticController, error) {
@@ -81,8 +82,25 @@ func (h *Hub) prepareNetworkRecovery(s *session.Session, e messagequeue.Entry, p
 			source.CredentialGeneration = binding.Generation
 		}
 	}
-	n := &networkRecovery{hub: h, session: s, source: source, generation: 1, epoch: h.networkRecoveryEpoch, owner: p.OwnerDevice, configuration: cfg, cwd: s.Cwd(), payload: p}
+	clock, clockErr := h.sampleNetworkClock()
+	if (clockErr != nil || !clock.Valid()) && !found {
+		return nil, nil
+	} // original single send, no unsafe wall fallback
+	n := &networkRecovery{hub: h, session: s, source: source, generation: 1, epoch: h.networkRecoveryEpoch, owner: p.OwnerDevice, configuration: cfg, cwd: s.Cwd(), payload: p, clock: clock}
 	if found {
+		n.clock = existing.Clock
+		if clockErr != nil || existing.ClockUnsafe || !existing.Clock.Valid() {
+			if err = h.messageQueue.PauseRecoveryClock(s.ID, e.RequestID); err != nil {
+				return nil, err
+			}
+			return nil, recovery.ErrClock
+		}
+		if _, err = existing.Clock.Time(clock); err != nil {
+			if er := h.messageQueue.PauseRecoveryClock(s.ID, e.RequestID); er != nil {
+				return nil, er
+			}
+			return nil, err
+		}
 		source.Provider = existing.Source.Provider
 		source.Scope = existing.Source.Scope
 		n.source = source
@@ -106,7 +124,7 @@ func (h *Hub) prepareNetworkRecovery(s *session.Session, e messagequeue.Entry, p
 				n.fileLeases = append(n.fileLeases, lease)
 			}
 		}
-		if _, err = h.messageQueue.BeginRecovery(source, n.epoch, n.now().UnixMilli(), n.fileLeases...); err != nil {
+		if _, err = h.messageQueue.BeginRecoveryClock(source, n.epoch, clock, n.fileLeases...); err != nil {
 			if errors.Is(err, messagequeue.ErrRecoveryInputPressure) {
 				return nil, nil
 			}
@@ -147,7 +165,14 @@ func (n *networkRecovery) guardSources(current, persisted recovery.AutomaticSour
 	if e != nil {
 		return e
 	}
-	if r.Generation != n.generation || r.OwnerEpoch != n.epoch || r.Source != persisted || r.State == "cancelled" || r.State == "disabled" || r.LeaseUntil <= n.now().UnixMilli() {
+	now, clockErr := n.clockTime()
+	if clockErr != nil || r.ClockUnsafe || now.UnixMilli() < r.ClockLast {
+		if e = n.hub.messageQueue.PauseRecoveryClock(n.source.Session, n.source.Request); e != nil {
+			return e
+		}
+		return recovery.ErrClock
+	}
+	if r.Generation != n.generation || r.OwnerEpoch != n.epoch || r.Source != persisted || r.State == "cancelled" || r.State == "disabled" || r.LeaseUntil <= now.UnixMilli() {
 		return recovery.ErrGuard
 	}
 	if e = n.hub.messageQueue.RecoveryNoNewInput(current.Session, current.Request); e != nil {
@@ -205,7 +230,11 @@ func (n *networkRecovery) BeforeDispatch(ctx context.Context, inputHash string, 
 	if e != nil {
 		return recovery.AutomaticNext{}, e
 	}
-	_, a, e := h.messageQueue.ClaimRecovery(n.source.Session, n.source.Request, n.generation, n.epoch, transport, inputHash, n.now().UnixMilli())
+	now, e := n.clockTime()
+	if e != nil {
+		return recovery.AutomaticNext{}, e
+	}
+	_, a, e := h.messageQueue.ClaimRecovery(n.source.Session, n.source.Request, n.generation, n.epoch, transport, inputHash, now.UnixMilli())
 	if errors.Is(e, recovery.ErrDispatchDeferred) || errors.Is(e, recovery.ErrDispatchPaused) {
 		h.updateRuntime(n.source.Session, "queued", n.source.Request, n.session.QueueLen(), "", "")
 		h.updateRuntimeProgress(n.source.Session, n.source.Request, "queued", "模型恢復正在等待共用容量；尚未重送。")
@@ -217,19 +246,27 @@ func (n *networkRecovery) BeforeDispatch(ctx context.Context, inputHash string, 
 	return recovery.AutomaticNext{Attempt: a, Continuation: before.Kind == "continue", ParentTurn: before.ParentTurn}, nil
 }
 func (n *networkRecovery) Accepted(attempt, thread, turn string) error {
-	return n.hub.messageQueue.RecoveryAccepted(n.source.Session, n.source.Request, attempt, thread, turn, n.generation, n.epoch, n.now().UnixMilli())
+	now, e := n.clockTime()
+	if e != nil {
+		now = time.Now()
+	} // receipt of an already accepted native turn must survive
+	return n.hub.messageQueue.RecoveryAccepted(n.source.Session, n.source.Request, attempt, thread, turn, n.generation, n.epoch, now.UnixMilli())
 }
 func (n *networkRecovery) Failed(o recovery.AutomaticOutcome) (bool, error) {
 	if e := n.Guard(); e != nil {
 		return false, e
 	}
-	r, retry, e := n.hub.messageQueue.ScheduleRecovery(n.source.Session, n.source.Request, n.generation, n.epoch, o, n.now().UnixMilli(), recoveryJitter())
+	now, e := n.clockTime()
+	if e != nil {
+		return false, e
+	}
+	r, retry, e := n.hub.messageQueue.ScheduleRecovery(n.source.Session, n.source.Request, n.generation, n.epoch, o, now.UnixMilli(), recoveryJitter())
 	if e != nil {
 		return false, e
 	}
 	message := recoveryUserMessage(recoveryPublic(r))
 	if retry {
-		message = fmt.Sprintf("模型連線／容量暫時失敗，%d 秒後自動續跑 · 第 %d/%d 次", max(0, (r.NextAt-n.now().UnixMilli()+999)/1000), r.Attempts+1, r.MaxAttempts)
+		message = fmt.Sprintf("模型連線／容量暫時失敗，%d 秒後自動續跑 · 第 %d/%d 次", max(0, (r.NextAt-now.UnixMilli()+999)/1000), r.Attempts+1, r.MaxAttempts)
 	}
 	n.hub.updateRuntime(n.source.Session, "queued", n.source.Request, n.session.QueueLen(), "", "")
 	n.hub.Emit(backend.NewTurnProgress(n.source.Session, n.source.Request, "queued", message))
@@ -242,6 +279,9 @@ func (n *networkRecovery) NativeFinished(status string) error {
 func (n *networkRecovery) Wait(ctx context.Context) error {
 	for {
 		if e := n.Guard(); e != nil {
+			if errors.Is(e, recovery.ErrClock) {
+				return e
+			}
 			reason := "source_changed"
 			if !n.hub.networkRecoveryEnabled(n.source.Session) {
 				reason = "disabled"
@@ -258,7 +298,11 @@ func (n *networkRecovery) Wait(ctx context.Context) error {
 		if r.State != "retry_wait" {
 			return recovery.ErrGuard
 		}
-		left := time.UnixMilli(r.NextAt).Sub(n.now())
+		now, e := n.clockTime()
+		if e != nil {
+			return e
+		}
+		left := time.UnixMilli(r.NextAt).Sub(now)
 		if left <= 0 {
 			return nil
 		}
@@ -398,11 +442,27 @@ func (n *networkRecovery) BindThread(thread string) error {
 	return n.Guard()
 }
 
-func (n *networkRecovery) now() time.Time {
-	if n.hub.networkRecoveryNow != nil {
-		return n.hub.networkRecoveryNow()
+func (h *Hub) sampleNetworkClock() (recovery.ClockAnchor, error) {
+	if h.networkRecoveryClock != nil {
+		return h.networkRecoveryClock()
 	}
-	return time.Now()
+	sample, e := recovery.SystemClock()
+	// Private deterministic test hook, never configurable by a client/operator.
+	if h.networkRecoveryNow != nil {
+		sample.WallMS = h.networkRecoveryNow().UnixMilli()
+	}
+	return sample, e
+}
+func (n *networkRecovery) clockTime() (time.Time, error) {
+	sample, e := n.hub.sampleNetworkClock()
+	if e != nil {
+		return time.Time{}, recovery.ErrClock
+	}
+	ms, e := n.clock.Time(sample)
+	if e != nil {
+		return time.Time{}, e
+	}
+	return time.UnixMilli(ms), nil
 }
 
 func (n *networkRecovery) BindProvider(provider string) error {
@@ -451,12 +511,18 @@ func (h *Hub) networkRecoveryReadiness() map[string]any {
 	} else if enabled && count > 0 {
 		mode = "exact_canary_allowlist"
 	}
+	clock, clockErr := h.sampleNetworkClock()
+	clockReady := clockErr == nil && clock.Valid()
 	ready := h.messageQueue != nil && h.messageQueue.RecoveryStorageReady() == nil
-	return map[string]any{"schema_version": 1, "enabled": enabled && !disabled && ready && (all || count > 0), "configured_enabled": enabled, "all_ordinary": all, "allowlist_count": count, "mode": mode, "disabled": disabled, "durable_store_ready": ready, "max_attempts": 5, "deadline_minutes": 30, "old_failed_replay": false, "objective_verification": "not_inferred_from_native_completed", "accepted_tool_coverage": "opaque_or_unverifiable_tools_pause"}
+	return map[string]any{"schema_version": 1, "enabled": enabled && !disabled && ready && clockReady && (all || count > 0), "configured_enabled": enabled, "all_ordinary": all, "allowlist_count": count, "mode": mode, "disabled": disabled, "durable_store_ready": ready, "clock_ready": clockReady, "clock_kind": clock.Kind, "max_attempts": 5, "deadline_minutes": 30, "old_failed_replay": false, "objective_verification": "not_inferred_from_native_completed", "accepted_tool_coverage": "opaque_or_unverifiable_tools_pause"}
 }
 
 func (n *networkRecovery) ObserveFailure(o recovery.AutomaticOutcome) error {
-	return n.hub.messageQueue.ObserveRecoveryFailure(n.source.Session, n.source.Request, o, n.now().UnixMilli())
+	now, e := n.clockTime()
+	if e != nil {
+		return e
+	}
+	return n.hub.messageQueue.ObserveRecoveryFailure(n.source.Session, n.source.Request, o, now.UnixMilli())
 }
 
 func (n *networkRecovery) VerifyInputs() error {

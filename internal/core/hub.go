@@ -42,6 +42,7 @@ import (
 	"everything-go/internal/notificationreply"
 	"everything-go/internal/partners"
 	"everything-go/internal/protocol"
+	"everything-go/internal/recovery"
 	"everything-go/internal/relay"
 	"everything-go/internal/runtime"
 	"everything-go/internal/runtimejournal"
@@ -85,6 +86,7 @@ type Config struct {
 type Hub struct {
 	networkRecoveryBarriers sync.Map
 	networkRecoveryNow      func() time.Time
+	networkRecoveryClock    func() (recovery.ClockAnchor, error)
 	networkRecoveryEpoch    string
 	networkRecoveryStarted  int64
 	workspace               *workspace.Store

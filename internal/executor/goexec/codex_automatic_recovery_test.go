@@ -730,3 +730,41 @@ func TestAutomaticFinalWriterRechecksLocalAccountAndOwnedTupleAfterCoreReads(t *
 		})
 	}
 }
+
+func TestAutomaticTerminalFailureDeadlineIncludesCanonicalReconciliationTime(t *testing.T) {
+	_, a, w, sink, run := automaticExecutionFixture(t)
+	initial := a.now
+	starts := 0
+	advanced := false
+	user := map[string]any{"id": "user", "type": "userMessage"}
+	w.call = func(method string, _ json.RawMessage) (json.RawMessage, error) {
+		switch method {
+		case "account/read":
+			return autoResult(map[string]any{"account": map[string]string{"type": "chatgpt"}}), nil
+		case "account/rateLimits/read":
+			return autoResult(map[string]any{"accountId": "original"}), nil
+		case "thread/read":
+			return autoResult(map[string]any{"thread": map[string]any{"id": "root", "status": map[string]string{"type": "idle"}}}), nil
+		case "turn/start":
+			starts++
+			if starts == 1 {
+				return autoResult(map[string]any{"turn": map[string]any{"id": "failed", "status": "failed", "error": map[string]any{"message": "capacity", "codexErrorInfo": "server_overloaded"}}}), nil
+			}
+			return autoResult(map[string]any{"turn": map[string]string{"id": "late-continuation", "status": "completed"}}), nil
+		case "thread/turns/list":
+			if !advanced {
+				advanced = true
+				a.now = initial + 1800001
+			}
+			return autoResult(map[string]any{"data": []any{map[string]any{"id": "failed", "status": "failed", "itemsView": "full", "items": []any{user}}}, "nextCursor": nil}), nil
+		case "thread/items/list":
+			return autoResult(map[string]any{"data": []any{map[string]any{"turnId": "failed", "item": user}}, "nextCursor": nil}), nil
+		}
+		return autoResult(map[string]any{}), nil
+	}
+	run()
+	r, _ := a.Resume()
+	if starts != 1 || r.FirstFailureAt != initial || sink.count(func(v any) bool { _, ok := v.(protocol.Done); return ok }) != 0 {
+		t.Fatalf("canonical reconciliation excluded from original30min budget: starts=%d firstFailure=%d expected=%d state=%s", starts, r.FirstFailureAt, initial, r.State)
+	}
+}

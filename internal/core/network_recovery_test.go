@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -13,6 +14,124 @@ import (
 	"everything-go/internal/recovery"
 	"everything-go/internal/session"
 )
+
+func TestNetworkRecoveryClockFaultPausesOnlyNewDispatchAndPreservesNative(t *testing.T) {
+	for _, kind := range []string{"waiting-boot", "waiting-unavailable", "accepted-boot"} {
+		t.Run(kind, func(t *testing.T) {
+			t.Setenv("EVERYTHING_GO_CODEX_NETWORK_AUTOCONTINUE", "true")
+			t.Setenv("EVERYTHING_GO_CODEX_NETWORK_AUTOCONTINUE_ALL_ORDINARY", "true")
+			h, fe := newTestHub(t)
+			h.cfg.DataDir = t.TempDir()
+			h.networkRecoveryStarted = 0
+			clock := recovery.ClockAnchor{Boot: "boot", Kind: "fake-continuous", WallMS: time.Now().UnixMilli(), ElapsedMS: 1000}
+			unavailable := false
+			h.networkRecoveryClock = func() (recovery.ClockAnchor, error) {
+				if unavailable {
+					return recovery.ClockAnchor{}, recovery.ErrClock
+				}
+				return clock, nil
+			}
+			c := sharedReadClient(t, h, "clock-phone")
+			s := h.registry.Create("s1", "ordinary", t.TempDir(), backend.Codex, "gpt-6.1-sol", "read-only", "thread")
+			done := make(chan error, 1)
+			fe.onSendContext = func(ctx context.Context, _ *session.Session, _, _ string) {
+				a := recovery.Automatic(ctx)
+				if a == nil {
+					done <- recovery.ErrGuard
+					return
+				}
+				next, e := a.BeforeDispatch(ctx, "input", 1)
+				if e != nil {
+					done <- e
+					return
+				}
+				if kind == "accepted-boot" {
+					e = a.Accepted(next.Attempt.ID, "thread", "original-active")
+				} else {
+					_, e = a.Failed(recovery.AutomaticOutcome{Acceptance: recovery.Rejected, IngressRejected: true, Failure: recovery.Failure{Category: recovery.ModelCapacity, Source: "codex_ingress"}})
+				}
+				if e != nil {
+					done <- e
+					return
+				}
+				before, e := a.Resume()
+				if e != nil {
+					done <- e
+					return
+				}
+				if kind == "waiting-unavailable" {
+					unavailable = true
+				} else {
+					clock.Boot = "new-boot"
+				}
+				e = a.Guard()
+				if !errors.Is(e, recovery.ErrClock) {
+					done <- errors.New("clock fault permitted dispatch")
+					return
+				}
+				after, e := a.Resume()
+				if e != nil {
+					done <- e
+					return
+				}
+				if !after.ClockUnsafe || after.LastAttempt != before.LastAttempt || after.Attempts != before.Attempts || after.Generation != before.Generation {
+					done <- errors.New("clock fault changed original attempt/generation")
+					return
+				}
+				if kind == "accepted-boot" {
+					if after.State != "accepted" || after.NativeStatus != "" {
+						done <- errors.New("clock fault finished accepted native")
+						return
+					}
+				} else if after.State != "paused_uncertain" {
+					done <- errors.New("waiting clock fault not paused")
+					return
+				}
+				done <- nil
+			}
+			enqueueTestMessage(t, h, c, "r_clock_fault")
+			select {
+			case e := <-done:
+				if e != nil {
+					t.Fatal(e)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("clock observation timed out")
+			}
+			s.EndTurn()
+		})
+	}
+}
+
+func TestNetworkRecoveryUnavailableClockUsesOriginalSingleSendAndReportsNotReady(t *testing.T) {
+	t.Setenv("EVERYTHING_GO_CODEX_NETWORK_AUTOCONTINUE", "true")
+	t.Setenv("EVERYTHING_GO_CODEX_NETWORK_AUTOCONTINUE_ALL_ORDINARY", "true")
+	h, fe := newTestHub(t)
+	h.cfg.DataDir = t.TempDir()
+	h.networkRecoveryStarted = 0
+	h.networkRecoveryClock = func() (recovery.ClockAnchor, error) { return recovery.ClockAnchor{}, recovery.ErrClock }
+	c := sharedReadClient(t, h, "clock-phone")
+	s := h.registry.Create("s1", "ordinary", t.TempDir(), backend.Codex, "gpt-6.1-sol", "read-only", "thread")
+	done := make(chan bool, 1)
+	fe.onSendContext = func(ctx context.Context, _ *session.Session, _, _ string) { done <- recovery.Automatic(ctx) == nil }
+	enqueueTestMessage(t, h, c, "r_clock_unavailable")
+	select {
+	case original := <-done:
+		if !original {
+			t.Fatal("unqualified recovery attached")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("ordinary send blocked")
+	}
+	r := h.networkRecoveryReadiness()
+	if r["clock_ready"] != false || r["enabled"] != false || r["durable_store_ready"] != true {
+		t.Fatal(r)
+	}
+	if _, found, e := h.messageQueue.Recovery("s1", "r_clock_unavailable"); e != nil || found {
+		t.Fatal("unqualified clock created recovery run", e)
+	}
+	s.EndTurn()
+}
 
 func TestNetworkRecoveryOriginalCoreActorAndLegacySnapshots(t *testing.T) {
 	t.Setenv("EVERYTHING_GO_CODEX_NETWORK_AUTOCONTINUE", "true")

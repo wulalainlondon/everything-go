@@ -194,6 +194,11 @@ func (c *Codex) automaticTryAgain(s *session.Session, st *codexState, detail *co
 		return false, nil
 	}
 	o := recovery.AutomaticOutcome{Failure: detail.Failure, Acceptance: detail.Acceptance, IngressRejected: detail.IngressRejected, Terminal: detail.Terminal, NativeWillRetry: detail.NativeWillRetry, Thread: s.ResumeID(), Turn: detail.TurnID}
+	// The first structured failure is known before potentially slow canonical
+	// pagination. Its entire reconciliation wait belongs to the same budget.
+	if e := a.ObserveFailure(o); e != nil {
+		return false, e
+	}
 	if o.Acceptance == recovery.Accepted && o.Terminal {
 		proof, e := c.automaticCanonical(s, st, o.Turn)
 		if e == nil {
