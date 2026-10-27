@@ -64,26 +64,25 @@ func (h *Hub) unifiedDelegationReadTarget(ctx context.Context, d delegation.Reco
 	if scope, e := h.TaskWorkerScope(child); e != nil || scope == nil {
 		return target, nil, unifiedError("scope_changed")
 	}
+	native, accepted, e := h.messageQueue.ExactNativeAcceptanceContext(ctx, d.ChildSessionID, d.ChildRequestID)
+	if e != nil {
+		return target, nil, e
+	}
+	if !accepted || native.ThreadID != pin || !h.nativeCorrelationKnown(child, pin, d.ChildRequestID, native.TurnID) {
+		return target, nil, unifiedError("scope_changed")
+	}
 	proof := captured
 	if proof == nil {
-		native, accepted, e := h.messageQueue.ExactNativeAcceptance(d.ChildSessionID, d.ChildRequestID)
-		if e != nil {
-			return target, nil, e
-		}
-		if !accepted {
-			return target, nil, unifiedError("scope_changed")
-		}
 		proof = &unifiedDelegationInitialization{Native: native}
-	}
-	if proof.Native.ThreadID != pin || !h.nativeCorrelationKnown(child, pin, d.ChildRequestID, proof.Native.TurnID) {
+	} else if proof.Native != native {
 		return target, nil, unifiedError("scope_changed")
 	}
 	target.ThreadID = pin
 	if captured == nil {
 		// The final transport disclosure runs outside any original MQ writer
 		// transaction. Re-reading its canonical acceptance here also detects a
-		// conflict after an await, without recursively borrowing that writer's
-		// single SQL connection from the in-transaction relation fence.
+		// conflict after an await. In-transaction relation fences use that
+		// same writer transaction for this canonical authority check.
 		registerUnifiedDisclosure(ctx, func(ctx context.Context) error {
 			native, accepted, e := h.messageQueue.ExactNativeAcceptance(d.ChildSessionID, d.ChildRequestID)
 			if e != nil {

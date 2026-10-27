@@ -215,7 +215,7 @@ func (s *Store) Enqueue(e Entry) (Entry, bool, error) {
 		if e.Unified.Revalidate == nil {
 			return Entry{}, false, taskapi.Failure("caller_unbound", "known_none", "refresh_identity")
 		}
-		if err = e.Unified.Revalidate(context.Background()); err != nil {
+		if err = e.Unified.Revalidate(s.nativeAcceptanceContext(context.Background(), tx)); err != nil {
 			return Entry{}, false, err
 		}
 		_, found, err := taskapi.OriginalOperation(context.Background(), tx, *e.Unified)
@@ -309,7 +309,7 @@ func (s *Store) Enqueue(e Entry) (Entry, bool, error) {
 		if _, err = tx.Exec(`INSERT INTO unified_reply_sources VALUES(?,?,?,?,?)`, e.SessionID, e.RequestID, e.Unified.Scope, e.Unified.Generation, e.UnifiedData); err != nil {
 			return Entry{}, false, err
 		}
-		if err = e.Unified.Revalidate(context.Background()); err != nil {
+		if err = e.Unified.Revalidate(s.nativeAcceptanceContext(context.Background(), tx)); err != nil {
 			return Entry{}, false, err
 		}
 		if _, err = taskapi.SaveOperation(context.Background(), tx, *e.Unified, map[string]any{"metadata_recorded": true, "admission": "accepted", "native_start": "unknown", "session_id": e.SessionID, "request_id": e.RequestID, "reply": json.RawMessage(e.UnifiedData)}); err != nil {

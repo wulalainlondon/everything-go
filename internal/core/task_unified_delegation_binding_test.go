@@ -285,3 +285,38 @@ func TestTaskUnifiedFreshDelegationInitializationDisclosureRejectsABA(t *testing
 		})
 	}
 }
+
+// Capture original native authority, then let a conflict commit before the MQ
+// writer. Final transport refusal cannot undo a grant/reply already persisted.
+func TestTaskUnifiedFreshDelegationConflictBeforeWriterHasNoEffect(t *testing.T) {
+	for _, op := range []string{"reply", "document_grant"} {
+		t.Run(op, func(t *testing.T) {
+			h, parent, _, d, _ := initializedUnifiedDelegation(t)
+			c := taskapi.VerifiedContext{Authority: h.cfg.InstanceID, StableScopeID: "device:phone", BindingKind: "paired_human"}
+			r, e := h.resolveUnified(t.Context(), c, parent.ID, unifiedLocator{Kind: "delegation", Authority: h.cfg.InstanceID, NativeID: d.ID})
+			if e != nil {
+				t.Fatal(e)
+			}
+			if e = h.messageQueue.RecordNativeAcceptance(d.ChildSessionID, d.ChildRequestID, r.Target.ThreadID, "late-conflicting-turn"); e != messagequeue.ErrNativeConflict {
+				t.Fatal(e)
+			}
+			m := taskapi.QueueMutation{Scope: "synthetic-initialized-writer", Generation: 1, Intent: "conflict-before-writer", Hash: "original-hash", Operation: op, Revalidate: r.disclosureCurrent}
+			if op == "reply" {
+				_, e = h.messageQueue.UnifiedReply(t.Context(), m, []byte(`{"synthetic":true}`))
+			} else {
+				g := messagequeue.UnifiedDocumentGrant{ID: "synthetic-denied-grant", Document: "synthetic-document", OwnerScope: m.Scope, OwnerGeneration: m.Generation, Consumer: []byte(`{}`), Purpose: "synthetic", Expires: time.Now().Add(time.Minute).UnixMilli()}
+				_, e = h.messageQueue.UnifiedDocumentMutation(t.Context(), m, nil, &g, "", map[string]any{"granted": true})
+				if _, foundErr := h.messageQueue.UnifiedGrant(t.Context(), g.ID); foundErr != sql.ErrNoRows {
+					t.Fatal("refused writer retained grant", foundErr)
+				}
+			}
+			if e == nil {
+				t.Fatal("conflict committed before writer but effect persisted")
+			}
+			_, found, lookupErr := h.messageQueue.UnifiedOperation(t.Context(), m)
+			if lookupErr != nil || found {
+				t.Fatal("refused writer retained mutation", found, lookupErr)
+			}
+		})
+	}
+}

@@ -48,7 +48,7 @@ func (s *Store) UnifiedDocumentMutation(ctx context.Context, m taskapi.QueueMuta
 		if m.Revalidate == nil {
 			return taskapi.Failure("caller_unbound", "known_none", "refresh_identity")
 		}
-		if e := m.Revalidate(ctx); e != nil {
+		if e := m.Revalidate(s.nativeAcceptanceContext(ctx, tx)); e != nil {
 			return e
 		}
 		old, ok, e := taskapi.OriginalOperation(ctx, tx, m)
@@ -86,7 +86,7 @@ func (s *Store) UnifiedDocumentMutation(ctx context.Context, m taskapi.QueueMuta
 				return taskapi.Failure("not_found", "known_none", "lookup_original")
 			}
 		}
-		if e = m.Revalidate(ctx); e != nil {
+		if e = m.Revalidate(s.nativeAcceptanceContext(ctx, tx)); e != nil {
 			return e
 		}
 		r, e = taskapi.SaveOperation(ctx, tx, m, data)
@@ -100,7 +100,7 @@ func (s *Store) UnifiedReply(ctx context.Context, m taskapi.QueueMutation, body 
 		if m.Revalidate == nil {
 			return taskapi.Failure("caller_unbound", "known_none", "refresh_identity")
 		}
-		if e := m.Revalidate(ctx); e != nil {
+		if e := m.Revalidate(s.nativeAcceptanceContext(ctx, tx)); e != nil {
 			return e
 		}
 		old, ok, e := taskapi.OriginalOperation(ctx, tx, m)
@@ -114,7 +114,7 @@ func (s *Store) UnifiedReply(ctx context.Context, m taskapi.QueueMutation, body 
 		if _, e = tx.ExecContext(ctx, "INSERT INTO unified_replies VALUES(?,?,?,?,?)", m.Scope, m.Generation, m.Intent, m.Hash, body); e != nil {
 			return e
 		}
-		if e = m.Revalidate(ctx); e != nil {
+		if e = m.Revalidate(s.nativeAcceptanceContext(ctx, tx)); e != nil {
 			return e
 		}
 		r, e = taskapi.SaveOperation(ctx, tx, m, map[string]any{"metadata_recorded": true, "native_start": "not_requested", "reply": json.RawMessage(body)})

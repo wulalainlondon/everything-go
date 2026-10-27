@@ -107,7 +107,7 @@ func (s *Store) UnifiedMutate(ctx context.Context, session string, eligible map[
 		if m.Revalidate == nil {
 			return taskapi.Failure("caller_unbound", "known_none", "refresh_identity")
 		}
-		if e := m.Revalidate(ctx); e != nil {
+		if e := m.Revalidate(s.nativeAcceptanceContext(ctx, tx)); e != nil {
 			return e
 		}
 		prior, found, e := taskapi.OriginalOperation(ctx, tx, m)
@@ -195,7 +195,7 @@ func (s *Store) UnifiedMutate(ctx context.Context, session string, eligible map[
 		default:
 			return taskapi.Failure("unsupported", "known_none", "read_capabilities")
 		}
-		if e = m.Revalidate(ctx); e != nil {
+		if e = m.Revalidate(s.nativeAcceptanceContext(ctx, tx)); e != nil {
 			return e
 		}
 		for _, row := range v.Items {

@@ -59,21 +59,42 @@ func (s *Store) RecordNativeAcceptance(session, request, thread, turn string) er
 
 // The one-statement view includes native and provider conflicts even if the
 // acceptance tuple is absent. Absence, unavailable and conflict never alias.
+// Native authority checks inside an original MQ writer must use its SQL
+// transaction. This prevents borrowing the single connection recursively and
+// ensures a conflict committed before that writer is rejected before effects.
+type nativeAcceptanceTransactionKey struct{}
+type nativeAcceptanceTransaction struct {
+	store *Store
+	tx    *sql.Tx
+}
+
+func (s *Store) nativeAcceptanceContext(ctx context.Context, tx *sql.Tx) context.Context {
+	return context.WithValue(ctx, nativeAcceptanceTransactionKey{}, nativeAcceptanceTransaction{s, tx})
+}
+func (s *Store) ExactNativeAcceptanceContext(ctx context.Context, session, request string) (NativeReceipt, bool, error) {
+	if bound, ok := ctx.Value(nativeAcceptanceTransactionKey{}).(nativeAcceptanceTransaction); ok && bound.store == s && bound.tx != nil {
+		return exactNativeAcceptance(bound.tx, session, request)
+	}
+	return exactNativeAcceptance(s.db, session, request)
+}
 func (s *Store) ExactNativeAcceptance(session, request string) (NativeReceipt, bool, error) {
+	return exactNativeAcceptance(s.db, session, request)
+}
+func exactNativeAcceptance(q interface{ QueryRow(string, ...any) *sql.Row }, session, request string) (NativeReceipt, bool, error) {
 	var thread, turn sql.NullString
 	var found, conflict bool
-	err := s.db.QueryRow(`SELECT (SELECT thread_id FROM task_native_acceptance WHERE session_id=?1 AND request_id=?2),(SELECT turn_id FROM task_native_acceptance WHERE session_id=?1 AND request_id=?2),EXISTS(SELECT 1 FROM task_native_acceptance WHERE session_id=?1 AND request_id=?2),EXISTS(SELECT 1 FROM task_native_conflicts WHERE session_id=?1 AND request_id=?2) OR EXISTS(SELECT 1 FROM task_provider_conflicts WHERE session_id=?1 AND request_id=?2)`, session, request).Scan(&thread, &turn, &found, &conflict)
+	err := q.QueryRow(`SELECT (SELECT thread_id FROM task_native_acceptance WHERE session_id=?1 AND request_id=?2),(SELECT turn_id FROM task_native_acceptance WHERE session_id=?1 AND request_id=?2),EXISTS(SELECT 1 FROM task_native_acceptance WHERE session_id=?1 AND request_id=?2),EXISTS(SELECT 1 FROM task_native_conflicts WHERE session_id=?1 AND request_id=?2) OR EXISTS(SELECT 1 FROM task_provider_conflicts WHERE session_id=?1 AND request_id=?2)`, session, request).Scan(&thread, &turn, &found, &conflict)
 	if err != nil {
 		return NativeReceipt{}, false, err
 	}
 	if conflict {
 		return NativeReceipt{}, false, ErrNativeConflict
 	}
-	if run, ok, e := s.Recovery(session, request); e != nil {
+	if run, ok, e := recoveryLookup(q, session, request); e != nil {
 		return NativeReceipt{}, false, e
 	} else if ok && run.LastAttempt != "" {
 		var raw []byte
-		e = s.db.QueryRow(`SELECT payload FROM recovery_attempts WHERE session_id=? AND request_id=? AND attempt_id=?`, session, request, run.LastAttempt).Scan(&raw)
+		e = q.QueryRow(`SELECT payload FROM recovery_attempts WHERE session_id=? AND request_id=? AND attempt_id=?`, session, request, run.LastAttempt).Scan(&raw)
 		if e != nil {
 			return NativeReceipt{}, false, e
 		}
