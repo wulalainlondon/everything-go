@@ -35,20 +35,21 @@ type Command struct {
 	SessionID string
 	RequestID string
 
-	DeviceID        string
-	DeviceName      string
-	ClientSurface   string
-	AuthToken       string
-	ReplayAck       bool
-	SessionReadSync bool
-	ProtocolVersion int
-	ClientInfo      *protocol.ClientInfo
-	ConnectionProbe bool
-	BatchID         string
-	Revision        uint64
-	Read            bool
-	ReadEpoch       string
-	ReadToken       string
+	DeviceID          string
+	DeviceName        string
+	ClientSurface     string
+	AuthToken         string
+	ReplayAck         bool
+	SessionReadSync   bool
+	ProtocolVersion   int
+	TaskAPISchemaHash string
+	ClientInfo        *protocol.ClientInfo
+	ConnectionProbe   bool
+	BatchID           string
+	Revision          uint64
+	Read              bool
+	ReadEpoch         string
+	ReadToken         string
 
 	Name                                          string
 	Cwd                                           string
@@ -223,20 +224,21 @@ func (AppV1) ParseCommand(in protocol.Inbound) Command {
 		SessionID:       in.SessionID,
 		RequestID:       in.RequestID,
 
-		DeviceID:        in.DeviceID,
-		DeviceName:      in.DeviceName,
-		ClientSurface:   in.ClientSurface,
-		AuthToken:       in.AuthToken,
-		ReplayAck:       in.ReplayAck,
-		SessionReadSync: in.SessionReadSync,
-		ProtocolVersion: in.ProtocolVersion,
-		ClientInfo:      in.ClientInfo,
-		ConnectionProbe: in.ConnectionProbe,
-		BatchID:         in.BatchID,
-		Revision:        in.Revision,
-		Read:            in.Read,
-		ReadEpoch:       in.ReadEpoch,
-		ReadToken:       in.ReadToken,
+		DeviceID:          in.DeviceID,
+		DeviceName:        in.DeviceName,
+		ClientSurface:     in.ClientSurface,
+		AuthToken:         in.AuthToken,
+		ReplayAck:         in.ReplayAck,
+		SessionReadSync:   in.SessionReadSync,
+		ProtocolVersion:   in.ProtocolVersion,
+		TaskAPISchemaHash: in.TaskAPISchemaHash,
+		ClientInfo:        in.ClientInfo,
+		ConnectionProbe:   in.ConnectionProbe,
+		BatchID:           in.BatchID,
+		Revision:          in.Revision,
+		Read:              in.Read,
+		ReadEpoch:         in.ReadEpoch,
+		ReadToken:         in.ReadToken,
 
 		Name:               in.Name,
 		Cwd:                in.Cwd,

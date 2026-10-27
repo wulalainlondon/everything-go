@@ -77,9 +77,9 @@ func mediaIntakeFixture(t *testing.T, kind string) (*Hub, *session.Session, func
 			}
 		}
 	}
-	send(map[string]any{"type": "hello", "auth_token": "media-token", "device_id": "media-phone", "protocol_version": 3})
+	send(map[string]any{"type": "hello", "auth_token": "media-token", "device_id": "media-phone", "protocol_version": 3, "task_api_schema_hash": contract.MediaHash()})
 	receive("hello_ack")
-	c, e := contract.New()
+	c, e := contract.NewMedia()
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -363,5 +363,5 @@ func TestMediaOnlyIntakeReservedFirstEffectKeepsExactIDAndEmptyHash(t *testing.T
 	}
 }
 func taskapiMediaCaller(h *Hub) taskapi.VerifiedContext {
-	return taskapi.VerifiedContext{Authority: h.cfg.InstanceID, StableScopeID: "device:phone", BindingKind: "paired_human", Transport: "authenticated_ws", NamespaceGeneration: jarvisTokenGeneration("jarvis-token")}
+	return taskapi.VerifiedContext{Authority: h.cfg.InstanceID, StableScopeID: "device:phone", BindingKind: "paired_human", Transport: "authenticated_ws", NamespaceGeneration: jarvisTokenGeneration("jarvis-token"), TaskSchemaHash: contract.MediaHash()}
 }

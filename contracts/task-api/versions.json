@@ -2,8 +2,15 @@
   "contracts": [
     {
       "version": "1.0.0-rc.1",
-      "schema_sha256": "ca3bac5e7c66b75bd141379035a49d060ca4e16996c08b230094be9d7487c018",
-      "operations": "retained independent general TaskAPI"
+      "schema_sha256": "674aada21ce809c5bec8324b192163c4f3c4acf7f5b57f39042eacd9982d23fa",
+      "operations": "retained independent general TaskAPI",
+      "negotiated_schemas": [
+        {
+          "schema_sha256": "ca3bac5e7c66b75bd141379035a49d060ca4e16996c08b230094be9d7487c018",
+          "selector": "authenticated hello.task_api_schema_hash exact; per connection immutable",
+          "description": "Original operations with valid media-only intake; no selector retains byte-exact original schema"
+        }
+      ]
     },
     {
       "version": "1.0.0-rc.2",

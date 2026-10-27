@@ -7,7 +7,7 @@ import (
 )
 
 func TestMediaOnlyIntakeContractAllowsAttachmentAndRejectsEmptyInput(t *testing.T) {
-	c, e := New()
+	c, e := NewMedia()
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -70,5 +70,14 @@ func TestMediaOnlyIntakeContractAllowsAttachmentAndRejectsEmptyInput(t *testing.
 	}
 	if !checked {
 		t.Fatal("positive formal create fixture missing")
+	}
+}
+
+func TestMediaContractRetainsExactOriginalAndSelectedSchema(t *testing.T) {
+	if Hash() != "674aada21ce809c5bec8324b192163c4f3c4acf7f5b57f39042eacd9982d23fa" {
+		t.Fatal("original default schema changed")
+	}
+	if MediaHash() != "ca3bac5e7c66b75bd141379035a49d060ca4e16996c08b230094be9d7487c018" {
+		t.Fatal("selected media schema drifted")
 	}
 }

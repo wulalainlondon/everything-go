@@ -24,13 +24,21 @@ const MaxBytes = 256 * 1024
 //go:embed api-contract.schema.json
 var Schema []byte
 
+// MediaSchema is selected only by an explicit authenticated connection
+// negotiation; the original Schema remains byte-exact for existing clients.
+//
+//go:embed media-intake.schema.json
+var MediaSchema []byte
+
 //go:embed golden.json
 var Golden []byte
 
 type Contract struct{ validators map[string]*jsonschema.Schema }
 
-func New() (*Contract, error) {
-	doc, err := Parse(Schema)
+func New() (*Contract, error)      { return newContract(Schema) }
+func NewMedia() (*Contract, error) { return newContract(MediaSchema) }
+func newContract(schema []byte) (*Contract, error) {
+	doc, err := Parse(schema)
 	if err != nil {
 		return nil, err
 	}
@@ -55,6 +63,7 @@ func New() (*Contract, error) {
 	return c, nil
 }
 func (c *Contract) Dialect() string { return "https://json-schema.org/draft/2020-12/schema" }
+func MediaHash() string             { sum := sha256.Sum256(MediaSchema); return hex.EncodeToString(sum[:]) }
 func Hash() string                  { sum := sha256.Sum256(Schema); return hex.EncodeToString(sum[:]) }
 func (c *Contract) Validate(raw []byte, definition string) error {
 	value, err := Parse(raw)

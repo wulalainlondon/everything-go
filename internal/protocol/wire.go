@@ -40,6 +40,7 @@ type Inbound struct {
 	ReplayAck            bool        `json:"replay_ack"`
 	SessionReadSync      bool        `json:"session_read_sync,omitempty"`
 	ProtocolVersion      int         `json:"protocol_version"`
+	TaskAPISchemaHash    string      `json:"task_api_schema_hash,omitempty"`
 	ClientInfo           *ClientInfo `json:"client_info,omitempty"`
 	ConnectionProbe      bool        `json:"connection_probe,omitempty"`
 	RequireOfflineDevice bool        `json:"require_offline_device,omitempty"`

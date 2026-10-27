@@ -133,13 +133,13 @@ func (v apiVerifier) Verify(context.Context, taskapi.Invocation) (taskapi.Verifi
 func (h *Hub) taskHuman(c *Client) (taskapi.BoundCaller, error) {
 	return taskapi.BindCaller(c.ctx, apiVerifier{func() (taskapi.VerifiedContext, error) {
 		device := h.pairedTaskDevice(c)
-		if device == "" || !c.live() {
+		if device == "" || !c.live() || c.taskSchemaRetired.Load() {
 			return taskapi.VerifiedContext{}, taskapi.Failure("caller_unbound", "known_none", "refresh_identity")
 		}
 		proof := c.readIdentity.Load()
 		digest := sha256.Sum256([]byte(proof.token))
 		generation := binary.BigEndian.Uint64(digest[:8]) & ((1 << 53) - 1)
-		return taskapi.VerifiedContext{Authority: h.cfg.InstanceID, StableScopeID: "device:" + device, NamespaceGeneration: generation, InvocationGeneration: c.clientID, Transport: "authenticated_ws", BindingKind: "paired_human"}, nil
+		return taskapi.VerifiedContext{Authority: h.cfg.InstanceID, StableScopeID: "device:" + device, NamespaceGeneration: generation, InvocationGeneration: c.clientID, Transport: "authenticated_ws", BindingKind: "paired_human", TaskSchemaHash: c.currentTaskSchema()}, nil
 	}}, taskapi.Invocation{})
 }
 func (h *Hub) TaskTools(s *session.Session) ([]map[string]any, error) {

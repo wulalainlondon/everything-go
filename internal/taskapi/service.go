@@ -13,9 +13,10 @@ import (
 )
 
 type Service struct {
-	contract *taskcontract.Contract
-	policy   Authorizer
-	gateway  Gateway
+	contract      *taskcontract.Contract
+	mediaContract *taskcontract.Contract
+	policy        Authorizer
+	gateway       Gateway
 }
 
 func NewService(policy Authorizer, gateway Gateway) (*Service, error) {
@@ -23,7 +24,11 @@ func NewService(policy Authorizer, gateway Gateway) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Service{c, policy, gateway}, nil
+	media, err := taskcontract.NewMedia()
+	if err != nil {
+		return nil, err
+	}
+	return &Service{contract: c, mediaContract: media, policy: policy, gateway: gateway}, nil
 }
 
 var operations = map[string]bool{"capabilities": true, "intake": true, "create_dispatch": true, "list": true, "get": true, "read_result": true, "append": true, "cancel": true, "snapshot": true, "events": true, "deliver_result": true, "read_input": true, "legacy_source": true}
@@ -60,13 +65,22 @@ func (s *Service) Execute(ctx context.Context, caller BoundCaller, raw []byte) R
 	if err != nil {
 		return fail(err)
 	}
+	validator := s.contract
+	switch binding.TaskSchemaHash {
+	case "", taskcontract.Hash():
+	case taskcontract.MediaHash():
+		validator = s.mediaContract
+	default:
+		return fail(Failure("unsupported", "known_none", "read_capabilities"))
+	}
+	ctx = withTaskSchema(ctx, binding.TaskSchemaHash)
 	if response.Operation == nil || response.RequestVersion == nil {
 		return fail(Failure("invalid_argument", "known_none", "correct_input"))
 	}
 	if *response.RequestVersion != taskcontract.Version || !operations[*response.Operation] {
 		return fail(Failure("unsupported", "known_none", "read_capabilities"))
 	}
-	if err = s.contract.ValidateValue(value, "Request"); err != nil {
+	if err = validator.ValidateValue(value, "Request"); err != nil {
 		return fail(Failure("invalid_argument", "known_none", "correct_input"))
 	}
 	var request Request
@@ -171,7 +185,7 @@ func (s *Service) Execute(ctx context.Context, caller BoundCaller, raw []byte) R
 	response.Result = result
 	response.RequestVersion = nil
 	encoded, marshalErr := json.Marshal(response)
-	if marshalErr != nil || s.contract.Validate(encoded, "Response") != nil {
+	if marshalErr != nil || validator.Validate(encoded, "Response") != nil {
 		response.OK = false
 		response.Result = nil
 		response.RequestVersion = &request.Version
@@ -287,4 +301,16 @@ func mutationRequest(r Request) bool {
 	var input struct{ Action string }
 	json.Unmarshal(r.Input, &input)
 	return input.Action == "confirm" || input.Action == "revoke"
+}
+
+type taskSchemaContextKey struct{}
+
+func withTaskSchema(ctx context.Context, hash string) context.Context {
+	return context.WithValue(ctx, taskSchemaContextKey{}, hash)
+}
+
+// MediaTaskView only changes the wire projection; canonical task data is never rewritten.
+func MediaTaskView(ctx context.Context) bool {
+	hash, _ := ctx.Value(taskSchemaContextKey{}).(string)
+	return hash == taskcontract.MediaHash()
 }

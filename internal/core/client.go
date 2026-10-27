@@ -145,6 +145,8 @@ type Client struct {
 	deviceID           string
 	clientSurface      string
 	protocolVersion    int
+	taskSchemaHash     atomic.Pointer[string]
+	taskSchemaRetired  atomic.Bool
 	inventoryBinding   atomic.Pointer[clientInventoryBinding]
 	inventoryName      string
 	inventoryProbe     bool

@@ -68,6 +68,8 @@ func (r Response) MarshalJSON() ([]byte, error) {
 // VerifiedContext has no wire representation. Only a trusted server verifier
 // derives it from actual transport/provider invocation and original authority.
 type VerifiedContext struct {
+	// Exact transport contract, not an authority or idempotency namespace.
+	TaskSchemaHash                                         string
 	NativeTurnID, ToolCallID, ProcessGeneration            string
 	Authority                                              string
 	StableScopeID                                          string

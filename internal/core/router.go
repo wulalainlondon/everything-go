@@ -103,6 +103,7 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 	case "pm_collaboration":
 		h.handlePM(c, cmd)
 	case "hello":
+		c.pinTaskSchema(cmd.TaskAPISchemaHash)
 		c.deviceID = cmd.DeviceID
 		c.clientSurface = strings.ToLower(strings.TrimSpace(cmd.ClientSurface))
 		c.protocolVersion = cmd.ProtocolVersion

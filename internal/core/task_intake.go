@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 
+	contract "everything-go/contracts/task-api/v1"
 	"everything-go/internal/backend"
 	"everything-go/internal/messagequeue"
 	"everything-go/internal/session"
@@ -124,7 +125,7 @@ func (h *Hub) authorizeIntake(ctx context.Context, c taskapi.VerifiedContext, r 
 	if in.Action == "inspect" {
 		return l, nil
 	}
-	if in.Action != "submit" || in.RequestID != r.IdempotencyKey || !intakeHasInput(in) {
+	if in.Action != "submit" || in.RequestID != r.IdempotencyKey || !intakeHasInput(in) || (strings.TrimSpace(in.Goal) == "" && c.TaskSchemaHash != contract.MediaHash()) {
 		return l, taskapi.Failure("invalid_argument", "known_none", "correct_input")
 	}
 	if in.Target.Instance != h.cfg.InstanceID {

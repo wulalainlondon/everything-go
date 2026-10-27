@@ -1170,7 +1170,7 @@
         },
         "goal": {
           "type": "string",
-          "minLength": 0,
+          "minLength": 1,
           "maxLength": 4096
         },
         "scope": {
@@ -3674,7 +3674,7 @@
             },
             "goal": {
               "type": "string",
-              "minLength": 0,
+              "minLength": 1,
               "maxLength": 32000
             },
             "images": {
@@ -3697,35 +3697,6 @@
             "submission_request_id",
             "target",
             "goal"
-          ],
-          "anyOf": [
-            {
-              "properties": {
-                "goal": {
-                  "minLength": 1
-                }
-              }
-            },
-            {
-              "required": [
-                "images"
-              ],
-              "properties": {
-                "images": {
-                  "minItems": 1
-                }
-              }
-            },
-            {
-              "required": [
-                "files"
-              ],
-              "properties": {
-                "files": {
-                  "minItems": 1
-                }
-              }
-            }
           ]
         }
       ]

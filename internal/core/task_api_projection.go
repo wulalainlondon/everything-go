@@ -280,7 +280,11 @@ func (h *Hub) apiTask(ctx context.Context, r taskapi.IntentRecord) (map[string]a
 		if len(runes) > 4096 {
 			runes = runes[:4096]
 		}
-		task["goal"] = string(runes)
+		if len(runes) > 0 || taskapi.MediaTaskView(ctx) {
+			task["goal"] = string(runes)
+		} else {
+			delete(task, "goal")
+		}
 		task["provenance"] = "unknown" // current execution boundary is inherited, never forged as a new child scope
 	}
 	if worker, ok := input["new_worker"].(map[string]any); ok {
@@ -607,7 +611,11 @@ func (h *Hub) Read(ctx context.Context, c taskapi.AuthorizedCommand) (any, error
 				}
 			}
 		}
-		return map[string]any{"api_versions": []string{contract.Version}, "schema_hash": contract.Hash(), "allowed_operations": ops, "paths": []string{"ordinary", "controller", "delegation"}, "providers": providers, "limits": map[string]int{"max_instruction_chars": 32000, "max_pending_children": capacity.Active, "event_retention_days": 30, "max_events_per_scope": 100000, "receipt_retention_days": 90}, "default_worker_profile": map[string]string{"backend": "codex", "model": "gpt-6.1-sol", "effort": "high"}, "mutation_authority_instance_id": h.cfg.InstanceID, "create_routes": routes}, nil
+		schemaHash := contract.Hash()
+		if c.Caller.TaskSchemaHash == contract.MediaHash() {
+			schemaHash = contract.MediaHash()
+		}
+		return map[string]any{"api_versions": []string{contract.Version}, "schema_hash": schemaHash, "allowed_operations": ops, "paths": []string{"ordinary", "controller", "delegation"}, "providers": providers, "limits": map[string]int{"max_instruction_chars": 32000, "max_pending_children": capacity.Active, "event_retention_days": 30, "max_events_per_scope": 100000, "receipt_retention_days": 90}, "default_worker_profile": map[string]string{"backend": "codex", "model": "gpt-6.1-sol", "effort": "high"}, "mutation_authority_instance_id": h.cfg.InstanceID, "create_routes": routes}, nil
 	case "get":
 		if in.Original != nil {
 			j := h.apiJournals()[c.Locator.Path]
