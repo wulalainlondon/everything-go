@@ -237,7 +237,19 @@ func (s *Store) TryPromote(ctx context.Context, id string) (bool, error) {
 			return err
 		}
 		var older bool
-		if err = tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM session_delegations q WHERE q.parent_session_id=? AND q.state='queued' AND q.rowid<? AND NOT EXISTS(SELECT 1 FROM session_delegations a WHERE a.child_session_id=q.child_session_id AND a.state IN ('provisioning','running','collecting') AND a.id NOT IN (SELECT id FROM delegation_rounds WHERE mode='steer')))", parent, seq).Scan(&older); err != nil || older {
+		if err = tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM session_delegations q WHERE q.parent_session_id=? AND q.state='queued' AND COALESCE((SELECT rank FROM unified_queue_ranks WHERE queue_key='waiting' AND item_id=q.id),q.rowid)<COALESCE((SELECT rank FROM unified_queue_ranks WHERE queue_key='waiting' AND item_id=?),?) AND NOT EXISTS(SELECT 1 FROM session_delegations a WHERE a.child_session_id=q.child_session_id AND a.state IN ('provisioning','running','collecting') AND a.id NOT IN (SELECT id FROM delegation_rounds WHERE mode='steer')))", parent, id, seq).Scan(&older); err != nil || older {
+			return err
+		}
+		// Global durable dispatch order is consulted by the ORIGINAL capacity
+		// promotion boundary, even when the cyclic recovery scan visits an
+		// older audit row first. Saturated parent/child lanes retain fairness.
+		if err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM session_delegations q
+          WHERE q.id!=? AND q.state='queued'
+          AND COALESCE((SELECT rank FROM unified_queue_ranks WHERE queue_key='waiting' AND item_id=q.id),q.rowid)<COALESCE((SELECT rank FROM unified_queue_ranks WHERE queue_key='waiting' AND item_id=?),?)
+          AND NOT EXISTS(SELECT 1 FROM session_delegations a WHERE a.child_session_id=q.child_session_id AND a.state IN ('provisioning','running','collecting') AND a.id NOT IN (SELECT id FROM delegation_rounds WHERE mode='steer'))
+          AND (SELECT COUNT(*) FROM session_delegations a WHERE a.parent_session_id=q.parent_session_id AND a.state IN ('provisioning','running')) < COALESCE((SELECT active FROM delegation_capacity WHERE parent=q.parent_session_id),(SELECT active FROM delegation_capacity WHERE parent=''))
+          AND (SELECT COUNT(*) FROM session_delegations a WHERE a.parent_session_id=q.parent_session_id AND (a.state IN ('provisioning','running','collecting') OR (a.state='terminal' AND a.delivery_state IN ('pending','queued')))) < COALESCE((SELECT delivery FROM delegation_capacity WHERE parent=q.parent_session_id),(SELECT delivery FROM delegation_capacity WHERE parent=''))
+        )`, id, id, seq).Scan(&older); err != nil || older {
 			return err
 		}
 		_, err = tx.ExecContext(ctx, "UPDATE session_delegations SET state='provisioning',updated_at=? WHERE id=? AND state='queued'", time.Now().UnixMilli(), id)

@@ -4,6 +4,7 @@
 package messagequeue
 
 import (
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -43,7 +44,13 @@ type APIAdmission struct {
 }
 
 type Entry struct {
+	EffectiveBinding                 []byte
+	Unified                          *taskapi.QueueMutation
+	UnifiedData                      []byte
+	Inherited                        *InheritedInput
 	API                              *APIAdmission
+	ContentRevision                  uint64
+	EffectiveHash                    string
 	Sequence                         int64
 	SessionID, RequestID             string
 	State                            State
@@ -105,6 +112,10 @@ func Open(dataDir string) (*Store, error) {
 		return nil, err
 	}
 	if err = migrateNativeConflictSchema(db); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err = taskapi.InstallUnified(db); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -200,6 +211,22 @@ func (s *Store) Enqueue(e Entry) (Entry, bool, error) {
 		return Entry{}, false, err
 	}
 	defer tx.Rollback()
+	if e.Unified != nil {
+		if e.Unified.Revalidate == nil {
+			return Entry{}, false, taskapi.Failure("caller_unbound", "known_none", "refresh_identity")
+		}
+		if err = e.Unified.Revalidate(context.Background()); err != nil {
+			return Entry{}, false, err
+		}
+		_, found, err := taskapi.OriginalOperation(context.Background(), tx, *e.Unified)
+		if err != nil {
+			return Entry{}, false, err
+		}
+		if found {
+			entry, _, err := lookup(tx, e.SessionID, e.RequestID)
+			return entry, false, err
+		}
+	}
 	if e.API != nil && e.API.CanCommit != nil && !e.API.CanCommit() {
 		return Entry{}, false, taskapi.Failure("permission", "known_none", "refresh_identity")
 	}
@@ -257,6 +284,17 @@ func (s *Store) Enqueue(e Entry) (Entry, bool, error) {
 	if err = saveTaskAdmission(tx, e); err != nil {
 		return Entry{}, false, err
 	}
+	if e.Inherited != nil && e.Inherited.Revision > 1 {
+		v := e.Inherited
+		if _, err = tx.Exec("INSERT INTO unified_input_versions VALUES(?,?,?,?,?,?,?)", e.SessionID, e.RequestID, v.Revision, e.Payload, e.Content, v.Hash, v.OriginalHash); err != nil {
+			return Entry{}, false, err
+		}
+		if len(v.Binding) > 0 {
+			if _, err = tx.Exec("INSERT INTO unified_version_bindings VALUES(?,?,?,?)", e.SessionID, e.RequestID, v.Revision, v.Binding); err != nil {
+				return Entry{}, false, err
+			}
+		}
+	}
 	if err = bump(tx, e.SessionID); err != nil {
 		return Entry{}, false, err
 	}
@@ -266,6 +304,17 @@ func (s *Store) Enqueue(e Entry) (Entry, bool, error) {
 	}
 	if e.API != nil && e.API.CanCommit != nil && !e.API.CanCommit() {
 		return Entry{}, false, taskapi.Failure("permission", "known_none", "refresh_identity")
+	}
+	if e.Unified != nil {
+		if _, err = tx.Exec(`INSERT INTO unified_reply_sources VALUES(?,?,?,?,?)`, e.SessionID, e.RequestID, e.Unified.Scope, e.Unified.Generation, e.UnifiedData); err != nil {
+			return Entry{}, false, err
+		}
+		if err = e.Unified.Revalidate(context.Background()); err != nil {
+			return Entry{}, false, err
+		}
+		if _, err = taskapi.SaveOperation(context.Background(), tx, *e.Unified, map[string]any{"metadata_recorded": true, "admission": "accepted", "native_start": "unknown", "session_id": e.SessionID, "request_id": e.RequestID, "reply": json.RawMessage(e.UnifiedData)}); err != nil {
+			return Entry{}, false, err
+		}
 	}
 	if err = tx.Commit(); err != nil {
 		return Entry{}, false, err
@@ -337,7 +386,13 @@ func (s *Store) Transition(sessionID, requestID string, from []State, to State, 
 	}
 	payload := e.Payload
 	if to == Completed || to == Cancelled || to == Steered || to == Failed {
-		payload = []byte{}
+		var revised bool
+		if err = tx.QueryRow("SELECT EXISTS(SELECT 1 FROM unified_input_versions WHERE queue_key=? AND item_id=?)", sessionID, requestID).Scan(&revised); err != nil {
+			return Entry{}, false, err
+		}
+		if !revised {
+			payload = []byte{}
+		}
 	}
 	_, err = tx.Exec(`UPDATE queue_commands SET state=?,message=?,active_request_id=?,turn_id=?,updated_at=?,payload=? WHERE session_id=? AND request_id=?`, to, message, activeRequestID, turnID, time.Now().UnixMilli(), payload, sessionID, requestID)
 	if err != nil {
@@ -355,6 +410,12 @@ func (s *Store) Transition(sessionID, requestID string, from []State, to State, 
 	e, _, err = lookup(tx, sessionID, requestID)
 	if err != nil {
 		return Entry{}, false, err
+	}
+	if to == Running || to == Steering {
+		e, err = effectiveInput(context.Background(), tx, e)
+		if err != nil {
+			return Entry{}, false, err
+		}
 	}
 	if err = tx.Commit(); err != nil {
 		return Entry{}, false, err
@@ -409,7 +470,7 @@ func (s *Store) Snapshot(sessionID string) (Snapshot, error) {
 }
 
 func (s *Store) Queued() ([]Entry, error) {
-	rows, err := s.db.Query("SELECT " + columns + ` FROM queue_commands WHERE state='queued' ORDER BY seq`)
+	rows, err := s.db.Query("SELECT " + columns + ` FROM queue_commands WHERE state='queued' ORDER BY session_id,COALESCE((SELECT rank FROM unified_queue_ranks WHERE queue_key=queue_commands.session_id AND item_id=queue_commands.request_id),seq),seq`)
 	if err != nil {
 		return nil, err
 	}

@@ -188,7 +188,16 @@ func (s *Store) Responsibility(ctx context.Context, logical string) (string, str
 	return owner, qa, e
 }
 func (s *Store) RecordQA(ctx context.Context, owner, qa, verdict string) error {
+	return s.RecordQAChecked(ctx, owner, qa, verdict, func() error { return nil })
+}
+func (s *Store) RecordQAChecked(ctx context.Context, owner, qa, verdict string, check func() error) error {
 	return s.TaskJournal().Transaction(ctx, func(tx *sql.Tx) error {
+		if check == nil {
+			return errors.New("caller_unbound")
+		}
+		if e := check(); e != nil {
+			return e
+		}
 		var oldQA, oldVerdict string
 		e := tx.QueryRowContext(ctx, "SELECT qa_round,verdict FROM delegation_qa_versions WHERE owner_round=?", owner).Scan(&oldQA, &oldVerdict)
 		if e == nil {
@@ -201,7 +210,10 @@ func (s *Store) RecordQA(ctx context.Context, owner, qa, verdict string) error {
 			return e
 		}
 		_, e = tx.ExecContext(ctx, "INSERT INTO delegation_qa_versions VALUES(?,?,?)", owner, qa, verdict)
-		return e
+		if e != nil {
+			return e
+		}
+		return check()
 	})
 }
 func (s *Store) QAForRound(ctx context.Context, id string) (string, string, error) {

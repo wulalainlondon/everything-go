@@ -388,7 +388,10 @@ func (h *Hub) DelegationRounds(parent *session.Session, id string, after uint64)
 	return map[string]any{"needs_input": len(questions) > 0, "pending_interactions": questions, "current_target": currentTarget, "source_authorization": sourceAuthorization, "continuation_availability": availability, "successor_reason": reason, "has_more": next < latest.Version, "next_version": next, "logical_task_id": round.LogicalID, "session_id": root.ChildSessionID, "native_thread_id": root.ExpectedThread, "owner_logical_task_id": owner, "qa_logical_task_id": qa, "rounds": out}, nil
 }
 func (h *Hub) BindDelegationQA(parent *session.Session, request, call, ownerID, qaID string) (any, error) {
-	if e := h.continuityCaller(parent, request, call); e != nil {
+	return h.bindDelegationQAChecked(parent, ownerID, qaID, func() error { return h.continuityCaller(parent, request, call) })
+}
+func (h *Hub) bindDelegationQAChecked(parent *session.Session, ownerID, qaID string, check func() error) (any, error) {
+	if e := check(); e != nil {
 		return nil, e
 	}
 	owner, om, os, e := h.continuityBase(parent, ownerID)
@@ -403,7 +406,7 @@ func (h *Hub) BindDelegationQA(parent *session.Session, request, call, ownerID, 
 		return nil, errors.New("delegation_independent_qa_required")
 	}
 	e = h.delegations.BindQA(context.Background(), om.LogicalID, qm.LogicalID, func() error {
-		if e := h.continuityCaller(parent, request, call); e != nil {
+		if e := check(); e != nil {
 			return e
 		}
 		if e := h.validateDelegationBindingForContinuation(context.Background(), owner, parent, os); e != nil {
@@ -420,7 +423,10 @@ func (h *Hub) BindDelegationQA(parent *session.Session, request, call, ownerID, 
 // The verdict comes from the exact QA final, not an owner-supplied verdict.
 // A later owner round cannot replace this immutable FAIL/PASS version.
 func (h *Hub) RecordDelegationReview(parent *session.Session, request, call, ownerID, qaID string) (any, error) {
-	if e := h.continuityCaller(parent, request, call); e != nil {
+	return h.recordDelegationReviewChecked(parent, ownerID, qaID, func() error { return h.continuityCaller(parent, request, call) })
+}
+func (h *Hub) recordDelegationReviewChecked(parent *session.Session, ownerID, qaID string, check func() error) (any, error) {
+	if e := check(); e != nil {
 		return nil, e
 	}
 	_, om, _, e := h.continuityBase(parent, ownerID)
@@ -453,7 +459,7 @@ func (h *Hub) RecordDelegationReview(parent *session.Session, request, call, own
 	if json.Unmarshal([]byte(qr.Result), &result) != nil || result.OwnerRound != ownerID || (result.Verdict != "PASS" && result.Verdict != "FAIL") {
 		return nil, errors.New("delegation_qa_verdict_invalid")
 	}
-	if e = h.delegations.RecordQA(context.Background(), ownerID, qaID, result.Verdict); e != nil {
+	if e = h.delegations.RecordQAChecked(context.Background(), ownerID, qaID, result.Verdict, check); e != nil {
 		return nil, e
 	}
 	return map[string]any{"owner_round_id": ownerID, "qa_round_id": qaID, "qa_version": qm.Version, "verdict": result.Verdict}, nil

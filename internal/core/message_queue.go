@@ -23,6 +23,7 @@ import (
 )
 
 type queuedPayload struct {
+	UnifiedBinding            *unifiedInputBinding       `json:"unified_binding,omitempty"`
 	OwnerCredentialGeneration uint64                     `json:"owner_credential_generation,omitempty"`
 	WorkspaceTask             *workspaceQueueBinding     `json:"workspace_task,omitempty"`
 	VoiceContext              bool                       `json:"voice_context,omitempty"`
@@ -78,6 +79,9 @@ func (e *dispatchTargetExpectation) matches(s *session.Session) bool {
 }
 
 func (h *Hub) enqueueChatMessageExpected(c *Client, cmd clientproto.Command, expected *dispatchTargetExpectation) bool {
+	return h.enqueueChatMessageExpectedInherited(c, cmd, expected, nil)
+}
+func (h *Hub) enqueueChatMessageExpectedInherited(c *Client, cmd clientproto.Command, expected *dispatchTargetExpectation, inherited *messagequeue.InheritedInput) bool {
 	if cmd.VoiceContext && (len(cmd.Images) == 0 || !h.voicePhotoOwner(c, cmd.SessionID, cmd.VoiceID, cmd.ThreadID)) {
 		h.queueError(c, cmd, "voice_context_retired", "原通話或圖片來源已改變，草稿已保留，未改送其他對話")
 		return false
@@ -182,7 +186,7 @@ func (h *Hub) enqueueChatMessageExpected(c *Client, cmd clientproto.Command, exp
 			return false
 		}
 	}
-	e, inserted, err := h.messageQueue.Enqueue(messagequeue.Entry{SessionID: cmd.SessionID, RequestID: cmd.RequestID, Content: truncateGraphemes(content, 4000), ImageCount: len(cmd.Images), FileNames: names, Payload: payload, PayloadHash: hex.EncodeToString(intentHash[:])})
+	e, inserted, err := h.messageQueue.Enqueue(messagequeue.Entry{SessionID: cmd.SessionID, RequestID: cmd.RequestID, Content: truncateGraphemes(content, 4000), ImageCount: len(cmd.Images), FileNames: names, Payload: payload, PayloadHash: hex.EncodeToString(intentHash[:]), Inherited: inherited})
 	if err != nil {
 		if errors.Is(err, messagequeue.ErrRejected) {
 			h.queueError(c, cmd, "message_rejected", "這則訊息先前已被拒絕，不會自動重送。請確認接管狀態後，以新訊息送出。")
@@ -333,6 +337,11 @@ func (h *Hub) runQueuedMessage(s *session.Session, requestID string) {
 	}
 	if automatic != nil {
 		sendContext = recovery.WithAutomatic(sendContext, automatic)
+	}
+	sendContext, err = h.unifiedExecutionContext(sendContext, s, e, payload)
+	if err != nil {
+		h.Emit(backend.NewError(s.ID, requestID, "unified_source_changed", err.Error()))
+		return
 	}
 	if err = h.exec.Send(sendContext, s, requestID, payload.Content, payload.Images, payload.Files); err != nil {
 		if errors.Is(err, backend.ErrNativeSubmissionBusy) {

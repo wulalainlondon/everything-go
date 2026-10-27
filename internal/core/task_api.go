@@ -20,6 +20,7 @@ import (
 
 	artifactcontract "everything-go/contracts/task-api/artifacts-v4"
 	interactioncontract "everything-go/contracts/task-api/interactions-v5"
+	unified "everything-go/contracts/task-api/unified-v6"
 	contract "everything-go/contracts/task-api/v1"
 	"everything-go/internal/backend"
 	"everything-go/internal/coordination"
@@ -161,6 +162,11 @@ func (h *Hub) TaskTools(s *session.Session) ([]map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
+	unifiedSchema, unifiedErr := unified.ToolInput()
+	if unifiedErr != nil {
+		return nil, unifiedErr
+	}
+	defs["task_unified"] = unifiedSchema
 	for name, input := range extra {
 		defs[name] = input
 	}
@@ -177,10 +183,10 @@ func (h *Hub) TaskTools(s *session.Session) ([]map[string]any, error) {
 		tools = append(tools, map[string]any{"type": "function", "name": "task_interactions", "description": "Original-task questions. ask_parent requests clarification; list/get/wait read exact questions; answer/escalate only for authorized original parent or human; ack confirms the child consumed the exact answer. Use api_version 1.0.0-rc.5 and operation interactions. Agent answers are never human authorization.", "inputSchema": interactioncontract.ToolInput()})
 	}
 	for name, schema := range defs {
-		if legacyWorker && name != "task_capabilities" {
+		if legacyWorker && name != "task_capabilities" && name != "task_unified" {
 			continue
 		}
-		if scope != nil && name != "task_read_input" && name != "task_capabilities" {
+		if scope != nil && name != "task_read_input" && name != "task_capabilities" && name != "task_unified" {
 			continue
 		}
 		tools = append(tools, map[string]any{"type": "function", "name": name, "description": "Authorized Bridge Task API. Native consumption, final, QA and delivery are independent evidence axes. Never replay unknown acceptance.", "inputSchema": schema})
@@ -222,7 +228,10 @@ func (h *Hub) ExecuteTask(ctx context.Context, c backend.TaskCaller, raw []byte)
 		}
 	}
 	caller, bindErr := taskapi.BindCaller(ctx, verifier, taskapi.Invocation{})
-	response, continuityHandled := h.executeInteractions(ctx, caller, raw)
+	response, continuityHandled := h.executeUnified(ctx, caller, raw)
+	if !continuityHandled {
+		response, continuityHandled = h.executeInteractions(ctx, caller, raw)
+	}
 	if !continuityHandled {
 		response, continuityHandled = h.executeArtifactBytes(ctx, caller, raw)
 	}
@@ -249,7 +258,10 @@ func (h *Hub) handleTaskAPI(ctx context.Context, c *Client, raw []byte) {
 		return
 	}
 	caller, _ := h.taskHuman(c)
-	response, handled := h.executeInteractions(ctx, caller, raw)
+	response, handled := h.executeUnified(ctx, caller, raw)
+	if !handled {
+		response, handled = h.executeInteractions(ctx, caller, raw)
+	}
 	if !handled {
 		response, handled = h.executeArtifactBytes(ctx, caller, raw)
 	}

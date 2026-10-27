@@ -128,6 +128,10 @@ func Open(dir string) (*Store, error) {
 		db.Close()
 		return nil, e
 	}
+	if err := taskapi.InstallUnified(db); err != nil {
+		db.Close()
+		return nil, err
+	}
 	if err := taskapi.InstallJournal(db); err != nil {
 		db.Close()
 		return nil, err
@@ -279,7 +283,7 @@ func (s *Store) List(ctx context.Context, parent string) ([]Record, error) {
 	return out, rows.Err()
 }
 func (s *Store) Pending(ctx context.Context) ([]Record, error) {
-	rows, e := s.db.QueryContext(ctx, `SELECT payload FROM session_dispatches WHERE state IN ('prepared','pending','accepted','queued','running','steering','steered','uncertain') OR json_extract(payload,'$.delivery_state') IN ('pending','queued') ORDER BY json_extract(payload,'$.updated_at') LIMIT 200`)
+	rows, e := s.db.QueryContext(ctx, `SELECT payload FROM session_dispatches WHERE state IN ('prepared','pending','accepted','queued','running','steering','steered','uncertain') OR json_extract(payload,'$.delivery_state') IN ('pending','queued') ORDER BY COALESCE((SELECT rank FROM unified_queue_ranks WHERE queue_key=json_extract(session_dispatches.payload,'$.target_session_id') AND item_id=session_dispatches.id),rowid),rowid LIMIT 200`)
 	if e != nil {
 		return nil, e
 	}

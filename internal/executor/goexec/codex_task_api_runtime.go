@@ -82,8 +82,12 @@ func (c *Codex) handleTaskAPIServerRequest(id any, method string, raw json.RawMe
 		return true
 	}
 	go func() {
-		var envelope struct{ Operation string }
-		if json.Unmarshal(call.Arguments, &envelope) != nil || call.Tool != "task_"+envelope.Operation {
+		var envelope struct {
+			Operation string
+			Type      string
+			Version   string `json:"api_version"`
+		}
+		if json.Unmarshal(call.Arguments, &envelope) != nil || !taskToolMatches(call.Tool, envelope.Type, envelope.Version, envelope.Operation) {
 			_ = c.rpc.write(map[string]any{"id": id, "result": map[string]any{"success": false, "contentItems": []map[string]any{{"type": "inputText", "text": "unsupported_tool_schema_mismatch"}}}})
 			return
 		}

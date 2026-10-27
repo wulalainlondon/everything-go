@@ -34,13 +34,13 @@ func retainedScope(p backend.TaskAPIProvider, s *session.Session, want taskapi.C
 		return fail()
 	}
 	tools, err := p.TaskTools(s)
-	if err != nil || (len(tools) != 2 && len(tools) != 3) {
+	if err != nil || (len(tools) < 2 || len(tools) > 4) {
 		return fail()
 	}
 	seen := map[string]bool{}
 	for _, tool := range tools {
 		name, _ := tool["name"].(string)
-		if name != "task_capabilities" && name != "task_read_input" && name != "task_interactions" {
+		if name != "task_capabilities" && name != "task_read_input" && name != "task_interactions" && name != "task_unified" {
 			return fail()
 		}
 		if seen[name] {

@@ -197,6 +197,9 @@ func (h *Hub) startRelationDecision(ctx context.Context, sub messagequeue.Notice
 	if !ok || target.Snapshot().Hidden {
 		return false, nil
 	}
+	if related, err := h.unifiedReplyStartDecision(ctx, manager.ID, device, generation, p); related || err != nil {
+		return related, err
+	}
 	if p.SessionID == manager.ID {
 		return h.startIntakeDecision(ctx, device, generation, target, p)
 	}

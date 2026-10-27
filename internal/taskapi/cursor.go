@@ -217,3 +217,11 @@ func (c *CursorCodec) EventWatermarks(token string, scope ReadScope) ([]Watermar
 func (c *CursorCodec) EventsFromWatermarks(scope ReadScope, marks []Watermark, expires time.Time) (string, error) {
 	return c.encode(cursorPayload{Kind: "events", Schema: taskcontract.Hash(), Scope: scope, Freeze: Freeze{ID: "event-stream", ExpiresAt: expires.UnixMilli(), Watermarks: marks}})
 }
+
+// OpaqueHandle conveys only a scoped queue position. It is not a task ID,
+// permission, cursor or effect namespace. Restart retires unpublished mappings.
+func (c *CursorCodec) OpaqueHandle(scope, value string) string {
+	mac := hmac.New(sha256.New, c.secret)
+	mac.Write([]byte("unified-queue\x00" + scope + "\x00" + value))
+	return "uqh_" + hex.EncodeToString(mac.Sum(nil))
+}

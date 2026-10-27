@@ -29,6 +29,9 @@ type Change struct {
 }
 
 func InstallJournal(db *sql.DB) error {
+	if e := InstallUnified(db); e != nil {
+		return e
+	}
 	_, err := db.Exec(`CREATE TABLE IF NOT EXISTS task_api_schema(version INTEGER NOT NULL); INSERT INTO task_api_schema(version) SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM task_api_schema);
  CREATE TABLE IF NOT EXISTS task_api_intents(namespace_key TEXT PRIMARY KEY,intent_hash TEXT NOT NULL,receipt_id TEXT NOT NULL UNIQUE,task_id TEXT NOT NULL,native_id TEXT NOT NULL,session_id TEXT NOT NULL,request_id TEXT NOT NULL,scope_id TEXT NOT NULL,generation INTEGER NOT NULL,path TEXT NOT NULL,metadata BLOB,created_at INTEGER NOT NULL);
  CREATE INDEX IF NOT EXISTS task_api_scope ON task_api_intents(scope_id,generation,task_id);

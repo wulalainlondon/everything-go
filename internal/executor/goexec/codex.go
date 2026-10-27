@@ -2345,7 +2345,11 @@ func (c *Codex) Send(ctx context.Context, s *session.Session, reqID, content str
 	st.mu.Lock()
 	st.automaticInput = input
 	st.mu.Unlock()
-	go c.runTurn(s, st, threadID, input, done, sandboxOverride)
+	guards := []func() error{}
+	if backend.HasTaskInputGuard(ctx) {
+		guards = append(guards, func() error { return backend.CheckTaskInputGuard(ctx) })
+	}
+	go c.runTurn(s, st, threadID, input, done, sandboxOverride, guards...)
 	return nil
 }
 
@@ -2439,7 +2443,7 @@ func (c *Codex) steerActiveTurn(s *session.Session, clientUserMessageID, content
 	return backend.SteerResult{TurnID: response.TurnID, RequestID: activeRequestID, StrictACK: true}, nil
 }
 
-func (c *Codex) runTurn(s *session.Session, st *codexState, threadID string, input []map[string]any, done chan struct{}, sandboxOverride string) {
+func (c *Codex) runTurn(s *session.Session, st *codexState, threadID string, input []map[string]any, done chan struct{}, sandboxOverride string, guards ...func() error) {
 	st.mu.Lock()
 	requestID := st.reqID
 	st.mu.Unlock()
@@ -2472,7 +2476,7 @@ func (c *Codex) runTurn(s *session.Session, st *codexState, threadID string, inp
 	}
 	for {
 		c.sink.Emit(backend.NewTurnProgress(s.ID, requestID, "waiting_model", "Waiting for Codex to accept the turn"))
-		if err := c.startTurnWithStaleRetry(s, st, threadID, input, sandboxOverride); err != nil {
+		if err := c.startTurnWithStaleRetry(s, st, threadID, input, sandboxOverride, guards...); err != nil {
 			if auto != nil && errors.Is(err, recovery.ErrDispatchDeferred) {
 				// Claim did not create a new attempt or invoke turn/start.
 				// Preserve the prior exact rejection/terminal evidence and actor.
@@ -2935,18 +2939,18 @@ func (c *Codex) shouldAutoCompact(st *codexState) bool {
 	return float64(st.contextUsed)/float64(st.contextMax) >= codexCompactThreshold
 }
 
-func (c *Codex) startTurnWithStaleRetry(s *session.Session, st *codexState, threadID string, input []map[string]any, sandboxOverride string) error {
+func (c *Codex) startTurnWithStaleRetry(s *session.Session, st *codexState, threadID string, input []map[string]any, sandboxOverride string, guards ...func() error) error {
 	st.mu.Lock()
 	automatic := st.automatic
 	st.mu.Unlock()
 	if automatic != nil {
-		return c.startTurn(threadID, input, s.Snapshot(), sandboxOverride, st.reqID)
+		return c.startTurn(threadID, input, s.Snapshot(), sandboxOverride, st.reqID, guards...)
 	}
 	snap := s.Snapshot()
 	st.mu.Lock()
 	requestID := st.reqID
 	st.mu.Unlock()
-	err := c.startTurn(threadID, input, snap, sandboxOverride, requestID)
+	err := c.startTurn(threadID, input, snap, sandboxOverride, requestID, guards...)
 	if err == nil {
 		if strings.HasPrefix(requestID, "ui_async_") && len(input) > 0 {
 			text, _ := input[0]["text"].(string)
@@ -2962,7 +2966,7 @@ func (c *Codex) startTurnWithStaleRetry(s *session.Session, st *codexState, thre
 	if pinned && isStaleThreadError(err) {
 		return fmt.Errorf("delegation_original_thread_unavailable_successor_required: %w", err)
 	}
-	if !isStaleThreadError(err) || codexPinnedRequest(requestID) {
+	if !isStaleThreadError(err) || codexPinnedRequest(requestID) || len(guards) > 0 {
 		return err
 	}
 
@@ -2984,7 +2988,7 @@ func (c *Codex) startTurnWithStaleRetry(s *session.Session, st *codexState, thre
 	st.mu.Lock()
 	st.startAdmission = admission
 	st.mu.Unlock()
-	if err := c.startTurn(newThreadID, input, snap, sandboxOverride, requestID); err != nil {
+	if err := c.startTurn(newThreadID, input, snap, sandboxOverride, requestID, guards...); err != nil {
 		return err
 	}
 	c.finalizePendingRecovery(s, st, newThreadID)
@@ -3114,7 +3118,17 @@ func (c *Codex) codexTurnParamsForSession(threadID string, input []map[string]an
 	return params
 }
 
-func (c *Codex) startTurn(threadID string, input []map[string]any, snap session.Snapshot, sandboxOverride, requestID string) error {
+func (c *Codex) startTurn(threadID string, input []map[string]any, snap session.Snapshot, sandboxOverride, requestID string, guards ...func() error) error {
+	guard := func() error {
+		for _, check := range guards {
+			if check != nil {
+				if e := check(); e != nil {
+					return e
+				}
+			}
+		}
+		return nil
+	}
 	params := c.codexTurnParamsForSession(threadID, input, snap, sandboxOverride)
 	if err := c.applyPMTurnPolicy(snap.ID, params); err != nil {
 		return err
@@ -3213,10 +3227,18 @@ func (c *Codex) startTurn(threadID string, input []map[string]any, snap session.
 					return fail(e)
 				}
 			}
+			if e = guard(); e != nil {
+				return fail(e)
+			}
 			return release, nil
 		})
 	} else {
-		raw, err = c.rpcCallAtEpoch("turn/start", params, 30*time.Second, &epoch)
+		raw, err = c.rpcCallAtEpoch("turn/start", params, 30*time.Second, &epoch, func() (func(), error) {
+			if e := guard(); e != nil {
+				return nil, e
+			}
+			return nil, nil
+		})
 	}
 	consumedResponseAt := time.Now()
 	if err == nil {

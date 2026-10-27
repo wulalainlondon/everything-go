@@ -111,6 +111,10 @@ func (h *Hub) workLinkProjection(r *http.Request, device string, manager *sessio
 	default:
 		return nil, errors.New("unsupported_execution_link")
 	}
+	effective, effectiveErr := h.unifiedWorkEffective(r.Context(), l)
+	if effectiveErr != nil {
+		return nil, effectiveErr
+	}
 	// Canonical Task API is reused when an exact original command exists.
 	for _, j := range h.apiJournals() {
 		if record, e := j.OriginalCommandForRequest(r.Context(), l.SessionID, l.RequestID); e == nil {
@@ -122,6 +126,9 @@ func (h *Hub) workLinkProjection(r *http.Request, device string, manager *sessio
 				return nil, e
 			}
 			h.overlayLiveWorkStart(projection, l)
+			if effective != nil {
+				projection["effective_input"] = effective
+			}
 			return projection, nil
 		}
 	}
@@ -169,6 +176,9 @@ func (h *Hub) workLinkProjection(r *http.Request, device string, manager *sessio
 		}
 	}
 	h.overlayLiveWorkStart(projection, l)
+	if effective != nil {
+		projection["effective_input"] = effective
+	}
 	return projection, nil
 }
 func (h *Hub) overlayLiveWorkStart(projection map[string]any, l messagequeue.WorkLink) {
@@ -467,7 +477,7 @@ func jarvisWorkSummary(visible, original messagequeue.WorkItem) messagequeue.Wor
 }
 func jarvisWorkProjectionSummary(original map[string]any) map[string]any {
 	out := map[string]any{"summary_only": true}
-	for _, key := range []string{"task_id", "task_ref", "identity", "source", "target", "axes", "revision", "definition_revision", "native_start", "seal_id", "final_hash", "result_ref", "result_anchor", "provenance", "fetched_at_ms", "fresh_until_ms"} {
+	for _, key := range []string{"task_id", "task_ref", "identity", "source", "target", "axes", "revision", "definition_revision", "effective_input", "native_start", "seal_id", "final_hash", "result_ref", "result_anchor", "provenance", "fetched_at_ms", "fresh_until_ms"} {
 		if value, ok := original[key]; ok {
 			out[key] = value
 		}
@@ -477,7 +487,7 @@ func jarvisWorkProjectionSummary(original map[string]any) map[string]any {
 	raw, _ := json.Marshal(out)
 	if len(raw) > 2<<10 {
 		out = map[string]any{"summary_only": true, "detail_truncated": true}
-		for _, key := range []string{"axes", "revision", "native_start", "provenance", "fetched_at_ms", "fresh_until_ms"} {
+		for _, key := range []string{"axes", "revision", "effective_input", "native_start", "provenance", "fetched_at_ms", "fresh_until_ms"} {
 			if v, ok := original[key]; ok {
 				out[key] = v
 			}

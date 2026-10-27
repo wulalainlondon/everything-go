@@ -31,6 +31,7 @@ func Failure(code, acceptance, action string) *APIError {
 }
 
 type Response struct {
+	Authority      string    `json:"authority_instance_id,omitempty"`
 	Type           string    `json:"type"`
 	Version        string    `json:"api_version"`
 	CorrelationID  string    `json:"correlation_id"`

@@ -622,7 +622,39 @@ func (h *Hub) provisionDelegationLocked(ctx context.Context, r delegation.Record
 		}
 		// Empty is an exact initial-thread expectation, not a wildcard.
 		expected := &dispatchTargetExpectation{ThreadID: expectedThread, Revision: expectedRevision}
-		h.enqueueChatMessageExpected(client, clientproto.Command{Kind: "message", SessionID: r.ChildSessionID, RequestID: r.ChildRequestID, Content: r.Instruction}, expected)
+		effectiveInstruction, effectiveErr := h.delegations.EffectiveInstruction(ctx, r.ID, r.Instruction)
+		if effectiveErr != nil {
+			return effectiveErr
+		}
+		var media queuedPayload
+		rawMedia, mediaErr := h.delegations.UnifiedReplyPayload(ctx, r.ID)
+		if mediaErr == nil {
+			revised, e := h.delegations.UnifiedEffectivePayload(ctx, "waiting", r.ID)
+			if e != nil {
+				return e
+			}
+			if len(revised) > 0 {
+				rawMedia = revised
+			}
+		}
+		if mediaErr != nil {
+			return mediaErr
+		}
+		if len(rawMedia) > 0 {
+			if json.Unmarshal(rawMedia, &media) != nil {
+				return errors.New("invalid_unified_reply_payload")
+			}
+			effectiveInstruction = media.Content
+		}
+		version, hash, original, versionErr := h.delegations.UnifiedVersion(ctx, "waiting", r.ID)
+		if versionErr != nil {
+			return versionErr
+		}
+		binding, bindingErr := h.delegations.UnifiedEffectiveBinding(ctx, "waiting", r.ID)
+		if bindingErr != nil {
+			return bindingErr
+		}
+		h.enqueueChatMessageExpectedInherited(client, clientproto.Command{Kind: "message", SessionID: r.ChildSessionID, RequestID: r.ChildRequestID, Content: effectiveInstruction, Images: media.Images, Files: media.Files}, expected, &messagequeue.InheritedInput{Revision: version, Hash: hash, OriginalHash: original, Binding: binding})
 		if _, queued, err := h.messageQueue.Get(r.ChildSessionID, r.ChildRequestID); err != nil || !queued {
 			return fmt.Errorf("delegation_child_enqueue_failed: %v", err)
 		}

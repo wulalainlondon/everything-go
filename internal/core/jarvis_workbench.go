@@ -165,7 +165,7 @@ func (h *Hub) jarvisOperations() []string {
 		ops = append(ops, "custom_inbox_assignment", "human_resolution")
 	}
 	if h.messageQueue != nil {
-		ops = append(ops, "work_elapsed_read", "worklist_read_v1", "worklist_notes_v1", "work_start_notice_v1", "context_reset_v1")
+		ops = append(ops, "work_elapsed_read", "worklist_read_v1", "worklist_notes_v1", "work_start_notice_v1", "context_reset_v1", "task_api_unified_rc6")
 		if h.fcm != nil {
 			ops = append(ops, "work_start_push_v1")
 		}
@@ -185,6 +185,10 @@ func (h *Hub) ServeJarvisAPI(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/api/jarvis/v1/")
 	if path == "capabilities" && r.Method == http.MethodGet {
 		_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": 1, "capability": "jarvis_workbench_v1", "authority_instance_id": h.cfg.InstanceID, "supported_operations": h.jarvisOperations(), "max_human_instruction_characters": 32000, "max_request_bytes": jarvisMaxBytes, "max_work_refs": 30})
+		return
+	}
+	if path == "task-api" {
+		h.serveUnifiedTask(w, r, device)
 		return
 	}
 	if r.Method == http.MethodPost && path == "work-status/read" {

@@ -270,7 +270,7 @@ func (c *Claude) Send(ctx context.Context, s *session.Session, reqID, content st
 		payload, _ = json.Marshal(frame)
 		payload = append(payload, '\n')
 	}
-	if _, err := p.stdin.Write(payload); err != nil {
+	if err := p.stdin.WriteGuarded(payload, func() error { return backend.CheckTaskInputGuard(ctx) }); err != nil {
 		if isCompact {
 			c.sink.Emit(backend.NewSessionCommandFailed(s.ID, reqID, "stdin write failed: "+err.Error(), 0))
 		}
@@ -1349,3 +1349,18 @@ func (b *bufWriteCloser) Flush() error {
 }
 
 func (b *bufWriteCloser) Close() error { return b.c.Close() }
+
+func (b *bufWriteCloser) WriteGuarded(payload []byte, guard func() error) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if guard == nil {
+		return errors.New("task_input_guard_missing")
+	}
+	if e := guard(); e != nil {
+		return e
+	}
+	if _, e := b.w.Write(payload); e != nil {
+		return e
+	}
+	return b.w.Flush()
+}

@@ -214,8 +214,12 @@ func (m *claudeTaskMCP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			process.mu.Unlock()
 			return !stopping && !lease.revoked && lease.requestID == request && lease.threadID == threadID && process.currentReqID() == request && process.taskLease == lease
 		}}
-		var header struct{ Operation string }
-		if json.Unmarshal(call.Arguments, &header) != nil || call.Name != "task_"+header.Operation {
+		var header struct {
+			Operation string
+			Type      string
+			Version   string `json:"api_version"`
+		}
+		if json.Unmarshal(call.Arguments, &header) != nil || !taskToolMatches(call.Name, header.Type, header.Version, header.Operation) {
 			http.Error(w, "invalid", 400)
 			return
 		}
@@ -413,7 +417,7 @@ func validTaskWorkerTools(tools []string) bool {
 		switch tool {
 		case "mcp__bridge_tasks__task_read_input":
 			found = true
-		case "mcp__bridge_tasks__task_capabilities", "mcp__bridge_tasks__task_interactions", "ToolSearch", "EndConversation":
+		case "mcp__bridge_tasks__task_capabilities", "mcp__bridge_tasks__task_interactions", "mcp__bridge_tasks__task_unified", "ToolSearch", "EndConversation":
 		default:
 			return false
 		}

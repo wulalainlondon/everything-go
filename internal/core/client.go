@@ -581,7 +581,7 @@ func (c *Client) dispatchFrame(ctx context.Context, data []byte) error {
 		c.hub.handleTaskCallback(ctx, c, data)
 		return nil
 	}
-	if json.Unmarshal(data, &taskHeader) == nil && taskHeader.Type == "task_api_request" {
+	if json.Unmarshal(data, &taskHeader) == nil && (taskHeader.Type == "task_api_request" || taskHeader.Type == "task_api_unified_request") {
 		c.hub.handleTaskAPI(ctx, c, data)
 		return nil
 	}

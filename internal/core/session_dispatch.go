@@ -268,10 +268,35 @@ func (h *Hub) submitLocalSessionDispatch(ctx context.Context, r sessiondispatch.
 		_ = h.dispatches.Put(ctx, r)
 		return r
 	}
-	cmd := clientproto.Command{MessagePurpose: "instruction", Kind: "message", SessionID: r.SessionID, RequestID: r.RequestID, Content: r.Content}
+	reserved, admitted, reserveErr := h.dispatches.ReserveAdmission(ctx, r.ID)
+	if reserveErr != nil || !admitted {
+		return r
+	}
+	effectiveContent := reserved.Content
+	var media queuedPayload
+	rawMedia, mediaErr := h.dispatches.UnifiedEffectivePayload(ctx, r.SessionID, r.ID)
+	if mediaErr != nil {
+		return r
+	}
+	if len(rawMedia) > 0 {
+		if json.Unmarshal(rawMedia, &media) != nil {
+			return r
+		}
+		effectiveContent = media.Content
+	}
+	cmd := clientproto.Command{MessagePurpose: "instruction", Kind: "message", SessionID: r.SessionID, RequestID: r.RequestID, Content: effectiveContent, Images: media.Images, Files: media.Files}
 	client := &Client{hub: h, deviceID: "session-controller", send: make(chan []byte, 64), quit: make(chan struct{}), ctx: ctx}
 	expected := &dispatchTargetExpectation{ThreadID: r.ThreadID, Revision: r.ConfigRevision}
-	if !h.enqueueChatMessageExpected(client, cmd, expected) {
+	version, hash, original, versionErr := h.dispatches.UnifiedVersion(ctx, r.SessionID, r.ID)
+	if versionErr != nil {
+		return r
+	}
+	binding, bindingErr := h.dispatches.UnifiedEffectiveBinding(ctx, r.SessionID, r.ID)
+	if bindingErr != nil {
+		return r
+	}
+	inherited := &messagequeue.InheritedInput{Revision: version, Hash: hash, OriginalHash: original, Binding: binding}
+	if !h.enqueueChatMessageExpectedInherited(client, cmd, expected, inherited) {
 		r.State = "rejected"
 		r.Error = "dispatch_enqueue_rejected"
 		_ = h.dispatches.Put(ctx, r)

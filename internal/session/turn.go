@@ -456,3 +456,45 @@ func (s *Session) CloseAndWait() {
 		<-done
 	}
 }
+
+// ReorderWaiting changes only original queued callbacks while the caller holds
+// the queue boundary. It cannot promote, reserve native execution or move an
+// active/held/anonymous input. The expected vector prevents partial reorders.
+func (s *Session) ReorderWaiting(expected, ordered []string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.queueHolds < 1 || len(expected) != len(s.mailbox) || len(ordered) != len(expected) {
+		return errors.New("queue_membership_changed")
+	}
+	items := map[string]*queuedTurn{}
+	for i, q := range s.mailbox {
+		if q.id == "" || q.held || q.id != expected[i] {
+			return errors.New("queue_membership_changed")
+		}
+		if items[q.id] != nil {
+			return errors.New("queue_duplicate")
+		}
+		items[q.id] = q
+	}
+	next := make([]*queuedTurn, 0, len(ordered))
+	for _, id := range ordered {
+		q := items[id]
+		if q == nil {
+			return errors.New("queue_membership_changed")
+		}
+		next = append(next, q)
+		delete(items, id)
+	}
+	s.mailbox = next
+	s.signalQueueLocked()
+	return nil
+}
+func (s *Session) WaitingIDs() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ids := []string{}
+	for _, q := range s.mailbox {
+		ids = append(ids, q.id)
+	}
+	return ids
+}
