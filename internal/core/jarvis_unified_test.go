@@ -1008,3 +1008,58 @@ func TestUnifiedAllLinksAuthorizeBeforePreviewAndAfterFreeze(t *testing.T) {
 		})
 	}
 }
+
+func TestUnifiedUnknownRelationCannotBeOverriddenByNegativeAlternative(t *testing.T) {
+	for _, current := range []bool{false, true} {
+		t.Run(fmt.Sprintf("controller_current_%v", current), func(t *testing.T) {
+			h, call := jarvisFixture(t)
+			manager := h.registry.Create("s_unknown_or_parent", "Parent", h.cfg.RootDir, "codex", "m", "read-only", "parent")
+			target := h.registry.Create("s_unknown_or_child", "Child", h.cfg.RootDir, "codex", "m", "read-only", "child")
+			ds, err := delegation.Open(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			h.delegations = ds
+			if err = ds.Close(); err != nil {
+				t.Fatal(err)
+			}
+			cs, err := sessiondispatch.Open(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer cs.Close()
+			h.dispatches = cs
+			if _, err = cs.SetGrant(context.Background(), manager.ID, sessiondispatch.Grant{Enabled: true, Local: true}, 0); err != nil {
+				t.Fatal(err)
+			}
+			revision := manager.SettingsSnapshot().ConfigRevision
+			if !current {
+				revision++
+			}
+			_, err = cs.Create(context.Background(), sessiondispatch.Record{ID: "unknown-or-controller", ParentID: manager.ID, ParentThreadID: manager.ResumeID(), ParentConfigKnown: true, ParentConfigRevision: revision, OriginRequestID: "r_unknown_or_original", ToolCallID: "call-original", InstanceID: h.cfg.InstanceID, SessionID: target.ID, ThreadID: target.ResumeID(), ConfigRevision: target.SettingsSnapshot().ConfigRevision, RequestID: "r_unknown_or_target", IntentHash: "original-or", Content: "original", State: "completed"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			input := unifiedBase(h, manager)
+			input["intent_id"] = "r_unknown_or_policy"
+			input["expected_revision"] = 0
+			input["enabled"] = true
+			input["push_schema_version"] = 1
+			if w := call("POST", "worklist/notifications", input, "phone"); w.Code != 200 {
+				t.Fatal(w.Code, w.Body.String())
+			}
+			sub, _, err := h.messageQueue.CurrentNoticePolicy(context.Background(), jarvisTestPrincipal("phone", "jarvis-token"), manager.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			allowed, err := h.startRelationDecision(context.Background(), sub, messagequeue.NativeStart{SessionID: target.ID, RequestID: "r_unknown_or_target", ThreadID: target.ResumeID()})
+			if current {
+				if !allowed || err != nil {
+					t.Fatalf("proven original positive relation may resolve OR: allowed=%v err=%v", allowed, err)
+				}
+			} else if allowed || err == nil {
+				t.Fatalf("negative alternative swallowed original source unknown: allowed=%v err=%v", allowed, err)
+			}
+		})
+	}
+}

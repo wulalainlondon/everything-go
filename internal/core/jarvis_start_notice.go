@@ -231,31 +231,28 @@ func (h *Hub) startRelationDecision(ctx context.Context, sub messagequeue.Notice
 		} else if found && d.ParentSessionID == manager.ID {
 			thread, revision, bound, err := h.delegations.SourceBinding(ctx, d.ID)
 			if err != nil {
-				return false, err
+				unknown = err
+			} else if bound && thread == manager.ResumeID() && revision == manager.SettingsSnapshot().ConfigRevision {
+				thread, revision, _, err = h.delegations.ExecutionBinding(ctx, d.ID)
+				if err != nil {
+					unknown = err
+				} else if thread == p.ThreadID && revision == target.SettingsSnapshot().ConfigRevision {
+					return true, nil
+				}
 			}
-			if !bound || thread != manager.ResumeID() || revision != manager.SettingsSnapshot().ConfigRevision {
-				return false, nil
-			}
-			thread, revision, _, err = h.delegations.ExecutionBinding(ctx, d.ID)
-			if err != nil {
-				return false, err
-			}
-			return thread == p.ThreadID && revision == target.SettingsSnapshot().ConfigRevision, nil
 		}
 	}
 	if h.dispatches != nil {
 		d, found, err := h.dispatches.ByTargetRequest(ctx, manager.ID, p.SessionID, p.RequestID)
 		if err != nil {
 			unknown = err
-		} else if found {
-			if d.InstanceID != h.cfg.InstanceID || d.ParentThreadID != manager.ResumeID() || !d.ParentConfigKnown || d.ParentConfigRevision != manager.SettingsSnapshot().ConfigRevision || d.ThreadID != p.ThreadID || d.ConfigRevision != target.SettingsSnapshot().ConfigRevision {
-				return false, nil
-			}
+		} else if found && d.InstanceID == h.cfg.InstanceID && d.ParentThreadID == manager.ResumeID() && d.ParentConfigKnown && d.ParentConfigRevision == manager.SettingsSnapshot().ConfigRevision && d.ThreadID == p.ThreadID && d.ConfigRevision == target.SettingsSnapshot().ConfigRevision {
 			g, err := h.dispatches.Grant(ctx, manager.ID)
 			if err != nil {
-				return false, err
+				unknown = err
+			} else if g.Allows(h.cfg.InstanceID, h.cfg.InstanceID, p.SessionID) && h.eventSessionAllowed(target) {
+				return true, nil
 			}
-			return g.Allows(h.cfg.InstanceID, h.cfg.InstanceID, p.SessionID) && h.eventSessionAllowed(target), nil
 		}
 	}
 	if intakeLinked {
