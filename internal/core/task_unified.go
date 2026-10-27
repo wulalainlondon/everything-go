@@ -32,6 +32,20 @@ type unifiedLocator struct {
 	RevisionKnown bool   `json:"-"`
 }
 
+// Presence is semantic: a verified revision 0 must survive the response wire,
+// while an unbound/omitted input revision must not be invented as known zero.
+func (l unifiedLocator) MarshalJSON() ([]byte, error) {
+	type plain unifiedLocator
+	var revision *uint64
+	if l.RevisionKnown || l.Revision != 0 {
+		revision = &l.Revision
+	}
+	return json.Marshal(struct {
+		plain
+		Revision *uint64 `json:"config_revision,omitempty"`
+	}{plain(l), revision})
+}
+
 func (l *unifiedLocator) UnmarshalJSON(b []byte) error {
 	type plain unifiedLocator
 	var v plain
@@ -679,6 +693,7 @@ func (h *Hub) resolveUnified(ctx context.Context, c taskapi.VerifiedContext, man
 		}
 		out.Locator.ThreadID = out.Target.ThreadID
 		out.Locator.Revision = out.Target.Revision
+		out.Locator.RevisionKnown = true
 		out.CanEdit = r.ScopeID == c.StableScopeID && r.Generation == c.NamespaceGeneration
 		return out, nil
 	}
@@ -853,6 +868,7 @@ func (h *Hub) resolveUnified(ctx context.Context, c taskapi.VerifiedContext, man
 	}
 	out.Locator.ThreadID = out.Target.ThreadID
 	out.Locator.Revision = out.Target.Revision
+	out.Locator.RevisionKnown = true
 	var err error
 	out.ReadFence, err = h.unifiedDisclosureFence(ctx, c, manager, out)
 	if err != nil {
