@@ -330,9 +330,10 @@ func (h *Hub) serveWorklist(w http.ResponseWriter, r *http.Request, device, path
 		links := []messagequeue.WorkLink{}
 		for _, item := range items {
 			executions := []any{}
-			visible := item
+			visible := jarvisWorkTitlePresentation(item)
 			visible.BodyHash = jarvisTextHash(item.Body)
 			visible.Links = []messagequeue.WorkLink{}
+			sourceUnavailable := false
 			executionTruncated := len(item.Links) > 8
 			for i, l := range item.Links {
 				// Detail includes every authorized original link; projection previews
@@ -340,6 +341,7 @@ func (h *Hub) serveWorklist(w http.ResponseWriter, r *http.Request, device, path
 				projection, err := h.workLinkProjection(r, device, manager, l)
 				if err != nil {
 					partial = true
+					sourceUnavailable = true
 					visible.DetailTruncated = true
 					if i < 8 {
 						executions = append(executions, map[string]any{"error": map[string]any{"code": "scope_or_source_unavailable", "retryable": false}})
@@ -358,8 +360,10 @@ func (h *Hub) serveWorklist(w http.ResponseWriter, r *http.Request, device, path
 				partial = true
 				continue
 			}
-			if visible.DetailTruncated {
+			if sourceUnavailable {
 				visible.Title = "來源待確認"
+				visible.TitleHash = ""
+				visible.TitleTruncated = false
 				visible.Body = ""
 				visible.BodyHash = ""
 				visible.Plan = nil
@@ -402,7 +406,7 @@ func (h *Hub) discoveredWorkItems(r *http.Request, manager *session.Session) ([]
 					partial = true
 					continue
 				}
-				out = append(out, messagequeue.WorkItem{ID: "controller_" + d.ID, Kind: "execution", Title: truncateGraphemes(d.Content, 100), Body: d.Content, RecordingState: "recorded", SourceRefs: []string{d.OriginRequestID}, Links: []messagequeue.WorkLink{{Kind: "controller", Authority: d.InstanceID, SessionID: d.SessionID, ThreadID: d.ThreadID, ConfigRevision: d.ConfigRevision, RequestID: d.RequestID, NativeID: d.ID}}, CreatedAt: d.CreatedAt, UpdatedAt: d.UpdatedAt, Revision: 1})
+				out = append(out, messagequeue.WorkItem{ID: "controller_" + d.ID, Kind: "execution", Title: jarvisDerivedWorkTitle(d.Content, "未命名工作"), Body: d.Content, RecordingState: "recorded", SourceRefs: []string{d.OriginRequestID}, Links: []messagequeue.WorkLink{{Kind: "controller", Authority: d.InstanceID, SessionID: d.SessionID, ThreadID: d.ThreadID, ConfigRevision: d.ConfigRevision, RequestID: d.RequestID, NativeID: d.ID}}, CreatedAt: d.CreatedAt, UpdatedAt: d.UpdatedAt, Revision: 1})
 			}
 		} else {
 			partial = true
@@ -416,7 +420,7 @@ func (h *Hub) discoveredWorkItems(r *http.Request, manager *session.Session) ([]
 					partial = true
 					continue
 				}
-				out = append(out, messagequeue.WorkItem{ID: "delegation_" + d.ID, Kind: "execution", Title: d.ChildName, Body: d.Instruction, RecordingState: "recorded", SourceRefs: []string{d.OriginRequestID}, Links: []messagequeue.WorkLink{{Kind: "delegation", Authority: h.cfg.InstanceID, SessionID: d.ChildSessionID, ThreadID: thread, ConfigRevision: revision, RequestID: d.ChildRequestID, NativeID: d.ID}}, CreatedAt: d.CreatedAt, UpdatedAt: d.UpdatedAt, Revision: 1})
+				out = append(out, messagequeue.WorkItem{ID: "delegation_" + d.ID, Kind: "execution", Title: jarvisDerivedWorkTitle(d.ChildName, "未命名搭檔工作"), Body: d.Instruction, RecordingState: "recorded", SourceRefs: []string{d.OriginRequestID}, Links: []messagequeue.WorkLink{{Kind: "delegation", Authority: h.cfg.InstanceID, SessionID: d.ChildSessionID, ThreadID: thread, ConfigRevision: revision, RequestID: d.ChildRequestID, NativeID: d.ID}}, CreatedAt: d.CreatedAt, UpdatedAt: d.UpdatedAt, Revision: 1})
 			}
 		}
 	}

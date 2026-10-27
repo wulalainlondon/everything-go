@@ -791,6 +791,38 @@ func TestUnifiedExportCrossRepositoryWirePacket(t *testing.T) {
 	target.SetMeta(nil, &restricted)
 	workspaceCall("workspace_restricted_snapshot", "worklist/snapshot", unifiedBase(wf.h, manager))
 
+	// Pure media and legacy structural inputs remain exact original admission
+	// records; only the read-derived title is supplied for the mobile contract.
+	for _, titleCase := range workTitleCases() {
+		manager := h.registry.Create("s_wire_title_"+titleCase.name, "Title fixture", h.cfg.RootDir, "codex", "m", "read-only", "title-native")
+		rid := seedTitleIntake(t, h, manager, titleCase)
+		export("intake_"+titleCase.name+"_snapshot", "worklist/snapshot", unifiedBase(h, manager))
+		in := unifiedBase(h, manager)
+		in["item_id"] = "intake_" + rid
+		export("intake_"+titleCase.name+"_detail", "worklist/get", in)
+	}
+	legacyHub, legacyCall := jarvisFixture(t)
+	legacyManager := legacyHub.registry.Create("s_wire_legacy_title", "Legacy title fixture", legacyHub.cfg.RootDir, "codex", "m", "read-only", "legacy-native")
+	legacy := seedLegacyTitleMetadata(t, legacyHub, legacyManager)
+	for _, path := range []string{"worklist/snapshot", "worklist/get"} {
+		in := unifiedBase(legacyHub, legacyManager)
+		name := "legacy_title_snapshot"
+		if path == "worklist/get" {
+			in["item_id"] = legacy.ID
+			name = "legacy_title_detail"
+		}
+		w := legacyCall("POST", path, in, "phone")
+		if w.Code != 200 {
+			t.Fatal(name, w.Code, w.Body.String())
+		}
+		var value any
+		if e := json.Unmarshal(w.Body.Bytes(), &value); e != nil {
+			t.Fatal(e)
+		}
+		outputs[name] = value
+		rawResponses[name] = append([]byte(nil), w.Body.Bytes()...)
+	}
+
 	packet := map[string]any{"sourceCommit": os.Getenv("JARVIS_WIRE_FIXTURE_SOURCE"), "evidence": "verified paired HTTP + authenticated original workspace WS/queue + real SQLite; synthetic provider only; no native/model/provider-reset/device/external effects", "outputs": outputs, "schemaHashes": map[string]string{"legacy": "674aada21ce809c5bec8324b192163c4f3c4acf7f5b57f39042eacd9982d23fa", "media": "ca3bac5e7c66b75bd141379035a49d060ca4e16996c08b230094be9d7487c018"}, "providerResetCalls": f.resetCalls}
 	raw, e := json.MarshalIndent(packet, "", "  ")
 	if e != nil {
@@ -817,6 +849,16 @@ func TestUnifiedExportCrossRepositoryWirePacket(t *testing.T) {
 		default:
 			kind = "work_mutation"
 		}
+		if strings.HasSuffix(name, "_snapshot") {
+			kind = "snapshot"
+		}
+		if strings.HasSuffix(name, "_detail") {
+			kind = "detail"
+		}
+		if name == "legacy_title_detail" {
+			kind = "restricted_detail"
+		}
+
 		relative := name + ".json"
 		if e = os.WriteFile(filepath.Join(dir, relative), body, 0600); e != nil {
 			t.Fatal(e)

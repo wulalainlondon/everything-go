@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -384,5 +385,33 @@ func TestUnifiedDurableStartJoinBeyondWindowsAndSubscriberLimit(t *testing.T) {
 	linked, e := s.HasWorkExecutionLink(ctx, sub.Scope, sub.Manager, "original-target", "original-request")
 	if e != nil || !linked {
 		t.Fatal("late original link lost", linked, e)
+	}
+}
+
+func TestUnifiedWorkTitleUTF16RejectedBeforeClaim(t *testing.T) {
+	s, e := Open(t.TempDir())
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer s.Close()
+	for i, title := range []string{strings.Repeat("😀", 101), strings.Repeat("中", 181)} {
+		in := WorkMutation{IntentID: fmt.Sprintf("r_oversize_title_%d", i), WorkItem: WorkItem{ID: "title", Kind: "discussion_note", Title: title, RecordingState: "recorded"}}
+		if _, e = s.MutateWork(context.Background(), "scope", "manager", in); e == nil {
+			t.Fatal("oversize accepted")
+		}
+		if _, e = s.WorkOperation(context.Background(), "scope", "manager", in.IntentID); e == nil {
+			t.Fatal("invalid title intent claimed")
+		}
+	}
+	in := WorkMutation{IntentID: "r_valid_title_boundary", WorkItem: WorkItem{ID: "boundary", Kind: "discussion_note", Title: strings.Repeat("😀", 100), RecordingState: "recorded"}}
+	if _, e = s.MutateWork(context.Background(), "scope", "manager", in); e != nil {
+		t.Fatal(e)
+	}
+	in.IntentID = "r_title_marker_rejected"
+	in.ID = "marker"
+	in.TitleTruncated = true
+	in.TitleHash = strings.Repeat("a", 64)
+	if _, e = s.MutateWork(context.Background(), "scope", "manager", in); e == nil {
+		t.Fatal("presentation accepted as raw metadata")
 	}
 }

@@ -165,7 +165,7 @@ func (s jarvisWorkSnapshotSource) Page(ctx context.Context, scope taskapi.ReadSc
 	return out, false, nil
 }
 func (h *Hub) workSummaryRow(r *http.Request, device string, manager *session.Session, item messagequeue.WorkItem, readonly bool) map[string]any {
-	visible := item
+	visible := jarvisWorkTitlePresentation(item)
 	visible.BodyHash = jarvisTextHash(item.Body)
 	visible.Links = []messagequeue.WorkLink{}
 	executions := []any{}
@@ -187,6 +187,8 @@ func (h *Hub) workSummaryRow(r *http.Request, device string, manager *session.Se
 	visible = jarvisWorkSummary(visible, item)
 	if partial || readonly && len(visible.Links) == 0 {
 		visible.Title = "來源待確認"
+		visible.TitleHash = ""
+		visible.TitleTruncated = false
 		visible.Body = ""
 		visible.BodyHash = ""
 		visible.SourceRefs = []string{}
@@ -278,6 +280,12 @@ func (h *Hub) serveFrozenWorklist(w http.ResponseWriter, r *http.Request, device
 		// Auxiliary fields stay at the response's original public locations.
 		var public map[string]any
 		_ = json.Unmarshal(encoded, &public)
+		// A still-valid cursor may reference a pre-upgrade freeze containing an
+		// empty/oversized legacy title. Keep its stored bytes and identity while
+		// applying the same explicitly marked display-only contract guard.
+		if presented := jarvisWorkTitlePresentation(row.Item); presented.Title != row.Item.Title {
+			public["item"] = presented
+		}
 		delete(public, "authorization_links")
 		delete(public, "notices")
 		delete(public, "push_receipts")
@@ -320,7 +328,7 @@ func (h *Hub) discoveredManagerIntakes(r *http.Request, device string, manager *
 		if input.Target.Thread != nil {
 			thread = *input.Target.Thread
 		}
-		out = append(out, messagequeue.WorkItem{ID: "intake_" + record.RequestID, Kind: "execution", Title: truncateGraphemes(meta.Intake.Goal, 100), Body: meta.Intake.Goal, RecordingState: "recorded", Links: []messagequeue.WorkLink{{Kind: "intake", Authority: h.cfg.InstanceID, SessionID: record.SessionID, ThreadID: thread, ConfigRevision: input.Target.Revision, RequestID: record.RequestID}}, SourceRefs: []string{record.ReceiptID}, Revision: 1, CreatedAt: record.CreatedAt, UpdatedAt: record.CreatedAt})
+		out = append(out, messagequeue.WorkItem{ID: "intake_" + record.RequestID, Kind: "execution", Title: jarvisIntakeWorkTitle(meta.Intake.Goal, input), Body: meta.Intake.Goal, RecordingState: "recorded", Links: []messagequeue.WorkLink{{Kind: "intake", Authority: h.cfg.InstanceID, SessionID: record.SessionID, ThreadID: thread, ConfigRevision: input.Target.Revision, RequestID: record.RequestID}}, SourceRefs: []string{record.ReceiptID}, Revision: 1, CreatedAt: record.CreatedAt, UpdatedAt: record.CreatedAt})
 	}
 	return out, false
 }

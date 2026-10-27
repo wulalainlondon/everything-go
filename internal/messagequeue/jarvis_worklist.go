@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf16"
 )
 
 type WorkLink struct {
@@ -39,6 +40,8 @@ type WorkItem struct {
 	ID              string        `json:"item_id"`
 	Kind            string        `json:"kind"`
 	Title           string        `json:"title"`
+	TitleTruncated  bool          `json:"title_truncated,omitempty"`
+	TitleHash       string        `json:"title_hash,omitempty"`
 	Body            string        `json:"body"`
 	BodyTruncated   bool          `json:"body_truncated,omitempty"`
 	BodyHash        string        `json:"body_hash,omitempty"`
@@ -75,7 +78,7 @@ func (s *Store) installWorklist() error {
 }
 func validWork(in WorkMutation) bool {
 	// Summary presentation fields must never overwrite the original metadata.
-	if in.BodyTruncated || in.DetailTruncated || in.BodyHash != "" {
+	if in.BodyTruncated || in.DetailTruncated || in.BodyHash != "" || in.TitleTruncated || in.TitleHash != "" {
 		return false
 	}
 	raw, err := json.Marshal(in)
@@ -94,7 +97,7 @@ func validWork(in WorkMutation) bool {
 			}
 		}
 	}
-	if len(in.IntentID) < 10 || len(in.IntentID) > 90 || !strings.HasPrefix(in.IntentID, "r_") || len(in.ID) < 1 || len(in.ID) > 120 || strings.TrimSpace(in.Title) == "" || len([]rune(in.Title)) > 180 || len(in.Body) > 32000 || len(in.Links) > 100 || len(in.SourceRefs) > 30 {
+	if len(in.IntentID) < 10 || len(in.IntentID) > 90 || !strings.HasPrefix(in.IntentID, "r_") || len(in.ID) < 1 || len(in.ID) > 120 || strings.TrimSpace(in.Title) == "" || len([]rune(in.Title)) > 180 || len(utf16.Encode([]rune(in.Title))) > 200 || len(in.Body) > 32000 || len(in.Links) > 100 || len(in.SourceRefs) > 30 {
 		return false
 	}
 	switch in.Kind {
