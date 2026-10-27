@@ -514,7 +514,10 @@ func (h *Hub) unifiedAdapter(ctx context.Context, caller taskapi.BoundCaller, re
 }
 func (h *Hub) recoverUnifiedFacade(ctx context.Context, caller taskapi.BoundCaller, j *taskapi.Journal, m taskapi.QueueMutation, p taskapi.FacadePointer) (any, error) {
 	var original taskapi.Request
-	_ = json.Unmarshal(p.OriginalRequest, &original)
+	if json.Unmarshal(p.OriginalRequest, &original) != nil {
+		return nil, taskapi.Failure("unknown", "unknown", "lookup_original")
+	}
+	m.Hash = p.Hash
 	bound, e := caller.Check(ctx)
 	if e != nil {
 		return nil, e
@@ -530,7 +533,7 @@ func (h *Hub) recoverUnifiedFacade(ctx context.Context, caller taskapi.BoundCall
 		if e != nil {
 			return nil, e
 		}
-		if p.Receipt != nil {
+		if p.Receipt != nil && p.Receipt.State != "unknown" {
 			return *p.Receipt, nil
 		}
 		op := original.Operation
@@ -543,10 +546,21 @@ func (h *Hub) recoverUnifiedFacade(ctx context.Context, caller taskapi.BoundCall
 	if !r.OK {
 		return nil, taskapi.Failure("unknown", "unknown", "lookup_original")
 	}
-	if p.Receipt != nil {
+	if p.Receipt != nil && p.Receipt.State != "unknown" {
 		return *p.Receipt, nil
 	}
-	m.Hash = p.Hash
+	// Read the exact original receipt, not task existence/current/latest state.
+	var observed struct {
+		Locator   taskapi.Locator `json:"locator"`
+		Operation string          `json:"operation"`
+		Key       string          `json:"idempotency_key"`
+		Hash      string          `json:"intent_hash"`
+	}
+	body, marshalErr := json.Marshal(r.Result)
+	digest, hashErr := taskapi.IntentHash(original)
+	if marshalErr != nil || hashErr != nil || json.Unmarshal(body, &observed) != nil || observed.Locator != p.Locator || observed.Operation != original.Operation || observed.Key != original.IdempotencyKey || observed.Hash != digest {
+		return nil, taskapi.Failure("unknown", "unknown", "lookup_original")
+	}
 	r.Operation = &original.Operation
 	return j.UnifiedFacadeFinish(ctx, m, r, p.Locator)
 }

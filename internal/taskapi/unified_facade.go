@@ -7,7 +7,8 @@ import (
 	"errors"
 )
 
-const facadeDDL = `CREATE TABLE IF NOT EXISTS unified_facade_pointers(scope TEXT NOT NULL,generation INTEGER NOT NULL,operation TEXT NOT NULL,intent TEXT NOT NULL,input_hash TEXT NOT NULL,original_request BLOB NOT NULL,original_locator BLOB NOT NULL,receipt BLOB,PRIMARY KEY(scope,generation,operation,intent));`
+const facadeDDL = `CREATE TABLE IF NOT EXISTS unified_facade_pointers(scope TEXT NOT NULL,generation INTEGER NOT NULL,operation TEXT NOT NULL,intent TEXT NOT NULL,input_hash TEXT NOT NULL,original_request BLOB NOT NULL,original_locator BLOB NOT NULL,receipt BLOB,PRIMARY KEY(scope,generation,operation,intent));
+CREATE TABLE IF NOT EXISTS unified_facade_observations(scope TEXT NOT NULL,generation INTEGER NOT NULL,operation TEXT NOT NULL,intent TEXT NOT NULL,input_hash TEXT NOT NULL,receipt_hash TEXT NOT NULL,receipt BLOB NOT NULL,PRIMARY KEY(scope,generation,operation,intent,receipt_hash));`
 
 type FacadePointer struct {
 	Hash            string
@@ -72,6 +73,8 @@ func (j *Journal) UnifiedFacadeFinish(ctx context.Context, m QueueMutation, resp
 	if e != nil {
 		return MutationReceipt{}, e
 	}
+	positive, typed := response.(Response)
+	canonicalPositive := typed && positive.OK
 	state := "applied"
 	if original, ok := response.(Response); ok && !original.OK {
 		state = "unknown"
@@ -82,17 +85,47 @@ func (j *Journal) UnifiedFacadeFinish(ctx context.Context, m QueueMutation, resp
 	r := MutationReceipt{m.Intent, m.Hash, state, data}
 	raw, _ := json.Marshal(r)
 	e = j.Transaction(ctx, func(tx *sql.Tx) error {
+		if m.Revalidate == nil {
+			return Failure("caller_unbound", "unknown", "lookup_original")
+		}
 		if e := m.Revalidate(ctx); e != nil {
 			return e
 		}
-		var previous []byte
-		if e := tx.QueryRowContext(ctx, "SELECT receipt FROM unified_facade_pointers WHERE scope=? AND generation=? AND operation=? AND intent=? AND input_hash=?", m.Scope, m.Generation, m.Operation, m.Intent, m.Hash).Scan(&previous); e != nil {
+		var previous, originalLocator []byte
+		if e := tx.QueryRowContext(ctx, "SELECT receipt,original_locator FROM unified_facade_pointers WHERE scope=? AND generation=? AND operation=? AND intent=? AND input_hash=?", m.Scope, m.Generation, m.Operation, m.Intent, m.Hash).Scan(&previous, &originalLocator); e != nil {
 			return e
 		}
-		if len(previous) > 0 {
-			return json.Unmarshal(previous, &r)
+		var savedLocator Locator
+		if e := json.Unmarshal(originalLocator, &savedLocator); e != nil {
+			return e
 		}
-		_, e := tx.ExecContext(ctx, "UPDATE unified_facade_pointers SET receipt=COALESCE(receipt,?) WHERE scope=? AND generation=? AND operation=? AND intent=? AND input_hash=?", raw, m.Scope, m.Generation, m.Operation, m.Intent, m.Hash)
+		if savedLocator != l {
+			return Failure("scope_changed", "unknown", "lookup_original")
+		}
+		preserve := func(observation []byte) error {
+			_, err := tx.ExecContext(ctx, "INSERT OR IGNORE INTO unified_facade_observations(scope,generation,operation,intent,input_hash,receipt_hash,receipt) VALUES(?,?,?,?,?,?,?)", m.Scope, m.Generation, m.Operation, m.Intent, m.Hash, RawDigest(observation), observation)
+			return err
+		}
+		if len(previous) > 0 {
+			var old MutationReceipt
+			if e := json.Unmarshal(previous, &old); e != nil {
+				return e
+			}
+			// Unknown is an observation, not a terminal no-effect promise. Only
+			// the authenticated original owner's positive lookup can settle it.
+			// Settled receipts and unknown negative/missing reads are immutable.
+			if old.State != "unknown" || !canonicalPositive {
+				r = old
+				return nil
+			}
+			if e := preserve(previous); e != nil {
+				return e
+			}
+		}
+		if e := preserve(raw); e != nil {
+			return e
+		}
+		_, e := tx.ExecContext(ctx, "UPDATE unified_facade_pointers SET receipt=? WHERE scope=? AND generation=? AND operation=? AND intent=? AND input_hash=?", raw, m.Scope, m.Generation, m.Operation, m.Intent, m.Hash)
 		return e
 	})
 	return r, e

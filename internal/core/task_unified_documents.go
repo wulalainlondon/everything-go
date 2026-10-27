@@ -17,7 +17,7 @@ func unifiedMutation(c taskapi.VerifiedContext, manager string, req taskapi.Requ
 	return taskapi.QueueMutation{Scope: c.StableScopeID + "\x00" + manager, Generation: c.NamespaceGeneration, Intent: req.IdempotencyKey, Operation: req.Operation, Hash: unifiedHash(req), Revalidate: check}
 }
 func (h *Hub) unifiedGeneralOperation(ctx context.Context, c taskapi.VerifiedContext, manager string, in unifiedInput, check func(context.Context) error) (any, error) {
-	m := taskapi.QueueMutation{Scope: c.StableScopeID + "\x00" + manager, Generation: c.NamespaceGeneration, Intent: in.OriginalKey, Operation: in.OriginalOperation}
+	m := taskapi.QueueMutation{Scope: c.StableScopeID + "\x00" + manager, Generation: c.NamespaceGeneration, Intent: in.OriginalKey, Operation: in.OriginalOperation, Revalidate: check}
 
 	var receipts []taskapi.MutationReceipt
 	lookups := []func(context.Context, taskapi.QueueMutation) (taskapi.MutationReceipt, bool, error){h.messageQueue.UnifiedOperation}
