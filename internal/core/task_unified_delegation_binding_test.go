@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"everything-go/internal/backend"
 	"everything-go/internal/delegation"
 	"everything-go/internal/messagequeue"
 	"everything-go/internal/session"
@@ -441,5 +442,55 @@ func TestTaskUnifiedFreshDelegationProductionReplyPreservesOriginalRound(t *test
 	initial, rev, _, e := h.delegations.ExecutionBinding(t.Context(), d.ID)
 	if e != nil || initial != "" || rev != 0 {
 		t.Fatal("original admission rewritten", initial, rev, e)
+	}
+}
+
+// Uses the real native ExecuteTask verifier and caller.Check all the way into
+// the original writer. The provider itself remains the original isolated fake.
+func TestTaskUnifiedFreshDelegationNativeExecuteQueuedReply(t *testing.T) {
+	h, parent, c, intent, d := extensionFormal(t)
+	cfg := session.ConfigurationFrom(parent.SettingsSnapshot())
+	payload, _ := json.Marshal(queuedPayload{Content: "original synthetic native source", Configuration: &cfg})
+	if _, _, e := h.messageQueue.Enqueue(messagequeue.Entry{SessionID: parent.ID, RequestID: c.RequestID, Content: "original synthetic native source", Payload: payload}); e != nil {
+		t.Fatal(e)
+	}
+	emitVerifiedNativeFixture(h, backend.NativeTaskAccepted{SessionID: parent.ID, RequestID: c.RequestID, ThreadID: c.ThreadID, TurnID: c.TurnID})
+	sourceThread, sourceRequest, sourceTurn := c.ThreadID, c.RequestID, c.TurnID
+	originalValidate := c.Validate
+	c.Validate = func() bool {
+		return originalValidate() && h.nativeCorrelationKnown(parent, sourceThread, sourceRequest, sourceTurn)
+	}
+	if !c.Validate() {
+		t.Fatal("original synthetic provider/source map missing")
+	}
+	caller := taskapi.VerifiedContext{Authority: h.cfg.InstanceID, StableScopeID: "session:" + parent.ID, SourceSessionID: parent.ID, SourceResumeID: c.ThreadID, SourceConfigRevision: parent.SettingsSnapshot().ConfigRevision, BindingKind: "native_tool"}
+	loc := unifiedLocator{Kind: "task", Authority: h.cfg.InstanceID, TaskID: intent.TaskID}
+	r, e := h.resolveUnified(t.Context(), caller, parent.ID, loc)
+	if e != nil {
+		t.Fatal(e)
+	}
+	var last []byte
+	for _, delivery := range []string{"metadata", "queue"} {
+		c.CallID = "synthetic-native-initialized-reply-" + delivery
+		input := map[string]any{"locator": loc, "direction": "parent_to_worker", "source": r.Parent, "target": r.Target, "reply_to_request_id": d.ChildRequestID, "reply_to_hash": r.ReplyHash, "content": "synthetic original native caller followup", "delivery": delivery}
+		request, _ := json.Marshal(map[string]any{"type": "task_api_unified_request", "api_version": "1.0.0-rc.6", "correlation_id": c.CallID, "operation": "reply", "idempotency_key": c.CallID, "input": input})
+		response := h.ExecuteTask(t.Context(), c, request)
+		if !response.OK {
+			t.Fatal("native original ExecuteTask reply refused", delivery, response.Error)
+		}
+		receipt := response.Result.(taskapi.MutationReceipt)
+		var data map[string]any
+		if json.Unmarshal(receipt.Data, &data) != nil {
+			t.Fatal(receipt)
+		}
+		if delivery == "queue" && data["logical_task_id"] != d.ID {
+			t.Fatal("native queued reply lost original", receipt)
+		}
+		last = request
+	}
+	c.ThreadID = "foreign-native-source"
+	refused := h.ExecuteTask(t.Context(), c, last)
+	if refused.OK {
+		t.Fatal("foreign native source retrieved original receipt")
 	}
 }

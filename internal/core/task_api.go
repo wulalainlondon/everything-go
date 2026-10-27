@@ -194,8 +194,17 @@ func (h *Hub) TaskTools(s *session.Session) ([]map[string]any, error) {
 	sort.Slice(tools, func(i, j int) bool { return tools[i]["name"].(string) < tools[j]["name"].(string) })
 	return tools, nil
 }
+
+// Native caller revalidation must retain the writer context; provider, active
+// request, thread, profile and admission checks remain unchanged.
+type nativeAPIVerifier func(context.Context) (taskapi.VerifiedContext, error)
+
+func (v nativeAPIVerifier) Verify(ctx context.Context, _ taskapi.Invocation) (taskapi.VerifiedContext, error) {
+	return v(ctx)
+}
+
 func (h *Hub) ExecuteTask(ctx context.Context, c backend.TaskCaller, raw []byte) taskapi.Response {
-	verifier := apiVerifier{func() (taskapi.VerifiedContext, error) {
+	verifier := nativeAPIVerifier(func(checkCtx context.Context) (taskapi.VerifiedContext, error) {
 		s, ok := h.registry.Get(c.Session.ID)
 		if !ok || s != c.Session || c.Validate == nil || !c.Validate() || s.ActiveQueuedID() != c.RequestID || s.ResumeID() != c.ThreadID || s.State() == session.Closed || s.Snapshot().Hidden || !h.controls.MobileMayWrite(s.ID) {
 			return taskapi.VerifiedContext{}, taskapi.Failure("caller_unbound", "known_none", "refresh_identity")
@@ -204,7 +213,7 @@ func (h *Hub) ExecuteTask(ctx context.Context, c backend.TaskCaller, raw []byte)
 			return taskapi.VerifiedContext{}, taskapi.Failure("unsupported", "known_none", "read_capabilities")
 		}
 		snapshot := s.Snapshot()
-		if entry, found, e := h.messageQueue.Get(s.ID, c.RequestID); e == nil && found {
+		if entry, found, e := h.messageQueue.GetContext(checkCtx, s.ID, c.RequestID); e == nil && found {
 			var admission queuedPayload
 			if json.Unmarshal(entry.Payload, &admission) == nil && admission.Configuration != nil {
 				snapshot.ConfigRevision = admission.Configuration.Revision
@@ -221,11 +230,11 @@ func (h *Hub) ExecuteTask(ctx context.Context, c backend.TaskCaller, raw []byte)
 			}
 			return "native_tool"
 		}()}, nil
-	}}
+	})
 	if c.Session == nil {
-		verifier.verify = func() (taskapi.VerifiedContext, error) {
+		verifier = nativeAPIVerifier(func(context.Context) (taskapi.VerifiedContext, error) {
 			return taskapi.VerifiedContext{}, taskapi.Failure("caller_unbound", "known_none", "refresh_identity")
-		}
+		})
 	}
 	caller, bindErr := taskapi.BindCaller(ctx, verifier, taskapi.Invocation{})
 	response, continuityHandled := h.executeUnified(ctx, caller, raw)

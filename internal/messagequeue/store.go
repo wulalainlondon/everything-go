@@ -187,6 +187,15 @@ func lookup(tx interface{ QueryRow(string, ...any) *sql.Row }, sessionID, reques
 func (s *Store) Get(sessionID, requestID string) (Entry, bool, error) {
 	return lookup(s.db, sessionID, requestID)
 }
+
+// GetContext preserves the original native caller's admission check inside a
+// same-Store writer without recursively borrowing its single SQL connection.
+func (s *Store) GetContext(ctx context.Context, sessionID, requestID string) (Entry, bool, error) {
+	if bound, ok := ctx.Value(nativeAcceptanceTransactionKey{}).(nativeAcceptanceTransaction); ok && bound.store == s && bound.tx != nil {
+		return lookup(bound.tx, sessionID, requestID)
+	}
+	return s.Get(sessionID, requestID)
+}
 func bump(tx *sql.Tx, sessionID string) error {
 	if err := taskapi.ChangeTx(tx, sessionID, "", "snapshot"); err != nil {
 		return err
