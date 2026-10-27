@@ -41,6 +41,21 @@ type intakeInput struct {
 	Files     []intakeFile  `json:"files"`
 }
 
+// Media-only input keeps the user's exact empty goal. An attachment envelope
+// alone is not content: uploaded references are resolved against the original
+// session/manifest below, and inline images must decode before admission commits.
+func intakeHasInput(in intakeInput) bool {
+	if strings.TrimSpace(in.Goal) != "" || len(in.Images) > 0 {
+		return true
+	}
+	for _, file := range in.Files {
+		if file.AttachmentID != "" || file.Content != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // Admitted user source evidence, not a fabricated native TaskOrigin or a new
 // caller principal. Unknown native IDs remain absent until real consumption.
 type intakeMetadata struct {
@@ -109,7 +124,7 @@ func (h *Hub) authorizeIntake(ctx context.Context, c taskapi.VerifiedContext, r 
 	if in.Action == "inspect" {
 		return l, nil
 	}
-	if in.Action != "submit" || in.RequestID != r.IdempotencyKey || strings.TrimSpace(in.Goal) == "" {
+	if in.Action != "submit" || in.RequestID != r.IdempotencyKey || !intakeHasInput(in) {
 		return l, taskapi.Failure("invalid_argument", "known_none", "correct_input")
 	}
 	if in.Target.Instance != h.cfg.InstanceID {
@@ -208,7 +223,7 @@ func (h *Hub) mutateIntake(ctx context.Context, c taskapi.AuthorizedCommand) (an
 	}
 	images := make([]backend.ImageAttachment, 0, len(in.Images))
 	for _, i := range in.Images {
-		if _, e := base64.StdEncoding.DecodeString(i.Data); e != nil {
+		if decoded, e := base64.StdEncoding.DecodeString(i.Data); e != nil || len(decoded) == 0 {
 			return nil, taskapi.Failure("invalid_argument", "known_none", "correct_input")
 		}
 		images = append(images, backend.ImageAttachment{Data: i.Data, MediaType: i.MediaType})

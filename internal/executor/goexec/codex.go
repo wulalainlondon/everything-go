@@ -3950,7 +3950,12 @@ func (c *Codex) codexInput(s *session.Session, reqID, imageOwnerID, content stri
 		}
 		userText += "\n\n[File: " + name + "]\n" + f.Content
 	}
-	input := []map[string]any{{"type": "text", "text": userText, "text_elements": []any{}}}
+	input := make([]map[string]any, 0, len(images)+1)
+	// Pure-image submissions contain only native image input, without an empty
+	// text item or a synthesized instruction. Preserve supplied text verbatim.
+	if userText != "" || len(images) == 0 {
+		input = append(input, map[string]any{"type": "text", "text": userText, "text_elements": []any{}})
+	}
 	for _, img := range images {
 		if item := c.prepareCodexImageInput(s, reqID, imageOwnerID, img, st); item != nil {
 			input = append(input, item)
