@@ -626,6 +626,7 @@ func (h *Hub) provisionDelegationLocked(ctx context.Context, r delegation.Record
 		if effectiveErr != nil {
 			return effectiveErr
 		}
+		effectiveUserInstruction := effectiveInstruction
 		var media queuedPayload
 		rawMedia, mediaErr := h.delegations.UnifiedReplyPayload(ctx, r.ID)
 		if mediaErr == nil {
@@ -654,7 +655,7 @@ func (h *Hub) provisionDelegationLocked(ctx context.Context, r delegation.Record
 		if bindingErr != nil {
 			return bindingErr
 		}
-		h.enqueueChatMessageExpectedInherited(client, clientproto.Command{Kind: "message", SessionID: r.ChildSessionID, RequestID: r.ChildRequestID, Content: effectiveInstruction, Images: media.Images, Files: media.Files}, expected, &messagequeue.InheritedInput{Revision: version, Hash: hash, OriginalHash: original, Binding: binding})
+		h.enqueueChatMessageExpectedInherited(client, clientproto.Command{Kind: "message", SessionID: r.ChildSessionID, RequestID: r.ChildRequestID, Content: effectiveInstruction, Images: media.Images, Files: media.Files}, expected, &messagequeue.InheritedInput{Revision: version, Hash: hash, OriginalHash: original, Binding: binding, Content: effectiveUserInstruction})
 		if _, queued, err := h.messageQueue.Get(r.ChildSessionID, r.ChildRequestID); err != nil || !queued {
 			return fmt.Errorf("delegation_child_enqueue_failed: %v", err)
 		}

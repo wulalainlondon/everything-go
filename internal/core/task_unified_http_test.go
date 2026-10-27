@@ -457,3 +457,84 @@ func TestTaskUnifiedUnverifiedRawSealNeverClaimsFinalOrCollection(t *testing.T) 
 		t.Fatal("scd promoted fake ta1", r)
 	}
 }
+
+func TestTaskUnifiedExpandedVideoEditorRetainsUserTextAtSameRevision(t *testing.T) {
+	h, call, a, b := unifiedFixtureSessions(t)
+	manager := h.unifiedIdentity(a.ID)
+	loc := seedUnifiedController(t, h, a, b, "media-editor")
+	hold := b.HoldQueue()
+	defer hold()
+	original := queuedPayload{Content: "原始文字", ExpectedTarget: &dispatchTargetExpectation{b.ResumeID(), b.SettingsSnapshot().ConfigRevision}}
+	payload, _ := json.Marshal(original)
+	if _, _, e := h.messageQueue.Enqueue(messagequeue.Entry{SessionID: b.ID, RequestID: "r_media-editor", Content: original.Content, Payload: payload}); e != nil {
+		t.Fatal(e)
+	}
+	if !b.SubmitNamed("r_media-editor", func() { b.EndTurn() }) {
+		t.Fatal("actor")
+	}
+	id := "u_" + strings.Repeat("a", 32)
+	dir := filepath.Join(h.cfg.DataDir, "uploads", attachmentSafe(b.ID, "session"), id)
+	if e := os.MkdirAll(dir, 0700); e != nil {
+		t.Fatal(e)
+	}
+	bytes := []byte("synthetic-mp4-not-provider-evidence")
+	path := filepath.Join(dir, "fixture.mp4")
+	os.WriteFile(path, bytes, 0600)
+	manifest := uploadedVideoManifest{Version: 2, UploadID: id, SessionID: b.ID, DeviceID: "phone", Name: "fixture.mp4", MediaType: "video/mp4", SizeBytes: int64(len(bytes)), SHA256: taskapi.RawDigest(bytes), Path: path}
+	raw, _ := json.Marshal(manifest)
+	os.WriteFile(filepath.Join(dir, "manifest.json"), raw, 0600)
+	q := unifiedQueue{"session_input", h.unifiedIdentity(b.ID)}
+	edit := func(key, content string, media bool) {
+		t.Helper()
+		r, _ := unifiedHTTP(t, call, manager, "queue_snapshot", "", map[string]any{"queue": q})
+		v := unifiedResult(t, r)
+		taskRead, _ := unifiedHTTP(t, call, manager, "get", "", map[string]any{"locator": loc})
+		row := unifiedResult(t, taskRead)["edit"].(map[string]any)
+		input := map[string]any{"locator": loc, "expected_queue_revision": v["revision"], "expected_content_revision": row["content_revision"], "expected_content_hash": row["content_hash"], "content": content}
+		if media {
+			input["files"] = []intakeFile{{AttachmentID: id, Name: manifest.Name, MediaType: manifest.MediaType, SizeBytes: manifest.SizeBytes}}
+		}
+		r, _ = unifiedHTTP(t, call, manager, "queue_edit", key, input)
+		unifiedResult(t, r)
+	}
+	edit("media-edit-one", "修訂一次", true)
+	r, _ := unifiedHTTP(t, call, manager, "get", "", map[string]any{"locator": loc})
+	task := unifiedResult(t, r)
+	editor := task["edit"].(map[string]any)["content"].(string)
+	if editor != "修訂一次" {
+		t.Errorf("editor leaked provider representation: %q", editor)
+	}
+	edit("media-edit-two", editor, false)
+	entry, _, e := h.messageQueue.EffectiveInput(t.Context(), b.ID, "r_media-editor")
+	if e != nil {
+		t.Fatal(e)
+	}
+	var effective queuedPayload
+	json.Unmarshal(entry.Payload, &effective)
+	count := strings.Count(effective.Content, "[Bridge attached files")
+	t.Logf("effective revision=%d usertext=%q provider_expansion_count=%d raw_upload_sha=%s", entry.ContentRevision, entry.Content, count, manifest.SHA256)
+	if count != 1 {
+		t.Errorf("attachment provider representation expanded %d times", count)
+	}
+	// Explicit file removal remains an empty original descriptor set; a later
+	// text-only edit must not resurrect the original video from older metadata.
+	r, _ = unifiedHTTP(t, call, manager, "queue_snapshot", "", map[string]any{"queue": q})
+	view := unifiedResult(t, r)
+	r, _ = unifiedHTTP(t, call, manager, "get", "", map[string]any{"locator": loc})
+	ed := unifiedResult(t, r)["edit"].(map[string]any)
+	r, _ = unifiedHTTP(t, call, manager, "queue_edit", "media-remove", map[string]any{"locator": loc, "expected_queue_revision": view["revision"], "expected_content_revision": ed["content_revision"], "expected_content_hash": ed["content_hash"], "content": "移除影片", "files": []intakeFile{}})
+	unifiedResult(t, r)
+	edit("after-removal", "保持移除", false)
+	entry, _, e = h.messageQueue.EffectiveInput(t.Context(), b.ID, "r_media-editor")
+	if e != nil {
+		t.Fatal(e)
+	}
+	json.Unmarshal(entry.Payload, &effective)
+	if strings.Contains(effective.Content, "[Bridge attached files") {
+		t.Fatal("removed video resurrected")
+	}
+	retained, _ := os.ReadFile(path)
+	if taskapi.RawDigest(retained) != manifest.SHA256 {
+		t.Fatal("original media mutated")
+	}
+}

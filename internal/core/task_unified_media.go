@@ -112,25 +112,36 @@ func (h *Hub) prepareUnifiedMedia(ctx context.Context, c taskapi.VerifiedContext
 func (h *Hub) prepareUnifiedEditMedia(ctx context.Context, c taskapi.VerifiedContext, r unifiedResolved, in unifiedInput, p queuedPayload) (queuedPayload, []unifiedUploadBinding, bool, error) {
 	images, files := in.Images, in.Files
 	explicit := images != nil || files != nil
+	if len(r.Entry.EffectiveBinding) == 0 && p.UnifiedBinding != nil {
+		r.Entry.EffectiveBinding, _ = json.Marshal(p.UnifiedBinding)
+	}
 	if files == nil {
 		var binding unifiedInputBinding
-		if json.Unmarshal(r.Entry.EffectiveBinding, &binding) == nil && len(binding.InputFiles) > 0 {
+		if json.Unmarshal(r.Entry.EffectiveBinding, &binding) == nil && binding.InputFiles != nil {
 			files = binding.InputFiles
 			explicit = true
 		}
 	}
 	// Formal media intake retained exact user-supplied refs, so the original
 	// verified media projection can be rebuilt with the new user text.
-	if !explicit && r.Canonical != nil {
+
+	if r.Canonical != nil {
 		var meta apiMetadata
 		if json.Unmarshal(r.Canonical.Metadata, &meta) == nil && meta.Request.Operation == "intake" {
 			var original intakeInput
-			if json.Unmarshal(meta.Request.Input, &original) == nil && (len(original.Images) > 0 || len(original.Files) > 0) {
-				images, files = original.Images, original.Files
-				explicit = true
+			if json.Unmarshal(meta.Request.Input, &original) == nil {
+				if images == nil && original.Images != nil {
+					images = original.Images
+					explicit = true
+				}
+				if files == nil && original.Files != nil {
+					files = original.Files
+					explicit = true
+				}
 			}
 		}
 	}
+
 	if !explicit {
 		if strings.TrimSpace(in.Content) == "" && len(p.Images) == 0 && len(p.Files) == 0 {
 			return p, nil, false, unifiedError("invalid_argument")
@@ -163,6 +174,12 @@ func (h *Hub) prepareUnifiedEditMedia(ctx context.Context, c taskapi.VerifiedCon
 func unifiedOriginalMediaFiles(r unifiedResolved, in unifiedInput) []intakeFile {
 	if in.Files != nil {
 		return in.Files
+	}
+	if len(r.Entry.EffectiveBinding) == 0 {
+		var p queuedPayload
+		if json.Unmarshal(r.Entry.Payload, &p) == nil && p.UnifiedBinding != nil {
+			r.Entry.EffectiveBinding, _ = json.Marshal(p.UnifiedBinding)
+		}
 	}
 	var binding unifiedInputBinding
 	if json.Unmarshal(r.Entry.EffectiveBinding, &binding) == nil && binding.InputFiles != nil {

@@ -15,7 +15,7 @@ import (
 type unifiedInputBinding struct {
 	InitialTarget    bool                   `json:"initial_target,omitempty"`
 	GrantTarget      string                 `json:"grant_target,omitempty"`
-	InputFiles       []intakeFile           `json:"input_files,omitempty"`
+	InputFiles       []intakeFile           `json:"input_files"`
 	Uploads          []unifiedUploadBinding `json:"uploads,omitempty"`
 	Source           jarvisTarget           `json:"source"`
 	Target           jarvisTarget           `json:"target"`

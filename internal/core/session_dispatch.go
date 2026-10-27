@@ -295,7 +295,7 @@ func (h *Hub) submitLocalSessionDispatch(ctx context.Context, r sessiondispatch.
 	if bindingErr != nil {
 		return r
 	}
-	inherited := &messagequeue.InheritedInput{Revision: version, Hash: hash, OriginalHash: original, Binding: binding}
+	inherited := &messagequeue.InheritedInput{Revision: version, Hash: hash, OriginalHash: original, Binding: binding, Content: reserved.Content}
 	if !h.enqueueChatMessageExpectedInherited(client, cmd, expected, inherited) {
 		r.State = "rejected"
 		r.Error = "dispatch_enqueue_rejected"

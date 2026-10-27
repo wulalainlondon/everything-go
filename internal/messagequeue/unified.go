@@ -214,5 +214,6 @@ func (s *Store) UnifiedMutate(ctx context.Context, session string, eligible map[
 type InheritedInput struct {
 	Revision           uint64
 	Hash, OriginalHash string
+	Content            string
 	Binding            []byte
 }

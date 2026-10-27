@@ -155,7 +155,7 @@ func (h *Hub) unifiedManager(c taskapi.VerifiedContext, in unifiedInput) (string
 	if c.SourceSessionID == "" {
 		return "", unifiedError("caller_unbound")
 	}
-	if in.Manager.SessionID != "" && (in.Manager.SessionID != c.SourceSessionID || in.Manager.ThreadID != c.SourceResumeID || in.Manager.Revision != c.SourceConfigRevision) {
+	if in.Manager.SessionID != "" && (in.Manager.Authority != c.Authority || in.Manager.SessionID != c.SourceSessionID || in.Manager.ThreadID != c.SourceResumeID || in.Manager.Revision != c.SourceConfigRevision) {
 		return "", unifiedError("permission")
 	}
 	return c.SourceSessionID, nil
@@ -739,6 +739,36 @@ func (h *Hub) resolveUnified(ctx context.Context, c taskapi.VerifiedContext, man
 			if !errors.Is(e, sql.ErrNoRows) {
 				return out, e
 			}
+			if h.dispatches != nil {
+				d, found, err := h.dispatches.UnifiedByExecution(ctx, h.cfg.InstanceID, l.SessionID, l.RequestID)
+				if err != nil {
+					return out, err
+				}
+				if found {
+					if l.NativeID != "" && l.NativeID != d.ID {
+						return out, unifiedError("ambiguous_owner")
+					}
+					ref := l
+					ref.Kind = "controller"
+					ref.NativeID = d.ID
+					return h.resolveUnified(ctx, c, manager, ref)
+				}
+			}
+			if h.delegations != nil {
+				d, found, err := h.delegations.ByChildRequest(ctx, l.SessionID, l.RequestID)
+				if err != nil {
+					return out, err
+				}
+				if found {
+					if l.NativeID != "" && l.NativeID != d.ID {
+						return out, unifiedError("ambiguous_owner")
+					}
+					ref := l
+					ref.Kind = "delegation"
+					ref.NativeID = d.ID
+					return h.resolveUnified(ctx, c, manager, ref)
+				}
+			}
 			scope, generation, body, replyFound, readErr := h.messageQueue.UnifiedReplySource(ctx, l.SessionID, l.RequestID)
 			if readErr != nil {
 				return out, readErr
@@ -866,7 +896,45 @@ func (h *Hub) unifiedTaskDTO(ctx context.Context, c taskapi.VerifiedContext, man
 		if json.Unmarshal(r.Entry.Payload, &payload) != nil {
 			return nil, unifiedError("invalid_argument")
 		}
-		edit = map[string]any{"queue": unifiedQueue{"session_input", r.Target}, "content": payload.Content, "content_revision": r.Entry.ContentRevision, "content_hash": r.Entry.EffectiveHash, "attachments_preserved": true}
+		userContent := payload.Content
+		if r.Entry.ContentRevision > 1 {
+			userContent = r.Entry.Content
+		} else if r.Canonical != nil {
+			var metadata apiMetadata
+			if json.Unmarshal(r.Canonical.Metadata, &metadata) == nil && metadata.Intake != nil {
+				userContent = metadata.Intake.Goal
+			}
+		}
+		if r.Entry.ContentRevision <= 1 && r.Locator.Kind == "controller" {
+			if d, ok, err := h.dispatches.Get(ctx, r.Locator.NativeID); err != nil {
+				return nil, err
+			} else if ok {
+				userContent = d.Content
+			}
+		}
+		if r.Entry.ContentRevision <= 1 && r.Locator.Kind == "delegation" {
+			if d, ok, err := h.delegations.ByID(ctx, r.Locator.NativeID); err != nil {
+				return nil, err
+			} else if ok {
+				userContent = d.Instruction
+			}
+		}
+		if r.Entry.ContentRevision <= 1 && payload.UnifiedBinding != nil {
+			_, _, body, found, err := h.messageQueue.UnifiedReplySource(ctx, r.Entry.SessionID, r.Entry.RequestID)
+			if err != nil {
+				return nil, err
+			}
+			if found {
+				var reply struct {
+					Content string `json:"content"`
+				}
+				if json.Unmarshal(body, &reply) != nil {
+					return nil, unifiedError("unknown")
+				}
+				userContent = reply.Content
+			}
+		}
+		edit = map[string]any{"queue": unifiedQueue{"session_input", r.Target}, "content": userContent, "content_revision": r.Entry.ContentRevision, "content_hash": r.Entry.EffectiveHash, "attachments_preserved": true}
 	}
 	if !r.HasEntry && r.CanEdit && (r.Locator.Kind == "controller" || r.Locator.Kind == "delegation") {
 		q := unifiedQueue{"controller_waiting_admission", r.Target}

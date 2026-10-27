@@ -286,7 +286,7 @@ func (s *Store) Enqueue(e Entry) (Entry, bool, error) {
 	}
 	if e.Inherited != nil && e.Inherited.Revision > 1 {
 		v := e.Inherited
-		if _, err = tx.Exec("INSERT INTO unified_input_versions VALUES(?,?,?,?,?,?,?)", e.SessionID, e.RequestID, v.Revision, e.Payload, e.Content, v.Hash, v.OriginalHash); err != nil {
+		if _, err = tx.Exec("INSERT INTO unified_input_versions VALUES(?,?,?,?,?,?,?)", e.SessionID, e.RequestID, v.Revision, e.Payload, v.Content, v.Hash, v.OriginalHash); err != nil {
 			return Entry{}, false, err
 		}
 		if len(v.Binding) > 0 {
