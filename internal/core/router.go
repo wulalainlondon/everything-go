@@ -103,7 +103,10 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 	case "pm_collaboration":
 		h.handlePM(c, cmd)
 	case "hello":
-		c.pinTaskSchema(cmd.TaskAPISchemaHash)
+		if !c.pinTaskSchema(cmd.TaskAPISchemaHash) {
+			c.enqueueEvent(protocol.NewError("", "task_api_schema_locked", "Task API contract is fixed for this connection; reconnect"))
+			return
+		}
 		c.deviceID = cmd.DeviceID
 		c.clientSurface = strings.ToLower(strings.TrimSpace(cmd.ClientSurface))
 		c.protocolVersion = cmd.ProtocolVersion

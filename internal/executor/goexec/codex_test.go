@@ -920,7 +920,7 @@ func TestCodexInputIncludesFilesAndImages(t *testing.T) {
 	st := c.state(s.ID)
 	png := base64.StdEncoding.EncodeToString([]byte("fake-png"))
 
-	input := c.codexInput(
+	input, inputErr := c.codexInput(
 		s,
 		"r1",
 		"r1",
@@ -929,6 +929,9 @@ func TestCodexInputIncludesFilesAndImages(t *testing.T) {
 		[]backend.FileAttachment{{Name: "a.txt", Content: "file body"}},
 		st,
 	)
+	if inputErr != nil {
+		t.Fatal(inputErr)
+	}
 
 	if len(input) != 2 {
 		t.Fatalf("want text + image input, got %+v", input)
@@ -965,8 +968,14 @@ func TestCodexTempImageCleanupIsScopedToOwningTurn(t *testing.T) {
 	st := c.state(s.ID)
 	png := base64.StdEncoding.EncodeToString([]byte("fake-png"))
 
-	oldInput := c.codexInput(s, "old-request", "old-request", "old", []backend.ImageAttachment{{Data: png, MediaType: "image/png"}}, nil, st)
-	newInput := c.codexInput(s, "new-request", "new-request", "new", []backend.ImageAttachment{{Data: png, MediaType: "image/png"}}, nil, st)
+	oldInput, inputErr := c.codexInput(s, "old-request", "old-request", "old", []backend.ImageAttachment{{Data: png, MediaType: "image/png"}}, nil, st)
+	if inputErr != nil {
+		t.Fatal(inputErr)
+	}
+	newInput, inputErr := c.codexInput(s, "new-request", "new-request", "new", []backend.ImageAttachment{{Data: png, MediaType: "image/png"}}, nil, st)
+	if inputErr != nil {
+		t.Fatal(inputErr)
+	}
 	oldPath, _ := oldInput[1]["path"].(string)
 	newPath, _ := newInput[1]["path"].(string)
 
@@ -991,7 +1000,10 @@ func TestCodexSteerImagesBelongToActiveTurn(t *testing.T) {
 	st := c.state(s.ID)
 	png := base64.StdEncoding.EncodeToString([]byte("fake-png"))
 
-	input := c.codexInput(s, "steer-message", "active-turn", "steer", []backend.ImageAttachment{{Data: png, MediaType: "image/png"}}, nil, st)
+	input, inputErr := c.codexInput(s, "steer-message", "active-turn", "steer", []backend.ImageAttachment{{Data: png, MediaType: "image/png"}}, nil, st)
+	if inputErr != nil {
+		t.Fatal(inputErr)
+	}
 	path, _ := input[1]["path"].(string)
 	c.cleanupTempImages(st, "steer-message")
 	if _, err := os.Stat(path); err != nil {

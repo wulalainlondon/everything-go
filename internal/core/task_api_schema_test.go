@@ -45,8 +45,19 @@ func taskSchemaConnection(t *testing.T, h *Hub, hash string) (*Client, func(stri
 			v["task_api_schema_hash"] = hash
 		}
 		send(v)
-		ack := receive("hello_ack")
-		clientID, _ = ack["client_id"].(string)
+		for {
+			ack := readEvent(t, ctx, conn)
+			if ack["type"] == "hello_ack" {
+				clientID, _ = ack["client_id"].(string)
+				break
+			}
+			if ack["type"] == "error" {
+				if clientID == "" || ack["code"] != "task_api_schema_locked" {
+					t.Fatal("unexpected hello refusal", ack)
+				}
+				break
+			}
+		}
 	}
 	hello(hash)
 	var client *Client

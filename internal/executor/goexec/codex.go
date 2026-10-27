@@ -2336,7 +2336,12 @@ func (c *Codex) Send(ctx context.Context, s *session.Session, reqID, content str
 		st.finish(err.Error())
 		return err
 	}
-	input := c.codexInput(s, reqID, reqID, backend.PresentationContent(ctx, content), images, files, st)
+	input, inputErr := c.codexInput(s, reqID, reqID, backend.PresentationContent(ctx, content), images, files, st)
+	if inputErr != nil {
+		st.finish(inputErr.Error())
+		c.releaseActiveThreads(s)
+		return inputErr
+	}
 	st.mu.Lock()
 	st.automaticInput = input
 	st.mu.Unlock()
@@ -2386,7 +2391,10 @@ func (c *Codex) steerActiveTurn(s *session.Session, clientUserMessageID, content
 		return backend.SteerResult{}, backend.ErrNoActiveTurn
 	}
 
-	input := c.codexInput(s, clientUserMessageID, activeRequestID, content, images, files, st)
+	input, inputErr := c.codexInput(s, clientUserMessageID, activeRequestID, content, images, files, st)
+	if inputErr != nil {
+		return backend.SteerResult{}, fmt.Errorf("%w: %w", backend.ErrSteerRejected, inputErr)
+	}
 	params := map[string]any{
 		"threadId":            threadID,
 		"expectedTurnId":      turnID,
@@ -3941,7 +3949,7 @@ func validateCodexInlineFiles(files []backend.FileAttachment) error {
 	return nil
 }
 
-func (c *Codex) codexInput(s *session.Session, reqID, imageOwnerID, content string, images []backend.ImageAttachment, files []backend.FileAttachment, st *codexState) []map[string]any {
+func (c *Codex) codexInput(s *session.Session, reqID, imageOwnerID, content string, images []backend.ImageAttachment, files []backend.FileAttachment, st *codexState) ([]map[string]any, error) {
 	userText := content
 	for _, f := range files {
 		name := f.Name
@@ -3956,18 +3964,23 @@ func (c *Codex) codexInput(s *session.Session, reqID, imageOwnerID, content stri
 	if userText != "" || len(images) == 0 {
 		input = append(input, map[string]any{"type": "text", "text": userText, "text_elements": []any{}})
 	}
+	staged := []string{}
 	for _, img := range images {
-		if item := c.prepareCodexImageInput(s, reqID, imageOwnerID, img, st); item != nil {
-			input = append(input, item)
+		item, err := c.prepareCodexImageInput(s, reqID, imageOwnerID, img, st)
+		if err != nil {
+			c.cleanupTempImagePaths(st, imageOwnerID, staged)
+			return nil, err
 		}
+		staged = append(staged, item["path"].(string))
+		input = append(input, item)
 	}
-	return input
+	return input, nil
 }
 
-func (c *Codex) prepareCodexImageInput(s *session.Session, reqID, imageOwnerID string, img backend.ImageAttachment, st *codexState) map[string]any {
+func (c *Codex) prepareCodexImageInput(s *session.Session, reqID, imageOwnerID string, img backend.ImageAttachment, st *codexState) (map[string]any, error) {
 	raw := strings.TrimSpace(img.Data)
 	if raw == "" {
-		return nil
+		return nil, &imageInputError{cause: errors.New("empty image input")}
 	}
 	if strings.HasPrefix(strings.ToLower(raw), "data:") {
 		if _, rest, ok := strings.Cut(raw, ","); ok {
@@ -3975,8 +3988,8 @@ func (c *Codex) prepareCodexImageInput(s *session.Session, reqID, imageOwnerID s
 		}
 	}
 	blob, err := base64.StdEncoding.DecodeString(raw)
-	if err != nil {
-		return nil
+	if err != nil || len(blob) == 0 {
+		return nil, &imageInputError{cause: errors.New("invalid image bytes")}
 	}
 	// Stage prompt images under Bridge runtime state, not the Session cwd.
 	// Downloads/Desktop/Documents are TCC-protected on macOS and the shared
@@ -3985,13 +3998,14 @@ func (c *Codex) prepareCodexImageInput(s *session.Session, reqID, imageOwnerID s
 	// fresh protected-folder prompt after Codex binary updates.
 	root := filepath.Join(c.dataDir, "codex-input-images")
 	if err := os.MkdirAll(root, 0o755); err != nil {
-		return nil
+		return nil, &imageInputError{cause: err}
 	}
 	sessionHash := sha256.Sum256([]byte(s.ID))
 	requestHash := sha256.Sum256([]byte(reqID))
 	path := filepath.Join(root, fmt.Sprintf("%x_%x_%s%s", sessionHash[:6], requestHash[:6], randHex(8), codexImageExt(img.MediaType)))
 	if err := os.WriteFile(path, blob, 0o600); err != nil {
-		return nil
+		_ = os.Remove(path)
+		return nil, &imageInputError{cause: err}
 	}
 	st.mu.Lock()
 	if st.tempImages == nil {
@@ -3999,7 +4013,32 @@ func (c *Codex) prepareCodexImageInput(s *session.Session, reqID, imageOwnerID s
 	}
 	st.tempImages[imageOwnerID] = append(st.tempImages[imageOwnerID], path)
 	st.mu.Unlock()
-	return map[string]any{"type": "localImage", "path": path}
+	return map[string]any{"type": "localImage", "path": path}, nil
+}
+
+// Retire only paths staged by this failed batch. A failed steer must never
+// delete image leases belonging to the original accepted active turn.
+func (c *Codex) cleanupTempImagePaths(st *codexState, owner string, paths []string) {
+	remove := map[string]bool{}
+	for _, path := range paths {
+		remove[path] = true
+	}
+	st.mu.Lock()
+	keep := st.tempImages[owner][:0]
+	for _, path := range st.tempImages[owner] {
+		if !remove[path] {
+			keep = append(keep, path)
+		}
+	}
+	if len(keep) == 0 {
+		delete(st.tempImages, owner)
+	} else {
+		st.tempImages[owner] = keep
+	}
+	st.mu.Unlock()
+	for _, path := range paths {
+		_ = os.Remove(path)
+	}
 }
 
 func (c *Codex) cleanupTempImages(st *codexState, imageOwnerID string) {
