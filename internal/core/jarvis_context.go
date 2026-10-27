@@ -68,7 +68,7 @@ func (h *Hub) contextBlockers(s *session.Session) []string {
 					out = append(out, "child_execution_unsettled")
 					break
 				}
-				if d.DeliveryState != "delivered" {
+				if d.DeliveryState != "delivered" && d.DeliveryState != "not_requested" {
 					out = append(out, "old_return_pending_wait_first")
 					break
 				}
@@ -81,11 +81,11 @@ func (h *Hub) contextBlockers(s *session.Session) []string {
 			out = append(out, "delegation_state_unknown")
 		} else {
 			for _, d := range records {
-				if d.State != "completed" && d.State != "failed" && d.State != "cancelled" {
+				if d.State != "terminal" && d.State != "cancelled" {
 					out = append(out, "child_execution_unsettled")
 					break
 				}
-				if d.DeliveryState != "delivered" {
+				if d.DeliveryState != "delivered" && d.DeliveryState != "not_requested" {
 					out = append(out, "old_return_pending_wait_first")
 					break
 				}

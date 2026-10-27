@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"everything-go/internal/backend"
+	"everything-go/internal/delegation"
 	"everything-go/internal/messagequeue"
 	"everything-go/internal/session"
 	"net/http"
@@ -252,5 +253,36 @@ func TestUnifiedOriginalMetadataReceiptCannotCrossManager(t *testing.T) {
 	w = call("POST", "worklist/get", get, "phone")
 	if strings.Contains(w.Body.String(), "subscription") {
 		t.Fatal("crossmanager subscription leak")
+	}
+}
+
+func TestUnifiedContextTerminalDelegationWithoutReturnIsSettled(t *testing.T) {
+	h, _ := newTestHub(t)
+	store, e := delegation.Open(t.TempDir())
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer store.Close()
+	h.delegations = store
+	s := h.registry.Create("parent", "Parent", t.TempDir(), "codex", "m", "read-only", "parent-thread")
+	child := h.registry.Create("child", "Child", s.Cwd(), "codex", "m", "read-only", "child-thread")
+	record := delegation.Record{ID: "d_original", ParentSessionID: s.ID, ChildSessionID: child.ID, ChildRequestID: "r_child", ParentRequestID: "r_return", ChildName: "Child", Cwd: s.Cwd()}
+	if e = store.Create(context.Background(), record); e != nil {
+		t.Fatal(e)
+	}
+	if blockers := h.contextBlockers(s); !strings.Contains(strings.Join(blockers, ","), "child_execution_unsettled") {
+		t.Fatal("running child missed", blockers)
+	}
+	if _, e = store.Complete(context.Background(), record.ChildSessionID, record.ChildRequestID, "completed", "done", "", nil); e != nil {
+		t.Fatal(e)
+	}
+	if e = store.MarkDeliveryQueued(context.Background(), record.ID); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = store.MarkDelivered(context.Background(), s.ID, record.ParentRequestID); e != nil {
+		t.Fatal(e)
+	}
+	if blockers := h.contextBlockers(s); strings.Contains(strings.Join(blockers, ","), "child_execution_unsettled") {
+		t.Fatal("terminal child treated as running", blockers)
 	}
 }
