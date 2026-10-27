@@ -195,3 +195,11 @@ func (s *Store) NativeExecution(session, request string) (string, string, bool) 
 	err := s.db.QueryRow("SELECT thread_id,turn_id FROM task_native_acceptance WHERE session_id=? AND request_id=?", session, request).Scan(&thread, &turn)
 	return thread, turn, err == nil && thread != "" && turn != ""
 }
+
+// WithNativeAcceptanceRead keeps the original canonical native snapshot on its
+// owning connection while a coupled delegation reply is committed. Callers
+// must retain the existing Hub delegationMu→MQ→delegation lock order and must
+// not borrow this Store's DB inside fn; scoped authority reads use ctx's tx.
+func (s *Store) WithNativeAcceptanceRead(ctx context.Context, fn func(context.Context) error) error {
+	return s.TaskJournal().Transaction(ctx, func(tx *sql.Tx) error { return fn(s.nativeAcceptanceContext(ctx, tx)) })
+}

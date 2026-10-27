@@ -54,6 +54,7 @@ func (h *Hub) unifiedReply(ctx context.Context, c taskapi.VerifiedContext, manag
 	if mediaErr != nil {
 		return nil, mediaErr
 	}
+	delegationWriter := false
 	baseCheck := m.Revalidate
 	var originalGrantRevision uint64
 	if r.Locator.Kind == "controller" {
@@ -65,6 +66,14 @@ func (h *Hub) unifiedReply(ctx context.Context, c taskapi.VerifiedContext, manag
 	}
 	m.Revalidate = func(ctx context.Context) error {
 		if err := baseCheck(ctx); err != nil {
+			return err
+		}
+
+		if delegationWriter {
+			if err := h.unifiedDelegationWriterCurrent(ctx, r); err != nil {
+				return err
+			}
+		} else if err := r.disclosureCurrent(ctx); err != nil {
 			return err
 		}
 		if r.Locator.Kind == "controller" {
@@ -111,6 +120,13 @@ func (h *Hub) unifiedReply(ctx context.Context, c taskapi.VerifiedContext, manag
 	binding.InputFiles = in.Files
 	m.Binding, _ = json.Marshal(binding)
 	if in.Direction == "parent_to_worker" && r.Locator.Kind == "delegation" {
+		// Match the original provision/continuation lock order. No MQ lock may
+		// precede delegationMu, and no delegation SQL callback re-enters that DB.
+		h.delegationMu.Lock()
+		defer h.delegationMu.Unlock()
+		if e := m.Revalidate(ctx); e != nil {
+			return nil, e
+		}
 		parent, _ := h.registry.Get(r.Parent.SessionID)
 		base, round, child, e := h.continuityBase(parent, r.Locator.NativeID)
 		if e != nil {
@@ -142,7 +158,25 @@ func (h *Hub) unifiedReply(ctx context.Context, c taskapi.VerifiedContext, manag
 			return h.unifiedTarget(target, true)
 		}
 		replyPayload, _ := json.Marshal(queuedPayload{Content: preparedContent, Images: preparedImages, Files: preparedFiles})
-		receipt, e := h.delegations.CreateUnifiedReply(ctx, m, d, body, replyPayload)
+
+		// Full original relation was checked outside its writer above. Within that
+		// writer, immutable accepted profile and captured identity generations are
+		// checked without borrowing delegation's SQL connection recursively.
+		delegationWriter = true
+		var receipt taskapi.MutationReceipt
+		create := func(writeCtx context.Context) error {
+			if e := m.Revalidate(writeCtx); e != nil {
+				return e
+			}
+			var err error
+			receipt, err = h.delegations.CreateUnifiedReply(writeCtx, m, d, body, replyPayload)
+			return err
+		}
+		if r.InitializedDelegation != nil {
+			e = h.messageQueue.WithNativeAcceptanceRead(ctx, create)
+		} else {
+			e = create(ctx)
+		}
 		if e == nil {
 			h.wakeDelegations()
 		}

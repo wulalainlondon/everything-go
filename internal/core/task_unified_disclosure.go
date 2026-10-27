@@ -24,7 +24,7 @@ type unifiedReadIdentity struct {
 // performs only authorization/identity reads and is called after the final data
 // read; it must not re-read that data and reopen the same authorize-before-await
 // window. A config/thread ABA is detected by the original SourceRevision.
-func (h *Hub) unifiedDisclosureFence(ctx context.Context, c taskapi.VerifiedContext, manager string, r unifiedResolved) (func(context.Context) error, error) {
+func (h *Hub) unifiedDisclosureFence(ctx context.Context, c taskapi.VerifiedContext, manager string, r unifiedResolved) (func(context.Context) error, func() error, error) {
 	identities := []unifiedReadIdentity{}
 	for _, identity := range []jarvisTarget{h.unifiedIdentity(manager), r.Parent, r.Target} {
 		if identity.SessionID == "" {
@@ -35,10 +35,10 @@ func (h *Hub) unifiedDisclosureFence(ctx context.Context, c taskapi.VerifiedCont
 			if identity == r.Target && r.Locator.Kind == "delegation" && identity.ThreadID == "" {
 				continue
 			}
-			return nil, unifiedError("scope_changed")
+			return nil, nil, unifiedError("scope_changed")
 		}
 		if e := h.unifiedTarget(identity, false); e != nil {
-			return nil, e
+			return nil, nil, e
 		}
 		identities = append(identities, unifiedReadIdentity{identity, s, s.SettingsSnapshot().SourceRevision})
 	}
@@ -105,7 +105,7 @@ func (h *Hub) unifiedDisclosureFence(ctx context.Context, c taskapi.VerifiedCont
 		return checkLocal()
 	}
 	registerUnifiedDisclosure(ctx, fence)
-	return fence, nil
+	return fence, checkLocal, nil
 }
 func (r unifiedResolved) disclosureCurrent(ctx context.Context) error {
 	if r.ReadFence == nil {

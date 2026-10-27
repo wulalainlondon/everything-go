@@ -2,8 +2,10 @@ package core
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"net/http/httptest"
@@ -318,5 +320,126 @@ func TestTaskUnifiedFreshDelegationConflictBeforeWriterHasNoEffect(t *testing.T)
 				t.Fatal("refused writer retained mutation", found, lookupErr)
 			}
 		})
+	}
+}
+
+func TestTaskUnifiedFreshDelegationProductionReplyConflictBeforeWriter(t *testing.T) {
+	for _, delivery := range []string{"metadata", "queue"} {
+		t.Run(delivery, func(t *testing.T) {
+			h, parent, _, d, _ := initializedUnifiedDelegation(t)
+			c := taskapi.VerifiedContext{Authority: h.cfg.InstanceID, StableScopeID: "device:phone", BindingKind: "paired_human"}
+			sum := sha256.Sum256([]byte("initialized-owned-paired-token"))
+			c.NamespaceGeneration = binary.BigEndian.Uint64(sum[:8]) & ((1 << 53) - 1)
+			loc := unifiedLocator{Kind: "delegation", Authority: h.cfg.InstanceID, NativeID: d.ID}
+			r, e := h.resolveUnified(t.Context(), c, parent.ID, loc)
+			if e != nil {
+				t.Fatal(e)
+			}
+			// A second handle belongs ONLY to this temporary synthetic test database.
+			// It commits the exact conflict at the production source-revalidation seam,
+			// after resolve but before the first metadata/delegation writer statement.
+			db, e := sql.Open("sqlite", filepath.Join(h.cfg.DataDir, "message_queue.sqlite"))
+			if e != nil {
+				t.Fatal(e)
+			}
+			defer db.Close()
+			injected := false
+			check := func(context.Context) error {
+				if !injected {
+					injected = true
+					_, err := db.Exec("INSERT INTO task_native_conflicts(session_id,request_id,thread_id,turn_id) VALUES(?,?,?,?)", d.ChildSessionID, d.ChildRequestID, r.Target.ThreadID, "production-late-conflict")
+					return err
+				}
+				return nil
+			}
+			req := taskapi.Request{Operation: "reply", IdempotencyKey: "production-conflict-" + delivery}
+			in := unifiedInput{Locator: loc, Direction: "parent_to_worker", Source: r.Parent, Target: r.Target, ReplyTo: r.Locator.RequestID, ReplyHash: r.ReplyHash, Content: "synthetic must not execute", Delivery: delivery}
+			_, e = h.unifiedReply(t.Context(), c, parent.ID, req, in, check)
+			t.Log("production response", delivery, "injected", injected, "error", e)
+			if !injected {
+				t.Fatal("did not reach production writer revalidation")
+			}
+			if e == nil {
+				t.Fatal("production reply accepted despite conflict before writer")
+			}
+			m := unifiedMutation(c, parent.ID, req, check)
+			for _, lookup := range []func(context.Context, taskapi.QueueMutation) (taskapi.MutationReceipt, bool, error){h.messageQueue.UnifiedOperation, h.delegations.UnifiedOperation} {
+				_, found, err := lookup(t.Context(), m)
+				if err != nil || found {
+					t.Fatal("production refusal retained receipt", found, err)
+				}
+			}
+			latest, err := h.delegations.LatestRound(t.Context(), d.ID)
+			if err != nil || latest.ID != d.ID {
+				t.Fatal("production refusal created successor", latest.ID, err)
+			}
+		})
+	}
+}
+
+func TestTaskUnifiedFreshDelegationProductionReplyPreservesOriginalRound(t *testing.T) {
+	h, parent, intent, d, call := initializedUnifiedDelegation(t)
+	c := taskapi.VerifiedContext{Authority: h.cfg.InstanceID, StableScopeID: "device:phone", BindingKind: "paired_human"}
+	sum := sha256.Sum256([]byte("initialized-owned-paired-token"))
+	c.NamespaceGeneration = binary.BigEndian.Uint64(sum[:8]) & ((1 << 53) - 1)
+	loc := unifiedLocator{Kind: "delegation", Authority: h.cfg.InstanceID, NativeID: d.ID}
+	r, e := h.resolveUnified(t.Context(), c, parent.ID, loc)
+	if e != nil {
+		t.Fatal(e)
+	}
+	for _, delivery := range []string{"metadata", "queue"} {
+		req := taskapi.Request{Operation: "reply", IdempotencyKey: "production-positive-" + delivery}
+		in := unifiedInput{Locator: loc, Direction: "parent_to_worker", Source: r.Parent, Target: r.Target, ReplyTo: r.Locator.RequestID, ReplyHash: r.ReplyHash, Content: "synthetic same work followup", Delivery: delivery}
+		value, e := h.unifiedReply(t.Context(), c, parent.ID, req, in, func(context.Context) error { return nil })
+		if e != nil {
+			t.Fatal(delivery, e)
+		}
+		receipt := value.(taskapi.MutationReceipt)
+		var data map[string]any
+		if json.Unmarshal(receipt.Data, &data) != nil {
+			t.Fatal(receipt)
+		}
+		if delivery == "queue" {
+			roundID, _ := data["round_id"].(string)
+			if roundID == "" || roundID == d.ID || data["logical_task_id"] != d.ID {
+				t.Fatal("new round lost original logical identity", data)
+			}
+			next, found, e := h.delegations.ByID(t.Context(), roundID)
+			if e != nil || !found || next.ChildSessionID != d.ChildSessionID {
+				t.Fatal("new round target changed", next, e)
+			}
+			round, found, e := h.delegations.Round(t.Context(), roundID)
+			if e != nil || !found || round.PreviousID != d.ID || round.LogicalID != d.ID || round.Version != 2 {
+				t.Fatal("new round lost original continuity", round, e)
+			}
+			for _, op := range []string{"resolve", "get"} {
+				response, _ := unifiedHTTP(t, call, h.unifiedIdentity(parent.ID), op, "", map[string]any{"locator": map[string]any{"kind": "delegation", "authority_instance_id": h.cfg.InstanceID, "native_id": roundID, "round_id": roundID}})
+				got := unifiedResult(t, response)
+				owner := got["owner"].(map[string]any)
+				if owner["thread_id"] != r.Target.ThreadID || owner["config_revision"] != float64(0) {
+					t.Fatal("next round target not exact", got)
+				}
+			}
+		}
+	}
+	// The old selected round/task must remain the original sealed request after
+	// its successor exists, never implicitly read latest or rewrite admission.
+	response, _ := unifiedHTTP(t, call, h.unifiedIdentity(parent.ID), "get", "", map[string]any{"locator": map[string]any{"kind": "task", "authority_instance_id": h.cfg.InstanceID, "task_id": intent.TaskID}})
+	got := unifiedResult(t, response)
+	legacy, e := h.apiTask(t.Context(), intent)
+	if e != nil {
+		t.Fatal(e)
+	}
+	final, ok := got["final"].(map[string]any)
+	if !ok || final["owner_request_id"] != d.ChildRequestID || final["seal_id"] != legacy["seal_id"] || final["full_hash"] != legacy["final_hash"] {
+		t.Fatal("old selection substituted successor or seal", got)
+	}
+	locator := got["locator"].(map[string]any)
+	if locator["request_id"] != d.ChildRequestID {
+		t.Fatal("old locator retargeted", locator)
+	}
+	initial, rev, _, e := h.delegations.ExecutionBinding(t.Context(), d.ID)
+	if e != nil || initial != "" || rev != 0 {
+		t.Fatal("original admission rewritten", initial, rev, e)
 	}
 }

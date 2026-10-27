@@ -13,7 +13,8 @@ import (
 // pin AND the same original round's provider-correlated acceptance. No binding,
 // grant, queue expectation or historical record is updated by this projection.
 type unifiedDelegationInitialization struct {
-	Native messagequeue.NativeReceipt
+	Native       messagequeue.NativeReceipt
+	ProfileCheck func() error
 }
 
 func (h *Hub) unifiedDelegationReadTarget(ctx context.Context, d delegation.Record, captured *unifiedDelegationInitialization) (jarvisTarget, *unifiedDelegationInitialization, error) {
@@ -61,7 +62,8 @@ func (h *Hub) unifiedDelegationReadTarget(ctx context.Context, d delegation.Reco
 	if current, e := taskRootIdentity(d.Cwd); e != nil || current != cwdIdentity {
 		return target, nil, unifiedError("scope_changed")
 	}
-	if scope, e := h.TaskWorkerScope(child); e != nil || scope == nil {
+	scope, e := h.TaskWorkerScope(child)
+	if e != nil || scope == nil {
 		return target, nil, unifiedError("scope_changed")
 	}
 	native, accepted, e := h.messageQueue.ExactNativeAcceptanceContext(ctx, d.ChildSessionID, d.ChildRequestID)
@@ -73,7 +75,25 @@ func (h *Hub) unifiedDelegationReadTarget(ctx context.Context, d delegation.Reco
 	}
 	proof := captured
 	if proof == nil {
-		proof = &unifiedDelegationInitialization{Native: native}
+		rootIDs := map[string]string{}
+		for _, root := range scope.Roots {
+			id, err := taskRootIdentity(root)
+			if err != nil {
+				return target, nil, err
+			}
+			rootIDs[root] = id
+		}
+		proof = &unifiedDelegationInitialization{Native: native, ProfileCheck: func() error {
+			if err := validateDelegationChildProfile(d, child, pin, rev, provider, true); err != nil {
+				return err
+			}
+			for root, want := range rootIDs {
+				if got, err := taskRootIdentity(root); err != nil || got != want {
+					return unifiedError("scope_changed")
+				}
+			}
+			return nil
+		}}
 	} else if proof.Native != native {
 		return target, nil, unifiedError("scope_changed")
 	}
@@ -95,4 +115,36 @@ func (h *Hub) unifiedDelegationReadTarget(ctx context.Context, d delegation.Reco
 		})
 	}
 	return target, proof, nil
+}
+
+// Pure immutable-profile/local checks plus the original canonical MQ authority.
+// Safe while the original delegation writer owns its single SQL connection.
+func (h *Hub) unifiedDelegationWriterCurrent(ctx context.Context, r unifiedResolved) error {
+	if r.LocalFence == nil {
+		return unifiedError("scope_changed")
+	}
+	if e := r.LocalFence(); e != nil {
+		return e
+	}
+	if r.InitializedDelegation != nil {
+		p := r.InitializedDelegation
+		if p.ProfileCheck == nil {
+			return unifiedError("scope_changed")
+		}
+		if e := p.ProfileCheck(); e != nil {
+			return e
+		}
+		native, accepted, e := h.messageQueue.ExactNativeAcceptanceContext(ctx, r.Target.SessionID, r.Locator.RequestID)
+		if e != nil {
+			return e
+		}
+		if !accepted || native != p.Native {
+			return unifiedError("scope_changed")
+		}
+		child, ok := h.registry.Get(r.Target.SessionID)
+		if !ok || !h.nativeCorrelationKnown(child, native.ThreadID, r.Locator.RequestID, native.TurnID) {
+			return unifiedError("scope_changed")
+		}
+	}
+	return r.LocalFence()
 }

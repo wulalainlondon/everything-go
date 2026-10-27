@@ -120,6 +120,7 @@ type unifiedInput struct {
 }
 type unifiedResolved struct {
 	ReadFence               func(context.Context) error
+	LocalFence              func() error
 	InitializedDelegation   *unifiedDelegationInitialization
 	ControllerGrantRevision uint64
 	Locator                 unifiedLocator
@@ -667,7 +668,7 @@ func (h *Hub) resolveUnified(ctx context.Context, c taskapi.VerifiedContext, man
 		var meta apiMetadata
 		_ = json.Unmarshal(r.Metadata, &meta)
 		out.Parent = h.unifiedIdentity(meta.Caller.SourceSessionID)
-		out.ReadFence, e = h.unifiedDisclosureFence(ctx, c, manager, out)
+		out.ReadFence, out.LocalFence, e = h.unifiedDisclosureFence(ctx, c, manager, out)
 		if e != nil {
 			return out, e
 		}
@@ -870,7 +871,7 @@ func (h *Hub) resolveUnified(ctx context.Context, c taskapi.VerifiedContext, man
 	out.Locator.Revision = out.Target.Revision
 	out.Locator.RevisionKnown = true
 	var err error
-	out.ReadFence, err = h.unifiedDisclosureFence(ctx, c, manager, out)
+	out.ReadFence, out.LocalFence, err = h.unifiedDisclosureFence(ctx, c, manager, out)
 	if err != nil {
 		return out, err
 	}
