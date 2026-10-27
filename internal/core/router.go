@@ -64,6 +64,13 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		c.enqueueEvent(h.client.Error("", "", "Pairing required before this device can use the bridge"))
 		return
 	}
+	if s, ok := h.registry.Get(cmd.SessionID); ok && h.contextAdmissionBlocked(s) {
+		switch cmd.Kind {
+		case "message", "steer_message", "clear_session", "close_session", "switch_session_config", "set_effort", "codex_goal_set", "codex_goal_clear", "handoff_to_desktop", "reclaim_from_desktop", "codex_voice_start", "prepare_tool_environment_repair", "apply_tool_environment_repair":
+			c.enqueueEvent(h.client.Error(s.ID, cmd.RequestID, "Original context reset is unresolved; inspect its original receipt before changing this generation"))
+			return
+		}
+	}
 	if h.rejectRoomSessionCommand(c, cmd) {
 		return
 	}

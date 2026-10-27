@@ -121,6 +121,18 @@ func Open(dataDir string) (*Store, error) {
 		return nil, err
 	}
 	s := &Store{db: db}
+	if err := s.installStartPush(); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err := s.installContextReset(); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err := s.installWorklist(); err != nil {
+		db.Close()
+		return nil, err
+	}
 	if err := s.initElapsed(); err != nil {
 		db.Close()
 		return nil, err
@@ -221,6 +233,9 @@ func (s *Store) Enqueue(e Entry) (Entry, bool, error) {
 		}
 		return previous, false, nil
 	}
+	if err := contextBarrierTx(tx, e.SessionID); err != nil {
+		return Entry{}, false, err
+	}
 	if e.FileNames == nil {
 		e.FileNames = []string{}
 	}
@@ -301,6 +316,11 @@ func (s *Store) Transition(sessionID, requestID string, from []State, to State, 
 	}
 	if !allowed {
 		return e, false, nil
+	}
+	if to == Running {
+		if err := contextBarrierTx(tx, sessionID); err != nil {
+			return Entry{}, false, err
+		}
 	}
 	if to == Cancelled {
 		if _, err = tx.Exec("INSERT OR IGNORE INTO task_cancel_origins VALUES(?,?,?)", sessionID, requestID, e.State); err != nil {

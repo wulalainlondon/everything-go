@@ -321,3 +321,29 @@ func (c *Client) SendFCM(ctx context.Context, device, token string, envelope []b
 func TokenHash(token string) string { return digest(token) }
 func (c *Client) BridgeID() string  { id, _ := credentialID(c.identity.Credential); return id }
 func (c *Client) String() string    { return fmt.Sprintf("push relay (%s)", c.identity.URL) }
+
+// SendFCMOnce uses a caller-persisted immutable outbox ID and makes one bounded
+// request. Unknown transport results are not retried under another broker ID.
+func (c *Client) SendFCMOnce(ctx context.Context, id, device, token string, envelope []byte, guard func() bool) error {
+	var input struct {
+		Message struct {
+			Token        string            `json:"token"`
+			Notification *Notification     `json:"notification,omitempty"`
+			Data         map[string]string `json:"data,omitempty"`
+			Android      *Android          `json:"android,omitempty"`
+			APNS         *APNS             `json:"apns,omitempty"`
+		} `json:"message"`
+	}
+	if strictJSON(envelope, &input) != nil || input.Message.Token != token || guard == nil || !guard() {
+		return &APIError{Code: "notification_no_longer_allowed"}
+	}
+	var response Response
+	e := c.request(ctx, "/v1/notifications", SendRequest{RequestID: id, DeviceID: device, TokenHash: digest(token), Message: Message{Notification: input.Message.Notification, Data: input.Message.Data, Android: input.Message.Android, APNS: input.Message.APNS}}, &response)
+	if e != nil {
+		return e
+	}
+	if response.Status != Sent {
+		return &APIError{Code: "invalid_response"}
+	}
+	return nil
+}

@@ -284,6 +284,9 @@ func (h *Hub) provisionPMProject(p coordination.Project) error {
 // AdmitTurn is called by the mux for ALL dispatch paths, including Work,
 // automation, relay, notifications and recovered user message queues.
 func (h *Hub) AdmitTurn(s *session.Session, requestID, content string) (string, func(), error) {
+	if h.contextAdmissionBlocked(s) {
+		return "", nil, errors.New("context_generation_reserved")
+	}
 	if h.workspaceReservedSession(s.ID) {
 		if _, _, err := h.validateWorkspaceNativeRequest(context.Background(), s.ID, requestID); err != nil {
 			return "", nil, err

@@ -153,7 +153,7 @@ func (h *Hub) handleLineVoiceStart(c *Client, cmd clientproto.Command) {
 		return
 	}
 	s, ok := h.registry.Get(cmd.SessionID)
-	if !ok || s.Backend() != backend.Codex || s.ResumeID() == "" || cmd.ThreadID != s.ResumeID() || !h.controls.MobileMayWrite(cmd.SessionID) {
+	if !ok || h.contextAdmissionBlocked(s) || s.Backend() != backend.Codex || s.ResumeID() == "" || cmd.ThreadID != s.ResumeID() || !h.controls.MobileMayWrite(cmd.SessionID) {
 		reject("目前對話沒有 LINE 通話控制權")
 		return
 	}
@@ -166,6 +166,12 @@ func (h *Hub) handleLineVoiceStart(c *Client, cmd clientproto.Command) {
 	h.voiceMu.Lock()
 	if h.voiceClients == nil {
 		h.voiceClients = map[*Client]*clientVoiceCall{}
+	}
+	if h.contextAdmissionBlocked(s) {
+		h.voiceMu.Unlock()
+		cancel()
+		reject("原上下文更新尚未確認，未開始通話")
+		return
 	}
 	for owner, existing := range h.voiceClients {
 		if owner == c || existing.kind == "line" || existing.session.ID == s.ID {

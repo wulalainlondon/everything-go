@@ -67,7 +67,7 @@ func (s *Session) QueueLen() int {
 func (s *Session) CanDispatchAutomatic() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.state != Idle {
+	if s.state != Idle || s.contextResetID != "" {
 		return false
 	}
 	return s.mailbox == nil || len(s.mailbox) == 0
@@ -107,7 +107,7 @@ func (s *Session) submit(id string, fn func(), wait bool) bool {
 func (s *Session) submitReady(id string, fn func(), wait bool, ready func() bool) bool {
 	for {
 		s.mu.Lock()
-		if s.state == Closed {
+		if s.state == Closed || s.contextResetID != "" {
 			s.mu.Unlock()
 			return false
 		}

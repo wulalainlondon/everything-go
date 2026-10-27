@@ -91,7 +91,7 @@ func (h *Hub) handleVoiceStart(c *Client, cmd clientproto.Command) {
 		c.enqueueEvent(voiceEvent(cmd, "error", "對話對應已變更，請重新開啟後再連線"))
 		return
 	}
-	if !h.controls.MobileMayWrite(s.ID) {
+	if h.contextAdmissionBlocked(s) || !h.controls.MobileMayWrite(s.ID) {
 		c.enqueueEvent(voiceEvent(cmd, "error", "此對話由桌面控制，請先取回手機控制权"))
 		return
 	}
@@ -141,7 +141,7 @@ func (h *Hub) handleVoiceStart(c *Client, cmd clientproto.Command) {
 	if h.voiceClients == nil {
 		h.voiceClients = map[*Client]*clientVoiceCall{}
 	}
-	if h.voiceClients[c] != nil {
+	if h.contextAdmissionBlocked(s) || h.voiceClients[c] != nil {
 		h.voiceMu.Unlock()
 		cancel()
 		c.enqueueEvent(voiceEvent(cmd, "error", "請先結束上一個語音對話"))

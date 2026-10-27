@@ -165,7 +165,10 @@ func (h *Hub) jarvisOperations() []string {
 		ops = append(ops, "custom_inbox_assignment", "human_resolution")
 	}
 	if h.messageQueue != nil {
-		ops = append(ops, "work_elapsed_read")
+		ops = append(ops, "work_elapsed_read", "worklist_read_v1", "worklist_notes_v1", "work_start_notice_v1", "context_reset_v1")
+		if h.fcm != nil {
+			ops = append(ops, "work_start_push_v1")
+		}
 	}
 	return ops
 }
@@ -186,6 +189,14 @@ func (h *Hub) ServeJarvisAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method == http.MethodPost && path == "work-status/read" {
 		h.jarvisReadWork(w, r, device)
+		return
+	}
+	if strings.HasPrefix(path, "context/") {
+		h.serveContext(w, r, device, path)
+		return
+	}
+	if strings.HasPrefix(path, "worklist/") {
+		h.serveWorklist(w, r, device, path)
 		return
 	}
 	if h.automation == nil {

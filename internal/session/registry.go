@@ -28,6 +28,7 @@ import (
 type Session struct {
 	mu             sync.Mutex
 	configUpdating bool
+	contextResetID string
 	configRevision uint64
 	sourceRevision uint64
 	futureConfig   *Configuration

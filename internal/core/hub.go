@@ -684,6 +684,17 @@ func (h *Hub) Emit(event any) {
 		release()
 		return
 	}
+	if proof, ok := event.(backend.NativeTaskStarted); ok {
+		if h.messageQueue != nil {
+			s, found := h.registry.Get(proof.SessionID)
+			if found && s.ResumeID() == proof.ThreadID && (proof.Provider != "codex" || h.nativeCorrelationKnown(s, proof.ThreadID, proof.RequestID, proof.Token)) {
+				if _, err := h.messageQueue.RecordNativeStart(messagequeue.NativeStart{SessionID: proof.SessionID, RequestID: proof.RequestID, Provider: proof.Provider, ThreadID: proof.ThreadID, Token: proof.Token, TokenKind: proof.TokenKind, ProofKind: proof.ProofKind, ObservedAt: proof.ObservedAt.UnixMilli()}); err != nil {
+					log.Printf("[jarvis] live start persistence refused: %v", err)
+				}
+			}
+		}
+		return
+	}
 	if proof, ok := event.(backend.NativeProviderEvidence); ok {
 		h.messageQueueMu.Lock()
 		defer h.messageQueueMu.Unlock()

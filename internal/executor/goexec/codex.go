@@ -3234,7 +3234,9 @@ func (c *Codex) startTurn(threadID string, input []map[string]any, snap session.
 			}
 			return &codexAcceptanceError{Reason: reason, Failure: recovery.ClassifyCodex(response.Turn.Error.Info, "")}
 		}
-		return c.confirmOwnedTurnSubmission(st, threadID, requestID, response.Turn, func() {
+		return c.confirmOwnedTurnSubmissionLive(st, threadID, requestID, response.Turn, func() {
+			c.sink.Emit(backend.NativeTaskStarted{SessionID: snap.ID, RequestID: requestID, Provider: "codex", ThreadID: threadID, Token: response.Turn.ID, TokenKind: "turn_id", ProofKind: "live_turn_start_in_progress", ObservedAt: consumedResponseAt})
+		}, func() {
 			if automatic != nil {
 				st.mu.Lock()
 				attempt := st.automaticAttempt

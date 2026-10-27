@@ -727,6 +727,16 @@ func (c *Claude) readStdout(s *session.Session, p *proc, stdout interface{ Read(
 			c.sink.Emit(backend.NewError(s.ID, reqID, prefix+evt.APIError, message))
 			return
 		}
+		// Only live assistant output after the exact input UUID ACK proves a
+		// Claude start. Process launch/user replay cannot manufacture a turn ID.
+		if evt.Type == "stream_event" || evt.Type == "assistant" {
+			p.mu.Lock()
+			token, conversation, alive := p.acceptedUUID, s.ResumeID(), p.reqID == reqID && reqID != ""
+			p.mu.Unlock()
+			if p.taskLease != nil && token != "" && conversation != "" && alive {
+				c.sink.Emit(backend.NativeTaskStarted{SessionID: s.ID, RequestID: reqID, Provider: "claude", ThreadID: conversation, Token: token, TokenKind: "message_uuid", ProofKind: "live_assistant_after_input_ack", ObservedAt: time.Now()})
+			}
+		}
 		switch evt.Type {
 		case "stream_event":
 			sawStreamEvent = true
@@ -922,7 +932,7 @@ func (c *Claude) readStdout(s *session.Session, p *proc, stdout interface{ Read(
 			}
 			if evt.Subtype == "init" && c.pmProvider != nil {
 				pm, err := c.pmProvider.PMConfiguration(s.ID)
-				if err != nil || (pm != nil && !validPMPolicyTools(pm,evt.Tools)) {
+				if err != nil || (pm != nil && !validPMPolicyTools(pm, evt.Tools)) {
 					p.cancel()
 					c.sink.Emit(backend.NewError(s.ID, p.currentReqID(), "pm_tool_policy_mismatch", "PM runtime exposed unexpected tools; execution was stopped."))
 					return

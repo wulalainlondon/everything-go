@@ -413,3 +413,32 @@ func (p Profile) Role() *RoleSnapshot {
 	sum := sha256.Sum256([]byte(p.Description))
 	return &RoleSnapshot{p.ID, p.RoleRevision, p.Description, hex.EncodeToString(sum[:])}
 }
+
+// ResetThreadCAS is an explicit paired-human reset migration, separate from
+// initial native pinning. It never changes role, owner, grants or profile ID.
+func (s *Store) ResetThreadCAS(sessionID, old string, revision uint64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, ok := s.state.Profiles[sessionID]
+	if !ok {
+		return errors.New("profile_unavailable")
+	}
+	if p.NativeThreadID != old || p.Revision != revision {
+		return errors.New("profile_reset_cas_conflict")
+	}
+	next := diskState{Version: 1, Revision: s.state.Revision + 1, Profiles: map[string]Profile{}, Receipts: map[string]Receipt{}}
+	for k, v := range s.state.Profiles {
+		next.Profiles[k] = v
+	}
+	for k, v := range s.state.Receipts {
+		next.Receipts[k] = v
+	}
+	p.NativeThreadID = ""
+	p.Revision++
+	next.Profiles[sessionID] = p
+	if e := s.persist(next); e != nil {
+		return e
+	}
+	s.state = next
+	return nil
+}

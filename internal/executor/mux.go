@@ -386,3 +386,21 @@ func (m *Mux) ValidateExistingTaskScope(s *session.Session, scope taskapi.ChildS
 	}
 	return guard.ValidateExistingTaskScope(s, scope, cwd)
 }
+
+func (m *Mux) ExportContext(ctx context.Context, s *session.Session) (backend.ContextExport, error) {
+	if e, ok := m.pick(s).(backend.ContextResetExecutor); ok {
+		return e.ExportContext(ctx, s)
+	}
+	return backend.ContextExport{}, fmt.Errorf("context_export_unsupported")
+}
+func (m *Mux) ResetContext(ctx context.Context, s *session.Session, old string) (string, error) {
+	if e, ok := m.pick(s).(backend.ContextResetExecutor); ok {
+		return e.ResetContext(ctx, s, old)
+	}
+	return "", fmt.Errorf("context_reset_unsupported")
+}
+
+func (m *Mux) SupportsContextReset(s *session.Session) bool {
+	_, ok := m.pick(s).(backend.ContextResetExecutor)
+	return ok
+}

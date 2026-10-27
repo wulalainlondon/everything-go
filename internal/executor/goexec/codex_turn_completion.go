@@ -77,6 +77,10 @@ func (st *codexState) applyTurnTerminalLocked(terminal codexTurnTerminal) {
 }
 
 func (c *Codex) confirmOwnedTurnSubmission(st *codexState, threadID, requestID string, turn codexTurnResponse, onAccepted ...func()) error {
+	return c.confirmOwnedTurnSubmissionLive(st, threadID, requestID, turn, nil, onAccepted...)
+}
+
+func (c *Codex) confirmOwnedTurnSubmissionLive(st *codexState, threadID, requestID string, turn codexTurnResponse, onLive func(), onAccepted ...func()) error {
 	st.mu.Lock()
 	var pending []json.RawMessage
 	var terminal codexTurnTerminal
@@ -91,6 +95,14 @@ func (c *Codex) confirmOwnedTurnSubmission(st *codexState, threadID, requestID s
 		// A later cancel is late acceptance, not grounds to erase this past fact.
 		for _, publish := range onAccepted {
 			publish()
+		}
+		if onLive != nil && !settle && turn.Status == "inProgress" {
+			st.mu.Lock()
+			live := st.turnActive && !st.stopping && st.reqID == requestID && st.threadID == threadID && st.currentTurnID == turn.ID && st.submissionEpoch == c.rpc.transportEpoch.Load()
+			st.mu.Unlock()
+			if live {
+				onLive()
+			}
 		}
 		for _, raw := range pending {
 			var n struct {

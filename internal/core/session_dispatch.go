@@ -367,6 +367,7 @@ func (h *Hub) StartSessionDispatchScheduler(ctx context.Context) {
 				return
 			case <-ticker.C:
 				h.reconcileSessionDispatches(ctx)
+				h.reconcileJarvisStartNotices(ctx)
 			}
 		}
 	}()
