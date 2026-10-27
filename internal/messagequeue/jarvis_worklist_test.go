@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -309,5 +310,79 @@ func TestUnifiedConcurrentAdmissionAndResetCannotBothCommit(t *testing.T) {
 			t.Fatal("reset and input committed concurrently")
 		}
 		s.Close()
+	}
+}
+
+func TestUnifiedDurableStartJoinBeyondWindowsAndSubscriberLimit(t *testing.T) {
+	s, e := Open("")
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	// Rotation must reach every original policy, including positions >500.
+	for i := 0; i < 601; i++ {
+		if e = s.SubscribeStart(ctx, NoticeSubscriber{Scope: fmt.Sprintf("phone-%04d", i), Manager: "manager", Input: json.RawMessage(`{"enabled":true}`), Enabled: true}); e != nil {
+			t.Fatal(e)
+		}
+	}
+	seen := map[string]bool{}
+	for tick := 0; tick < 32; tick++ {
+		subs, e := s.StartJoinSubscribers(ctx, 20)
+		if e != nil {
+			t.Fatal(e)
+		}
+		for _, sub := range subs {
+			seen[sub.Scope] = true
+		}
+	}
+	if len(seen) != 601 {
+		t.Fatal("subscriber silently truncated", len(seen))
+	}
+	sub := NoticeSubscriber{Scope: "phone-0000", Manager: "manager", Input: json.RawMessage(`{"enabled":true}`), Enabled: true}
+	for i := 0; i < 105; i++ {
+		p := liveStart(t, s, fmt.Sprintf("r_join_%03d", i))
+		p.ObservedAt = time.Now().Add(-time.Hour).UnixMilli()
+		if _, e = s.RecordNativeStart(p); e != nil {
+			t.Fatal(e)
+		}
+	}
+	count := 0
+	for batch := 0; batch < 2; batch++ {
+		facts, e := s.StartJoinFacts(ctx, sub, 100)
+		if e != nil {
+			t.Fatal(e)
+		}
+		for _, p := range facts {
+			if e = s.CommitStartJoin(ctx, sub, p, "expired"); e != nil {
+				t.Fatal(e)
+			}
+			count++
+		}
+	}
+	if count != 105 {
+		t.Fatal("native start silently truncated", count)
+	}
+	facts, e := s.StartJoinFacts(ctx, sub, 100)
+	if e != nil || len(facts) != 0 {
+		t.Fatal("durable sequence did not settle", len(facts), e)
+	}
+	var outcomes int
+	if e = s.db.QueryRow(`SELECT COUNT(*) FROM jarvis_start_push WHERE scope=? AND manager=? AND state='expired'`, sub.Scope, sub.Manager).Scan(&outcomes); e != nil || outcomes != 105 {
+		t.Fatal(outcomes, e)
+	}
+	// Exact JSON linkage does not stop at page 17 / item 510.
+	for i := 0; i < 511; i++ {
+		m := WorkMutation{IntentID: fmt.Sprintf("r_link_original_%04d", i), WorkItem: WorkItem{ID: fmt.Sprintf("item-%04d", i), Kind: "execution", Title: "original", RecordingState: "recorded"}}
+		if i == 510 {
+			m.Links = []WorkLink{{Kind: "intake", SessionID: "original-target", RequestID: "original-request"}}
+		}
+		if _, e = s.MutateWork(ctx, sub.Scope, sub.Manager, m); e != nil {
+			t.Fatal(e)
+		}
+	}
+	linked, e := s.HasWorkExecutionLink(ctx, sub.Scope, sub.Manager, "original-target", "original-request")
+	if e != nil || !linked {
+		t.Fatal("late original link lost", linked, e)
 	}
 }

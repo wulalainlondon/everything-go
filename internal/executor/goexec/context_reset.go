@@ -105,6 +105,7 @@ func (c *Codex) ResetContext(ctx context.Context, s *session.Session, old string
 		return "", errors.New("reset_generation_not_reserved")
 	}
 	before := s.Snapshot()
+	epoch := c.rpc.transportEpoch.Load()
 	if e := c.contextIdle(s); e != nil {
 		return "", e
 	}
@@ -113,7 +114,22 @@ func (c *Codex) ResetContext(ctx context.Context, s *session.Session, old string
 	}
 	// Do not use legacy Clear (which ignores errors/forgets historical IDs).
 	// Unsubscribe is acknowledged before local detach; a timeout remains unknown.
-	if _, e := c.rpcCall("thread/unsubscribe", map[string]any{"threadId": old}, 15*time.Second); e != nil {
+	if _, e := c.rpc.requestAtEpochGuarded(ctx, "thread/unsubscribe", map[string]any{"threadId": old}, 15*time.Second, &epoch, func() (func(), error) {
+		if e := backend.CheckContextResetGuard(ctx); e != nil {
+			return nil, e
+		}
+		now := s.Snapshot()
+		if now.SourceRevision != before.SourceRevision || now.ResumeID != old || !s.ContextResetReserved() {
+			return nil, errors.New("reset_first_effect_source_changed")
+		}
+		st := c.state(s.ID)
+		st.mu.Lock()
+		if st.turnActive || st.compactActive || st.stopping || st.turnStartPending || st.observedTurnID != "" {
+			st.mu.Unlock()
+			return nil, errors.New("native_context_busy_before_effect")
+		}
+		return st.mu.Unlock, nil
+	}); e != nil {
 		return "", e
 	}
 	c.forgetThread(s, c.state(s.ID), old)
@@ -159,8 +175,32 @@ func (c *Claude) ResetContext(ctx context.Context, s *session.Session, old strin
 	c.mu.Lock()
 	p := c.procs[s.ID]
 	c.mu.Unlock()
+	if e := backend.CheckContextResetGuard(ctx); e != nil {
+		return "", e
+	}
+	if s.ResumeID() != old || !s.ContextResetReserved() {
+		return "", errors.New("reset_first_effect_source_changed")
+	}
 	if p != nil {
+		c.mu.Lock()
+		if c.procs[s.ID] != p {
+			c.mu.Unlock()
+			return "", errors.New("provider_owner_changed_before_effect")
+		}
+		p.mu.Lock()
+		if p.reqID != "" {
+			p.mu.Unlock()
+			c.mu.Unlock()
+			return "", errors.New("provider_busy_before_effect")
+		}
+		if e := backend.CheckContextResetGuard(ctx); e != nil {
+			p.mu.Unlock()
+			c.mu.Unlock()
+			return "", e
+		}
 		p.cancel()
+		p.mu.Unlock()
+		c.mu.Unlock()
 		select {
 		case <-p.exited:
 		case <-ctx.Done():

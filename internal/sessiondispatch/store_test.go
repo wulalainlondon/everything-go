@@ -2,6 +2,7 @@ package sessiondispatch
 
 import (
 	"context"
+	"fmt"
 	"testing"
 )
 
@@ -73,5 +74,37 @@ func TestFinalAnswerSignalCannotBeOverwrittenByAnOlderStatusPoll(t *testing.T) {
 	got, _, _ := s.Get(ctx, "job")
 	if got.Result != "exact final" {
 		t.Fatal(got)
+	}
+}
+
+func TestUnifiedContextGuardDoesNotUseLatestHundredControllerRows(t *testing.T) {
+	s, e := Open(t.TempDir())
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	original := Record{ID: "old-unsettled", ParentID: "parent", OriginRequestID: "origin-old", ToolCallID: "call-old", RequestID: "r-old", IntentHash: "hash-old", State: "queued", DeliveryState: "pending"}
+	if created, e := s.Create(ctx, original); e != nil || !created {
+		t.Fatal(created, e)
+	}
+	for i := 0; i < 101; i++ {
+		r := Record{ID: fmt.Sprintf("recent-%03d", i), ParentID: "parent", OriginRequestID: fmt.Sprintf("origin-%03d", i), ToolCallID: "call", RequestID: fmt.Sprintf("r-%03d", i), IntentHash: "hash", State: "completed", DeliveryState: "not_requested"}
+		if created, e := s.Create(ctx, r); e != nil || !created {
+			t.Fatal(created, e)
+		}
+	}
+	execution, delivery, e := s.ContextUnsettled(ctx, "parent")
+	if e != nil || !execution || !delivery {
+		t.Fatal("old unsettled original missed", execution, delivery, e)
+	}
+	original.State = "completed"
+	original.DeliveryState = "delivered"
+	if e = s.Put(ctx, original); e != nil {
+		t.Fatal(e)
+	}
+	execution, delivery, e = s.ContextUnsettled(ctx, "parent")
+	if e != nil || execution || delivery {
+		t.Fatal("terminal originals treated active", execution, delivery, e)
 	}
 }

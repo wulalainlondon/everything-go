@@ -1,6 +1,9 @@
 package core
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"everything-go/internal/messagequeue"
@@ -33,7 +36,7 @@ func (h *Hub) workLinkProjection(r *http.Request, device string, manager *sessio
 		return nil, errors.New("remote_source_not_read_here")
 	}
 	target, found := h.registry.Get(l.SessionID)
-	if !found || target.Snapshot().Hidden || l.Kind != "delegation" && !h.eventSessionAllowed(target) {
+	if !found || target.Snapshot().Hidden || l.Kind != "delegation" && l.Kind != "workspace" && !h.eventSessionAllowed(target) {
 		return nil, errors.New("target_scope_unavailable")
 	}
 	// Original immutable target tuples may describe a retained old generation;
@@ -43,6 +46,39 @@ func (h *Hub) workLinkProjection(r *http.Request, device string, manager *sessio
 		_, _, failure := h.jarvisReadOneWork(r, device, jarvisWorkRef{SessionID: l.SessionID, RequestID: l.RequestID})
 		if failure != nil {
 			return nil, errors.New(failure.Code)
+		}
+		if l.Kind == "intake" {
+			record, err := h.messageQueue.TaskJournal().OriginalCommandForRequest(r.Context(), l.SessionID, l.RequestID)
+			var meta apiMetadata
+			var original intakeInput
+			if err != nil || json.Unmarshal(record.Metadata, &meta) != nil || meta.Intake == nil || json.Unmarshal(meta.Request.Input, &original) != nil {
+				return nil, errors.New("original_intake_metadata_required")
+			}
+			thread := ""
+			if original.Target.Thread != nil {
+				thread = *original.Target.Thread
+			}
+			if thread != l.ThreadID || original.Target.Revision != l.ConfigRevision {
+				return nil, errors.New("original_intake_tuple_changed")
+			}
+		}
+	case "workspace":
+		if h.workspace == nil {
+			return nil, errors.New("workspace_unavailable")
+		}
+		record, err := h.messageQueue.TaskJournal().OriginalCommandForRequest(r.Context(), l.SessionID, l.RequestID)
+		var meta apiMetadata
+		if err != nil || json.Unmarshal(record.Metadata, &meta) != nil || meta.WorkspaceRoomID == "" || record.NativeID != l.NativeID {
+			return nil, errors.New("original_workspace_receipt_required")
+		}
+		digest := sha256.Sum256([]byte(strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))))
+		actor := h.workspace.Owner(device, hex.EncodeToString(digest[:]))
+		if _, _, err = h.workspace.Authorize(r.Context(), actor, meta.WorkspaceRoomID, "read"); err != nil {
+			return nil, errors.New("workspace_grant_changed")
+		}
+		_, task, err := h.workspace.WorkProjectionState(r.Context(), meta.WorkspaceRoomID, meta.WorkspaceTaskID)
+		if err != nil || task.SessionID != l.SessionID || task.RequestID != l.RequestID {
+			return nil, errors.New("workspace_original_binding_changed")
 		}
 	case "controller":
 		if h.dispatches == nil {
@@ -61,8 +97,12 @@ func (h *Hub) workLinkProjection(r *http.Request, device string, manager *sessio
 			return nil, errors.New("delegation_unavailable")
 		}
 		d, ok, e := h.delegations.ByID(r.Context(), l.NativeID)
-		if e != nil || !ok || d.ParentSessionID != manager.ID || d.ChildSessionID != l.SessionID || d.ChildRequestID != l.RequestID || d.SourceThread != manager.ResumeID() || d.SourceRevision != manager.SettingsSnapshot().ConfigRevision {
+		if e != nil || !ok || d.ParentSessionID != manager.ID || d.ChildSessionID != l.SessionID || d.ChildRequestID != l.RequestID {
 			return nil, errors.New("original_delegation_relation_required")
+		}
+		sourceThread, sourceRevision, bound, err := h.delegations.SourceBinding(r.Context(), d.ID)
+		if err != nil || !bound || sourceThread != manager.ResumeID() || sourceRevision != manager.SettingsSnapshot().ConfigRevision {
+			return nil, errors.New("original_delegation_source_binding_required")
 		}
 		thread, revision, _, e := h.delegations.ExecutionBinding(r.Context(), d.ID)
 		if e != nil || thread != l.ThreadID || revision != l.ConfigRevision {
@@ -74,6 +114,9 @@ func (h *Hub) workLinkProjection(r *http.Request, device string, manager *sessio
 	// Canonical Task API is reused when an exact original command exists.
 	for _, j := range h.apiJournals() {
 		if record, e := j.OriginalCommandForRequest(r.Context(), l.SessionID, l.RequestID); e == nil {
+			if h.apiJournals()[record.Path] == nil {
+				return nil, errors.New("canonical_original_store_unavailable")
+			}
 			projection, e := h.apiTask(r.Context(), record)
 			if e != nil {
 				return nil, e
@@ -213,7 +256,7 @@ func (h *Hub) serveWorklist(w http.ResponseWriter, r *http.Request, device, path
 			http.Error(w, "scope changed; lookup original", 403)
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": 1, "item": out, "authority_instance_id": h.cfg.InstanceID, "recorded": true, "dispatched": false})
+		jarvisWorkJSON(w, map[string]any{"schema_version": 1, "item": out, "authority_instance_id": h.cfg.InstanceID, "recorded": true, "dispatched": false})
 	case "worklist/snapshot", "worklist/get", "worklist/notices":
 		var in struct {
 			jarvisWorkScope
@@ -230,20 +273,33 @@ func (h *Hub) serveWorklist(w http.ResponseWriter, r *http.Request, device, path
 			http.Error(w, e.Error(), 403)
 			return
 		}
-		after := ""
+		if in.ItemID == "" && in.IntentID == "" {
+			h.serveFrozenWorklist(w, r, device, in.jarvisWorkScope, manager, scope, in.Cursor, in.Limit)
+			return
+		}
 		if in.Cursor != "" {
 			prefix := h.messageQueue.WorkCursor(scope, jarvisHash(in.jarvisWorkScope), "")
 			if !strings.HasPrefix(in.Cursor, prefix) {
 				http.Error(w, "cursor scope expired", 409)
 				return
 			}
-			after = strings.TrimPrefix(in.Cursor, prefix)
 		}
 		items := []messagequeue.WorkItem{}
 		next := ""
+		partial := false
+		detail := in.ItemID != "" || in.IntentID != ""
+		discovered, sourcePartial := h.discoveredWorkItems(r, manager)
+		ordinary, ordinaryPartial := h.discoveredManagerIntakes(r, device, manager)
+		discovered = append(discovered, ordinary...)
+		sourcePartial = sourcePartial || ordinaryPartial
+		partial = sourcePartial
+		virtual := map[string]bool{}
+		for _, item := range discovered {
+			virtual[item.ID] = true
+		}
 		if in.IntentID != "" {
 			if policy, err := h.messageQueue.NoticePolicyOperation(r.Context(), scope, manager.ID, in.IntentID); err == nil {
-				_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": 1, "authority_instance_id": h.cfg.InstanceID, "subscription": policy, "provider_sent": false})
+				jarvisWorkJSON(w, map[string]any{"schema_version": 1, "authority_instance_id": h.cfg.InstanceID, "subscription": policy, "provider_sent": false})
 				return
 			}
 			item, err := h.messageQueue.WorkOperation(r.Context(), scope, manager.ID, in.IntentID)
@@ -254,11 +310,17 @@ func (h *Hub) serveWorklist(w http.ResponseWriter, r *http.Request, device, path
 		} else if in.ItemID != "" {
 			item, err := h.messageQueue.WorkItem(r.Context(), scope, manager.ID, in.ItemID)
 			e = err
+			if e != nil {
+				for _, original := range discovered {
+					if original.ID == in.ItemID {
+						item, e = original, nil
+						break
+					}
+				}
+			}
 			if e == nil {
 				items = append(items, item)
 			}
-		} else {
-			items, next, e = h.messageQueue.WorkItems(r.Context(), scope, manager.ID, after, in.Limit)
 		}
 		if e != nil {
 			http.Error(w, "worklist read unavailable", 503)
@@ -266,49 +328,48 @@ func (h *Hub) serveWorklist(w http.ResponseWriter, r *http.Request, device, path
 		}
 		rows := []any{}
 		links := []messagequeue.WorkLink{}
-		partial := false
 		for _, item := range items {
 			executions := []any{}
 			visible := item
+			visible.BodyHash = jarvisTextHash(item.Body)
 			visible.Links = []messagequeue.WorkLink{}
-			for _, l := range item.Links {
+			executionTruncated := len(item.Links) > 8
+			for i, l := range item.Links {
+				// Detail includes every authorized original link; projection previews
+				// remain bounded and never substitute for the canonical task detail.
 				projection, err := h.workLinkProjection(r, device, manager, l)
 				if err != nil {
 					partial = true
-					executions = append(executions, map[string]any{"error": map[string]any{"code": "scope_or_source_unavailable", "retryable": false}})
+					visible.DetailTruncated = true
+					if i < 8 {
+						executions = append(executions, map[string]any{"error": map[string]any{"code": "scope_or_source_unavailable", "retryable": false}})
+					}
 					continue
 				}
-				visible.Links = append(visible.Links, l)
-				links = append(links, l)
-				executions = append(executions, map[string]any{"link": l, "projection": projection})
-			}
-			// Item title/body belong to the source manager scope; inaccessible target
-			// projections contain no target names, links, avatars or result bytes.
-			rows = append(rows, map[string]any{"item": visible, "executions": executions})
-		}
-		// Source-owned controller/delegation rounds are discovered without copying
-		// their execution state into metadata or manufacturing a new dispatch.
-		if in.Cursor == "" && in.ItemID == "" && in.IntentID == "" {
-			discovered, sourcePartial := h.discoveredWorkItems(r, manager)
-			partial = partial || sourcePartial
-			for _, item := range discovered {
-				executions := []any{}
-				visible := item
-				visible.Links = []messagequeue.WorkLink{}
-				for _, l := range item.Links {
-					p, err := h.workLinkProjection(r, device, manager, l)
-					if err != nil {
-						partial = true
-						continue
-					}
-					executions = append(executions, map[string]any{"link": l, "projection": p})
-					links = append(links, l)
+				if detail || len(visible.Links) < 8 {
 					visible.Links = append(visible.Links, l)
 				}
-				if len(executions) > 0 {
-					rows = append(rows, map[string]any{"item": visible, "executions": executions, "read_only": true})
+				if i < 8 {
+					links = append(links, l)
+					executions = append(executions, map[string]any{"link": l, "projection": jarvisWorkProjectionSummary(projection)})
 				}
 			}
+			if virtual[item.ID] && len(executions) == 0 {
+				partial = true
+				continue
+			}
+			if visible.DetailTruncated {
+				visible.Title = "來源待確認"
+				visible.Body = ""
+				visible.BodyHash = ""
+				visible.Plan = nil
+				visible.Decision = nil
+				visible.SourceRefs = nil
+			}
+			if !detail {
+				visible = jarvisWorkSummary(visible, item)
+			}
+			rows = append(rows, map[string]any{"item": visible, "executions": executions, "executions_truncated": executionTruncated, "read_only": virtual[item.ID]})
 		}
 		notices, e := h.messageQueue.WorkNotices(r.Context(), scope, manager.ID, links)
 		if e != nil {
@@ -319,13 +380,13 @@ func (h *Hub) serveWorklist(w http.ResponseWriter, r *http.Request, device, path
 			http.Error(w, "scope changed", 403)
 			return
 		}
-		pushes, _ := h.messageQueue.StartPushes(r.Context(), scope, manager.ID)
+		pushes, _ := h.messageQueue.StartPushesForLinks(r.Context(), scope, manager.ID, links)
 		_, policy, _ := h.messageQueue.CurrentNoticePolicy(r.Context(), scope, manager.ID)
 		cursor := ""
 		if next != "" {
 			cursor = h.messageQueue.WorkCursor(scope, jarvisHash(in.jarvisWorkScope), next)
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": 1, "authority_instance_id": h.cfg.InstanceID, "items": rows, "notices": notices, "push_receipts": pushes, "notification_policy": policy, "cursor": cursor, "coverage": map[string]any{"kind": "scope_owned_items", "partial": partial, "all_tasks": false, "more": next != ""}, "sampled_at_ms": time.Now().UnixMilli(), "fresh_until_ms": time.Now().Add(12 * time.Second).UnixMilli(), "notification_capabilities": map[string]bool{"visual": true, "push": h.fcm != nil, "speech": false}})
+		jarvisWorkJSON(w, map[string]any{"schema_version": 1, "authority_instance_id": h.cfg.InstanceID, "items": rows, "notices": notices, "push_receipts": pushes, "notification_policy": policy, "cursor": cursor, "coverage": map[string]any{"kind": "scope_owned_items", "partial": partial, "all_tasks": false, "more": next != ""}, "sampled_at_ms": time.Now().UnixMilli(), "fresh_until_ms": time.Now().Add(12 * time.Second).UnixMilli(), "notification_capabilities": map[string]bool{"visual": true, "push": h.fcm != nil, "speech": false}})
 	default:
 		http.NotFound(w, r)
 	}
@@ -360,4 +421,67 @@ func (h *Hub) discoveredWorkItems(r *http.Request, manager *session.Session) ([]
 		}
 	}
 	return out, partial
+}
+
+// Only the new worklist transport is bounded here. An explicit error preserves
+// durable originals and lets the client avoid treating a truncated body as saved.
+func jarvisWorkJSON(w http.ResponseWriter, value any) {
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(value); err != nil {
+		http.Error(w, "worklist encoding unavailable", 503)
+		return
+	}
+	if b.Len() > 240<<10 {
+		http.Error(w, "worklist detail exceeds response bound; original records preserved", http.StatusRequestEntityTooLarge)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(b.Bytes())
+}
+func jarvisWorkSummary(visible, original messagequeue.WorkItem) messagequeue.WorkItem {
+	body := []rune(original.Body)
+	if len(body) > 240 {
+		visible.Body = string(body[:240])
+		visible.BodyTruncated = true
+	}
+	if len(visible.SourceRefs) > 4 {
+		visible.SourceRefs = visible.SourceRefs[:4]
+		visible.DetailTruncated = true
+	}
+	if len(original.Links) > len(visible.Links) {
+		visible.DetailTruncated = true
+	}
+	// Plan/checklist and decision instructions belong to the exact detail reader.
+	if visible.Plan != nil || visible.Decision != nil {
+		visible.Plan = nil
+		visible.Decision = nil
+		visible.DetailTruncated = true
+	}
+	return visible
+}
+func jarvisWorkProjectionSummary(original map[string]any) map[string]any {
+	out := map[string]any{"summary_only": true}
+	for _, key := range []string{"task_id", "task_ref", "identity", "source", "target", "axes", "revision", "definition_revision", "native_start", "seal_id", "final_hash", "result_ref", "result_anchor", "provenance", "fetched_at_ms", "fresh_until_ms"} {
+		if value, ok := original[key]; ok {
+			out[key] = value
+		}
+	}
+	// Canonical identity/axis fields are normally small. Corrupt or unexpectedly
+	// verbose legacy metadata is explicit rather than leaking unbounded task text.
+	raw, _ := json.Marshal(out)
+	if len(raw) > 2<<10 {
+		out = map[string]any{"summary_only": true, "detail_truncated": true}
+		for _, key := range []string{"axes", "revision", "native_start", "provenance", "fetched_at_ms", "fresh_until_ms"} {
+			if v, ok := original[key]; ok {
+				out[key] = v
+			}
+		}
+		raw, _ = json.Marshal(out)
+		if len(raw) > 2<<10 {
+			return map[string]any{"summary_only": true, "projection_unavailable": "canonical_summary_exceeds_bound"}
+		}
+	}
+	return out
 }

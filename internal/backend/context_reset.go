@@ -2,6 +2,7 @@ package backend
 
 import (
 	"context"
+	"errors"
 	"everything-go/internal/session"
 )
 
@@ -18,4 +19,22 @@ type ContextExport struct {
 type ContextResetExecutor interface {
 	ExportContext(context.Context, *session.Session) (ContextExport, error)
 	ResetContext(context.Context, *session.Session, string) (string, error)
+}
+
+type resetAuthorizerKey struct{}
+
+// The original HTTP principal/source authorizer is invoked by each provider
+// after every idle wait, at the actual destructive writer boundary.
+func WithContextResetGuard(ctx context.Context, guard func() bool) context.Context {
+	return context.WithValue(ctx, resetAuthorizerKey{}, guard)
+}
+func CheckContextResetGuard(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	guard, ok := ctx.Value(resetAuthorizerKey{}).(func() bool)
+	if !ok || guard == nil || !guard() {
+		return errors.New("reset_original_authority_changed_before_effect")
+	}
+	return nil
 }

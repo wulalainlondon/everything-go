@@ -9,25 +9,26 @@ import (
 )
 
 type ContextReset struct {
-	IntentID        string `json:"intent_id"`
-	Scope           string `json:"-"`
-	SessionID       string `json:"session_id"`
-	ThreadID        string `json:"thread_id"`
-	SourceRevision  uint64 `json:"source_revision"`
-	ConfigRevision  uint64 `json:"config_revision"`
-	Mode            string `json:"mode"`
-	BoundaryHash    string `json:"boundary_hash"`
-	ArchiveHash     string `json:"archive_hash"`
-	Handoff         string `json:"handoff"`
-	HandoffHash     string `json:"handoff_hash"`
-	HandoffRevision uint64 `json:"handoff_revision"`
-	SeedRequestID   string `json:"seed_request_id,omitempty"`
-	Phase           string `json:"phase"`
-	Revision        uint64 `json:"revision"`
-	Error           string `json:"error,omitempty"`
-	CreatedAt       int64  `json:"created_at_ms"`
-	UpdatedAt       int64  `json:"updated_at_ms"`
-	BindingRevision uint64 `json:"binding_revision,omitempty"`
+	IntentID            string `json:"intent_id"`
+	Scope               string `json:"-"`
+	SessionID           string `json:"session_id"`
+	ThreadID            string `json:"thread_id"`
+	SourceRevision      uint64 `json:"source_revision"`
+	ConfigRevision      uint64 `json:"config_revision"`
+	Mode                string `json:"mode"`
+	BoundaryHash        string `json:"boundary_hash"`
+	ArchiveHash         string `json:"archive_hash"`
+	Handoff             string `json:"handoff"`
+	HandoffHash         string `json:"handoff_hash"`
+	HandoffRevision     uint64 `json:"handoff_revision"`
+	HandoffBoundaryHash string `json:"handoff_boundary_hash,omitempty"`
+	SeedRequestID       string `json:"seed_request_id,omitempty"`
+	Phase               string `json:"phase"`
+	Revision            uint64 `json:"revision"`
+	Error               string `json:"error,omitempty"`
+	CreatedAt           int64  `json:"created_at_ms"`
+	UpdatedAt           int64  `json:"updated_at_ms"`
+	BindingRevision     uint64 `json:"binding_revision,omitempty"`
 }
 
 func (s *Store) installContextReset() error {
@@ -180,4 +181,37 @@ func (s *Store) ContextBarrier(ctx context.Context, session string) (bool, error
 	var n int
 	e := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM jarvis_context_barriers WHERE session_id=? AND active=1`, session).Scan(&n)
 	return n > 0, e
+}
+
+// A pre-effect rejection is durable under the same original reset intent. It
+// cannot race a prepared receipt into a false known-none outcome.
+func (s *Store) RejectContextReset(ctx context.Context, scope, inputHash string, in ContextReset, reason string) (ContextReset, error) {
+	tx, e := s.db.BeginTx(ctx, nil)
+	if e != nil {
+		return in, e
+	}
+	defer tx.Rollback()
+	var oldHash string
+	var raw []byte
+	e = tx.QueryRowContext(ctx, `SELECT input_hash,payload FROM jarvis_context_resets WHERE scope=? AND intent=?`, scope, in.IntentID).Scan(&oldHash, &raw)
+	if e == nil {
+		if oldHash != inputHash {
+			return in, ErrWorkConflict
+		}
+		e = json.Unmarshal(raw, &in)
+		return in, e
+	}
+	if !errors.Is(e, sql.ErrNoRows) {
+		return in, e
+	}
+	in.Phase = "rejected"
+	in.Error = reason
+	in.Revision = 1
+	in.CreatedAt = time.Now().UnixMilli()
+	in.UpdatedAt = in.CreatedAt
+	raw, _ = json.Marshal(in)
+	if _, e = tx.ExecContext(ctx, `INSERT INTO jarvis_context_resets VALUES(?,?,?,?,?)`, scope, in.IntentID, in.SessionID, inputHash, raw); e != nil {
+		return in, e
+	}
+	return in, tx.Commit()
 }

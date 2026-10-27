@@ -44,7 +44,7 @@ func TestUnifiedCodexResetUsesAcknowledgedDetachAndKeepsHistory(t *testing.T) {
 					return nil, nil
 				}
 			}
-			phase, e := c.ResetContext(context.Background(), s, "root")
+			phase, e := c.ResetContext(backend.WithContextResetGuard(context.Background(), func() bool { return true }), s, "root")
 			if outcome == "idle" {
 				if e != nil || phase != "awaiting_initialization" || s.ResumeID() != "" || !reflect.DeepEqual(s.ResumeIDs(), []string{"root"}) {
 					t.Fatal(phase, e, s.ResumeIDs())
@@ -88,5 +88,34 @@ func TestUnifiedCodexBufferedTerminalCannotBecomeLiveStart(t *testing.T) {
 	_ = c.startTurn("root", nil, s.Snapshot(), "", "request-1")
 	if sink.count(func(v any) bool { _, ok := v.(backend.NativeTaskStarted); return ok }) != 0 {
 		t.Fatal("buffered terminal invented start")
+	}
+}
+
+func TestUnifiedCodexResetRevalidatesOriginalAuthorityAfterIdleRPC(t *testing.T) {
+	c, s, st, w, _ := livenessFixture(t)
+	st.turnActive = false
+	st.currentTurnID = ""
+	c.appServerMode = "daemon"
+	c.remoteConn = &websocket.Conn{}
+	release, e := s.ReserveContextGeneration("r_reset", "root", s.Snapshot().SourceRevision)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer release()
+	allowed := true
+	unsubscribes := 0
+	w.reply = func(method string, _ json.RawMessage) (any, error) {
+		if method == "thread/read" {
+			allowed = false
+			return map[string]any{"thread": map[string]any{"id": "root", "status": map[string]string{"type": "idle"}}}, nil
+		}
+		if method == "thread/unsubscribe" {
+			unsubscribes++
+		}
+		return map[string]any{}, nil
+	}
+	_, e = c.ResetContext(backend.WithContextResetGuard(context.Background(), func() bool { return allowed }), s, "root")
+	if e == nil || unsubscribes != 0 || s.ResumeID() != "root" {
+		t.Fatal("idle wait retained stale authority", e, unsubscribes, s.ResumeID())
 	}
 }

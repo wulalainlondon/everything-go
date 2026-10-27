@@ -204,3 +204,32 @@ func TestRemoteCommandReservationHasOneSenderAcrossRestart(t *testing.T) {
 		t.Fatal("uncertain receipt lost", state, e)
 	}
 }
+
+func TestUnifiedContextInteractionGuardIsNotRotatingPage(t *testing.T) {
+	s, e := Open(t.TempDir())
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	for i := 0; i < 257; i++ {
+		r := fixtureRecord()
+		r.OriginKey = fmt.Sprintf("scope-guard-%04d", i)
+		r.Binding.Child = fmt.Sprintf("child-%04d", i)
+		if _, _, e = s.Create(ctx, r); e != nil {
+			t.Fatal(e)
+		}
+	}
+	if _, e = s.Pending(ctx); e != nil {
+		t.Fatal(e)
+	}
+	for _, sid := range []string{"parent", "child-0256"} {
+		unsettled, e := s.UnsettledForSession(ctx, sid)
+		if e != nil || !unsettled {
+			t.Fatal(sid, unsettled, e)
+		}
+	}
+	if unsettled, e := s.UnsettledForSession(ctx, "foreign"); e != nil || unsettled {
+		t.Fatal("foreign interaction scope", unsettled, e)
+	}
+}

@@ -36,18 +36,21 @@ type WorkDecision struct {
 	Instruction string `json:"instruction"`
 }
 type WorkItem struct {
-	ID             string        `json:"item_id"`
-	Kind           string        `json:"kind"`
-	Title          string        `json:"title"`
-	Body           string        `json:"body"`
-	RecordingState string        `json:"recording_state"`
-	SourceRefs     []string      `json:"source_refs"`
-	Plan           *WorkPlan     `json:"plan_ref,omitempty"`
-	Decision       *WorkDecision `json:"decision,omitempty"`
-	Links          []WorkLink    `json:"links"`
-	Revision       uint64        `json:"revision"`
-	CreatedAt      int64         `json:"created_at_ms"`
-	UpdatedAt      int64         `json:"updated_at_ms"`
+	ID              string        `json:"item_id"`
+	Kind            string        `json:"kind"`
+	Title           string        `json:"title"`
+	Body            string        `json:"body"`
+	BodyTruncated   bool          `json:"body_truncated,omitempty"`
+	BodyHash        string        `json:"body_hash,omitempty"`
+	DetailTruncated bool          `json:"detail_truncated,omitempty"`
+	RecordingState  string        `json:"recording_state"`
+	SourceRefs      []string      `json:"source_refs"`
+	Plan            *WorkPlan     `json:"plan_ref,omitempty"`
+	Decision        *WorkDecision `json:"decision,omitempty"`
+	Links           []WorkLink    `json:"links"`
+	Revision        uint64        `json:"revision"`
+	CreatedAt       int64         `json:"created_at_ms"`
+	UpdatedAt       int64         `json:"updated_at_ms"`
 }
 type WorkMutation struct {
 	IntentID         string `json:"intent_id"`
@@ -71,6 +74,26 @@ func (s *Store) installWorklist() error {
 	return err
 }
 func validWork(in WorkMutation) bool {
+	// Summary presentation fields must never overwrite the original metadata.
+	if in.BodyTruncated || in.DetailTruncated || in.BodyHash != "" {
+		return false
+	}
+	raw, err := json.Marshal(in)
+	if err != nil || len(raw) > 96<<10 {
+		return false
+	}
+	for _, ref := range in.SourceRefs {
+		if len(ref) > 256 {
+			return false
+		}
+	}
+	for _, l := range in.Links {
+		for _, v := range []string{l.Kind, l.Authority, l.SessionID, l.ThreadID, l.RequestID, l.NativeID} {
+			if len(v) > 256 {
+				return false
+			}
+		}
+	}
 	if len(in.IntentID) < 10 || len(in.IntentID) > 90 || !strings.HasPrefix(in.IntentID, "r_") || len(in.ID) < 1 || len(in.ID) > 120 || strings.TrimSpace(in.Title) == "" || len([]rune(in.Title)) > 180 || len(in.Body) > 32000 || len(in.Links) > 100 || len(in.SourceRefs) > 30 {
 		return false
 	}
@@ -193,6 +216,9 @@ func (s *Store) MutateWork(ctx context.Context, scope, manager string, in WorkMu
 		return WorkItem{}, e
 	}
 	if _, e = tx.ExecContext(ctx, `INSERT INTO jarvis_work_ops VALUES(?,?,?,?,?)`, scope, in.IntentID, manager, hash, raw); e != nil {
+		return WorkItem{}, e
+	}
+	if e = taskapi.ChangeTx(tx, manager, in.IntentID, "jarvis_work_metadata"); e != nil {
 		return WorkItem{}, e
 	}
 	return out, tx.Commit()
@@ -398,6 +424,9 @@ type StartPush struct {
 }
 
 func (s *Store) installStartPush() error {
+	if e := s.installStartJoin(); e != nil {
+		return e
+	}
 	_, e := s.db.Exec(`CREATE TABLE IF NOT EXISTS jarvis_notice_policy_revisions(scope TEXT NOT NULL,manager TEXT NOT NULL,revision INTEGER NOT NULL,PRIMARY KEY(scope,manager));CREATE TABLE IF NOT EXISTS jarvis_notice_policy_ops(scope TEXT NOT NULL,intent TEXT NOT NULL,manager TEXT NOT NULL,hash TEXT NOT NULL,payload BLOB NOT NULL,PRIMARY KEY(scope,intent));CREATE TABLE IF NOT EXISTS jarvis_notice_subscribers(scope TEXT NOT NULL,manager TEXT NOT NULL,input BLOB NOT NULL,enabled INTEGER NOT NULL,PRIMARY KEY(scope,manager));CREATE TABLE IF NOT EXISTS jarvis_start_push(scope TEXT NOT NULL,manager TEXT NOT NULL,event_id TEXT NOT NULL,state TEXT NOT NULL,payload BLOB NOT NULL,expires INTEGER NOT NULL,receipt BLOB NOT NULL,PRIMARY KEY(scope,manager,event_id));`)
 	return e
 }
@@ -442,21 +471,53 @@ func (s *Store) RecentNativeStarts(ctx context.Context, since int64) ([]NativeSt
 	return out, rows.Err()
 }
 func (s *Store) PrepareStartPush(ctx context.Context, p StartPush) error {
-	_, e := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO jarvis_start_push VALUES(?,?,?,'prepared',?,?,?)`, p.Scope, p.Manager, p.EventID, []byte(p.Payload), p.ExpiresAt, []byte(`{}`))
-	return e
+	return s.TaskJournal().Transaction(ctx, func(tx *sql.Tx) error {
+		r, e := tx.ExecContext(ctx, `INSERT OR IGNORE INTO jarvis_start_push VALUES(?,?,?,'prepared',?,?,?)`, p.Scope, p.Manager, p.EventID, []byte(p.Payload), p.ExpiresAt, []byte(`{}`))
+		if e != nil {
+			return e
+		}
+		if n, e := r.RowsAffected(); e != nil {
+			return e
+		} else if n > 0 {
+			return taskapi.ChangeTx(tx, p.Manager, p.EventID, "jarvis_notice_prepared")
+		}
+		return nil
+	})
 }
 func (s *Store) ClaimStartPush(ctx context.Context, p StartPush) (bool, error) {
-	r, e := s.db.ExecContext(ctx, `UPDATE jarvis_start_push SET state='issued' WHERE scope=? AND manager=? AND event_id=? AND state='prepared' AND expires>?`, p.Scope, p.Manager, p.EventID, time.Now().UnixMilli())
-	if e != nil {
-		return false, e
-	}
-	n, e := r.RowsAffected()
-	return n == 1, e
+	claimed := false
+	e := s.TaskJournal().Transaction(ctx, func(tx *sql.Tx) error {
+		r, e := tx.ExecContext(ctx, `UPDATE jarvis_start_push SET state='issued' WHERE scope=? AND manager=? AND event_id=? AND state='prepared' AND expires>?`, p.Scope, p.Manager, p.EventID, time.Now().UnixMilli())
+		if e != nil {
+			return e
+		}
+		n, e := r.RowsAffected()
+		if e != nil {
+			return e
+		}
+		claimed = n == 1
+		if claimed {
+			return taskapi.ChangeTx(tx, p.Manager, p.EventID, "jarvis_notice_issued")
+		}
+		return nil
+	})
+	return claimed, e
 }
 func (s *Store) FinishStartPush(ctx context.Context, p StartPush, state string, receipt json.RawMessage) error {
-	_, e := s.db.ExecContext(ctx, `UPDATE jarvis_start_push SET state=?,receipt=? WHERE scope=? AND manager=? AND event_id=? AND state='issued'`, state, []byte(receipt), p.Scope, p.Manager, p.EventID)
-	return e
+	return s.TaskJournal().Transaction(ctx, func(tx *sql.Tx) error {
+		r, e := tx.ExecContext(ctx, `UPDATE jarvis_start_push SET state=?,receipt=? WHERE scope=? AND manager=? AND event_id=? AND state='issued'`, state, []byte(receipt), p.Scope, p.Manager, p.EventID)
+		if e != nil {
+			return e
+		}
+		if n, e := r.RowsAffected(); e != nil {
+			return e
+		} else if n > 0 {
+			return taskapi.ChangeTx(tx, p.Manager, p.EventID, "jarvis_notice_receipt")
+		}
+		return nil
+	})
 }
+
 func (s *Store) StartPushes(ctx context.Context, scope, manager string) ([]StartPush, error) {
 	rows, e := s.db.QueryContext(ctx, `SELECT event_id,state,payload,expires,receipt FROM jarvis_start_push WHERE scope=? AND manager=? ORDER BY rowid DESC LIMIT 100`, scope, manager)
 	if e != nil {
@@ -519,6 +580,9 @@ func (s *Store) SetNoticePolicy(ctx context.Context, v NoticeSubscriber, intent 
 		return out, e
 	}
 	if _, e = tx.ExecContext(ctx, `INSERT INTO jarvis_notice_policy_ops VALUES(?,?,?,?,?)`, v.Scope, intent, v.Manager, hash, raw); e != nil {
+		return out, e
+	}
+	if e = taskapi.ChangeTx(tx, v.Manager, intent, "jarvis_notice_policy"); e != nil {
 		return out, e
 	}
 	return out, tx.Commit()

@@ -305,3 +305,25 @@ func (s *Store) HasTargetReceipt(ctx context.Context, instance, session, request
 	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM session_dispatches WHERE json_extract(payload,'$.instance_id')=? AND json_extract(payload,'$.target_session_id')=? AND json_extract(payload,'$.request_id')=?)`, instance, session, request).Scan(&found)
 	return found, err
 }
+
+// Exact original target lookup is not limited by the UI's latest-100 list.
+func (s *Store) ByTargetRequest(ctx context.Context, parent, target, request string) (Record, bool, error) {
+	var raw string
+	var v Record
+	e := s.db.QueryRowContext(ctx, `SELECT payload FROM session_dispatches WHERE parent_id=? AND json_extract(payload,'$.target_session_id')=? AND json_extract(payload,'$.request_id')=? ORDER BY rowid DESC LIMIT 1`, parent, target, request).Scan(&raw)
+	if errors.Is(e, sql.ErrNoRows) {
+		return v, false, nil
+	}
+	if e == nil {
+		e = json.Unmarshal([]byte(raw), &v)
+	}
+	return v, e == nil, e
+}
+
+// A destructive-generation guard needs complete outstanding coverage, not the
+// latest-100 presentation list or the coordinator's rotating work page.
+func (s *Store) ContextUnsettled(ctx context.Context, parent string) (bool, bool, error) {
+	var execution, delivery bool
+	e := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM session_dispatches WHERE parent_id=? AND state NOT IN ('completed','failed','cancelled','rejected')),EXISTS(SELECT 1 FROM session_dispatches WHERE parent_id=? AND COALESCE(json_extract(payload,'$.delivery_state'),'pending') NOT IN ('delivered','not_requested'))`, parent, parent).Scan(&execution, &delivery)
+	return execution, delivery, e
+}

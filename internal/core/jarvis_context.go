@@ -46,32 +46,23 @@ func (h *Hub) contextBlockers(s *session.Session) []string {
 	}
 	h.voiceMu.Unlock()
 	if h.interactions != nil {
-		pending, e := h.interactions.Pending(context.Background())
+		unsettled, e := h.interactions.UnsettledForSession(context.Background(), s.ID)
 		if e != nil {
 			out = append(out, "tool_interaction_unknown")
-		} else {
-			for _, v := range pending {
-				if v.Binding.Child == s.ID || v.Binding.Parent == s.ID {
-					out = append(out, "tool_interaction_unsettled")
-					break
-				}
-			}
+		} else if unsettled {
+			out = append(out, "tool_interaction_unsettled")
 		}
 	}
 	if h.dispatches != nil {
-		records, e := h.dispatches.List(context.Background(), s.ID)
+		execution, delivery, e := h.dispatches.ContextUnsettled(context.Background(), s.ID)
 		if e != nil {
 			out = append(out, "child_state_unknown")
 		} else {
-			for _, d := range records {
-				if d.State != "completed" && d.State != "failed" && d.State != "cancelled" {
-					out = append(out, "child_execution_unsettled")
-					break
-				}
-				if d.DeliveryState != "delivered" && d.DeliveryState != "not_requested" {
-					out = append(out, "old_return_pending_wait_first")
-					break
-				}
+			if execution {
+				out = append(out, "child_execution_unsettled")
+			}
+			if delivery {
+				out = append(out, "old_return_pending_wait_first")
 			}
 		}
 	}
@@ -106,6 +97,7 @@ func (h *Hub) serveContext(w http.ResponseWriter, r *http.Request, device, path 
 		Mode                     string `json:"mode,omitempty"`
 		Handoff                  string `json:"handoff,omitempty"`
 		HandoffRevision          uint64 `json:"handoff_revision,omitempty"`
+		HandoffBoundaryHash      string `json:"handoff_boundary_hash,omitempty"`
 		SeedRequestID            string `json:"seed_request_id,omitempty"`
 		BindingRevision          uint64 `json:"binding_revision,omitempty"`
 		ExpectedRevision         uint64 `json:"expected_revision,omitempty"`
@@ -215,20 +207,34 @@ func (h *Hub) serveContext(w http.ResponseWriter, r *http.Request, device, path 
 		_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": 1, "authority_instance_id": h.cfg.InstanceID, "context": map[string]any{"provider": snap.Backend, "thread_id": snap.ResumeID, "source_revision": snap.SourceRevision, "config_revision": snap.ConfigRevision, "used_tokens": used, "max_tokens": max, "usage_freshness": "last_observed"}, "reset_capability": ok, "blockers": blockers, "bindings": bindings, "sampled_at_ms": time.Now().UnixMilli()})
 		return
 	}
+	if path == "context/boundary" {
+		if !ok || len(h.contextBlockers(s)) > 0 {
+			http.Error(w, "context boundary unavailable while unsettled", 409)
+			return
+		}
+		before := s.Snapshot()
+		export, err := provider.ExportContext(r.Context(), s)
+		if err != nil || !export.Complete || export.ThreadID != before.ResumeID || !h.workScopeCurrent(r, device, in.jarvisWorkScope, s) || s.Snapshot().SourceRevision != before.SourceRevision {
+			http.Error(w, "complete context boundary unavailable", 409)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": 1, "authority_instance_id": h.cfg.InstanceID, "handoff_boundary_hash": jarvisHash(export), "boundary_hash": jarvisHash(export), "source_revision": before.SourceRevision, "thread_id": before.ResumeID, "config_revision": before.ConfigRevision, "sampled_at_ms": time.Now().UnixMilli()})
+		return
+	}
 	if !jarvisID.MatchString(in.IntentID) || !ok {
 		http.Error(w, "invalid reset intent or provider unsupported", 400)
 		return
 	}
 	if path == "context/prepare" {
 		if old, e := h.messageQueue.ContextReset(r.Context(), scope, in.IntentID); e == nil {
-			if old.SessionID != s.ID || old.ThreadID != in.Manager.ThreadID || old.Mode != in.Mode || old.Handoff != in.Handoff || old.HandoffRevision != in.HandoffRevision || old.SeedRequestID != in.SeedRequestID {
+			if old.SessionID != s.ID || old.ThreadID != in.Manager.ThreadID || old.Mode != in.Mode || old.Handoff != in.Handoff || old.HandoffRevision != in.HandoffRevision || old.HandoffBoundaryHash != in.HandoffBoundaryHash || old.SeedRequestID != in.SeedRequestID {
 				http.Error(w, "immutable reset conflict", 409)
 				return
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": 1, "authority_instance_id": h.cfg.InstanceID, "reset": old})
 			return
 		}
-		if in.Mode != "direct" && in.Mode != "handoff" || len(in.Handoff) > 32000 || in.Mode == "handoff" && (strings.TrimSpace(in.Handoff) == "" || in.HandoffRevision == 0 || !jarvisIntakeID.MatchString(in.SeedRequestID)) {
+		if in.Mode != "direct" && in.Mode != "handoff" || len(in.Handoff) > 32000 || in.Mode == "handoff" && (strings.TrimSpace(in.Handoff) == "" || in.HandoffRevision == 0 || !jarvisSHA.MatchString(in.HandoffBoundaryHash) || !jarvisIntakeID.MatchString(in.SeedRequestID)) {
 			http.Error(w, "invalid direct or reviewed handoff", 400)
 			return
 		}
@@ -251,8 +257,19 @@ func (h *Hub) serveContext(w http.ResponseWriter, r *http.Request, device, path 
 			http.Error(w, "context changed during export", 409)
 			return
 		}
+
+		if in.Mode == "handoff" && jarvisHash(export) != in.HandoffBoundaryHash {
+			rejected, err := h.messageQueue.RejectContextReset(r.Context(), scope, jarvisHash(in), messagequeue.ContextReset{IntentID: in.IntentID, SessionID: s.ID, ThreadID: snapshot.ResumeID, SourceRevision: snapshot.SourceRevision, ConfigRevision: snapshot.ConfigRevision, Mode: in.Mode, Handoff: in.Handoff, HandoffHash: jarvisTextHash(in.Handoff), HandoffRevision: in.HandoffRevision, HandoffBoundaryHash: in.HandoffBoundaryHash, SeedRequestID: in.SeedRequestID}, "handoff_boundary_changed")
+			if err != nil || rejected.Phase != "rejected" {
+				http.Error(w, "original rejection persistence uncertain; lookup original", 409)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": 1, "authority_instance_id": h.cfg.InstanceID, "intent_id": in.IntentID, "phase": "rejected", "no_effect": true, "reason": "handoff_boundary_changed", "reset": rejected})
+			return
+		}
+
 		raw, _ := json.Marshal(export)
-		v := messagequeue.ContextReset{IntentID: in.IntentID, SessionID: s.ID, ThreadID: snapshot.ResumeID, SourceRevision: snapshot.SourceRevision, ConfigRevision: snapshot.ConfigRevision, Mode: in.Mode, BoundaryHash: jarvisHash(export), ArchiveHash: jarvisHash(json.RawMessage(raw)), Handoff: in.Handoff, HandoffHash: jarvisTextHash(in.Handoff), HandoffRevision: in.HandoffRevision, SeedRequestID: in.SeedRequestID, BindingRevision: in.BindingRevision}
+		v := messagequeue.ContextReset{IntentID: in.IntentID, SessionID: s.ID, ThreadID: snapshot.ResumeID, SourceRevision: snapshot.SourceRevision, ConfigRevision: snapshot.ConfigRevision, Mode: in.Mode, BoundaryHash: jarvisHash(export), ArchiveHash: jarvisHash(json.RawMessage(raw)), Handoff: in.Handoff, HandoffHash: jarvisTextHash(in.Handoff), HandoffRevision: in.HandoffRevision, HandoffBoundaryHash: in.HandoffBoundaryHash, SeedRequestID: in.SeedRequestID, BindingRevision: in.BindingRevision}
 		saved, e := h.messageQueue.SaveContextReset(r.Context(), scope, jarvisHash(in), v, raw)
 		if e != nil {
 			http.Error(w, e.Error(), 409)
@@ -342,7 +359,27 @@ func (h *Hub) serveContext(w http.ResponseWriter, r *http.Request, device, path 
 		http.Error(w, "phase persistence failed; no reset issued", 503)
 		return
 	}
-	_, e = provider.ResetContext(r.Context(), s, v.ThreadID)
+	// All durable reads/phase writes have completed. Do not carry a stale
+	// authorization across either those waits or the provider idle RPC.
+	effectContext := backend.WithContextResetGuard(r.Context(), func() bool {
+		now := s.Snapshot()
+		if !h.workScopeCurrent(r, device, in.jarvisWorkScope, s) || now.SourceRevision != v.SourceRevision || now.ResumeID != v.ThreadID || now.ConfigRevision != v.ConfigRevision || !s.ContextResetReserved() || h.toolRepairRunning.Load() || !h.controls.MobileMayWrite(s.ID) {
+			return false
+		}
+		h.voiceMu.Lock()
+		defer h.voiceMu.Unlock()
+		for _, call := range h.voiceClients {
+			if call.session == s {
+				return false
+			}
+		}
+		return true
+	})
+	if e = backend.CheckContextResetGuard(effectContext); e != nil {
+		block("scope_changed_after_durable_wait")
+		return
+	}
+	_, e = provider.ResetContext(effectContext, s, v.ThreadID)
 	if e != nil {
 		v, _ = h.messageQueue.ContextResetPhase(context.Background(), scope, v.IntentID, "reset_issued", "unknown", "provider_detach_unconfirmed_lookup_original")
 		_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": 1, "authority_instance_id": h.cfg.InstanceID, "reset": v})

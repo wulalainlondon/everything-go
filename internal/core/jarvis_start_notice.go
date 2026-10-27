@@ -69,13 +69,69 @@ func (h *Hub) noticeSubscriberValid(sub messagequeue.NoticeSubscriber) (*session
 	}
 	return s, parts[0], generation, true
 }
-func (h *Hub) startRelationAllowed(ctx context.Context, sub messagequeue.NoticeSubscriber, p messagequeue.NativeStart) bool {
+func (h *Hub) startRelationRelevant(ctx context.Context, sub messagequeue.NoticeSubscriber, p messagequeue.NativeStart) bool {
 	manager, device, generation, ok := h.noticeSubscriberValid(sub)
 	if !ok {
 		return false
 	}
 	target, ok := h.registry.Get(p.SessionID)
-	if !ok || target.Snapshot().Hidden || target.ResumeID() != p.ThreadID {
+	if !ok || target.Snapshot().Hidden {
+		return false
+	}
+	if h.dispatches != nil {
+		d, found, e := h.dispatches.ByTargetRequest(ctx, manager.ID, p.SessionID, p.RequestID)
+		if e == nil && found && d.InstanceID == h.cfg.InstanceID && d.ParentThreadID == manager.ResumeID() && d.ParentConfigKnown && d.ParentConfigRevision == manager.SettingsSnapshot().ConfigRevision && d.ThreadID == p.ThreadID && d.ConfigRevision == target.SettingsSnapshot().ConfigRevision {
+			g, e := h.dispatches.Grant(ctx, manager.ID)
+			return e == nil && g.Allows(h.cfg.InstanceID, h.cfg.InstanceID, p.SessionID) && h.eventSessionAllowed(target)
+		}
+	}
+	if h.delegations != nil {
+		d, found, e := h.delegations.ByChildRequest(ctx, p.SessionID, p.RequestID)
+
+		if e == nil && found && d.ParentSessionID == manager.ID {
+			sourceThread, sourceRevision, bound, e := h.delegations.SourceBinding(ctx, d.ID)
+			if e != nil || !bound || sourceThread != manager.ResumeID() || sourceRevision != manager.SettingsSnapshot().ConfigRevision {
+				return false
+			}
+			thread, revision, _, e := h.delegations.ExecutionBinding(ctx, d.ID)
+			return e == nil && thread == p.ThreadID && revision == target.SettingsSnapshot().ConfigRevision
+		}
+
+	}
+	// Manager ordinary intakes are first-class source records. Other intakes
+	// additionally require an explicit original metadata link, queried by exact
+	// JSON identity rather than a latest-N scan.
+	linked := p.SessionID == manager.ID
+	if !linked {
+		var e error
+		linked, e = h.messageQueue.HasWorkExecutionLink(ctx, sub.Scope, sub.Manager, p.SessionID, p.RequestID)
+		if e != nil {
+			return false
+		}
+	}
+	if !linked || !h.eventSessionAllowed(target) {
+		return false
+	}
+	record, e := h.messageQueue.TaskJournal().OriginalCommandForRequest(ctx, p.SessionID, p.RequestID)
+	if e != nil || record.ScopeID != "device:"+device || record.Generation != generation {
+		return false
+	}
+	var meta apiMetadata
+	var input intakeInput
+	if json.Unmarshal(record.Metadata, &meta) != nil || meta.Intake == nil || json.Unmarshal(meta.Request.Input, &input) != nil {
+		return false
+	}
+	if input.Target.Thread != nil && *input.Target.Thread != "" && *input.Target.Thread != p.ThreadID {
+		return false
+	}
+	return input.Target.Revision == target.SettingsSnapshot().ConfigRevision
+}
+func (h *Hub) startRelationAllowed(ctx context.Context, sub messagequeue.NoticeSubscriber, p messagequeue.NativeStart) bool {
+	if !h.startRelationRelevant(ctx, sub, p) || p.ObservedAt+180000 <= time.Now().UnixMilli() {
+		return false
+	}
+	target, ok := h.registry.Get(p.SessionID)
+	if !ok || target.ResumeID() != p.ThreadID {
 		return false
 	}
 	if conflict, e := h.messageQueue.NativeConflict(p.SessionID, p.RequestID); e != nil || conflict {
@@ -85,85 +141,68 @@ func (h *Hub) startRelationAllowed(ctx context.Context, sub messagequeue.NoticeS
 	if e != nil || !found || entry.State != messagequeue.Running {
 		return false
 	}
-	if p.ObservedAt+180000 <= time.Now().UnixMilli() {
-		return false
-	}
-	if h.dispatches != nil {
-		if list, e := h.dispatches.List(ctx, manager.ID); e == nil {
-			for _, d := range list {
-				if d.SessionID == p.SessionID && d.RequestID == p.RequestID && d.InstanceID == h.cfg.InstanceID && d.ParentThreadID == manager.ResumeID() && d.ParentConfigKnown && d.ParentConfigRevision == manager.SettingsSnapshot().ConfigRevision && d.ThreadID == p.ThreadID {
-					g, e := h.dispatches.Grant(ctx, manager.ID)
-					return e == nil && g.Allows(h.cfg.InstanceID, h.cfg.InstanceID, p.SessionID) && h.eventSessionAllowed(target)
-				}
-			}
-		}
-	}
-	if h.delegations != nil {
-		if list, e := h.delegations.ListByParent(ctx, manager.ID); e == nil {
-			for _, d := range list {
-				if d.ChildSessionID == p.SessionID && d.ChildRequestID == p.RequestID && d.SourceThread == manager.ResumeID() {
-					return true
-				}
-			}
-		}
-	}
-	// Ordinary intakes only qualify when an explicit metadata link joins the
-	// original same credential command. Merely knowing a session ID is not enough.
-	after := ""
-	for pages := 0; pages < 17; pages++ {
-		items, next, e := h.messageQueue.WorkItems(ctx, sub.Scope, sub.Manager, after, 30)
-		if e != nil {
-			return false
-		}
-		for _, item := range items {
-			for _, l := range item.Links {
-				if l.Kind != "intake" || l.SessionID != p.SessionID || l.RequestID != p.RequestID || l.ThreadID != p.ThreadID {
-					continue
-				}
-				record, e := h.messageQueue.TaskJournal().OriginalCommandForRequest(ctx, p.SessionID, p.RequestID)
-				return e == nil && record.ScopeID == "device:"+device && record.Generation == generation && h.eventSessionAllowed(target)
-			}
-		}
-		if next == "" {
-			break
-		}
-		after = next
-	}
-	return false
+	// Relation/queue reads can wait on the original stores. Recheck the
+	// credential, selected source and target locally after those waits.
+	_, _, _, current := h.noticeSubscriberValid(sub)
+	return current && target.ResumeID() == p.ThreadID && !target.Snapshot().Hidden && p.ObservedAt+180000 > time.Now().UnixMilli()
 }
 
-// Called by the existing controller/coordinator tick: it joins durable facts to
-// durable subscriber outboxes. It does not schedule or resume model work.
+// The existing coordinator tick advances durable bounded source sequences. A
+// crash before/after a join can repeat the read, never the outbox's effect.
 func (h *Hub) reconcileJarvisStartNotices(ctx context.Context) {
 	if h.messageQueue == nil || h.fcm == nil {
 		return
 	}
-	subs, e := h.messageQueue.StartSubscribers(ctx)
-	if e != nil {
-		return
-	}
-	starts, e := h.messageQueue.RecentNativeStarts(ctx, time.Now().Add(-3*time.Minute).UnixMilli())
+	subs, e := h.messageQueue.StartJoinSubscribers(ctx, 20)
 	if e != nil {
 		return
 	}
 	for _, sub := range subs {
-		for _, p := range starts {
-			if !h.startRelationAllowed(ctx, sub, p) {
-				continue
+		facts, e := h.messageQueue.StartJoinFacts(ctx, sub, 100)
+		if e != nil {
+			continue
+		}
+		for _, p := range facts {
+			outcome := ""
+			if h.startRelationRelevant(ctx, sub, p.Start) {
+				outcome = "prepared"
+				if p.Start.ObservedAt+180000 <= time.Now().UnixMilli() {
+					outcome = "expired"
+				} else if !h.startRelationAllowed(ctx, sub, p.Start) {
+					outcome = "terminal_or_scope_changed_before_delivery"
+				}
 			}
-			raw, _ := json.Marshal(p)
-			notice := messagequeue.StartPush{Scope: sub.Scope, Manager: sub.Manager, EventID: p.EventID, Payload: raw, ExpiresAt: p.ObservedAt + 180000}
-			if e = h.messageQueue.PrepareStartPush(ctx, notice); e != nil {
-				continue
+			if e = h.messageQueue.CommitStartJoin(ctx, sub, p, outcome); e != nil {
+				break
 			}
-			claimed, e := h.messageQueue.ClaimStartPush(ctx, notice)
-			if e != nil || !claimed {
-				continue
-			}
-			go h.sendJarvisStartNotice(sub, p, notice)
 		}
 	}
+	prepared, e := h.messageQueue.PreparedStartPushes(ctx)
+	if e != nil {
+		return
+	}
+	for _, notice := range prepared {
+		sub, _, err := h.messageQueue.CurrentNoticePolicy(ctx, notice.Scope, notice.Manager)
+		var p messagequeue.NativeStart
+		if err != nil || json.Unmarshal(notice.Payload, &p) != nil {
+			continue
+		}
+		if !h.startRelationAllowed(ctx, sub, p) {
+			state := "revoked_or_terminal"
+			if notice.ExpiresAt <= time.Now().UnixMilli() {
+				state = "expired"
+			}
+			_ = h.messageQueue.RetirePreparedStartPush(ctx, notice, state)
+			continue
+		}
+		claimed, err := h.messageQueue.ClaimStartPush(ctx, notice)
+		if err != nil || !claimed {
+			continue
+		}
+		go h.sendJarvisStartNotice(sub, p, notice)
+	}
 }
+
 func (h *Hub) sendJarvisStartNotice(sub messagequeue.NoticeSubscriber, p messagequeue.NativeStart, notice messagequeue.StartPush) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()

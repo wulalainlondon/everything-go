@@ -391,3 +391,11 @@ func (s *Store) ListPage(ctx context.Context, sid, cursor string, limit int) ([]
 	}
 	return out, next, rows.Err()
 }
+
+// Generation reset cannot use the coordinator's intentionally rotating page as
+// a complete absence proof. This scoped EXISTS has no scheduling side effect.
+func (s *Store) UnsettledForSession(ctx context.Context, sessionID string) (bool, error) {
+	var unsettled bool
+	e := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM questions WHERE (json_extract(data,'$.binding.child_session_id')=? OR json_extract(data,'$.binding.parent_session_id')=?) AND json_extract(data,'$.state') NOT IN ('resolved','expired','cancelled','orphaned','native_reply_written'))`, sessionID, sessionID).Scan(&unsettled)
+	return unsettled, e
+}
