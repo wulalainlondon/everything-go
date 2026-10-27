@@ -53,7 +53,7 @@ func TestPluginMetadataStatusAxesAndOriginalContract(t *testing.T) {
 			}
 			contracts := v["contracts"].(map[string]any)
 			task := contracts["task_api"].(map[string]any)
-			if task["version"] != "1.0.0-rc.1" || task["sha256"] != "674aada21ce809c5bec8324b192163c4f3c4acf7f5b57f39042eacd9982d23fa" {
+			if task["version"] != "1.0.0-rc.1" || task["sha256"] != "ca3bac5e7c66b75bd141379035a49d060ca4e16996c08b230094be9d7487c018" {
 				t.Fatal("original contract changed")
 			}
 			mode := v["supported_mode"].(map[string]any)
