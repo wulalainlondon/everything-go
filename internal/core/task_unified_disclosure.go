@@ -94,11 +94,11 @@ func (h *Hub) unifiedDisclosureFence(ctx context.Context, c taskapi.VerifiedCont
 			if !bound || thread != r.Parent.ThreadID || rev != r.Parent.Revision {
 				return unifiedError("scope_changed")
 			}
-			thread, rev, _, e = h.delegations.ExecutionBinding(ctx, d.ID)
+			target, _, e := h.unifiedDelegationReadTarget(ctx, d, r.InitializedDelegation)
 			if e != nil {
 				return e
 			}
-			if thread != r.Target.ThreadID || rev != r.Target.Revision {
+			if target != r.Target {
 				return unifiedError("scope_changed")
 			}
 		}

@@ -120,6 +120,7 @@ type unifiedInput struct {
 }
 type unifiedResolved struct {
 	ReadFence               func(context.Context) error
+	InitializedDelegation   *unifiedDelegationInitialization
 	ControllerGrantRevision uint64
 	Locator                 unifiedLocator
 	Parent                  jarvisTarget
@@ -747,18 +748,17 @@ func (h *Hub) resolveUnified(ctx context.Context, c taskapi.VerifiedContext, man
 		if !ok {
 			return out, unifiedError("not_found")
 		}
+		if manager != d.ParentSessionID && manager != d.ChildSessionID && c.SourceSessionID != d.ChildSessionID {
+			return out, unifiedError("permission")
+		}
 		thread, rev, bound, e := h.delegations.SourceBinding(ctx, d.ID)
 		if e != nil || !bound {
 			return out, unifiedError("scope_changed")
 		}
 		out.Parent = jarvisTarget{h.cfg.InstanceID, d.ParentSessionID, thread, rev}
-		thread, rev, _, e = h.delegations.ExecutionBinding(ctx, d.ID)
+		out.Target, out.InitializedDelegation, e = h.unifiedDelegationReadTarget(ctx, d, nil)
 		if e != nil {
 			return out, e
-		}
-		out.Target = jarvisTarget{h.cfg.InstanceID, d.ChildSessionID, thread, rev}
-		if manager != d.ParentSessionID && manager != d.ChildSessionID && c.SourceSessionID != d.ChildSessionID {
-			return out, unifiedError("permission")
 		}
 		out.Locator.SessionID = d.ChildSessionID
 		out.Locator.RequestID = d.ChildRequestID
