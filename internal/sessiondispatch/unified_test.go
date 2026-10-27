@@ -56,3 +56,46 @@ func TestUnifiedControllerRevisionReservationAndDurableAdmissionOrder(t *testing
 		t.Fatal("edit crossed admission")
 	}
 }
+
+func TestUnifiedControllerAdmissionBoundaryRechecksStaleEligibility(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	for _, id := range []string{"a", "b"} {
+		_, err = s.Create(ctx, Record{ID: id, ParentID: "owner", OriginRequestID: "origin-" + id, ToolCallID: "call", IntentHash: taskapi.RawDigest([]byte(id)), SessionID: "target", RequestID: "r-" + id, Content: "original", Mode: "queue"})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	eligible := map[string]bool{"a": true, "b": true}
+	before, err := s.UnifiedQueue(ctx, "target", eligible)
+	if err != nil || len(before.Items) != 2 || !before.Items[0].Eligible || !before.Items[1].Eligible {
+		t.Fatal("waiting admission should remain eligible", before, err)
+	}
+	d, reserved, err := s.ReserveAdmission(ctx, "a")
+	if err != nil || !reserved {
+		t.Fatal("original admission", d, reserved, err)
+	}
+	for _, state := range []string{"accepted", "queued", "running", "uncertain"} {
+		d.State = state
+		if err := s.Put(ctx, d); err != nil {
+			t.Fatal(err)
+		}
+		v, err := s.UnifiedQueue(ctx, "target", eligible) // intentionally stale map
+		if err != nil || len(v.Items) != 2 || v.Items[0].Eligible || !v.Items[1].Eligible {
+			t.Fatal("admitted row reopened by stale eligibility", state, v, err)
+		}
+		move := taskapi.QueueMutation{Scope: "dispatcher", Generation: 1, Intent: "move-" + state, Hash: "h", Operation: "queue_move", ExpectedRevision: v.Revision, MembershipHash: v.MembershipHash, Item: "b", Relative: "a", Placement: "before", Revalidate: func(context.Context) error { return nil }}
+		if _, err := s.UnifiedMutate(ctx, "target", eligible, move); err == nil {
+			t.Fatal("controller transaction crossed original admission", state)
+		}
+	}
+	// An admission racing after a waiting snapshot must fail the original CAS.
+	stale := taskapi.QueueMutation{Scope: "dispatcher", Generation: 1, Intent: "stale-admission", Hash: "h", Operation: "queue_move", ExpectedRevision: before.Revision, MembershipHash: before.MembershipHash, Item: "b", Relative: "a", Placement: "before", Revalidate: func(context.Context) error { return nil }}
+	if _, err := s.UnifiedMutate(ctx, "target", eligible, stale); err == nil {
+		t.Fatal("original pre-admission snapshot survived admission")
+	}
+}

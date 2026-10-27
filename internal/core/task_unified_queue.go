@@ -105,7 +105,7 @@ func (h *Hub) unifiedEligible(ctx context.Context, manager string, q unifiedQueu
 			if e != nil {
 				return nil, e
 			}
-			if ok && d.SessionID == r.Session && d.RequestID == r.Request && d.Mode == "queue" && d.VoiceID == "" && d.InstanceID == h.cfg.InstanceID {
+			if ok && (d.State == "prepared" || d.State == "pending") && d.SessionID == r.Session && d.RequestID == r.Request && d.Mode == "queue" && d.VoiceID == "" && d.InstanceID == h.cfg.InstanceID {
 				if !d.ParentConfigKnown || h.unifiedTarget(jarvisTarget{h.cfg.InstanceID, d.ParentID, d.ParentThreadID, d.ParentConfigRevision}, false) != nil || h.unifiedTarget(jarvisTarget{h.cfg.InstanceID, d.SessionID, d.ThreadID, d.ConfigRevision}, true) != nil {
 					continue
 				}
@@ -385,7 +385,11 @@ func (h *Hub) unifiedQueueOperation(ctx context.Context, c taskapi.VerifiedConte
 			if r.Eligible {
 				classification = "eligible_dispatched_job"
 			}
-			row := map[string]any{"item_id": publicHandles[r.ID], "classification": classification, "barrier_reason": r.Barrier, "content_revision": r.ContentRevision, "content_hash": r.ContentHash, "can_edit": canRead && resolved.CanEdit && r.State == "queued", "can_move": r.Eligible, "state": r.State}
+			canEdit := canRead && resolved.CanEdit && r.State == "queued"
+			if q.Kind == "controller_waiting_admission" && !r.Eligible {
+				canEdit = false
+			}
+			row := map[string]any{"item_id": publicHandles[r.ID], "classification": classification, "barrier_reason": r.Barrier, "content_revision": r.ContentRevision, "content_hash": r.ContentHash, "can_edit": canEdit, "can_move": r.Eligible, "state": r.State}
 			if !canRead {
 				row["content_revision"] = 0
 				row["content_hash"] = ""

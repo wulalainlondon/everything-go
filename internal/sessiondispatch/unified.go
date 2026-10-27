@@ -31,7 +31,11 @@ func unifiedRows(ctx context.Context, tx *sql.Tx, target string, eligible map[st
 		if state == "prepared" || state == "pending" {
 			state = "queued"
 		}
-		r := taskapi.QueueRow{ID: d.ID, Sequence: seq, State: state, Parent: d.ParentID, Session: d.SessionID, Request: d.RequestID, ContentHash: d.IntentHash, ContentRevision: 1, Eligible: eligible[d.ID] && state == "queued"}
+		// Admission freezes this store's version/order boundary. A queued row
+		// already handed to messagequeue belongs to its original actor instead;
+		// a stale eligibility map must not move only the controller audit ranks.
+		waitingAdmission := d.State == "prepared" || d.State == "pending"
+		r := taskapi.QueueRow{ID: d.ID, Sequence: seq, State: state, Parent: d.ParentID, Session: d.SessionID, Request: d.RequestID, ContentHash: d.IntentHash, ContentRevision: 1, Eligible: eligible[d.ID] && state == "queued" && waitingAdmission}
 		if !r.Eligible {
 			r.Barrier = "original_authority_or_admission_boundary"
 		}
