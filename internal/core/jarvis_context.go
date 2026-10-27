@@ -129,6 +129,25 @@ func (h *Hub) serveContext(w http.ResponseWriter, r *http.Request, device, path 
 		}
 		v = h.reconcileContextResetReadback(r, scope, s, v)
 		out := map[string]any{"schema_version": 1, "authority_instance_id": h.cfg.InstanceID, "reset": v}
+		if v.Phase == "completed" || v.Phase == "awaiting_seed" {
+			oldFound := false
+			for _, id := range s.ResumeIDs() {
+				if id == v.ThreadID {
+					oldFound = true
+				}
+			}
+			if oldFound {
+				if _, _, err := h.messageQueue.ContextArchive(r.Context(), scope, v.IntentID); err == nil {
+					out["old_history_preserved"] = true
+					generation := "initialized"
+					if s.ResumeID() == "" {
+						generation = "awaiting_initialization"
+					}
+					out["native_generation"] = generation
+					out["new_target"] = jarvisTarget{Authority: h.cfg.InstanceID, SessionID: s.ID, ThreadID: s.ResumeID(), Revision: s.SettingsSnapshot().ConfigRevision}
+				}
+			}
+		}
 		if in.IncludeArchive {
 			raw, hash, e := h.messageQueue.ContextArchive(r.Context(), scope, in.IntentID)
 			if e != nil {
