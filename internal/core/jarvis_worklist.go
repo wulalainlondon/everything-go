@@ -364,7 +364,7 @@ func (h *Hub) serveWorklist(w http.ResponseWriter, r *http.Request, device, path
 				visible.BodyHash = ""
 				visible.Plan = nil
 				visible.Decision = nil
-				visible.SourceRefs = nil
+				visible.SourceRefs = []string{}
 			}
 			if !detail {
 				visible = jarvisWorkSummary(visible, item)

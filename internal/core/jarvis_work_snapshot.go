@@ -171,29 +171,30 @@ func (h *Hub) workSummaryRow(r *http.Request, device string, manager *session.Se
 	executions := []any{}
 	partial := false
 	for i, l := range item.Links {
-		if i >= 8 {
-			break
-		}
 		p, e := h.workLinkProjection(r, device, manager, l)
 		if e != nil {
 			partial = true
-			executions = append(executions, map[string]any{"error": map[string]any{"code": "scope_or_source_unavailable", "retryable": false}})
+			if i < 8 {
+				executions = append(executions, map[string]any{"error": map[string]any{"code": "scope_or_source_unavailable", "retryable": false}})
+			}
 			continue
 		}
-		visible.Links = append(visible.Links, l)
-		executions = append(executions, map[string]any{"link": l, "projection": jarvisWorkProjectionSummary(p)})
+		if i < 8 {
+			visible.Links = append(visible.Links, l)
+			executions = append(executions, map[string]any{"link": l, "projection": jarvisWorkProjectionSummary(p)})
+		}
 	}
 	visible = jarvisWorkSummary(visible, item)
 	if partial || readonly && len(visible.Links) == 0 {
 		visible.Title = "來源待確認"
 		visible.Body = ""
 		visible.BodyHash = ""
-		visible.SourceRefs = nil
+		visible.SourceRefs = []string{}
 		visible.DetailTruncated = true
 		visible.Plan = nil
 		visible.Decision = nil
 	}
-	return map[string]any{"item": visible, "executions": executions, "read_only": readonly, "executions_truncated": len(item.Links) > 8, "source_partial": partial}
+	return map[string]any{"authorization_links": item.Links, "item": visible, "executions": executions, "read_only": readonly, "executions_truncated": len(item.Links) > 8, "source_partial": partial}
 }
 func (h *Hub) serveFrozenWorklist(w http.ResponseWriter, r *http.Request, device string, in jarvisWorkScope, manager *session.Session, principal, cursor string, limit int) {
 	if limit < 1 || limit > 8 {
@@ -231,12 +232,13 @@ func (h *Hub) serveFrozenWorklist(w http.ResponseWriter, r *http.Request, device
 		// remains an explicit opaque slot, not a visible stale private title.
 		encoded, _ := json.Marshal(raw)
 		var row struct {
-			Header   bool                  `json:"jarvis_snapshot_header"`
-			Policy   json.RawMessage       `json:"notification_policy"`
-			Notices  []map[string]any      `json:"notices"`
-			Pushes   []map[string]any      `json:"push_receipts"`
-			Item     messagequeue.WorkItem `json:"item"`
-			ReadOnly bool                  `json:"read_only"`
+			AuthorizationLinks []messagequeue.WorkLink `json:"authorization_links"`
+			Header             bool                    `json:"jarvis_snapshot_header"`
+			Policy             json.RawMessage         `json:"notification_policy"`
+			Notices            []map[string]any        `json:"notices"`
+			Pushes             []map[string]any        `json:"push_receipts"`
+			Item               messagequeue.WorkItem   `json:"item"`
+			ReadOnly           bool                    `json:"read_only"`
 		}
 		if json.Unmarshal(encoded, &row) != nil {
 			http.Error(w, "frozen row unavailable", 503)
@@ -249,7 +251,7 @@ func (h *Hub) serveFrozenWorklist(w http.ResponseWriter, r *http.Request, device
 			continue
 		}
 		allowed := true
-		for _, link := range row.Item.Links {
+		for _, link := range row.AuthorizationLinks {
 			if _, err := h.workLinkProjection(r, device, manager, link); err != nil {
 				allowed = false
 				break
@@ -276,6 +278,7 @@ func (h *Hub) serveFrozenWorklist(w http.ResponseWriter, r *http.Request, device
 		// Auxiliary fields stay at the response's original public locations.
 		var public map[string]any
 		_ = json.Unmarshal(encoded, &public)
+		delete(public, "authorization_links")
 		delete(public, "notices")
 		delete(public, "push_receipts")
 		delete(public, "notification_policy")

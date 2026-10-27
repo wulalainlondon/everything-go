@@ -787,6 +787,10 @@ func TestUnifiedExportCrossRepositoryWirePacket(t *testing.T) {
 	workspaceDetail := unifiedBase(wf.h, manager)
 	workspaceDetail["item_id"] = "workspace-original"
 	workspaceCall("workspace_detail", "worklist/get", workspaceDetail)
+	restricted := true
+	target.SetMeta(nil, &restricted)
+	workspaceCall("workspace_restricted_snapshot", "worklist/snapshot", unifiedBase(wf.h, manager))
+
 	packet := map[string]any{"sourceCommit": os.Getenv("JARVIS_WIRE_FIXTURE_SOURCE"), "evidence": "verified paired HTTP + authenticated original workspace WS/queue + real SQLite; synthetic provider only; no native/model/provider-reset/device/external effects", "outputs": outputs, "schemaHashes": map[string]string{"legacy": "674aada21ce809c5bec8324b192163c4f3c4acf7f5b57f39042eacd9982d23fa", "media": "ca3bac5e7c66b75bd141379035a49d060ca4e16996c08b230094be9d7487c018"}, "providerResetCalls": f.resetCalls}
 	raw, e := json.MarshalIndent(packet, "", "  ")
 	if e != nil {
@@ -800,7 +804,7 @@ func TestUnifiedExportCrossRepositoryWirePacket(t *testing.T) {
 	for name, body := range rawResponses {
 		kind := "snapshot"
 		switch name {
-		case "snapshot", "workspace_snapshot":
+		case "snapshot", "workspace_snapshot", "workspace_restricted_snapshot":
 			kind = "snapshot"
 		case "detail", "original_mutation", "workspace_detail":
 			kind = "detail"
@@ -907,5 +911,100 @@ func TestUnifiedFrozenDuplicateExecutionNoticeChannelsDoNotMixPages(t *testing.T
 	}
 	if len(b["push_receipts"].([]any)) != 1 || b["push_receipts"].([]any)[0].(map[string]any)["status"] != "prepared" {
 		t.Fatal("live receipt leaked into frozen snapshot", b)
+	}
+}
+
+func TestUnifiedAllLinksAuthorizeBeforePreviewAndAfterFreeze(t *testing.T) {
+	for _, mode := range []string{"hidden", "grant"} {
+		t.Run(mode, func(t *testing.T) {
+			h, call := jarvisFixture(t)
+			manager := h.registry.Create("s_full_auth_manager", "Manager", h.cfg.RootDir, "codex", "m", "read-only", "manager")
+			store, e := sessiondispatch.Open(t.TempDir())
+			if e != nil {
+				t.Fatal(e)
+			}
+			defer store.Close()
+			h.dispatches = store
+			if _, e = store.SetGrant(context.Background(), manager.ID, sessiondispatch.Grant{Enabled: true, Local: true}, 0); e != nil {
+				t.Fatal(e)
+			}
+			links := []messagequeue.WorkLink{}
+			targets := []*session.Session{}
+			allowed := []string{}
+			for i := 0; i < 9; i++ {
+				target := h.registry.Create(fmt.Sprintf("s_auth_%d", i), "Target", h.cfg.RootDir, "codex", "m", "read-only", fmt.Sprintf("thread-%d", i))
+				targets = append(targets, target)
+				rid := fmt.Sprintf("r_auth_%d", i)
+				record := sessiondispatch.Record{ID: fmt.Sprintf("auth-%d", i), ParentID: manager.ID, ParentThreadID: manager.ResumeID(), ParentConfigKnown: true, ParentConfigRevision: manager.SettingsSnapshot().ConfigRevision, OriginRequestID: "r_auth_original", ToolCallID: fmt.Sprintf("call-%d", i), InstanceID: h.cfg.InstanceID, SessionID: target.ID, ThreadID: target.ResumeID(), ConfigRevision: target.SettingsSnapshot().ConfigRevision, RequestID: rid, IntentHash: rid, Content: "original", State: "completed"}
+				if _, e = store.Create(context.Background(), record); e != nil {
+					t.Fatal(e)
+				}
+				if _, _, e = h.messageQueue.Enqueue(messagequeue.Entry{SessionID: target.ID, RequestID: rid, Payload: []byte(`{}`)}); e != nil {
+					t.Fatal(e)
+				}
+				links = append(links, messagequeue.WorkLink{Kind: "controller", Authority: h.cfg.InstanceID, SessionID: target.ID, ThreadID: target.ResumeID(), ConfigRevision: target.SettingsSnapshot().ConfigRevision, RequestID: rid, NativeID: record.ID})
+				if i < 8 {
+					allowed = append(allowed, h.cfg.InstanceID+":"+target.ID)
+				}
+			}
+			for _, id := range []string{"a_public", "b_sensitive"} {
+				in := unifiedBase(h, manager)
+				in["intent_id"] = "r_auth_note_" + id
+				in["item_id"] = id
+				in["kind"] = "execution"
+				in["title"] = "PRIVATE-NINTH-TITLE"
+				in["body"] = "PRIVATE-NINTH-BODY"
+				in["recording_state"] = "recorded"
+				in["source_refs"] = []string{"source-original"}
+				in["links"] = []messagequeue.WorkLink{}
+				if id == "b_sensitive" {
+					in["links"] = links
+				}
+				if w := call("POST", "worklist/item", in, "phone"); w.Code != 200 {
+					t.Fatal(w.Code, w.Body.String())
+				}
+			}
+			first := unifiedBase(h, manager)
+			first["limit"] = 1
+			w := call("POST", "worklist/snapshot", first, "phone")
+			if w.Code != 200 {
+				t.Fatal(w.Code, w.Body.String())
+			}
+			captured := decodeUnified(t, w.Body.Bytes())
+			if mode == "hidden" {
+				yes := true
+				targets[8].SetMeta(nil, &yes)
+			} else {
+				if _, e = store.SetGrant(context.Background(), manager.ID, sessiondispatch.Grant{Enabled: true, Local: true, Sessions: allowed}, 1); e != nil {
+					t.Fatal(e)
+				}
+			}
+			assertOpaque := func(w *httptest.ResponseRecorder) {
+				if w.Code != 200 {
+					t.Fatal(w.Code, w.Body.String())
+				}
+				if strings.Contains(w.Body.String(), "authorization_links") {
+					t.Fatal("internal authorization refs leaked")
+				}
+				for _, raw := range decodeUnified(t, w.Body.Bytes())["items"].([]any) {
+					item := raw.(map[string]any)["item"].(map[string]any)
+					if item["item_id"] == "b_sensitive" {
+						if item["title"] == "PRIVATE-NINTH-TITLE" || item["body"] == "PRIVATE-NINTH-BODY" {
+							t.Fatal("ninth link skipped authorization", w.Body.String())
+						}
+						if _, ok := item["source_refs"].([]any); !ok {
+							t.Fatal("opaque source refs must be wire array", item)
+						}
+						return
+					}
+				}
+				t.Fatal("opaque original item missing")
+			}
+			next := unifiedBase(h, manager)
+			next["limit"] = 1
+			next["cursor"] = captured["cursor"]
+			assertOpaque(call("POST", "worklist/snapshot", next, "phone"))
+			assertOpaque(call("POST", "worklist/snapshot", unifiedBase(h, manager), "phone"))
+		})
 	}
 }

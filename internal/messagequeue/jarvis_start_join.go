@@ -191,3 +191,25 @@ func (s *Store) StartPushesForLinks(ctx context.Context, scope, manager string, 
 	}
 	return out, nil
 }
+
+// Return exact retained links without a presentation page/preview bound.
+func (s *Store) WorkExecutionLinks(ctx context.Context, scope, manager, session, request string) ([]WorkLink, error) {
+	rows, e := s.db.QueryContext(ctx, `SELECT link.value FROM jarvis_work_items,json_each(jarvis_work_items.payload,'$.links') AS link WHERE scope=? AND manager=? AND json_extract(link.value,'$.session_id')=? AND json_extract(link.value,'$.request_id')=?`, scope, manager, session, request)
+	if e != nil {
+		return nil, e
+	}
+	defer rows.Close()
+	out := []WorkLink{}
+	for rows.Next() {
+		var raw string
+		var link WorkLink
+		if e = rows.Scan(&raw); e != nil {
+			return nil, e
+		}
+		if e = json.Unmarshal([]byte(raw), &link); e != nil {
+			return nil, e
+		}
+		out = append(out, link)
+	}
+	return out, rows.Err()
+}
