@@ -36,6 +36,31 @@ func (h *Hub) unifiedRole(ctx context.Context, manager string, target string) er
 	}
 	return h.unifiedTarget(h.unifiedIdentity(manager), true)
 }
+
+// A queue's opaque barriers still disclose membership. Require the original
+// dispatch role before reading any rows, and pin its revision across every await.
+// The delegation capacity board is global: its selector is the manager, while
+// each row retains the original target grant check in unifiedEligible.
+func (h *Hub) unifiedQueueReadRole(ctx context.Context, manager string, q unifiedQueue) (uint64, error) {
+	if h.dispatches == nil {
+		return 0, unifiedError("unsupported")
+	}
+	g, e := h.dispatches.Grant(ctx, manager)
+	if e != nil {
+		return 0, e
+	}
+	allowed := g.Allows(h.cfg.InstanceID, q.Target.Authority, q.Target.SessionID)
+	if q.Kind == "delegation_waiting" {
+		allowed = q.Target.SessionID == manager && g.AllowsInstance(h.cfg.InstanceID, h.cfg.InstanceID)
+	}
+	if !allowed {
+		return 0, unifiedError("permission")
+	}
+	if e := h.unifiedTarget(h.unifiedIdentity(manager), true); e != nil {
+		return 0, e
+	}
+	return g.Revision, nil
+}
 func (h *Hub) unifiedEligible(ctx context.Context, manager string, q unifiedQueue, rows []taskapi.QueueRow) (map[string]bool, error) {
 	out := map[string]bool{}
 	for _, r := range rows {
@@ -258,6 +283,48 @@ func (h *Hub) unifiedQueueOperation(ctx context.Context, c taskapi.VerifiedConte
 		defer release()
 		actorIDs = s.WaitingIDs()
 	}
+	roleRevision := uint64(0)
+	var readRoleFence func(context.Context) error
+	if req.Operation == "queue_snapshot" {
+		roleRevision, e = h.unifiedQueueReadRole(ctx, manager, q)
+		if e != nil {
+			return nil, e
+		}
+		saved := []unifiedReadIdentity{}
+		for _, identity := range []jarvisTarget{h.unifiedIdentity(manager), q.Target} {
+			current, ok := h.registry.Get(identity.SessionID)
+			if !ok {
+				return nil, unifiedError("scope_changed")
+			}
+			saved = append(saved, unifiedReadIdentity{identity, current, current.SettingsSnapshot().SourceRevision})
+		}
+		readRoleFence = func(ctx context.Context) error {
+			checkLocal := func() error {
+				for _, original := range saved {
+					current, ok := h.registry.Get(original.identity.SessionID)
+					if !ok || current != original.session || current.SettingsSnapshot().SourceRevision != original.generation {
+						return unifiedError("scope_changed")
+					}
+					if err := h.unifiedTarget(original.identity, false); err != nil {
+						return err
+					}
+				}
+				return nil
+			}
+			if err := checkLocal(); err != nil {
+				return err
+			}
+			revision, err := h.unifiedQueueReadRole(ctx, manager, q)
+			if err != nil {
+				return err
+			}
+			if revision != roleRevision {
+				return unifiedError("scope_changed")
+			}
+			return checkLocal()
+		}
+		registerUnifiedDisclosure(ctx, readRoleFence)
+	}
 	v, e := h.unifiedQueueView(ctx, q, nil)
 	if e != nil {
 		return nil, e
@@ -273,8 +340,7 @@ func (h *Hub) unifiedQueueOperation(ctx context.Context, c taskapi.VerifiedConte
 	if e != nil {
 		return nil, e
 	}
-	roleRevision := uint64(0)
-	if h.dispatches != nil {
+	if req.Operation != "queue_snapshot" && h.dispatches != nil {
 		g, grantErr := h.dispatches.Grant(ctx, manager)
 		if grantErr != nil {
 			return nil, grantErr
@@ -328,6 +394,14 @@ func (h *Hub) unifiedQueueOperation(ctx context.Context, c taskapi.VerifiedConte
 				row["locator"] = resolved.Locator
 			}
 			items = append(items, row)
+		}
+		for _, resolved := range readableRows {
+			if err := resolved.disclosureCurrent(ctx); err != nil {
+				return nil, err
+			}
+		}
+		if err := readRoleFence(ctx); err != nil {
+			return nil, err
 		}
 		return map[string]any{"queue": q, "revision": v.Revision, "membership_hash": scopedMembership, "items": items, "coverage": "complete", "order_owner": "original_store_actor"}, nil
 	}

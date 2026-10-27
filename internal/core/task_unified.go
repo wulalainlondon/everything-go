@@ -105,15 +105,17 @@ type unifiedInput struct {
 	Expires           int64           `json:"expires_at"`
 }
 type unifiedResolved struct {
-	Locator         unifiedLocator
-	Parent          jarvisTarget
-	Target          jarvisTarget
-	Entry           messagequeue.Entry
-	HasEntry        bool
-	Canonical       *taskapi.IntentRecord
-	State, Delivery string
-	ReplyHash       string
-	CanEdit         bool
+	ReadFence               func(context.Context) error
+	ControllerGrantRevision uint64
+	Locator                 unifiedLocator
+	Parent                  jarvisTarget
+	Target                  jarvisTarget
+	Entry                   messagequeue.Entry
+	HasEntry                bool
+	Canonical               *taskapi.IntentRecord
+	State, Delivery         string
+	ReplyHash               string
+	CanEdit                 bool
 }
 
 func unifiedError(code string) error { return taskapi.Failure(code, "known_none", "refresh_snapshot") }
@@ -279,6 +281,8 @@ func (h *Hub) executeUnified(ctx context.Context, caller taskapi.BoundCaller, ra
 		}
 		return nil
 	}
+	disclosures := []func(context.Context) error{}
+	ctx = context.WithValue(ctx, unifiedDisclosureCollectorKey{}, &disclosures)
 	var result any
 	switch op {
 	case "capabilities":
@@ -309,6 +313,13 @@ func (h *Hub) executeUnified(ctx context.Context, caller taskapi.BoundCaller, ra
 	}
 	if e = check(ctx); e != nil {
 		return fail(e)
+	}
+	// Native caller verification can itself wait for its original queue read.
+	// Recheck every disclosed relation AFTER that verifier's final await.
+	for _, disclose := range disclosures {
+		if e = disclose(ctx); e != nil {
+			return fail(e)
+		}
 	}
 	resp.OK = true
 	resp.Result = result
@@ -627,6 +638,10 @@ func (h *Hub) resolveUnified(ctx context.Context, c taskapi.VerifiedContext, man
 		var meta apiMetadata
 		_ = json.Unmarshal(r.Metadata, &meta)
 		out.Parent = h.unifiedIdentity(meta.Caller.SourceSessionID)
+		out.ReadFence, e = h.unifiedDisclosureFence(ctx, c, manager, out)
+		if e != nil {
+			return out, e
+		}
 		entry, found, e := h.messageQueue.EffectiveInput(ctx, r.SessionID, r.RequestID)
 		if e != nil {
 			return out, e
@@ -685,6 +700,7 @@ func (h *Hub) resolveUnified(ctx context.Context, c taskapi.VerifiedContext, man
 		if e != nil || !g.Allows(h.cfg.InstanceID, d.InstanceID, d.SessionID) {
 			return out, unifiedError("permission")
 		}
+		out.ControllerGrantRevision = g.Revision
 		out.Locator.SessionID = d.SessionID
 		out.Locator.RequestID = d.RequestID
 		out.State = d.State
@@ -823,6 +839,11 @@ func (h *Hub) resolveUnified(ctx context.Context, c taskapi.VerifiedContext, man
 	}
 	out.Locator.ThreadID = out.Target.ThreadID
 	out.Locator.Revision = out.Target.Revision
+	var err error
+	out.ReadFence, err = h.unifiedDisclosureFence(ctx, c, manager, out)
+	if err != nil {
+		return out, err
+	}
 	e, found, err := h.messageQueue.EffectiveInput(ctx, out.Locator.SessionID, out.Locator.RequestID)
 	if err != nil {
 		return out, err
@@ -837,7 +858,15 @@ func (h *Hub) resolveUnified(ctx context.Context, c taskapi.VerifiedContext, man
 	}
 	return out, nil
 }
-func (h *Hub) unifiedTaskDTO(ctx context.Context, c taskapi.VerifiedContext, manager string, r unifiedResolved) (any, error) {
+func (h *Hub) unifiedTaskDTO(ctx context.Context, c taskapi.VerifiedContext, manager string, r unifiedResolved) (result any, err error) {
+	defer func() {
+		if err == nil {
+			if e := r.disclosureCurrent(ctx); e != nil {
+				result = nil
+				err = e
+			}
+		}
+	}()
 	data := map[string]any{}
 	if r.Canonical != nil {
 		d, e := h.apiTask(ctx, *r.Canonical)
@@ -979,7 +1008,15 @@ func (h *Hub) unifiedTaskDTO(ctx context.Context, c taskapi.VerifiedContext, man
 	}
 	return map[string]any{"locator": r.Locator, "owner": r.Target, "execution": execution, "final": final, "delivery": r.Delivery, "qa": "original_selected_round_only", "data": data, "reply_routes": routes, "edit": edit}, nil
 }
-func (h *Hub) unifiedReadResult(ctx context.Context, r unifiedResolved, in unifiedInput) (any, error) {
+func (h *Hub) unifiedReadResult(ctx context.Context, r unifiedResolved, in unifiedInput) (result any, err error) {
+	defer func() {
+		if err == nil {
+			if e := r.disclosureCurrent(ctx); e != nil {
+				result = nil
+				err = e
+			}
+		}
+	}()
 	if in.OwnerRequest != r.Locator.RequestID {
 		return nil, unifiedError("ambiguous_owner")
 	}

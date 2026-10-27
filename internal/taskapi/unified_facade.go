@@ -74,13 +74,23 @@ func (j *Journal) UnifiedFacadeFinish(ctx context.Context, m QueueMutation, resp
 	}
 	state := "applied"
 	if original, ok := response.(Response); ok && !original.OK {
-		state = "rejected"
+		state = "unknown"
+		if original.Error != nil && original.Error.Acceptance == "known_none" {
+			state = "rejected"
+		}
 	}
 	r := MutationReceipt{m.Intent, m.Hash, state, data}
 	raw, _ := json.Marshal(r)
 	e = j.Transaction(ctx, func(tx *sql.Tx) error {
 		if e := m.Revalidate(ctx); e != nil {
 			return e
+		}
+		var previous []byte
+		if e := tx.QueryRowContext(ctx, "SELECT receipt FROM unified_facade_pointers WHERE scope=? AND generation=? AND operation=? AND intent=? AND input_hash=?", m.Scope, m.Generation, m.Operation, m.Intent, m.Hash).Scan(&previous); e != nil {
+			return e
+		}
+		if len(previous) > 0 {
+			return json.Unmarshal(previous, &r)
 		}
 		_, e := tx.ExecContext(ctx, "UPDATE unified_facade_pointers SET receipt=COALESCE(receipt,?) WHERE scope=? AND generation=? AND operation=? AND intent=? AND input_hash=?", raw, m.Scope, m.Generation, m.Operation, m.Intent, m.Hash)
 		return e

@@ -73,7 +73,7 @@ func (h *Hub) unifiedGeneralOperation(ctx context.Context, c taskapi.VerifiedCon
 	return receipts[0], nil
 }
 
-func (h *Hub) unifiedDocument(ctx context.Context, c taskapi.VerifiedContext, manager string, req taskapi.Request, in unifiedInput, check func(context.Context) error) (any, error) {
+func (h *Hub) unifiedDocument(ctx context.Context, c taskapi.VerifiedContext, manager string, req taskapi.Request, in unifiedInput, check func(context.Context) error) (result any, err error) {
 	m := unifiedMutation(c, manager, req, check)
 	// A scoped consumer can ONLY read an exact immutable grant. It never gains the
 	// original owner relation/catalog, caller mutation or filesystem permissions.
@@ -89,10 +89,17 @@ func (h *Hub) unifiedDocument(ctx context.Context, c taskapi.VerifiedContext, ma
 		if json.Unmarshal(grant.Consumer, &binding) != nil {
 			return nil, unifiedError("permission")
 		}
+		registerUnifiedDisclosure(ctx, func(ctx context.Context) error {
+			latest, e := h.messageQueue.UnifiedGrant(ctx, in.GrantID)
+			if e != nil {
+				return e
+			}
+			return h.checkUnifiedDocumentConsumption(ctx, c, manager, latest, binding)
+		})
 		if grant.Document != in.DocumentID {
 			return nil, unifiedError("permission")
 		}
-		if e = h.checkUnifiedDocumentGrant(ctx, c, manager, grant, binding); e != nil {
+		if e = h.checkUnifiedDocumentConsumption(ctx, c, manager, grant, binding); e != nil {
 			return nil, e
 		}
 		d, e := h.messageQueue.UnifiedDocument(ctx, in.DocumentID)
@@ -113,7 +120,7 @@ func (h *Hub) unifiedDocument(ctx context.Context, c taskapi.VerifiedContext, ma
 		if e != nil {
 			return nil, e
 		}
-		if e = h.checkUnifiedDocumentGrant(ctx, c, manager, again, binding); e != nil {
+		if e = h.checkUnifiedDocumentConsumption(ctx, c, manager, again, binding); e != nil {
 			return nil, e
 		}
 		result.(map[string]any)["document_id"] = d.ID
@@ -124,8 +131,23 @@ func (h *Hub) unifiedDocument(ctx context.Context, c taskapi.VerifiedContext, ma
 	if e != nil {
 		return nil, e
 	}
+	defer func() {
+		if err == nil {
+			if e := resolved.disclosureCurrent(ctx); e != nil {
+				result = nil
+				err = e
+			}
+		}
+	}()
 	if resolved.Parent.SessionID != "" && manager != resolved.Parent.SessionID && c.SourceSessionID != resolved.Parent.SessionID {
 		return nil, unifiedError("permission")
+	}
+	sourceCheck := m.Revalidate
+	m.Revalidate = func(ctx context.Context) error {
+		if e := sourceCheck(ctx); e != nil {
+			return e
+		}
+		return resolved.disclosureCurrent(ctx)
 	}
 	if req.Operation != "read_document" {
 		if previous, found, e := h.messageQueue.UnifiedOperation(ctx, m); e != nil {
