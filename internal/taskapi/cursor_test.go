@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	taskcontract "everything-go/contracts/task-api/v1"
+	"fmt"
 	"reflect"
 	"sort"
 	"strings"
@@ -196,5 +197,86 @@ func TestNF01SourceChildrenCoverageIsFrozenKnownSubsetNotGlobalZero(t *testing.T
 	self, e := engine.Page(context.Background(), scope, []string{"self"}, "", 10)
 	if e != nil || self.SourceRelationCoverage != "not_requested" {
 		t.Fatal(self, e)
+	}
+}
+
+func TestSnapshotByteBoundKeepsOriginalRowsCursorAndFrozenVector(t *testing.T) {
+	codec, _ := NewCursorCodec(make([]byte, 32), func() time.Time { return time.UnixMilli(1) })
+	source := &fixtureSnapshot{latest: map[string]string{}, seq: 10}
+	for i := 0; i < 80; i++ {
+		source.latest[fmt.Sprintf("task-%03d", i)] = fmt.Sprintf("original-%03d:", i) + strings.Repeat("繁<", 2000)
+	}
+	engine := SnapshotEngine{codec, source}
+	scope := ReadScope{"authority", "paired-scope", "filter", 7}
+	page, err := engine.Page(context.Background(), scope, []string{"self", "source_children"}, "", 100)
+	if err != nil || len(page.Items) == 0 || len(page.Items) >= 80 || !page.HasMore {
+		t.Fatal("row count was treated as transport byte budget", len(page.Items), err)
+	}
+	firstEvents := page.EventsCursor
+	// Later source mutations must not replace a trimmed frozen suffix.
+	source.change("task-079", "changed-latest")
+	source.change("task-new", "new-latest")
+	seen := map[string]bool{}
+	for pages := 0; ; pages++ {
+		if pages > 20 {
+			t.Fatal("frozen byte paging did not terminate")
+		}
+		for _, item := range page.Items {
+			value := item.(string)
+			if !strings.Contains(value, "繁<") || seen[value] {
+				t.Fatal("original value truncated, replaced or duplicated")
+			}
+			seen[value] = true
+		}
+		op := "snapshot"
+		raw, _ := json.Marshal(Response{Type: "task_api_response", Version: taskcontract.Version, CorrelationID: strings.Repeat("&", 512), Operation: &op, OK: true, Result: page})
+		if len(raw) > taskcontract.MaxBytes || page.EventsCursor != firstEvents || !page.Partial {
+			t.Fatal("wire bound, coverage or original event vector drift", len(raw))
+		}
+		if !page.HasMore {
+			break
+		}
+		next, err := engine.Page(context.Background(), scope, []string{"self", "source_children"}, page.NextPageCursor, 100)
+		again, replayErr := engine.Page(context.Background(), scope, []string{"self", "source_children"}, page.NextPageCursor, 100)
+		if err != nil || replayErr != nil || !reflect.DeepEqual(next, again) {
+			t.Fatal("trimmed cursor replay changed", err, replayErr)
+		}
+		wrong := scope
+		wrong.NamespaceGeneration++
+		if _, err := engine.Page(context.Background(), wrong, []string{"self", "source_children"}, page.NextPageCursor, 100); err == nil {
+			t.Fatal("trimmed cursor bypassed original scope")
+		}
+		page = next
+	}
+	if len(seen) != 80 {
+		t.Fatal("frozen membership silently lost", len(seen))
+	}
+}
+
+func TestSnapshotOversizedSingleRowCannotBecomeEmptyOrSkip(t *testing.T) {
+	for _, later := range []bool{false, true} {
+		t.Run(fmt.Sprint(later), func(t *testing.T) {
+			codec, _ := NewCursorCodec(make([]byte, 32), func() time.Time { return time.UnixMilli(1) })
+			source := &fixtureSnapshot{latest: map[string]string{"z-large": strings.Repeat("x", taskcontract.MaxBytes)}, seq: 1}
+			if later {
+				source.latest["a-small"] = "original-small"
+			}
+			engine := SnapshotEngine{codec, source}
+			scope := ReadScope{"authority", "paired-scope", "filter", 7}
+			page, err := engine.Page(context.Background(), scope, []string{"self"}, "", 100)
+			if later {
+				if err != nil || len(page.Items) != 1 || page.Items[0] != "original-small" || !page.HasMore {
+					t.Fatal("oversized suffix skipped or poisoned first bounded row", page, err)
+				}
+				page, err = engine.Page(context.Background(), scope, []string{"self"}, page.NextPageCursor, 100)
+			}
+			failure, ok := err.(*APIError)
+			if !ok || failure.Code != "unsupported" || failure.Acceptance != "known_none" || len(page.Items) != 0 || page.HasMore {
+				t.Fatal("single oversized row became complete empty result", page, err)
+			}
+			if len(source.frozen["fixture-freeze"]) != len(source.latest) {
+				t.Fatal("oversized original was removed")
+			}
+		})
 	}
 }

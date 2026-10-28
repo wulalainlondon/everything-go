@@ -208,7 +208,36 @@ func (s SnapshotEngine) Page(ctx context.Context, scope ReadScope, views []strin
 		p.After = last
 		result.NextPageCursor, err = s.Codec.encode(p)
 	}
-	return result, err
+	if err != nil {
+		return SnapshotPage{}, err
+	}
+	// A requested row count is an upper bound, not a promise that those rows
+	// fit the closed transport. Keep the frozen rows intact and continue after
+	// the last row actually disclosed. Reserve 4096 bytes for the successful
+	// rc1 envelope (even a 512-character fully JSON-escaped correlation ID is
+	// smaller); list's wrapper is smaller than the snapshot wrapper.
+	const pageBytes = taskcontract.MaxBytes - 4096
+	for {
+		encoded, encodeErr := json.Marshal(result)
+		if encodeErr != nil {
+			return SnapshotPage{}, encodeErr
+		}
+		if len(encoded) <= pageBytes {
+			return result, nil
+		}
+		if len(result.Items) <= 1 {
+			// Never skip a too-large original row or claim an empty complete
+			// result. Its original record remains available through exact reads.
+			return SnapshotPage{}, Failure("unsupported", "known_none", "read_capabilities")
+		}
+		result.Items = result.Items[:len(result.Items)-1]
+		result.HasMore = true
+		p.After = rows[len(result.Items)-1].Key
+		result.NextPageCursor, err = s.Codec.encode(p)
+		if err != nil {
+			return SnapshotPage{}, err
+		}
+	}
 }
 func (c *CursorCodec) EventWatermarks(token string, scope ReadScope) ([]Watermark, error) {
 	p, err := c.decode(token, scope, "events")
