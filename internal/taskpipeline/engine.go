@@ -313,6 +313,13 @@ func (s *Store) Observe(ctx context.Context, id string, expected uint64, facts [
 				met := 0
 				for _, from := range edge.From {
 					x := states[from]
+					predecessor := Step{}
+					for _, candidate := range Steps(r) {
+						if candidate.ID == from {
+							predecessor = candidate
+							break
+						}
+					}
 					good := false
 					var proof Fact
 					if x.EvidenceHash != "" {
@@ -325,6 +332,15 @@ func (s *Store) Observe(ctx context.Context, id string, expected uint64, facts [
 							var original Event
 							if err = json.Unmarshal(encoded, &original); err != nil {
 								return err
+							}
+							if predecessor.Action != nil {
+								matched, err := actionEdgeCheckpoint(ctx, tx, r, predecessor, x, original, edge.Condition)
+								if err != nil {
+									return err
+								}
+								if !matched {
+									continue
+								}
 							}
 							proof = original.Fact
 							kind := "success_sealed"
@@ -360,12 +376,16 @@ func (s *Store) Observe(ctx context.Context, id string, expected uint64, facts [
 			eligible = states["source"].State == "satisfied"
 		}
 		if action != nil && eligible {
-			var oldState, oldID string
-			err := tx.QueryRowContext(ctx, `SELECT state,id FROM task_pipeline_outbox WHERE record_id=? AND definition_revision=? AND node_id=?`, r.ID, r.DefinitionRevision, st.ID).Scan(&oldState, &oldID)
+			var oldState, oldID, oldTerminal string
+			err := tx.QueryRowContext(ctx, `SELECT state,id,COALESCE(json_extract(continuation,'$.terminal'),'') FROM task_pipeline_outbox WHERE record_id=? AND definition_revision=? AND node_id=?`, r.ID, r.DefinitionRevision, st.ID).Scan(&oldState, &oldID, &oldTerminal)
 			if err == nil {
 				v.State = oldState
 				if oldState == "checkpointed" {
 					v.State = "done"
+					if oldTerminal == "failed" || oldTerminal == "cancelled" || oldTerminal == "rejected" {
+						v.State = "failed"
+						v.Reason = oldTerminal
+					}
 				}
 				v.ContinuationID = oldID
 				states[st.ID] = v
@@ -629,3 +649,46 @@ func (s *Store) SetOutcome(ctx context.Context, c Continuation, state, reason st
 
 func jsonUnmarshal(b []byte, v any) error { return json.Unmarshal(b, v) }
 func shaText(b []byte) string             { h := sha256.Sum256(b); return hex.EncodeToString(h[:]) }
+
+// A node's Source is the prerequisite for its action, not the result of that
+// action. Downstream edges may consume only this definition's original action
+// checkpoint, never a sealed readiness/source event from an earlier round.
+func actionEdgeCheckpoint(ctx context.Context, tx *sql.Tx, r Record, st Step, x StepState, event Event, condition string) (bool, error) {
+	if x.ContinuationID == "" || event.State != "checkpointed" || event.RecordID != r.ID || event.NodeID != st.ID {
+		return false, nil
+	}
+	if x.State != "done" && (condition != "on_terminal" || x.State != "failed") {
+		return false, nil
+	}
+	var raw []byte
+	var state string
+	err := tx.QueryRowContext(ctx, `SELECT continuation,state FROM task_pipeline_outbox WHERE id=? AND record_id=? AND definition_revision=? AND node_id=?`, x.ContinuationID, r.ID, r.DefinitionRevision, st.ID).Scan(&raw, &state)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	var c Continuation
+	if err = json.Unmarshal(raw, &c); err != nil {
+		return false, err
+	}
+	if state != "checkpointed" || c.State != "checkpointed" || c.ID != x.ContinuationID || c.RecordID != r.ID || c.DefinitionRevision != r.DefinitionRevision || c.NodeID != st.ID || st.Action == nil || digest(c.Action) != digest(*st.Action) || c.OriginalReceipt == nil {
+		return false, nil
+	}
+	f := event.Fact
+	receipt := c.OriginalReceipt
+	if receipt.Key != c.ID || (receipt.Kind != "session_input" && receipt.Kind != "delegation_round") || receipt.Session != f.Source.Session || receipt.Request != f.Source.Request || c.Action.Target.Session != f.Source.Session || receipt.Authority != f.Source.Authority || c.Action.Target.Authority != f.Source.Authority || c.Action.Target.Thread != f.Source.Thread || c.Action.Target.Revision != f.Source.Revision || c.Terminal != f.Terminal {
+		return false, nil
+	}
+	if receipt.Kind == "delegation_round" && receipt.NativeID != f.Source.RoundID {
+		return false, nil
+	}
+	if event.ID != "pe_"+digest(struct{ Continuation, Proof string }{c.ID, sourceKey(f)}) || x.EvidenceHash != sourceKey(f) {
+		return false, nil
+	}
+	if x.State == "failed" {
+		return PredicateMet(Predicate{Kind: "terminal"}, f) && (f.Terminal == "failed" || f.Terminal == "cancelled" || f.Terminal == "rejected"), nil
+	}
+	return PredicateMet(Predicate{Kind: "success_sealed"}, f), nil
+}
