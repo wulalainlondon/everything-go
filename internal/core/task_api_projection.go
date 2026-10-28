@@ -263,13 +263,19 @@ func (h *Hub) apiTask(ctx context.Context, r taskapi.IntentRecord) (map[string]a
 		}
 	}
 	source := map[string]any{"identity": map[string]any{"instance_id": h.cfg.InstanceID}, "binding_kind": meta.Caller.BindingKind, "provenance": "verified"}
+	// A derived original-controller read index preserves its private origin for
+	// authorization. It has no TaskAPI/provider-tool acceptance provenance.
+	if meta.Transport == "original_controller_read_index" && meta.Caller.BindingKind == "controller_origin" {
+		source["binding_kind"] = "legacy_unknown"
+		source["provenance"] = "legacy"
+	}
 	if meta.Caller.SourceSessionID != "" {
 		source["identity"] = map[string]any{"instance_id": h.cfg.InstanceID, "session_id": meta.Caller.SourceSessionID, "request_id": meta.Caller.SourceRequestID, "native_thread_id": meta.SourceThread, "config_revision": meta.SourceRevision}
 	}
 	if meta.Intake != nil {
 		source["identity"] = meta.Intake.Source
 	}
-	task := map[string]any{"task_id": r.TaskID, "task_ref": map[string]string{"authority_instance_id": h.cfg.InstanceID, "path": r.Path, "native_record_id": r.NativeID}, "revision": revision, "definition_revision": uint64(1), "source": source, "target": identity, "axes": axes, "artifact_refs": []any{}, "qa": map[string]any{"status": "not_requested", "evidence_refs": []any{}}, "evidence_refs": []any{}, "receipt_ids": []string{r.ReceiptID}, "child_task_ids": []string{}, "provenance": "legacy", "views": []string{"self"}, "capabilities": []string{"get", "read_result"}}
+	task := map[string]any{"task_id": r.TaskID, "task_ref": map[string]string{"authority_instance_id": h.cfg.InstanceID, "path": r.Path, "native_record_id": r.NativeID}, "revision": revision, "definition_revision": uint64(1), "source": source, "target": identity, "axes": axes, "artifact_refs": []any{}, "qa": map[string]any{"status": "not_requested", "evidence_refs": []any{}}, "evidence_refs": []any{}, "receipt_ids": legacyReceiptIDs(r.ReceiptID), "child_task_ids": []string{}, "provenance": "legacy", "views": []string{"self"}, "capabilities": []string{"get", "read_result"}}
 	for _, field := range []string{"goal", "scope", "acceptance", "dependencies", "workspace"} {
 		if value, ok := input[field]; ok {
 			task[field] = value
