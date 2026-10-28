@@ -35,7 +35,7 @@ func (f *extensionExec) FinalAnswerForSession(*session.Session, string) (string,
 func extensionFormal(t *testing.T) (*Hub, *session.Session, backend.TaskCaller, taskapi.IntentRecord, delegation.Record) {
 	return extensionFormalBackend(t, backend.Codex)
 }
-func extensionFormalBackend(t *testing.T, childBackend string) (*Hub, *session.Session, backend.TaskCaller, taskapi.IntentRecord, delegation.Record) {
+func extensionFormalBackend(t *testing.T, childBackend string, withTypedStart ...bool) (*Hub, *session.Session, backend.TaskCaller, taskapi.IntentRecord, delegation.Record) {
 	t.Helper()
 	h, p, _ := continuityFixture(t)
 	if childBackend == backend.Claude {
@@ -49,6 +49,9 @@ func extensionFormalBackend(t *testing.T, childBackend string) (*Hub, *session.S
 		}
 		if childBackend == backend.Codex {
 			emitVerifiedNativeFixture(h, backend.NativeTaskAccepted{SessionID: s.ID, RequestID: req, ThreadID: s.ResumeID(), TurnID: "synthetic-turn-" + req})
+			if len(withTypedStart) > 0 && withTypedStart[0] {
+				h.Emit(backend.NativeTaskStarted{SessionID: s.ID, RequestID: req, Provider: "codex", ThreadID: s.ResumeID(), Token: "synthetic-turn-" + req, TokenKind: "turn_id", ProofKind: "live_turn_start_in_progress", ObservedAt: time.Now()})
+			}
 		} else {
 			f.claudeProof = &extensionClaudeProof{thread: s.ResumeID(), text: f.final, id: "synthetic-claude-anchor"}
 			h.Emit(backend.NativeProviderEvidence{SessionID: s.ID, RequestID: req, Backend: backend.Claude, ConversationID: s.ResumeID(), Token: "synthetic-message-uuid", TokenKind: "message_uuid", MessageID: "synthetic-message-id", Text: f.final, Status: "succeeded"})

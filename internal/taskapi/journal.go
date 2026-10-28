@@ -46,6 +46,10 @@ func InstallJournal(db *sql.DB) error {
 }
 func AttachedJournal(db *sql.DB, store string) *Journal { return &Journal{db, store} }
 func (j *Journal) Transaction(ctx context.Context, fn func(*sql.Tx) error) error {
+	if tx := BoundSQLTransaction(ctx, j.db); tx != nil {
+		// The outer original writer alone commits or rolls back.
+		return fn(tx)
+	}
 	tx, err := j.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -97,7 +101,7 @@ func (j *Journal) ClaimTx(tx *sql.Tx, c AuthorizedCommand, r IntentRecord) (Inte
 	return r, true, err
 }
 func (j *Journal) Lookup(ctx context.Context, n Namespace, key string) (IntentRecord, error) {
-	r, err := scanIntent(j.db.QueryRowContext(ctx, "SELECT "+intentColumns+" FROM task_api_intents WHERE namespace_key=?", n.Key(key)))
+	r, err := scanIntent(ReadSQL(ctx, j.db).QueryRowContext(ctx, "SELECT "+intentColumns+" FROM task_api_intents WHERE namespace_key=?", n.Key(key)))
 	if errors.Is(err, sql.ErrNoRows) {
 		return r, Failure("not_found", "known_none", "lookup_original")
 	}
@@ -107,14 +111,14 @@ func (j *Journal) Lookup(ctx context.Context, n Namespace, key string) (IntentRe
 	return r, err
 }
 func (j *Journal) Task(ctx context.Context, scope string, generation uint64, id string) (IntentRecord, error) {
-	r, err := scanIntent(j.db.QueryRowContext(ctx, "SELECT "+intentColumns+" FROM task_api_intents WHERE scope_id=? AND generation=? AND task_id=? ORDER BY created_at LIMIT 1", scope, generation, id))
+	r, err := scanIntent(ReadSQL(ctx, j.db).QueryRowContext(ctx, "SELECT "+intentColumns+" FROM task_api_intents WHERE scope_id=? AND generation=? AND task_id=? ORDER BY created_at LIMIT 1", scope, generation, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return r, Failure("not_found", "known_none", "lookup_original")
 	}
 	return r, err
 }
 func (j *Journal) List(ctx context.Context, scope string, generation uint64) ([]IntentRecord, error) {
-	rows, err := j.db.QueryContext(ctx, "SELECT "+intentColumns+" FROM task_api_intents WHERE scope_id=? AND generation=? ORDER BY task_id,created_at", scope, generation)
+	rows, err := ReadSQL(ctx, j.db).QueryContext(ctx, "SELECT "+intentColumns+" FROM task_api_intents WHERE scope_id=? AND generation=? ORDER BY task_id,created_at", scope, generation)
 	if err != nil {
 		return nil, err
 	}
@@ -153,13 +157,13 @@ func ChangeTx(tx *sql.Tx, session, request, kind string) error {
 }
 func (j *Journal) Changes(ctx context.Context, after uint64, limit int) ([]Change, uint64, error) {
 	var floor uint64
-	if err := j.db.QueryRowContext(ctx, "SELECT floor FROM task_api_retention WHERE id=1").Scan(&floor); err != nil {
+	if err := ReadSQL(ctx, j.db).QueryRowContext(ctx, "SELECT floor FROM task_api_retention WHERE id=1").Scan(&floor); err != nil {
 		return nil, 0, err
 	}
 	if after < floor {
 		return nil, floor, Failure("cursor_expired", "known_none", "refresh_snapshot")
 	}
-	rows, err := j.db.QueryContext(ctx, "SELECT seq,session_id,request_id,kind,at FROM task_api_changes WHERE seq>? ORDER BY seq LIMIT ?", after, limit)
+	rows, err := ReadSQL(ctx, j.db).QueryContext(ctx, "SELECT seq,session_id,request_id,kind,at FROM task_api_changes WHERE seq>? ORDER BY seq LIMIT ?", after, limit)
 	if err != nil {
 		return nil, floor, err
 	}
@@ -176,7 +180,7 @@ func (j *Journal) Changes(ctx context.Context, after uint64, limit int) ([]Chang
 }
 func (j *Journal) Watermark(ctx context.Context) (uint64, error) {
 	var n uint64
-	err := j.db.QueryRowContext(ctx, "SELECT MAX(COALESCE((SELECT MAX(seq) FROM task_api_changes),0),(SELECT floor FROM task_api_retention WHERE id=1))").Scan(&n)
+	err := ReadSQL(ctx, j.db).QueryRowContext(ctx, "SELECT MAX(COALESCE((SELECT MAX(seq) FROM task_api_changes),0),(SELECT floor FROM task_api_retention WHERE id=1))").Scan(&n)
 	return n, err
 }
 func (j *Journal) Freeze(ctx context.Context, scope ReadScope, f Freeze, rows []SnapshotRow) error {
@@ -193,7 +197,7 @@ func (j *Journal) Freeze(ctx context.Context, scope ReadScope, f Freeze, rows []
 }
 func (j *Journal) Frozen(ctx context.Context, scope ReadScope, f Freeze) ([]SnapshotRow, error) {
 	var data, wm []byte
-	err := j.db.QueryRowContext(ctx, "SELECT rows,watermarks FROM task_api_freezes WHERE id=? AND scope_id=? AND generation=? AND filter_hash=? AND expires_at>?", f.ID, scope.StableScopeID, scope.NamespaceGeneration, scope.FilterHash, time.Now().UnixMilli()).Scan(&data, &wm)
+	err := ReadSQL(ctx, j.db).QueryRowContext(ctx, "SELECT rows,watermarks FROM task_api_freezes WHERE id=? AND scope_id=? AND generation=? AND filter_hash=? AND expires_at>?", f.ID, scope.StableScopeID, scope.NamespaceGeneration, scope.FilterHash, time.Now().UnixMilli()).Scan(&data, &wm)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, Failure("cursor_expired", "known_none", "refresh_snapshot")
 	}
@@ -246,7 +250,7 @@ func (j *Journal) Prune(ctx context.Context, now time.Time) error {
 }
 
 func (j *Journal) Receipt(ctx context.Context, scope string, generation uint64, id string) (IntentRecord, error) {
-	r, e := scanIntent(j.db.QueryRowContext(ctx, "SELECT "+intentColumns+" FROM task_api_intents WHERE scope_id=? AND generation=? AND receipt_id=?", scope, generation, id))
+	r, e := scanIntent(ReadSQL(ctx, j.db).QueryRowContext(ctx, "SELECT "+intentColumns+" FROM task_api_intents WHERE scope_id=? AND generation=? AND receipt_id=?", scope, generation, id))
 	if errors.Is(e, sql.ErrNoRows) {
 		return r, Failure("not_found", "known_none", "lookup_original")
 	}
@@ -254,7 +258,7 @@ func (j *Journal) Receipt(ctx context.Context, scope string, generation uint64, 
 }
 
 func (j *Journal) Pending(ctx context.Context) ([]IntentRecord, error) {
-	rows, err := j.db.QueryContext(ctx, "SELECT "+intentColumns+" FROM task_api_intents WHERE namespace_key IN(SELECT namespace_key FROM task_api_outbox WHERE state IN('prepared','queued')) ORDER BY created_at")
+	rows, err := ReadSQL(ctx, j.db).QueryContext(ctx, "SELECT "+intentColumns+" FROM task_api_intents WHERE namespace_key IN(SELECT namespace_key FROM task_api_outbox WHERE state IN('prepared','queued')) ORDER BY created_at")
 	if err != nil {
 		return nil, err
 	}
@@ -274,7 +278,7 @@ func (j *Journal) Pending(ctx context.Context) ([]IntentRecord, error) {
 // native task state. A refused cancel cannot later become a successful retry.
 func (j *Journal) Outcome(ctx context.Context, key string) (*APIError, bool, error) {
 	var raw []byte
-	err := j.db.QueryRowContext(ctx, "SELECT error FROM task_api_outcomes WHERE namespace_key=?", key).Scan(&raw)
+	err := ReadSQL(ctx, j.db).QueryRowContext(ctx, "SELECT error FROM task_api_outcomes WHERE namespace_key=?", key).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, false, nil
 	}
@@ -308,7 +312,7 @@ func SaveOutcomeTx(tx *sql.Tx, key string, failure *APIError) error {
 	return err
 }
 func (j *Journal) TaskCommands(ctx context.Context, task string) ([]IntentRecord, error) {
-	rows, err := j.db.QueryContext(ctx, "SELECT "+intentColumns+" FROM task_api_intents WHERE task_id=? ORDER BY created_at", task)
+	rows, err := ReadSQL(ctx, j.db).QueryContext(ctx, "SELECT "+intentColumns+" FROM task_api_intents WHERE task_id=? ORDER BY created_at", task)
 	if err != nil {
 		return nil, err
 	}
@@ -349,7 +353,7 @@ func (j *Journal) FreezeChecked(ctx context.Context, scope ReadScope, f Freeze, 
 // All is an internal canonical intent projection. The service must authorize
 // every row with the original paired-human/session path before exposing it.
 func (j *Journal) All(ctx context.Context) ([]IntentRecord, error) {
-	rows, err := j.db.QueryContext(ctx, "SELECT "+intentColumns+" FROM task_api_intents WHERE metadata IS NOT NULL ORDER BY task_id,created_at")
+	rows, err := ReadSQL(ctx, j.db).QueryContext(ctx, "SELECT "+intentColumns+" FROM task_api_intents WHERE metadata IS NOT NULL ORDER BY task_id,created_at")
 	if err != nil {
 		return nil, err
 	}
@@ -369,7 +373,7 @@ func (j *Journal) All(ctx context.Context) ([]IntentRecord, error) {
 	return out, rows.Err()
 }
 func (j *Journal) FindTask(ctx context.Context, id string) (IntentRecord, error) {
-	r, err := scanIntent(j.db.QueryRowContext(ctx, "SELECT "+intentColumns+" FROM task_api_intents WHERE task_id=? ORDER BY created_at LIMIT 1", id))
+	r, err := scanIntent(ReadSQL(ctx, j.db).QueryRowContext(ctx, "SELECT "+intentColumns+" FROM task_api_intents WHERE task_id=? ORDER BY created_at LIMIT 1", id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return r, Failure("not_found", "known_none", "lookup_original")
 	}
@@ -378,19 +382,19 @@ func (j *Journal) FindTask(ctx context.Context, id string) (IntentRecord, error)
 
 func (j *Journal) OutboxState(ctx context.Context, key string) (string, error) {
 	var state string
-	err := j.db.QueryRowContext(ctx, "SELECT state FROM task_api_outbox WHERE namespace_key=?", key).Scan(&state)
+	err := ReadSQL(ctx, j.db).QueryRowContext(ctx, "SELECT state FROM task_api_outbox WHERE namespace_key=?", key).Scan(&state)
 	return state, err
 }
 
 // OriginalCommandForRequest resolves persisted request identity without
 // substituting a task's first turn for a later accepted continuation.
 func (j *Journal) OriginalCommandForRequest(ctx context.Context, session, request string) (IntentRecord, error) {
-	return scanIntent(j.db.QueryRowContext(ctx, "SELECT "+intentColumns+" FROM task_api_intents WHERE session_id=? AND request_id=? ORDER BY rowid LIMIT 1", session, request))
+	return scanIntent(ReadSQL(ctx, j.db).QueryRowContext(ctx, "SELECT "+intentColumns+" FROM task_api_intents WHERE session_id=? AND request_id=? ORDER BY rowid LIMIT 1", session, request))
 }
 
 // SourceRevision is the original store committed sequence for this exact request.
 func (j *Journal) SourceRevision(ctx context.Context, session, request string) (uint64, error) {
 	var n uint64
-	e := j.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(seq),0) FROM task_api_changes WHERE session_id=? AND request_id=?`, session, request).Scan(&n)
+	e := ReadSQL(ctx, j.db).QueryRowContext(ctx, `SELECT COALESCE(MAX(seq),0) FROM task_api_changes WHERE session_id=? AND request_id=?`, session, request).Scan(&n)
 	return n, e
 }

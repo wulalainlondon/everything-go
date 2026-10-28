@@ -920,7 +920,7 @@ func (h *Hub) unifiedTaskDTO(ctx context.Context, c taskapi.VerifiedContext, man
 		case messagequeue.Completed, messagequeue.Failed, messagequeue.Cancelled:
 			execution["terminal"] = string(r.Entry.State)
 		}
-		if start, ok, e := h.messageQueue.NativeStart(r.Entry.SessionID, r.Entry.RequestID); e != nil {
+		if start, ok, e := h.messageQueue.NativeStartContext(ctx, r.Entry.SessionID, r.Entry.RequestID); e != nil {
 			return nil, e
 		} else if ok {
 			execution["native_start"] = "observed"

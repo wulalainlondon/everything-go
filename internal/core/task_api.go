@@ -1048,14 +1048,17 @@ func (h *Hub) apiReceipt(ctx context.Context, c taskapi.AuthorizedCommand, r tas
 
 // TaskWorkerScope is a formal child-profile lookup, never a name/prefix guess.
 func (h *Hub) TaskWorkerScope(s *session.Session) (*taskapi.ChildScope, error) {
+	return h.taskWorkerScopeContext(context.Background(), s)
+}
+func (h *Hub) taskWorkerScopeContext(ctx context.Context, s *session.Session) (*taskapi.ChildScope, error) {
 	if h.delegations == nil {
 		return nil, nil
 	}
-	_, found, err := h.delegations.APIBackend(context.Background(), s.ID)
+	_, found, err := h.delegations.APIBackend(ctx, s.ID)
 	if err != nil || !found {
 		return nil, err
 	}
-	raw, found, err := h.delegations.APIChildMetadata(context.Background(), s.ID)
+	raw, found, err := h.delegations.APIChildMetadata(ctx, s.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -1070,15 +1073,15 @@ func (h *Hub) TaskWorkerScope(s *session.Session) (*taskapi.ChildScope, error) {
 	if json.Unmarshal(meta.Request.Input, &input) != nil {
 		return nil, errors.New("child scope unavailable")
 	}
-	root, found, err := h.delegations.OriginalRootForChild(context.Background(), s.ID)
+	root, found, err := h.delegations.OriginalRootForChild(ctx, s.ID)
 	if err != nil || !found {
 		return nil, errors.New("original bounded profile unavailable")
 	}
-	provider, _, err := h.delegations.APIBackend(context.Background(), s.ID)
+	provider, _, err := h.delegations.APIBackend(ctx, s.ID)
 	if err != nil {
 		return nil, err
 	}
-	_, revision, _, err := h.delegations.ExecutionBinding(context.Background(), root.ID)
+	_, revision, _, err := h.delegations.ExecutionBinding(ctx, root.ID)
 	if err != nil {
 		return nil, err
 	}

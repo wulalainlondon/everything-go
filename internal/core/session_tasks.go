@@ -52,11 +52,14 @@ func (h *Hub) admitTaskOrigin(c *Client, cmd clientproto.Command) (string, error
 	return owner, nil
 }
 func (h *Hub) nativeTaskTurn(s *session.Session, request string) string {
+	return h.nativeTaskTurnContext(context.Background(), s, request)
+}
+func (h *Hub) nativeTaskTurnContext(ctx context.Context, s *session.Session, request string) string {
 	if h.messageQueue != nil {
-		if conflict, e := h.messageQueue.NativeConflict(s.ID, request); e != nil || conflict {
+		if conflict, e := h.messageQueue.NativeConflictContext(ctx, s.ID, request); e != nil || conflict {
 			return ""
 		}
-		if turn := h.messageQueue.NativeAcceptance(s.ID, request, s.ResumeID()); turn != "" {
+		if turn := h.messageQueue.NativeAcceptanceContext(ctx, s.ID, request, s.ResumeID()); turn != "" {
 			if h.nativeCorrelationKnown(s, s.ResumeID(), request, turn) {
 				return turn
 			}

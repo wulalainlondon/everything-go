@@ -59,7 +59,7 @@ func (s *Store) createAPI(ctx context.Context, c taskapi.AuthorizedCommand, inte
 }
 func (s *Store) APIBackend(ctx context.Context, child string) (string, bool, error) {
 	var raw []byte
-	err := s.db.QueryRowContext(ctx, "SELECT profile FROM task_api_child_profiles WHERE session_id=?", child).Scan(&raw)
+	err := taskapi.ReadSQL(ctx, s.db).QueryRowContext(ctx, "SELECT profile FROM task_api_child_profiles WHERE session_id=?", child).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", false, nil
 	}
@@ -73,7 +73,7 @@ func (s *Store) APIBackend(ctx context.Context, child string) (string, bool, err
 
 func (s *Store) APIChildMetadata(ctx context.Context, child string) ([]byte, bool, error) {
 	var raw []byte
-	err := s.db.QueryRowContext(ctx, "SELECT profile FROM task_api_child_profiles WHERE session_id=?", child).Scan(&raw)
+	err := taskapi.ReadSQL(ctx, s.db).QueryRowContext(ctx, "SELECT profile FROM task_api_child_profiles WHERE session_id=?", child).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, false, nil
 	}
@@ -87,7 +87,7 @@ func (s *Store) APIChildMetadata(ctx context.Context, child string) ([]byte, boo
 
 // OriginalRootForChild reads the canonical round owner, not a new ledger.
 func (s *Store) OriginalRootForChild(ctx context.Context, child string) (Record, bool, error) {
-	r, err := scanRecord(s.db.QueryRowContext(ctx, "SELECT "+columns+" FROM session_delegations WHERE child_session_id=? AND id IN (SELECT logical_id FROM delegation_rounds)", child))
+	r, err := scanRecord(taskapi.ReadSQL(ctx, s.db).QueryRowContext(ctx, "SELECT "+columns+" FROM session_delegations WHERE child_session_id=? AND id IN (SELECT logical_id FROM delegation_rounds)", child))
 	if errors.Is(err, sql.ErrNoRows) {
 		return r, false, nil
 	}

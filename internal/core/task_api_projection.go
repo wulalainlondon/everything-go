@@ -103,11 +103,11 @@ func (h *Hub) apiTask(ctx context.Context, r taskapi.IntentRecord) (map[string]a
 		if original.Existing != nil {
 			identity["native_thread_id"] = original.Existing.ResumeID
 			identity["config_revision"] = original.Existing.ConfigRevision
-		} else if proof, found, _ := h.messageQueue.ProviderEvidence(r.SessionID, r.RequestID); found {
+		} else if proof, found, _ := h.messageQueue.ProviderEvidenceContext(ctx, r.SessionID, r.RequestID); found {
 			identity["native_thread_id"] = proof.ConversationID
 		}
 	}
-	nativeThread, nativeTurn, nativeKnown := h.messageQueue.NativeExecution(r.SessionID, r.RequestID)
+	nativeThread, nativeTurn, nativeKnown := h.messageQueue.NativeExecutionContext(ctx, r.SessionID, r.RequestID)
 	nativeTupleObserved := nativeKnown
 	if exists && nativeKnown && !h.nativeCorrelationKnown(target, nativeThread, r.RequestID, nativeTurn) {
 		nativeKnown = false
@@ -120,11 +120,11 @@ func (h *Hub) apiTask(ctx context.Context, r taskapi.IntentRecord) (map[string]a
 			identity["native_turn_id"] = nativeTurn
 		}
 	}
-	entry, found, err := h.messageQueue.Get(r.SessionID, r.RequestID)
+	entry, found, err := h.messageQueue.GetContext(ctx, r.SessionID, r.RequestID)
 	if err != nil {
 		return nil, err
 	}
-	snapshot, err := h.messageQueue.Snapshot(r.SessionID)
+	snapshot, err := h.messageQueue.SnapshotContext(ctx, r.SessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -189,7 +189,7 @@ func (h *Hub) apiTask(ctx context.Context, r taskapi.IntentRecord) (map[string]a
 			axes["execution"] = "unknown"
 		case messagequeue.Cancelled:
 			axes["cancellation"] = "confirmed"
-			if from, e := h.messageQueue.CancelOrigin(r.SessionID, r.RequestID); e != nil || from == "" || from != messagequeue.Queued {
+			if from, e := h.messageQueue.CancelOriginContext(ctx, r.SessionID, r.RequestID); e != nil || from == "" || from != messagequeue.Queued {
 				axes["cancellation"] = "unknown"
 				axes["execution"] = "unknown"
 			}
@@ -200,10 +200,10 @@ func (h *Hub) apiTask(ctx context.Context, r taskapi.IntentRecord) (map[string]a
 			axes["execution"] = "failed"
 		}
 		if exists {
-			conflict, _ := h.messageQueue.NativeConflict(r.SessionID, r.RequestID)
+			conflict, _ := h.messageQueue.NativeConflictContext(ctx, r.SessionID, r.RequestID)
 			if conflict {
 				axes["execution"] = "unknown"
-			} else if turn := h.nativeTaskTurn(target, r.RequestID); turn != "" {
+			} else if turn := h.nativeTaskTurnContext(ctx, target, r.RequestID); turn != "" {
 				identity["native_turn_id"] = turn
 				if entry.State == messagequeue.Cancelled {
 					axes["execution"] = "unknown"
@@ -248,7 +248,7 @@ func (h *Hub) apiTask(ctx context.Context, r taskapi.IntentRecord) (map[string]a
 			}
 		}
 	}
-	if proof, ok, err := h.messageQueue.ProviderEvidence(r.SessionID, r.RequestID); err == nil && ok && proof.Backend == "claude" {
+	if proof, ok, err := h.messageQueue.ProviderEvidenceContext(ctx, r.SessionID, r.RequestID); err == nil && ok && proof.Backend == "claude" {
 		identity["provider_execution"] = map[string]string{"backend": "claude", "provider_session_id": proof.ConversationID, "token_kind": proof.TokenKind, "provider_token": proof.Token}
 		if found && entry.State == messagequeue.Running {
 			axes["execution"] = "native_consumed"
@@ -328,7 +328,7 @@ func (h *Hub) apiTask(ctx context.Context, r taskapi.IntentRecord) (map[string]a
 		task["views"] = append(task["views"].([]string), "source_children")
 	}
 	if anchor != nil && canUseSeal {
-		conflict, _ := h.messageQueue.NativeConflict(r.SessionID, r.RequestID)
+		conflict, _ := h.messageQueue.NativeConflictContext(ctx, r.SessionID, r.RequestID)
 		encoded, _ := json.Marshal(anchor)
 		if conflict {
 			axes["execution"] = "unknown"
@@ -341,7 +341,7 @@ func (h *Hub) apiTask(ctx context.Context, r taskapi.IntentRecord) (map[string]a
 			task["final_hash"] = finalHash
 		}
 	}
-	if conflict, e := h.messageQueue.NativeConflict(r.SessionID, r.RequestID); e != nil || conflict {
+	if conflict, e := h.messageQueue.NativeConflictContext(ctx, r.SessionID, r.RequestID); e != nil || conflict {
 		axes["execution"] = "unknown"
 		axes["final"] = "unknown"
 		delete(task, "result_anchor")
@@ -1083,7 +1083,7 @@ func (h *Hub) apiDelivery(ctx context.Context, r taskapi.IntentRecord) (string, 
 	if state == "failed" {
 		return "failed", nil
 	}
-	entry, found, e := h.messageQueue.Get(parentID, requestID)
+	entry, found, e := h.messageQueue.GetContext(ctx, parentID, requestID)
 	if e != nil {
 		return "unknown", nil
 	}
@@ -1094,12 +1094,12 @@ func (h *Hub) apiDelivery(ctx context.Context, r taskapi.IntentRecord) (string, 
 	if !ok || parent.ResumeID() != threadID {
 		return "unknown", nil
 	}
-	if conflict, e := h.messageQueue.NativeConflict(parentID, requestID); e != nil || conflict {
+	if conflict, e := h.messageQueue.NativeConflictContext(ctx, parentID, requestID); e != nil || conflict {
 		return "unknown", nil
 	}
 	var anchor any
 	if parent.Backend() == backend.Codex {
-		turn := h.nativeTaskTurn(parent, requestID)
+		turn := h.nativeTaskTurnContext(ctx, parent, requestID)
 		if turn != "" {
 			if entry.State == messagequeue.Completed {
 				finals, _ := h.sessionTaskFinals(parent)
@@ -1112,7 +1112,7 @@ func (h *Hub) apiDelivery(ctx context.Context, r taskapi.IntentRecord) (string, 
 				return "native_consumed", nil
 			}
 		}
-	} else if proof, found, e := h.messageQueue.ProviderEvidence(parentID, requestID); e == nil && found && proof.ConversationID == threadID {
+	} else if proof, found, e := h.messageQueue.ProviderEvidenceContext(ctx, parentID, requestID); e == nil && found && proof.ConversationID == threadID {
 		if entry.State == messagequeue.Completed {
 			if id := h.claudeAnchorID(parent, proof); id != "" {
 				anchor = map[string]any{"instance_id": h.cfg.InstanceID, "session_id": parentID, "request_id": requestID, "source_message_id": id, "execution": map[string]string{"backend": "claude", "provider_session_id": proof.ConversationID, "token_kind": proof.TokenKind, "provider_token": proof.Token}}

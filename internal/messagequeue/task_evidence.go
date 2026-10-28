@@ -80,7 +80,7 @@ type nativeAcceptanceTransaction struct {
 }
 
 func (s *Store) nativeAcceptanceContext(ctx context.Context, tx *sql.Tx) context.Context {
-	return context.WithValue(ctx, nativeAcceptanceTransactionKey{}, nativeAcceptanceTransaction{s, tx})
+	return taskapi.BindSQLTransaction(context.WithValue(ctx, nativeAcceptanceTransactionKey{}, nativeAcceptanceTransaction{s, tx}), s.db, tx)
 }
 func (s *Store) ExactNativeAcceptanceContext(ctx context.Context, session, request string) (NativeReceipt, bool, error) {
 	if bound, ok := ctx.Value(nativeAcceptanceTransactionKey{}).(nativeAcceptanceTransaction); ok && bound.store == s && bound.tx != nil {
@@ -126,7 +126,10 @@ func exactNativeAcceptance(q interface{ QueryRow(string, ...any) *sql.Row }, ses
 	return NativeReceipt{thread.String, turn.String}, true, nil
 }
 func (s *Store) NativeAcceptance(session, request, thread string) string {
-	out, found, err := s.ExactNativeAcceptance(session, request)
+	return s.NativeAcceptanceContext(context.Background(), session, request, thread)
+}
+func (s *Store) NativeAcceptanceContext(ctx context.Context, session, request, thread string) string {
+	out, found, err := s.ExactNativeAcceptanceContext(ctx, session, request)
 	if err == nil && found && out.ThreadID == thread {
 		return out.TurnID
 	}
@@ -192,18 +195,24 @@ func (s *Store) TaskAdmission(session, request string) ([]byte, bool, error) {
 }
 
 func (s *Store) NativeConflict(session, request string) (bool, error) {
+	return s.NativeConflictContext(context.Background(), session, request)
+}
+func (s *Store) NativeConflictContext(ctx context.Context, session, request string) (bool, error) {
 	var count int
-	err := s.db.QueryRow("SELECT (SELECT COUNT(*) FROM task_native_conflicts WHERE session_id=?1 AND request_id=?2)+(SELECT COUNT(*) FROM task_provider_conflicts WHERE session_id=?1 AND request_id=?2)", session, request).Scan(&count)
+	err := taskapi.ReadSQL(ctx, s.db).QueryRowContext(ctx, "SELECT (SELECT COUNT(*) FROM task_native_conflicts WHERE session_id=?1 AND request_id=?2)+(SELECT COUNT(*) FROM task_provider_conflicts WHERE session_id=?1 AND request_id=?2)", session, request).Scan(&count)
 	return count > 0, err
 }
 
 // Exact original acceptance tuple; never substitutes today's ResumeID.
 func (s *Store) NativeExecution(session, request string) (string, string, bool) {
-	if conflict, e := s.NativeConflict(session, request); e != nil || conflict {
+	return s.NativeExecutionContext(context.Background(), session, request)
+}
+func (s *Store) NativeExecutionContext(ctx context.Context, session, request string) (string, string, bool) {
+	if conflict, e := s.NativeConflictContext(ctx, session, request); e != nil || conflict {
 		return "", "", false
 	}
 	var thread, turn string
-	err := s.db.QueryRow("SELECT thread_id,turn_id FROM task_native_acceptance WHERE session_id=? AND request_id=?", session, request).Scan(&thread, &turn)
+	err := taskapi.ReadSQL(ctx, s.db).QueryRowContext(ctx, "SELECT thread_id,turn_id FROM task_native_acceptance WHERE session_id=? AND request_id=?", session, request).Scan(&thread, &turn)
 	return thread, turn, err == nil && thread != "" && turn != ""
 }
 

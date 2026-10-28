@@ -62,7 +62,7 @@ func (h *Hub) unifiedDelegationReadTarget(ctx context.Context, d delegation.Reco
 	if current, e := taskRootIdentity(d.Cwd); e != nil || current != cwdIdentity {
 		return target, nil, unifiedError("scope_changed")
 	}
-	scope, e := h.TaskWorkerScope(child)
+	scope, e := h.taskWorkerScopeContext(ctx, child)
 	if e != nil || scope == nil {
 		return target, nil, unifiedError("scope_changed")
 	}

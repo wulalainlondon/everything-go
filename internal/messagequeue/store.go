@@ -456,36 +456,38 @@ func (s *Store) HasUnsettled(sessionID string) (bool, error) {
 }
 
 func (s *Store) Snapshot(sessionID string) (Snapshot, error) {
-	tx, err := s.db.Begin()
-	if err != nil {
-		return Snapshot{}, err
-	}
-	defer tx.Rollback()
-	out := Snapshot{Items: []Entry{}}
-	if err = tx.QueryRow(`SELECT revision FROM queue_sessions WHERE session_id=?`, sessionID).Scan(&out.Revision); err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return out, err
-	}
-	// Do not materialize queued attachment blobs just to broadcast a preview.
-	metadataColumns := strings.Replace(columns, "payload,payload_hash", "X'',payload_hash", 1)
-	rows, err := tx.Query("SELECT "+metadataColumns+` FROM queue_commands WHERE session_id=? AND (state IN ('queued','running','steering','uncertain') OR seq IN (SELECT seq FROM queue_commands WHERE session_id=? ORDER BY seq DESC LIMIT 100)) ORDER BY seq`, sessionID, sessionID)
-	if err != nil {
-		return out, err
-	}
-	for rows.Next() {
-		e, err := scan(rows)
-		if err != nil {
-			rows.Close()
-			return out, err
+	return s.SnapshotContext(context.Background(), sessionID)
+}
+func (s *Store) SnapshotContext(ctx context.Context, sessionID string) (Snapshot, error) {
+	var out Snapshot
+	err := s.TaskJournal().Transaction(ctx, func(tx *sql.Tx) error {
+		out = Snapshot{Items: []Entry{}}
+		if err := tx.QueryRowContext(ctx, `SELECT revision FROM queue_sessions WHERE session_id=?`, sessionID).Scan(&out.Revision); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
 		}
-		e.Payload = nil
-		out.Items = append(out.Items, e)
-	}
-	err = rows.Err()
-	rows.Close()
-	if err != nil {
-		return out, err
-	}
-	return out, tx.Commit()
+		// Do not materialize queued attachment blobs just to broadcast a preview.
+		metadataColumns := strings.Replace(columns, "payload,payload_hash", "X'',payload_hash", 1)
+		rows, err := tx.QueryContext(ctx, "SELECT "+metadataColumns+` FROM queue_commands WHERE session_id=? AND (state IN ('queued','running','steering','uncertain') OR seq IN (SELECT seq FROM queue_commands WHERE session_id=? ORDER BY seq DESC LIMIT 100)) ORDER BY seq`, sessionID, sessionID)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			e, err := scan(rows)
+			if err != nil {
+				rows.Close()
+				return err
+			}
+			e.Payload = nil
+			out.Items = append(out.Items, e)
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return err
+		}
+		return nil
+	})
+	return out, err
 }
 
 func (s *Store) Queued() ([]Entry, error) {

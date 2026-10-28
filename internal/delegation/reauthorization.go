@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"everything-go/internal/taskapi"
 )
 
 // Explicit, append-only authority epochs. Original source bindings, rounds,
@@ -22,7 +23,7 @@ type SourceEpoch struct {
 
 func (s *Store) SourceEpoch(ctx context.Context, logical string) (SourceEpoch, bool, error) {
 	var a SourceEpoch
-	err := s.db.QueryRowContext(ctx, `SELECT logical_id,epoch,parent,authority,thread,from_revision,to_revision,grant_digest,peer,origin_request,origin_call FROM delegation_source_epochs WHERE logical_id=? ORDER BY epoch DESC LIMIT 1`, logical).Scan(&a.LogicalID, &a.Epoch, &a.Parent, &a.Authority, &a.Thread, &a.FromRevision, &a.ToRevision, &a.GrantDigest, &a.Peer, &a.Request, &a.Call)
+	err := taskapi.ReadSQL(ctx, s.db).QueryRowContext(ctx, `SELECT logical_id,epoch,parent,authority,thread,from_revision,to_revision,grant_digest,peer,origin_request,origin_call FROM delegation_source_epochs WHERE logical_id=? ORDER BY epoch DESC LIMIT 1`, logical).Scan(&a.LogicalID, &a.Epoch, &a.Parent, &a.Authority, &a.Thread, &a.FromRevision, &a.ToRevision, &a.GrantDigest, &a.Peer, &a.Request, &a.Call)
 	if errors.Is(err, sql.ErrNoRows) {
 		return a, false, nil
 	}

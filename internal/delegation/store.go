@@ -120,7 +120,7 @@ func (s *Store) CreateBounded(ctx context.Context, r Record) error {
 
 func (s *Store) NativeCommitment(ctx context.Context, id string) (bool, error) {
 	var exists int
-	err := s.db.QueryRowContext(ctx, "SELECT 1 FROM native_delegation_commitments WHERE id=?", id).Scan(&exists)
+	err := taskapi.ReadSQL(ctx, s.db).QueryRowContext(ctx, "SELECT 1 FROM native_delegation_commitments WHERE id=?", id).Scan(&exists)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -201,7 +201,7 @@ const columns = `id,parent_session_id,origin_request_id,tool_call_id,intent_hash
   terminal_status,result,artifacts_json,error,delivery_state,delivery_error,created_at,updated_at`
 
 func (s *Store) ByChildRequest(ctx context.Context, sessionID, requestID string) (Record, bool, error) {
-	r, err := scanRecord(s.db.QueryRowContext(ctx, `SELECT `+columns+` FROM session_delegations WHERE child_session_id=? AND child_request_id=?`, sessionID, requestID))
+	r, err := scanRecord(taskapi.ReadSQL(ctx, s.db).QueryRowContext(ctx, `SELECT `+columns+` FROM session_delegations WHERE child_session_id=? AND child_request_id=?`, sessionID, requestID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return Record{}, false, nil
 	}
@@ -209,7 +209,7 @@ func (s *Store) ByChildRequest(ctx context.Context, sessionID, requestID string)
 }
 
 func (s *Store) ByOrigin(ctx context.Context, parentSessionID, originRequestID, toolCallID string) (Record, bool, error) {
-	r, err := scanRecord(s.db.QueryRowContext(ctx, `SELECT `+columns+` FROM session_delegations
+	r, err := scanRecord(taskapi.ReadSQL(ctx, s.db).QueryRowContext(ctx, `SELECT `+columns+` FROM session_delegations
 	  WHERE parent_session_id=? AND origin_request_id=? AND tool_call_id=?`, parentSessionID, originRequestID, toolCallID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return Record{}, false, nil
@@ -218,7 +218,7 @@ func (s *Store) ByOrigin(ctx context.Context, parentSessionID, originRequestID, 
 }
 
 func (s *Store) ByID(ctx context.Context, id string) (Record, bool, error) {
-	r, err := scanRecord(s.db.QueryRowContext(ctx, `SELECT `+columns+` FROM session_delegations WHERE id=?`, id))
+	r, err := scanRecord(taskapi.ReadSQL(ctx, s.db).QueryRowContext(ctx, `SELECT `+columns+` FROM session_delegations WHERE id=?`, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return Record{}, false, nil
 	}
@@ -226,7 +226,7 @@ func (s *Store) ByID(ctx context.Context, id string) (Record, bool, error) {
 }
 
 func (s *Store) ByParentRequest(ctx context.Context, sessionID, requestID string) (Record, bool, error) {
-	r, err := scanRecord(s.db.QueryRowContext(ctx, `SELECT `+columns+` FROM session_delegations WHERE parent_session_id=? AND parent_request_id=?`, sessionID, requestID))
+	r, err := scanRecord(taskapi.ReadSQL(ctx, s.db).QueryRowContext(ctx, `SELECT `+columns+` FROM session_delegations WHERE parent_session_id=? AND parent_request_id=?`, sessionID, requestID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return Record{}, false, nil
 	}
@@ -234,7 +234,7 @@ func (s *Store) ByParentRequest(ctx context.Context, sessionID, requestID string
 }
 
 func (s *Store) Pending(ctx context.Context) ([]Record, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT `+columns+` FROM session_delegations WHERE state!='terminal' OR delivery_state IN ('pending','queued') ORDER BY created_at LIMIT 128`)
+	rows, err := taskapi.ReadSQL(ctx, s.db).QueryContext(ctx, `SELECT `+columns+` FROM session_delegations WHERE state!='terminal' OR delivery_state IN ('pending','queued') ORDER BY created_at LIMIT 128`)
 	if err != nil {
 		return nil, err
 	}
@@ -251,7 +251,7 @@ func (s *Store) Pending(ctx context.Context) ([]Record, error) {
 }
 
 func (s *Store) ListByParent(ctx context.Context, sessionID string) ([]Record, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT `+columns+` FROM session_delegations WHERE parent_session_id=? ORDER BY created_at`, sessionID)
+	rows, err := taskapi.ReadSQL(ctx, s.db).QueryContext(ctx, `SELECT `+columns+` FROM session_delegations WHERE parent_session_id=? ORDER BY created_at`, sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -269,7 +269,7 @@ func (s *Store) ListByParent(ctx context.Context, sessionID string) ([]Record, e
 
 func (s *Store) ActiveCountForParent(ctx context.Context, sessionID string) (int, error) {
 	var count int
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM session_delegations WHERE parent_session_id=?
+	err := taskapi.ReadSQL(ctx, s.db).QueryRowContext(ctx, `SELECT COUNT(*) FROM session_delegations WHERE parent_session_id=?
 	  AND state IN ('provisioning','running')`, sessionID).Scan(&count)
 	return count, err
 }
@@ -277,6 +277,6 @@ func (s *Store) ActiveCountForParent(ctx context.Context, sessionID string) (int
 // HasChildReceipt checks exact canonical delegation identity, not inferred history.
 func (s *Store) HasChildReceipt(ctx context.Context, session, request string) (bool, error) {
 	var found bool
-	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM session_delegations WHERE child_session_id=? AND child_request_id=?)`, session, request).Scan(&found)
+	err := taskapi.ReadSQL(ctx, s.db).QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM session_delegations WHERE child_session_id=? AND child_request_id=?)`, session, request).Scan(&found)
 	return found, err
 }

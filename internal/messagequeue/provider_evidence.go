@@ -10,8 +10,11 @@ import (
 type ProviderEvidence struct{ SessionID, RequestID, Backend, ConversationID, Token, TokenKind, MessageID, Text, Status string }
 
 func (s *Store) ProviderEvidence(session, request string) (ProviderEvidence, bool, error) {
+	return s.ProviderEvidenceContext(context.Background(), session, request)
+}
+func (s *Store) ProviderEvidenceContext(ctx context.Context, session, request string) (ProviderEvidence, bool, error) {
 	var r ProviderEvidence
-	err := s.db.QueryRow(`SELECT session_id,request_id,backend,conversation_id,token,token_kind,message_id,text,status FROM task_api_provider_evidence WHERE session_id=? AND request_id=?`, session, request).Scan(&r.SessionID, &r.RequestID, &r.Backend, &r.ConversationID, &r.Token, &r.TokenKind, &r.MessageID, &r.Text, &r.Status)
+	err := taskapi.ReadSQL(ctx, s.db).QueryRowContext(ctx, `SELECT session_id,request_id,backend,conversation_id,token,token_kind,message_id,text,status FROM task_api_provider_evidence WHERE session_id=? AND request_id=?`, session, request).Scan(&r.SessionID, &r.RequestID, &r.Backend, &r.ConversationID, &r.Token, &r.TokenKind, &r.MessageID, &r.Text, &r.Status)
 	if errors.Is(err, sql.ErrNoRows) {
 		return r, false, nil
 	}

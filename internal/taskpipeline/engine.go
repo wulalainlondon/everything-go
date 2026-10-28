@@ -202,7 +202,7 @@ func (s *Store) Observe(ctx context.Context, id string, expected uint64, facts [
 	if check == nil {
 		return ErrScope
 	}
-	if e = check(ctx); e != nil {
+	if e = check(s.context(ctx, tx)); e != nil {
 		return e
 	}
 	if Auth(r).Budget.DeadlineMS <= now() {
@@ -443,7 +443,7 @@ func (s *Store) Observe(ctx context.Context, id string, expected uint64, facts [
 	if e = save(ctx, tx, issuer.Scope, r, issuer); e != nil {
 		return e
 	}
-	if e = check(ctx); e != nil {
+	if e = check(s.context(ctx, tx)); e != nil {
 		return e
 	}
 	return tx.Commit()
@@ -513,7 +513,7 @@ func (s *Store) MarkIssued(ctx context.Context, c Continuation, check func(conte
 	if check == nil {
 		return c, ErrScope
 	}
-	if e = check(ctx); e != nil {
+	if e = check(s.context(ctx, tx)); e != nil {
 		return c, e
 	}
 	var state string

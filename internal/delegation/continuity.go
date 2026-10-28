@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"everything-go/internal/taskapi"
 )
 
 // Additive relation metadata: original execution/result/return rows are never
@@ -69,14 +70,14 @@ func scanRound(row interface{ Scan(...any) error }) (Round, error) {
 const roundColumns = "id,logical_id,version,previous_id,authority,grant_digest,mode,execution_request"
 
 func (s *Store) Round(ctx context.Context, id string) (Round, bool, error) {
-	r, err := scanRound(s.db.QueryRowContext(ctx, "SELECT "+roundColumns+" FROM delegation_rounds WHERE id=?", id))
+	r, err := scanRound(taskapi.ReadSQL(ctx, s.db).QueryRowContext(ctx, "SELECT "+roundColumns+" FROM delegation_rounds WHERE id=?", id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return r, false, nil
 	}
 	return r, err == nil, err
 }
 func (s *Store) Rounds(ctx context.Context, logical string) ([]Round, error) {
-	rows, err := s.db.QueryContext(ctx, "SELECT "+roundColumns+" FROM delegation_rounds WHERE logical_id=? ORDER BY version LIMIT 128", logical)
+	rows, err := taskapi.ReadSQL(ctx, s.db).QueryContext(ctx, "SELECT "+roundColumns+" FROM delegation_rounds WHERE logical_id=? ORDER BY version LIMIT 128", logical)
 	if err != nil {
 		return nil, err
 	}
@@ -113,7 +114,7 @@ func (s *Store) PinNativeThread(ctx context.Context, child, thread string, revis
 func (s *Store) NativeThread(ctx context.Context, child string) (string, uint64, bool, error) {
 	var thread string
 	var revision uint64
-	err := s.db.QueryRowContext(ctx, "SELECT thread,revision FROM delegation_native_threads WHERE child=?", child).Scan(&thread, &revision)
+	err := taskapi.ReadSQL(ctx, s.db).QueryRowContext(ctx, "SELECT thread,revision FROM delegation_native_threads WHERE child=?", child).Scan(&thread, &revision)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", 0, false, nil
 	}
@@ -122,6 +123,12 @@ func (s *Store) NativeThread(ctx context.Context, child string) (string, uint64,
 
 // Revalidation runs inside the same serialized admission/receipt transaction.
 func (s *Store) Continue(ctx context.Context, r Record, validate func() error) (Record, error) {
+	return s.ContinueChecked(ctx, r, func(context.Context) error { return validate() })
+}
+
+// ContinueChecked preserves the original transaction for source-qualified
+// automation checks. The caller acquires MQ before this delegation writer.
+func (s *Store) ContinueChecked(ctx context.Context, r Record, validate func(context.Context) error) (Record, error) {
 	var out Record
 	err := s.TaskJournal().Transaction(ctx, func(tx *sql.Tx) error {
 		old, e := scanRecord(tx.QueryRowContext(ctx, "SELECT "+columns+" FROM session_delegations WHERE parent_session_id=? AND origin_request_id=? AND tool_call_id=?", r.ParentSessionID, r.OriginRequestID, r.ToolCallID))
@@ -135,13 +142,13 @@ func (s *Store) Continue(ctx context.Context, r Record, validate func() error) (
 		if !errors.Is(e, sql.ErrNoRows) {
 			return e
 		}
-		if e = validate(); e != nil {
+		if e = validate(taskapi.BindSQLTransaction(ctx, s.db, tx)); e != nil {
 			return e
 		}
 		if _, e = insertBounded(ctx, tx, r); e != nil {
 			return e
 		}
-		if e = validate(); e != nil {
+		if e = validate(taskapi.BindSQLTransaction(ctx, s.db, tx)); e != nil {
 			return e
 		}
 		out, e = scanRecord(tx.QueryRowContext(ctx, "SELECT "+columns+" FROM session_delegations WHERE id=?", r.ID))
@@ -181,7 +188,7 @@ func (s *Store) BindQA(ctx context.Context, owner, qa string, validate func() er
 }
 func (s *Store) Responsibility(ctx context.Context, logical string) (string, string, error) {
 	var owner, qa string
-	e := s.db.QueryRowContext(ctx, "SELECT owner,qa FROM delegation_responsibilities WHERE owner=? OR qa=?", logical, logical).Scan(&owner, &qa)
+	e := taskapi.ReadSQL(ctx, s.db).QueryRowContext(ctx, "SELECT owner,qa FROM delegation_responsibilities WHERE owner=? OR qa=?", logical, logical).Scan(&owner, &qa)
 	if errors.Is(e, sql.ErrNoRows) {
 		return "", "", nil
 	}
@@ -218,7 +225,7 @@ func (s *Store) RecordQAChecked(ctx context.Context, owner, qa, verdict string, 
 }
 func (s *Store) QAForRound(ctx context.Context, id string) (string, string, error) {
 	var qa, verdict string
-	e := s.db.QueryRowContext(ctx, "SELECT qa_round,verdict FROM delegation_qa_versions WHERE owner_round=?", id).Scan(&qa, &verdict)
+	e := taskapi.ReadSQL(ctx, s.db).QueryRowContext(ctx, "SELECT qa_round,verdict FROM delegation_qa_versions WHERE owner_round=?", id).Scan(&qa, &verdict)
 	if errors.Is(e, sql.ErrNoRows) {
 		return "", "", nil
 	}
@@ -226,10 +233,10 @@ func (s *Store) QAForRound(ctx context.Context, id string) (string, string, erro
 }
 
 func (s *Store) LatestRound(ctx context.Context, logical string) (Round, error) {
-	return scanRound(s.db.QueryRowContext(ctx, "SELECT "+roundColumns+" FROM delegation_rounds WHERE logical_id=? ORDER BY version DESC LIMIT 1", logical))
+	return scanRound(taskapi.ReadSQL(ctx, s.db).QueryRowContext(ctx, "SELECT "+roundColumns+" FROM delegation_rounds WHERE logical_id=? ORDER BY version DESC LIMIT 1", logical))
 }
 func (s *Store) RoundsAfter(ctx context.Context, logical string, after uint64) ([]Round, error) {
-	rows, e := s.db.QueryContext(ctx, "SELECT "+roundColumns+" FROM delegation_rounds WHERE logical_id=? AND version>? ORDER BY version LIMIT 128", logical, after)
+	rows, e := taskapi.ReadSQL(ctx, s.db).QueryContext(ctx, "SELECT "+roundColumns+" FROM delegation_rounds WHERE logical_id=? AND version>? ORDER BY version LIMIT 128", logical, after)
 	if e != nil {
 		return nil, e
 	}

@@ -23,12 +23,12 @@ import (
 	"everything-go/internal/taskapi"
 )
 
-func initializedUnifiedDelegation(t *testing.T) (*Hub, *session.Session, taskapi.IntentRecord, delegation.Record, func(string, string, any, string) *httptest.ResponseRecorder) {
+func initializedUnifiedDelegation(t *testing.T, withTypedStart ...bool) (*Hub, *session.Session, taskapi.IntentRecord, delegation.Record, func(string, string, any, string) *httptest.ResponseRecorder) {
 	t.Helper()
 	// The original create/provision fixture starts with an empty execution thread.
 	// Its provider Send initializes that thread and emits original correlated
 	// acceptance through Hub. The test never seeds a known execution expectation.
-	h, parent, _, intent, d := extensionFormal(t)
+	h, parent, _, intent, d := extensionFormalBackend(t, backend.Codex, withTypedStart...)
 	initial, rev, _, e := h.delegations.ExecutionBinding(t.Context(), d.ID)
 	if e != nil || initial != "" {
 		t.Fatal("initial expectation must stay empty", initial, rev, e)

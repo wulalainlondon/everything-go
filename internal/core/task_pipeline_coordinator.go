@@ -332,11 +332,18 @@ func (h *Hub) continuePipelineDelegation(ctx context.Context, parent *session.Se
 		return nil, err
 	}
 	d := delegation.Record{ID: "dgfollow_" + c.ID, LogicalID: round.LogicalID, PreviousID: round.ID, Authority: h.cfg.InstanceID, Mode: "queue", ParentSessionID: parent.ID, OriginRequestID: c.RequestID, ToolCallID: c.ID, IntentHash: taskapi.Digest(c.Action), ChildSessionID: child.ID, ChildRequestID: "r_" + c.ID, ParentRequestID: "dgreturn_" + c.ID, ChildName: base.ChildName, Cwd: base.Cwd, Instruction: text, Model: base.Model, Effort: base.Effort, Sandbox: base.Sandbox, SourceThread: base.SourceThread, SourceRevision: base.SourceRevision, ExpectedThread: base.ExpectedThread, ExpectedRevision: base.ExpectedRevision, WorkspaceIdentity: base.WorkspaceIdentity, GrantDigest: delegationGrantDigest(base, base.SourceThread, base.SourceRevision)}
-	stored, e := h.delegations.Continue(ctx, d, func() error {
-		if e := check(ctx); e != nil {
-			return e
-		}
-		return h.validateDelegationBindingForContinuation(ctx, base, parent, child)
+	var stored delegation.Record
+	// Preserve the established MQ -> delegation order used by original replies.
+	// Both final checks read their own held transaction, never a second conn.
+	e = h.messageQueue.WithNativeAcceptanceRead(ctx, func(writeCtx context.Context) error {
+		var err error
+		stored, err = h.delegations.ContinueChecked(writeCtx, d, func(checkCtx context.Context) error {
+			if err := check(checkCtx); err != nil {
+				return err
+			}
+			return h.validateDelegationBindingForContinuation(checkCtx, base, parent, child)
+		})
+		return err
 	})
 	if e != nil {
 		return nil, e

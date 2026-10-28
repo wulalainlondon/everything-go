@@ -51,7 +51,7 @@ func (s *Store) SealTask(ctx context.Context, seal TaskSeal) (TaskSeal, error) {
 }
 func (s *Store) TaskSeal(ctx context.Context, session, request, id string) (TaskSeal, error) {
 	var r TaskSeal
-	err := s.db.QueryRowContext(ctx, "SELECT seal_id,session_id,request_id,hash,text,anchor FROM task_api_seals WHERE session_id=? AND request_id=? AND (?3='' OR seal_id=?3)", session, request, id).Scan(&r.ID, &r.SessionID, &r.RequestID, &r.Hash, &r.Text, &r.Anchor)
+	err := taskapi.ReadSQL(ctx, s.db).QueryRowContext(ctx, "SELECT seal_id,session_id,request_id,hash,text,anchor FROM task_api_seals WHERE session_id=? AND request_id=? AND (?3='' OR seal_id=?3)", session, request, id).Scan(&r.ID, &r.SessionID, &r.RequestID, &r.Hash, &r.Text, &r.Anchor)
 	if errors.Is(err, sql.ErrNoRows) {
 		return r, taskapi.Failure("result_not_ready", "known_none", "wait")
 	}
@@ -59,6 +59,6 @@ func (s *Store) TaskSeal(ctx context.Context, session, request, id string) (Task
 }
 func (s *Store) TaskRevision(ctx context.Context, session, request string) (uint64, error) {
 	var r uint64
-	err := s.db.QueryRowContext(ctx, "SELECT COALESCE((SELECT revision FROM task_api_revisions WHERE session_id=? AND request_id=?),0)", session, request).Scan(&r)
+	err := taskapi.ReadSQL(ctx, s.db).QueryRowContext(ctx, "SELECT COALESCE((SELECT revision FROM task_api_revisions WHERE session_id=? AND request_id=?),0)", session, request).Scan(&r)
 	return r, err
 }

@@ -3,6 +3,7 @@ package messagequeue
 import (
 	"context"
 	"database/sql"
+	"everything-go/internal/taskapi"
 	"everything-go/internal/taskpipeline"
 )
 
@@ -17,21 +18,21 @@ func (s *Store) PipelineStore() *taskpipeline.Store {
 func (s *Store) ConsumedInput(ctx context.Context, session, request, thread string) (uint64, string, bool, error) {
 	var rev uint64
 	var hash, acceptedThread, token string
-	e := s.db.QueryRowContext(ctx, `SELECT revision,input_hash,thread_id,token FROM task_pipeline_native_inputs WHERE session_id=? AND request_id=?`, session, request).Scan(&rev, &hash, &acceptedThread, &token)
+	e := taskapi.ReadSQL(ctx, s.db).QueryRowContext(ctx, `SELECT revision,input_hash,thread_id,token FROM task_pipeline_native_inputs WHERE session_id=? AND request_id=?`, session, request).Scan(&rev, &hash, &acceptedThread, &token)
 	if e == sql.ErrNoRows {
 		return 0, "", false, nil
 	}
 	if e != nil {
 		return 0, "", false, e
 	}
-	proof, found, e := s.ExactNativeAcceptance(session, request)
+	proof, found, e := s.ExactNativeAcceptanceContext(ctx, session, request)
 	if e != nil {
 		return 0, "", false, e
 	}
 	if found {
 		return rev, hash, acceptedThread == thread && proof.ThreadID == thread && proof.TurnID == token, nil
 	}
-	start, started, e := s.NativeStart(session, request)
+	start, started, e := s.NativeStartContext(ctx, session, request)
 	if e != nil {
 		return 0, "", false, e
 	}
@@ -46,6 +47,6 @@ func (s *Store) PipelineArtifactHash(ctx context.Context, session, request, seal
 		return false, nil
 	}
 	var count int
-	e := s.db.QueryRowContext(ctx, `SELECT count(*) FROM unified_documents WHERE owner_session=? AND owner_request=? AND seal_id=? AND hash=?`, session, request, seal, hash).Scan(&count)
+	e := taskapi.ReadSQL(ctx, s.db).QueryRowContext(ctx, `SELECT count(*) FROM unified_documents WHERE owner_session=? AND owner_request=? AND seal_id=? AND hash=?`, session, request, seal, hash).Scan(&count)
 	return count > 0, e
 }

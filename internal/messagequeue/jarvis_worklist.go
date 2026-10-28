@@ -260,7 +260,7 @@ func (s *Store) WorkItems(ctx context.Context, scope, manager string, after stri
 func (s *Store) WorkItem(ctx context.Context, scope, manager, id string) (WorkItem, error) {
 	var raw []byte
 	var v WorkItem
-	e := s.db.QueryRowContext(ctx, `SELECT payload FROM jarvis_work_items WHERE scope=? AND manager=? AND item_id=?`, scope, manager, id).Scan(&raw)
+	e := taskapi.ReadSQL(ctx, s.db).QueryRowContext(ctx, `SELECT payload FROM jarvis_work_items WHERE scope=? AND manager=? AND item_id=?`, scope, manager, id).Scan(&raw)
 	if e == nil {
 		e = json.Unmarshal(raw, &v)
 	}
@@ -352,9 +352,12 @@ func (s *Store) RecordNativeStart(p NativeStart) (bool, error) {
 	return created, err
 }
 func (s *Store) NativeStart(session, request string) (NativeStart, bool, error) {
+	return s.NativeStartContext(context.Background(), session, request)
+}
+func (s *Store) NativeStartContext(ctx context.Context, session, request string) (NativeStart, bool, error) {
 	var raw []byte
 	var out NativeStart
-	e := s.db.QueryRow(`SELECT payload FROM task_native_starts WHERE session_id=? AND request_id=?`, session, request).Scan(&raw)
+	e := taskapi.ReadSQL(ctx, s.db).QueryRowContext(ctx, `SELECT payload FROM task_native_starts WHERE session_id=? AND request_id=?`, session, request).Scan(&raw)
 	if errors.Is(e, sql.ErrNoRows) {
 		return out, false, nil
 	}

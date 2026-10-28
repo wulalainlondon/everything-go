@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"everything-go/internal/taskapi"
 	"fmt"
 	"io"
 	"time"
@@ -200,7 +201,7 @@ func insertBounded(ctx context.Context, tx *sql.Tx, r Record) (string, error) {
 func (s *Store) SourceBinding(ctx context.Context, id string) (string, uint64, bool, error) {
 	var thread string
 	var revision uint64
-	err := s.db.QueryRowContext(ctx, "SELECT thread,revision FROM delegation_source_bindings WHERE id=?", id).Scan(&thread, &revision)
+	err := taskapi.ReadSQL(ctx, s.db).QueryRowContext(ctx, "SELECT thread,revision FROM delegation_source_bindings WHERE id=?", id).Scan(&thread, &revision)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", 0, false, nil
 	}
@@ -321,7 +322,7 @@ func (s *Store) PendingBatch(ctx context.Context, limit int) ([]Record, error) {
 func (s *Store) ExecutionBinding(ctx context.Context, id string) (string, uint64, string, error) {
 	var thread, identity string
 	var revision uint64
-	err := s.db.QueryRowContext(ctx, "SELECT expected_thread,expected_revision,cwd_identity FROM delegation_source_bindings WHERE id=?", id).Scan(&thread, &revision, &identity)
+	err := taskapi.ReadSQL(ctx, s.db).QueryRowContext(ctx, "SELECT expected_thread,expected_revision,cwd_identity FROM delegation_source_bindings WHERE id=?", id).Scan(&thread, &revision, &identity)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", 0, "", nil
 	}
@@ -330,6 +331,6 @@ func (s *Store) ExecutionBinding(ctx context.Context, id string) (string, uint64
 
 func (s *Store) HasChild(ctx context.Context, child string) (bool, error) {
 	var exists bool
-	err := s.db.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM session_delegations WHERE child_session_id=?)", child).Scan(&exists)
+	err := taskapi.ReadSQL(ctx, s.db).QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM session_delegations WHERE child_session_id=?)", child).Scan(&exists)
 	return exists, err
 }
