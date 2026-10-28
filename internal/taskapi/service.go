@@ -230,7 +230,12 @@ func readDiagnostic(request Request, schema, stage string, err error, size int) 
 		schema = taskcontract.Hash()
 	}
 	digest := sha256.Sum256([]byte(request.CorrelationID))
-	log.Printf("task_api_read_diagnostic correlation_sha256=%x operation=%s stage=%s reason=%s response_bytes=%d contract_sha256=%s", digest, request.Operation, stage, reason, size, schema)
+	witness := ""
+	if stage == "response_validate" && reason == "schema" {
+		encoded, _ := json.Marshal(closedReadSchemaWitness(err))
+		witness = " schema_witness=" + string(encoded)
+	}
+	log.Printf("task_api_read_diagnostic correlation_sha256=%x operation=%s stage=%s reason=%s response_bytes=%d contract_sha256=%s%s", digest, request.Operation, stage, reason, size, schema, witness)
 }
 
 func MakeNamespace(c VerifiedContext, l Locator, r Request) (Namespace, error) {

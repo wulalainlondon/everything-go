@@ -80,7 +80,7 @@ func TestReadDiagnosticsClosedStagesAndNoPrivateContents(t *testing.T) {
 						t.Fatal("technical diagnostic disclosed private value")
 					}
 				}
-				if strings.Count(line, "task_api_read_diagnostic ") != 1 || len(line) > 400 {
+				if strings.Count(line, "task_api_read_diagnostic ") != 1 || len(line) > 1024 {
 					t.Fatal("diagnostic was not one bounded line")
 				}
 			})
