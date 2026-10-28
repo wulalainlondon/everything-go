@@ -300,7 +300,7 @@ func TestDefinitionUnchangedAdmittedActionCarriesOnlyExactFreshCheckpoint(t *tes
 }
 
 func TestDefinitionCarryRejectsChangedFrozenExecutionAndInputs(t *testing.T) {
-	for _, kind := range []string{"action", "source", "predicate", "incoming", "manager", "source_generation", "grant_revision", "target_ABA", "wrong_round", "consumed_hash", "not_checkpointed", "missing_input", "final_revoke"} {
+	for _, kind := range []string{"action", "source", "predicate", "incoming", "manager", "source_generation", "grant_revision", "target_ABA", "wrong_round", "consumed_hash", "not_checkpointed", "missing_input", "output_sequence", "input_sequence", "final_revoke"} {
 		t.Run(kind, func(t *testing.T) {
 			s, scope, i := fixture(t)
 			r, facts := edgePipeline(t, s, scope, i, "on_success", "all_success", 1)
@@ -340,8 +340,12 @@ func TestDefinitionCarryRejectsChangedFrozenExecutionAndInputs(t *testing.T) {
 				actual.Source.RoundID = "other-round"
 			case "consumed_hash":
 				actual.ConsumedHash = "other-hash"
+			case "output_sequence":
+				actual.Sequence = 0
+			case "input_sequence":
+				facts[0].Sequence = 0
 			}
-			// Cycles are correctly refused at definition validation, not silently adopted.
+			// The original definition writer retains its own validation/manager rules.
 			receipt, e := s.Mutate(context.Background(), scope, ni, "new-frontier", "pipeline_define", "newhash", r.ID, current.Revision, &next, nil, nil, allow)
 			if kind == "incoming" || kind == "manager" {
 				if e == nil && receipt.Record.Manager != scope.Manager {

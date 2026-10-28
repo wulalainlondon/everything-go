@@ -116,7 +116,9 @@ func checkpointEventRead(ctx context.Context, q reader, c Continuation) (Event, 
 func MatchCarryInputs(c Continuation, facts []Fact) bool {
 	keys := []string{}
 	for _, f := range facts {
-		keys = append(keys, sourceKey(f))
+		if f.Sequence > 0 {
+			keys = append(keys, sourceKey(f))
+		}
 	}
 	sort.Strings(keys)
 	for _, old := range c.Evidence {
@@ -128,7 +130,9 @@ func MatchCarryInputs(c Continuation, facts []Fact) bool {
 	}
 	return true
 }
-func SameFactProof(a, b Fact) bool { return sourceKey(a) == sourceKey(b) }
+func SameFactProof(a, b Fact) bool {
+	return a.Sequence > 0 && b.Sequence > 0 && sourceKey(a) == sourceKey(b)
+}
 
 // Each lookup is bounded by the current DAG's <=32 nodes. No history/body
 // catalog is exported and SQL readers use the original writer transaction.
