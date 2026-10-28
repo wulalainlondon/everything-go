@@ -162,6 +162,12 @@ func seedTx(ctx context.Context, tx *sql.Tx, r Record, facts []Fact) error {
 	}
 	for _, f := range facts {
 		ev := Event{ID: "pe_" + digest(struct{ Record, Source string }{r.ID, sourceKey(f)}), RecordID: r.ID, NodeID: "", State: "baseline", Fact: f, AppliedRevision: r.Revision}
+		if r.DefinitionRevision > 1 {
+			ev.ID = "pe_" + digest(struct {
+				Record, Source string
+				Version        uint64
+			}{r.ID, sourceKey(f), r.DefinitionRevision})
+		}
 		if r.Watch != nil && r.Watch.CatchUp {
 			continue
 		}
@@ -174,7 +180,7 @@ func seedTx(ctx context.Context, tx *sql.Tx, r Record, facts []Fact) error {
 
 // Observe commits inbox, predicate application, chosen input set and outbox claim
 // in one local transaction. Native start/final remain original-store facts.
-func (s *Store) Observe(ctx context.Context, id string, expected uint64, facts []Fact, check func(context.Context) error) error {
+func (s *Store) Observe(ctx context.Context, id string, expected uint64, facts []Fact, check func(context.Context) error, cursors ...SourceCursor) error {
 	tx, e := s.db.BeginTx(ctx, nil)
 	if e != nil {
 		return e
@@ -218,6 +224,13 @@ func (s *Store) Observe(ctx context.Context, id string, expected uint64, facts [
 		}
 		return tx.Commit()
 	}
+	triggerPolicy, e := policy(ctx, tx, issuer.Scope)
+	if e != nil {
+		return e
+	}
+	if e = putCursorsTx(ctx, tx, r, issuer, cursors); e != nil {
+		return e
+	}
 	changed := false
 	states := map[string]StepState{}
 	for _, v := range r.Steps {
@@ -236,6 +249,13 @@ func (s *Store) Observe(ctx context.Context, id string, expected uint64, facts [
 			} else if !(st.Predicate.Kind == "human_decision" && st.WorkItem != nil && st.WorkItem.ItemID == f.Source.NativeID && st.WorkItem.Revision == f.Sequence) {
 				continue
 			}
+			baselineMet, err := watchBaselineSatisfied(ctx, tx, r)
+			if err != nil {
+				return err
+			}
+			if baselineMet {
+				continue
+			}
 			key := sourceKey(f)
 			eventID := "pe_" + digest(struct{ Record, Node, Source string }{r.ID, st.ID, key})
 			var count int
@@ -246,7 +266,7 @@ func (s *Store) Observe(ctx context.Context, id string, expected uint64, facts [
 			// Ingress identity is global to this record. A newly authorized DAG
 			// definition may still apply that exact, currently revalidated fact
 			// to its fresh step state; do not import a second observation.
-			if count != 0 && (r.Kind != "pipeline" || r.DefinitionRevision == 1 || v.EvidenceHash == key) {
+			if count != 0 && ((r.Kind != "pipeline" && r.Kind != "watch") || r.DefinitionRevision == 1 || v.EvidenceHash == key) {
 				continue
 			}
 			before := v
@@ -277,6 +297,9 @@ func (s *Store) Observe(ctx context.Context, id string, expected uint64, facts [
 			ev := Event{ID: eventID, RecordID: id, NodeID: st.ID, State: state, Fact: f, AppliedRevision: r.Revision + 1}
 			if count == 0 {
 				if _, e = tx.ExecContext(ctx, `INSERT INTO task_pipeline_events(event_id,record_id,node_id,source_key,event) VALUES(?,?,?,?,?)`, ev.ID, id, st.ID, key, encode(ev)); e != nil {
+					return e
+				}
+				if e = queueNotificationTx(ctx, tx, r, ev); e != nil {
 					return e
 				}
 				changed = true
@@ -422,7 +445,7 @@ func (s *Store) Observe(ctx context.Context, id string, expected uint64, facts [
 			// A definition edit is not permission to repeat an already issued
 			// node. Preserve the old frozen effect; an operator may explicitly
 			// select its exact execution as a source-only node in the new DAG.
-			if r.Pipeline != nil && r.DefinitionRevision > 1 {
+			if (r.Pipeline != nil || r.Watch != nil) && r.DefinitionRevision > 1 {
 				var prior string
 				err := tx.QueryRowContext(ctx, `SELECT id FROM task_pipeline_outbox WHERE record_id=? AND definition_revision<? AND node_id=? AND (state NOT IN ('ready','retired','rejected','no_progress') OR json_extract(continuation,'$.original_receipt') IS NOT NULL) ORDER BY definition_revision DESC LIMIT 1`, r.ID, r.DefinitionRevision, st.ID).Scan(&prior)
 				if err != nil && err != sql.ErrNoRows {
@@ -456,6 +479,14 @@ func (s *Store) Observe(ctx context.Context, id string, expected uint64, facts [
 			if err != sql.ErrNoRows {
 				return err
 			}
+			if !triggerPolicy.EffectiveEnabled {
+				previous := v
+				v.Reason = "new_triggers_disabled"
+				states[st.ID] = v
+				changed = changed || previous != v
+				continue
+			}
+			v.Reason = ""
 			auth := Auth(r)
 			if !auth.Confirmed || auth.Budget.DeadlineMS <= now() {
 				r.State = "blocked"
@@ -502,14 +533,17 @@ func (s *Store) Observe(ctx context.Context, id string, expected uint64, facts [
 		states[st.ID] = v
 	}
 	if !changed {
-		return nil
+		if e = check(s.context(ctx, tx)); e != nil {
+			return e
+		}
+		return tx.Commit()
 	}
 	r.Steps = []StepState{}
 	done := true
 	for _, st := range Steps(r) {
 		v := states[st.ID]
 		r.Steps = append(r.Steps, v)
-		if st.Required && v.State != "satisfied" && v.State != "done" {
+		if st.Required && ((st.Action != nil || (r.Watch != nil && r.Watch.Action != nil)) && v.State != "done" || (st.Action == nil && (r.Watch == nil || r.Watch.Action == nil) && v.State != "satisfied" && v.State != "done")) {
 			done = false
 		}
 	}
@@ -595,6 +629,17 @@ func (s *Store) MarkIssued(ctx context.Context, c Continuation, check func(conte
 	if check == nil {
 		return c, ErrScope
 	}
+	var scopeRaw []byte
+	if e = tx.QueryRowContext(ctx, `SELECT issuer FROM task_pipeline_records WHERE id=?`, c.RecordID).Scan(&scopeRaw); e != nil {
+		return c, e
+	}
+	var owner Issuer
+	if e = json.Unmarshal(scopeRaw, &owner); e != nil {
+		return c, e
+	}
+	if e = triggersAllowed(ctx, tx, owner.Scope); e != nil {
+		return c, e
+	}
 	if e = check(s.context(ctx, tx)); e != nil {
 		return c, e
 	}
@@ -606,6 +651,21 @@ func (s *Store) MarkIssued(ctx context.Context, c Continuation, check func(conte
 	}
 	if e != nil {
 		return c, e
+	}
+	var recordRaw []byte
+	if e = tx.QueryRowContext(ctx, `SELECT record FROM task_pipeline_records WHERE id=?`, c.RecordID).Scan(&recordRaw); e != nil {
+		return c, e
+	}
+	var current Record
+	if e = json.Unmarshal(recordRaw, &current); e != nil {
+		return c, e
+	}
+	baselineMet, err := watchBaselineSatisfied(ctx, tx, current)
+	if err != nil {
+		return c, err
+	}
+	if baselineMet {
+		return c, ErrScope
 	}
 	if state != "ready" || version != c.DefinitionRevision {
 		return c, ErrConflict
@@ -650,6 +710,17 @@ func AdmitTx(ctx context.Context, tx *sql.Tx, a *Admission, session, request str
 	}
 	if state != "issued" || rs != "active" || version != c.DefinitionRevision || c.Fence != a.Fence || c.RequestID != request || c.Action.Target.Session != session {
 		return ErrScope
+	}
+	var ownerRaw []byte
+	if e = tx.QueryRowContext(ctx, `SELECT issuer FROM task_pipeline_records WHERE id=?`, c.RecordID).Scan(&ownerRaw); e != nil {
+		return e
+	}
+	var owner Issuer
+	if e = json.Unmarshal(ownerRaw, &owner); e != nil {
+		return e
+	}
+	if e = triggersAllowed(ctx, tx, owner.Scope); e != nil {
+		return e
 	}
 	c.State = "queued"
 	c.OriginalReceipt = &EffectReceipt{Kind: "session_input", Authority: c.Action.Target.Authority, Session: session, Request: request, Key: c.ID, InputHash: payloadHash}
@@ -762,4 +833,26 @@ func actionEdgeCheckpoint(ctx context.Context, tx *sql.Tx, r Record, issuer Issu
 		return PredicateMet(Predicate{Kind: "terminal"}, f) && (f.Terminal == "failed" || f.Terminal == "cancelled" || f.Terminal == "rejected"), nil
 	}
 	return PredicateMet(Predicate{Kind: "success_sealed"}, f), nil
+}
+
+// The baseline belongs to its exact definition birth revision, not the newest
+// fact or a different predicate/version. Existing native admissions are never
+// rewritten by this pre-claim test.
+func watchBaselineSatisfied(ctx context.Context, tx *sql.Tx, r Record) (bool, error) {
+	if r.Watch == nil || r.Watch.CatchUp {
+		return false, nil
+	}
+	var raw []byte
+	e := tx.QueryRowContext(ctx, `SELECT event FROM task_pipeline_events WHERE record_id=? AND node_id='' AND json_extract(event,'$.state')='baseline' AND json_extract(event,'$.applied_revision')=(SELECT MIN(revision) FROM task_pipeline_revisions WHERE record_id=? AND json_extract(record,'$.definition_revision')=?) ORDER BY seq LIMIT 1`, r.ID, r.ID, r.DefinitionRevision).Scan(&raw)
+	if e == sql.ErrNoRows {
+		return false, nil
+	}
+	if e != nil {
+		return false, e
+	}
+	var baseline Event
+	if e = json.Unmarshal(raw, &baseline); e != nil {
+		return false, e
+	}
+	return baseline.Fact.Source == r.Watch.Source && PredicateMet(r.Watch.Predicate, baseline.Fact), nil
 }

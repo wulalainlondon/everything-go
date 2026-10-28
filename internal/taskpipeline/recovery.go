@@ -79,6 +79,9 @@ func (s *Store) EnsureRecovery(ctx context.Context, id string, expected uint64, 
 	if e = check(s.context(ctx, tx)); e != nil {
 		return e
 	}
+	if e = triggersAllowed(ctx, tx, issuer.Scope); e != nil {
+		return e
+	}
 	var pending int
 	if e = tx.QueryRowContext(ctx, `SELECT count(*) FROM task_pipeline_outbox WHERE record_id=? AND state NOT IN ('checkpointed','retired','rejected','no_progress')`, id).Scan(&pending); e != nil {
 		return e

@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"everything-go/internal/taskapi"
 	"fmt"
 	"time"
 )
@@ -58,7 +59,10 @@ CREATE TABLE IF NOT EXISTS task_pipeline_outbox(id TEXT PRIMARY KEY,record_id TE
 CREATE TABLE IF NOT EXISTS task_pipeline_authorizations(record_id TEXT NOT NULL,definition_revision INTEGER NOT NULL,issuer BLOB NOT NULL,PRIMARY KEY(record_id,definition_revision));
 CREATE TABLE IF NOT EXISTS task_pipeline_revisions(record_id TEXT NOT NULL,revision INTEGER NOT NULL,record BLOB NOT NULL,PRIMARY KEY(record_id,revision));
 `)
-	return e
+	if e != nil {
+		return e
+	}
+	return installDurability(db)
 }
 func digest(v any) string {
 	b, _ := json.Marshal(v)
@@ -178,6 +182,13 @@ func (s *Store) Mutate(ctx context.Context, scope Scope, issuer Issuer, intent, 
 	if e != sql.ErrNoRows {
 		return Receipt{}, e
 	}
+	var other int
+	if e = tx.QueryRowContext(ctx, `SELECT count(*) FROM task_pipeline_delivery_operations WHERE scope=? AND manager=? AND intent=?`, ScopeKey(scope), ManagerKey(scope), intent).Scan(&other); e != nil {
+		return Receipt{}, e
+	}
+	if other != 0 {
+		return Receipt{}, ErrConflict
+	}
 	if check == nil {
 		return Receipt{}, ErrScope
 	}
@@ -260,6 +271,9 @@ func (s *Store) Mutate(ctx context.Context, scope Scope, issuer Issuer, intent, 
 		r.State = "paused"
 	case "mission_cancel", "watch_cancel", "pipeline_cancel":
 		r.State = "cancelled"
+		if _, e = tx.ExecContext(ctx, `UPDATE task_pipeline_notifications SET state='retired',notification=json_set(notification,'$.state','retired','$.revision',json_extract(notification,'$.revision')+1,'$.reason','original_rule_cancelled') WHERE record_id=? AND state IN ('pending','failed')`, r.ID); e != nil {
+			return Receipt{}, e
+		}
 	case "pipeline_enable":
 		r.State = "active"
 	case "mission_checkpoint":
@@ -278,7 +292,7 @@ func (s *Store) Mutate(ctx context.Context, scope Scope, issuer Issuer, intent, 
 			return Receipt{}, e
 		}
 	}
-	if definition != nil && expected == 0 {
+	if definition != nil {
 		if e = seedTx(ctx, tx, r, initial); e != nil {
 			return Receipt{}, e
 		}
@@ -381,6 +395,13 @@ func (s *Store) Events(ctx context.Context, scope Scope, id string, after uint64
 	if _, _, found, e := s.Get(ctx, scope, id); e != nil || !found {
 		return nil, after, false, e
 	}
+	floor, e := s.EventFloor(ctx, id)
+	if e != nil {
+		return nil, after, false, e
+	}
+	if after < floor {
+		return nil, after, false, taskapi.Failure("cursor_expired", "known_none", "refresh_snapshot")
+	}
 	if limit < 1 || limit > 100 {
 		limit = 50
 	}
@@ -480,6 +501,43 @@ func (s *Store) guard(ctx context.Context, session string, scope *Scope) (GuardS
 			g.ActiveClaims++
 		}
 	}
+
+	if e = rows.Err(); e != nil {
+		return g, e
+	}
+	rows.Close()
+	notices, e := s.db.QueryContext(ctx, `SELECT r.record,n.state,r.scope,r.manager FROM task_pipeline_notifications n JOIN task_pipeline_records r ON r.id=n.record_id WHERE n.state NOT IN ('inbox_committed','displayed','retired')`)
+	if e != nil {
+		return g, e
+	}
+	defer notices.Close()
+	for notices.Next() {
+		var raw []byte
+		var state, sk, mk string
+		if e = notices.Scan(&raw, &state, &sk, &mk); e != nil {
+			return g, e
+		}
+		if scope != nil && (sk != ScopeKey(*scope) || mk != ManagerKey(*scope)) {
+			continue
+		}
+		var r Record
+		if e = json.Unmarshal(raw, &r); e != nil {
+			return g, e
+		}
+		if session != "" && !Touches(r, session) {
+			continue
+		}
+		if !seen[r.ID] {
+			g.Outstanding++
+			seen[r.ID] = true
+		}
+		if state != "pending" && state != "failed" {
+			g.Unknown++
+		}
+	}
+	if e = notices.Err(); e != nil {
+		return g, e
+	}
 	g.Ready = g.Outstanding == 0 && g.Unknown == 0
 	if !g.Ready {
 		g.Reasons = append(g.Reasons, "pipeline_outstanding_or_unknown")
@@ -569,7 +627,7 @@ func Touches(r Record, session string) bool {
 // GuardTx runs in the destructive generation writer's transaction, so a watch
 // registration and context reset cannot both pass independent idle snapshots.
 func GuardTx(ctx context.Context, tx *sql.Tx, session string) error {
-	rows, e := tx.QueryContext(ctx, `SELECT r.record FROM task_pipeline_records r WHERE r.state NOT IN ('paused','cancelled','blocked','done','expired','disabled') OR EXISTS(SELECT 1 FROM task_pipeline_outbox o WHERE o.record_id=r.id AND o.state NOT IN ('checkpointed','retired','rejected','no_progress'))`)
+	rows, e := tx.QueryContext(ctx, `SELECT r.record FROM task_pipeline_records r WHERE r.state NOT IN ('paused','cancelled','blocked','done','expired','disabled') OR EXISTS(SELECT 1 FROM task_pipeline_outbox o WHERE o.record_id=r.id AND o.state NOT IN ('checkpointed','retired','rejected','no_progress')) OR EXISTS(SELECT 1 FROM task_pipeline_notifications n WHERE n.record_id=r.id AND n.state NOT IN ('inbox_committed','displayed','retired'))`)
 	if e != nil {
 		return e
 	}

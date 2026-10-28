@@ -31,11 +31,11 @@ func (h *Hub) reconcileTaskPipelines(ctx context.Context) {
 		if e = check(ctx); e != nil {
 			continue
 		}
-		facts, err := h.pipelineCurrentFacts(ctx, i, r)
+		facts, cursors, err := h.pipelineSourceBatch(ctx, i, r)
 		if err != nil {
 			continue
 		}
-		if e = store.Observe(ctx, r.ID, r.Revision, facts, check); e != nil {
+		if e = store.Observe(ctx, r.ID, r.Revision, facts, check, cursors...); e != nil {
 			continue
 		}
 		current, _, found, err := store.Get(ctx, i.Scope, r.ID)
@@ -43,6 +43,7 @@ func (h *Hub) reconcileTaskPipelines(ctx context.Context) {
 			_ = store.EnsureRecovery(ctx, current.ID, current.Revision, facts, check)
 		}
 	}
+	h.reconcilePipelineNotifications(ctx)
 	pending, e := store.Pending(ctx, 32)
 	if e != nil {
 		return
@@ -52,7 +53,15 @@ func (h *Hub) reconcileTaskPipelines(ctx context.Context) {
 		if e != nil {
 			continue
 		}
-		check := func(ctx context.Context) error { return h.pipelineEffectCurrent(ctx, i, r) }
+		check := func(ctx context.Context) error {
+			if e := store.TriggersAllowed(ctx, i.Scope); e != nil {
+				return e
+			}
+			if e := store.TriggerSourceGuard(ctx, r); e != nil {
+				return e
+			}
+			return h.pipelineEffectCurrent(ctx, i, r)
+		}
 		if c.State != "ready" {
 			old, oldIssuer, err := store.OriginalDefinition(ctx, c.RecordID, c.DefinitionRevision)
 			if err != nil {

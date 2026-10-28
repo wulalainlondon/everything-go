@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	contract "everything-go/contracts/task-api/pipeline-v7"
+	contract8 "everything-go/contracts/task-api/pipeline-v8"
 	"everything-go/internal/session"
 	"everything-go/internal/taskapi"
 	p "everything-go/internal/taskpipeline"
@@ -26,6 +27,8 @@ type pipelineInput struct {
 	OriginalIntent    string        `json:"original_intent_id"`
 	OriginalOperation string        `json:"original_operation"`
 	Hash              string        `json:"expected_input_hash"`
+	NotificationID    string        `json:"notification_id"`
+	Enabled           bool          `json:"enabled"`
 }
 
 var pipelineOps = []string{"capabilities", "mission_create", "mission_get", "mission_list", "mission_update", "mission_checkpoint", "mission_pause", "mission_cancel", "watch_create", "watch_get", "watch_list", "watch_update", "watch_pause", "watch_cancel", "pipeline_define", "pipeline_get", "pipeline_list", "pipeline_enable", "pipeline_pause", "pipeline_cancel", "event_history", "continuation_get", "continuation_ack", "continuation_receipt_get", "operation_get", "guard_status"}
@@ -49,7 +52,15 @@ func (h *Hub) executePipeline(ctx context.Context, caller taskapi.BoundCaller, r
 		return taskapi.Response{}, false
 	}
 	op := req.Operation
-	resp := taskapi.Response{Authority: h.cfg.InstanceID, Type: "task_api_pipeline_response", Version: contract.Version, CorrelationID: req.CorrelationID, Operation: &op}
+	version := contract.Version
+	validate := contract.Validate
+	schemaHash := contract.Hash()
+	if req.Version == contract8.Version {
+		version = contract8.Version
+		validate = contract8.Validate
+		schemaHash = contract8.Hash()
+	}
+	resp := taskapi.Response{Authority: h.cfg.InstanceID, Type: "task_api_pipeline_response", Version: version, CorrelationID: req.CorrelationID, Operation: &op}
 	fail := func(e error) (taskapi.Response, bool) {
 		var api *taskapi.APIError
 		if errors.Is(e, p.ErrConflict) {
@@ -62,10 +73,10 @@ func (h *Hub) executePipeline(ctx context.Context, caller taskapi.BoundCaller, r
 		resp.Error = api
 		return resp, true
 	}
-	if req.Version != contract.Version {
+	if req.Version != version {
 		return fail(unifiedError("unsupported"))
 	}
-	if e := contract.Validate(raw); e != nil {
+	if e := validate(raw); e != nil {
 		return fail(unifiedError("invalid_argument"))
 	}
 	if h.messageQueue == nil {
@@ -98,12 +109,21 @@ func (h *Hub) executePipeline(ctx context.Context, caller taskapi.BoundCaller, r
 		role = "bounded_worker"
 	}
 	if op == "capabilities" {
-		allowed := pipelineOps
+		allowed := append([]string{}, pipelineOps...)
+		if version == contract8.Version && !worker {
+			allowed = append(allowed, pipelineDurabilityOps...)
+		}
 		if worker {
 			allowed = []string{"capabilities", "mission_get", "mission_list", "event_history", "continuation_get", "continuation_receipt_get", "mission_checkpoint", "continuation_ack", "operation_get"}
 		}
 		resp.OK = true
-		resp.Result = map[string]any{"kind": "capabilities", "schema_hash": contract.Hash(), "authority_instance_id": h.cfg.InstanceID, "role": role, "allowed_operations": allowed, "features": map[string]any{"missions": true, "exact_round_watch": true, "pipeline_dag": true, "server_automation": role == "native_dispatcher" || role == "paired_human", "speech": false, "remote_automation": false}, "limits": map[string]any{"max_records": 128, "max_nodes": 32, "max_edges": 64, "max_events_per_read": 100, "max_request_bytes": 262144, "max_response_bytes": 8388608}, "scope": map[string]any{"session_id": bound.SourceSessionID, "namespace_generation": bound.NamespaceGeneration}}
+		resp.Result = map[string]any{"kind": "capabilities", "schema_hash": schemaHash, "authority_instance_id": h.cfg.InstanceID, "role": role, "allowed_operations": allowed, "features": map[string]any{"missions": true, "exact_round_watch": true, "pipeline_dag": true, "server_automation": (role == "native_dispatcher" || role == "paired_human") && !p.OperatorDisabled(), "speech": false, "remote_automation": false}, "limits": map[string]any{"max_records": 128, "max_nodes": 32, "max_edges": 64, "max_events_per_read": 100, "max_request_bytes": 262144, "max_response_bytes": 8388608}, "scope": map[string]any{"session_id": bound.SourceSessionID, "namespace_generation": bound.NamespaceGeneration}}
+		if version == contract8.Version {
+			features := resp.Result.(map[string]any)["features"].(map[string]any)
+			features["visual_delivery_outbox"] = true
+			features["durable_source_vector"] = true
+			features["manager_trigger_policy"] = true
+		}
 		return resp, true
 	}
 	manager, e := h.unifiedManager(bound, unifiedInput{Manager: pipelineTarget(in.Manager)})
@@ -152,7 +172,7 @@ func (h *Hub) executePipeline(ctx context.Context, caller taskapi.BoundCaller, r
 	}
 	projection := false
 	switch op {
-	case "mission_get", "watch_get", "pipeline_get", "event_history", "continuation_get", "continuation_receipt_get":
+	case "mission_get", "watch_get", "pipeline_get", "event_history", "continuation_get", "continuation_receipt_get", "source_status", "notification_list":
 		if bound.BindingKind == "paired_human" {
 			recordID := in.ID
 			if op == "continuation_get" || op == "continuation_receipt_get" {
@@ -284,6 +304,13 @@ func (h *Hub) executePipeline(ctx context.Context, caller taskapi.BoundCaller, r
 			return fail(e)
 		}
 		result = map[string]any{"kind": "events", "items": events, "next_sequence": next, "has_more": more}
+		if version == contract8.Version {
+			floor, err := store.EventFloor(ctx, in.ID)
+			if err != nil {
+				return fail(err)
+			}
+			result.(map[string]any)["retention_floor"] = floor
+		}
 	case "continuation_get":
 		c, f, e := store.Continuation(ctx, scope, in.ID)
 		if e != nil {
@@ -355,6 +382,34 @@ func (h *Hub) executePipeline(ctx context.Context, caller taskapi.BoundCaller, r
 		}
 		result = receipt
 	case "operation_get":
+		if version == contract8.Version {
+			receipt, found, err := store.DeliveryOperation(ctx, scope, in.OriginalIntent, in.OriginalOperation, in.Hash)
+			if err != nil {
+				return fail(err)
+			}
+			if found {
+				if receipt.Notification != nil {
+					r, _, f, err := store.Get(ctx, scope, receipt.Notification.RecordID)
+					if err != nil || !f {
+						return fail(unifiedError("scope_changed"))
+					}
+					if err = disclose(r); err != nil {
+						return fail(err)
+					}
+					if receipt.Notification.DefinitionRevision != r.DefinitionRevision {
+						old, _, err := store.OriginalDefinition(ctx, r.ID, receipt.Notification.DefinitionRevision)
+						if err != nil {
+							return fail(err)
+						}
+						if err = disclose(old); err != nil {
+							return fail(err)
+						}
+					}
+				}
+				result = receipt
+				break
+			}
+		}
 		receipt, f, e := store.Operation(ctx, scope, in.OriginalIntent, in.OriginalOperation, in.Hash)
 		if e != nil {
 			return fail(e)
@@ -368,6 +423,14 @@ func (h *Hub) executePipeline(ctx context.Context, caller taskapi.BoundCaller, r
 			}
 		}
 		result = receipt
+	case "source_status", "notification_list", "notification_ack", "notification_retry", "trigger_policy_get", "trigger_policy_set":
+		if version != contract8.Version {
+			return fail(unifiedError("unsupported"))
+		}
+		result, e = h.pipelineDurabilityOperation(ctx, bound, scope, in, req, check, disclose, projection)
+		if e != nil {
+			return fail(e)
+		}
 	case "guard_status":
 		result, e = store.ScopedGuard(ctx, scope)
 		if e != nil {

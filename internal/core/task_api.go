@@ -20,7 +20,7 @@ import (
 
 	artifactcontract "everything-go/contracts/task-api/artifacts-v4"
 	interactioncontract "everything-go/contracts/task-api/interactions-v5"
-	pipeline "everything-go/contracts/task-api/pipeline-v7"
+	pipeline "everything-go/contracts/task-api/pipeline-v8"
 	unified "everything-go/contracts/task-api/unified-v6"
 	contract "everything-go/contracts/task-api/v1"
 	"everything-go/internal/backend"

@@ -392,7 +392,16 @@ func (h *Hub) queuedSubmissionReady(s *session.Session, requestID string) bool {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 	defer cancel()
-	return reader.QueuedSubmissionReady(ctx, s, requestID) == nil
+	err := reader.QueuedSubmissionReady(ctx, s, requestID)
+	message := ""
+	if errors.Is(err, backend.ErrNativeSubmissionBusy) {
+		message = "等待上一個對話回合結束；訊息仍在排隊。"
+	} else if err != nil {
+		// Never publish raw provider errors, transport details or private input.
+		message = "正在確認對話狀態；訊息仍在排隊。"
+	}
+	h.updateQueuedWaitReason(s.ID, requestID, message)
+	return err == nil
 }
 
 func (h *Hub) submitQueuedMessage(s *session.Session, requestID string) bool {
@@ -825,4 +834,25 @@ func (h *Hub) closeQueuedMessages(sessionID string) {
 // Keep payload-independent queue operations small and safe to retry.
 func queueRequestValid(cmd clientproto.Command) bool {
 	return strings.TrimSpace(cmd.SessionID) != "" && strings.TrimSpace(cmd.RequestID) != ""
+}
+
+// Hold the existing queue writer only for the durable-state + presentation CAS,
+// never during the native metadata RPC. A late readiness result cannot change a
+// cancelled command, another head or a request already admitted to the provider.
+func (h *Hub) updateQueuedWaitReason(sessionID, requestID, message string) {
+	if h.messageQueue == nil || h.runtimes == nil {
+		return
+	}
+	h.messageQueueMu.Lock()
+	entry, found, err := h.messageQueue.Get(sessionID, requestID)
+	if err != nil || !found || entry.State != messagequeue.Queued {
+		h.messageQueueMu.Unlock()
+		return
+	}
+	view, changed := h.runtimes.QueuedWait(sessionID, requestID, message)
+	h.messageQueueMu.Unlock()
+	if changed {
+		h.broadcastRuntime(view)
+		h.notifyRuntimeStatus(view)
+	}
 }

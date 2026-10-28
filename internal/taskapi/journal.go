@@ -32,7 +32,8 @@ func InstallJournal(db *sql.DB) error {
 	if e := InstallUnified(db); e != nil {
 		return e
 	}
-	_, err := db.Exec(`CREATE TABLE IF NOT EXISTS task_api_schema(version INTEGER NOT NULL); INSERT INTO task_api_schema(version) SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM task_api_schema);
+	_, err := db.Exec(`CREATE TABLE IF NOT EXISTS task_api_journal_identity(id INTEGER PRIMARY KEY CHECK(id=1),identity TEXT NOT NULL); INSERT OR IGNORE INTO task_api_journal_identity VALUES(1,lower(hex(randomblob(16))));
+CREATE TABLE IF NOT EXISTS task_api_schema(version INTEGER NOT NULL); INSERT INTO task_api_schema(version) SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM task_api_schema);
  CREATE TABLE IF NOT EXISTS task_api_intents(namespace_key TEXT PRIMARY KEY,intent_hash TEXT NOT NULL,receipt_id TEXT NOT NULL UNIQUE,task_id TEXT NOT NULL,native_id TEXT NOT NULL,session_id TEXT NOT NULL,request_id TEXT NOT NULL,scope_id TEXT NOT NULL,generation INTEGER NOT NULL,path TEXT NOT NULL,metadata BLOB,created_at INTEGER NOT NULL);
  CREATE INDEX IF NOT EXISTS task_api_scope ON task_api_intents(scope_id,generation,task_id);
  CREATE TABLE IF NOT EXISTS task_api_outbox(namespace_key TEXT PRIMARY KEY,state TEXT NOT NULL,updated_at INTEGER NOT NULL);
@@ -156,6 +157,16 @@ func ChangeTx(tx *sql.Tx, session, request, kind string) error {
 	return err
 }
 func (j *Journal) Changes(ctx context.Context, after uint64, limit int) ([]Change, uint64, error) {
+	// Floor and page must share one original-store snapshot; prune cannot erase
+	// unread rows between two unrelated reads and masquerade as a complete page.
+	if BoundSQLTransaction(ctx, j.db) == nil {
+		tx, e := j.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+		if e != nil {
+			return nil, 0, e
+		}
+		defer tx.Rollback()
+		ctx = BindSQLTransaction(ctx, j.db, tx)
+	}
 	var floor uint64
 	if err := ReadSQL(ctx, j.db).QueryRowContext(ctx, "SELECT floor FROM task_api_retention WHERE id=1").Scan(&floor); err != nil {
 		return nil, 0, err
@@ -397,4 +408,12 @@ func (j *Journal) SourceRevision(ctx context.Context, session, request string) (
 	var n uint64
 	e := ReadSQL(ctx, j.db).QueryRowContext(ctx, `SELECT COALESCE(MAX(seq),0) FROM task_api_changes WHERE session_id=? AND request_id=?`, session, request).Scan(&n)
 	return n, e
+}
+
+// Identity is a durable original-store epoch. It changes on a genuine new store,
+// not on a service restart; cursors must never silently adopt another database.
+func (j *Journal) Identity(ctx context.Context) (string, error) {
+	var id string
+	e := ReadSQL(ctx, j.db).QueryRowContext(ctx, `SELECT identity FROM task_api_journal_identity WHERE id=1`).Scan(&id)
+	return id, e
 }
