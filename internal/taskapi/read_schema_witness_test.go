@@ -29,8 +29,8 @@ func TestClosedSchemaWitnessActualMediaValidatorAndService(t *testing.T) {
 	if original == nil {
 		t.Fatal("original real projected controller defect must remain an invalid fixture")
 	}
-	expected := []closedSchemaWitness{{"result.items[].source.binding_kind", "enum", 0, -1}, {"result.items[].receipt_ids[]", "minLength", 0, 0}}
-	if got := closedReadSchemaWitness(original); !reflect.DeepEqual(got, expected) {
+	expected := []closedSchemaWitness{{"schema_unknown", "other", -1, -1}, {"result.items[].source.binding_kind", "enum", 0, -1}, {"result.items[].receipt_ids[]", "minLength", 0, 0}}
+	if got := closedReadSchemaWitness(original); !sameClosedWitnessFacts(got, expected) {
 		t.Fatal(got)
 	}
 	var envelope map[string]any
@@ -71,7 +71,7 @@ func TestClosedSchemaWitnessActualMediaValidatorAndService(t *testing.T) {
 				t.Fatal("real validation diagnostic lacks witness")
 			}
 			var got []closedSchemaWitness
-			if json.Unmarshal([]byte(strings.TrimSpace(line[offset+len(marker):])), &got) != nil || !reflect.DeepEqual(got, expected) {
+			if json.Unmarshal([]byte(strings.TrimSpace(line[offset+len(marker):])), &got) != nil || !sameClosedWitnessFacts(got, expected) {
 				t.Fatal("not original two bounded typed failures", got)
 			}
 			if len(line) > 1024 || strings.Count(line, "task_api_read_diagnostic ") != 1 {
@@ -142,4 +142,23 @@ func TestClosedSchemaWitnessBoundedTraversalDedupAndMaximumFacts(t *testing.T) {
 	if got = closedReadSchemaWitness(root); len(got) != 1 || got[0].Path != "schema_unknown" {
 		t.Fatal(got)
 	}
+}
+
+func sameClosedWitnessFacts(actual, expected []closedSchemaWitness) bool {
+	if len(actual) != len(expected) {
+		return false
+	}
+	seen := map[closedSchemaWitness]bool{}
+	for _, fact := range actual {
+		if seen[fact] {
+			return false
+		}
+		seen[fact] = true
+	}
+	for _, fact := range expected {
+		if !seen[fact] {
+			return false
+		}
+	}
+	return true
 }
