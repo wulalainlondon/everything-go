@@ -12,16 +12,16 @@ import (
 
 // Reuse the original canonical queue/history/native guards. A raw DB seal is
 // never enough to expose a result or authorize human resolution.
-func (h *Hub) jarvisResultSeal(ctx context.Context, s *session.Session, request, id string) (messagequeue.TaskSeal, error) {
+func (h *Hub) jarvisResultSeal(ctx context.Context, s *session.Session, request, id string, materialize ...bool) (messagequeue.TaskSeal, error) {
 	missing := errors.New("canonical native terminal result unavailable")
-	entry, found, err := h.messageQueue.Get(s.ID, request)
+	entry, found, err := h.messageQueue.GetContext(ctx, s.ID, request)
 	if err != nil || !found || entry.State != messagequeue.Completed {
 		return messagequeue.TaskSeal{}, missing
 	}
-	if conflict, err := h.messageQueue.NativeConflict(s.ID, request); err != nil || conflict {
+	if conflict, err := h.messageQueue.NativeConflictContext(ctx, s.ID, request); err != nil || conflict {
 		return messagequeue.TaskSeal{}, missing
 	}
-	thread, turn, nativeKnown := h.messageQueue.NativeExecution(s.ID, request)
+	thread, turn, nativeKnown := h.messageQueue.NativeExecutionContext(ctx, s.ID, request)
 	if s.Backend() == backend.Codex && (!nativeKnown || !h.nativeCorrelationKnown(s, thread, request, turn)) {
 		return messagequeue.TaskSeal{}, missing
 	}
@@ -39,7 +39,7 @@ func (h *Hub) jarvisResultSeal(ctx context.Context, s *session.Session, request,
 			return false
 		}
 		if s.Backend() == backend.Claude {
-			proof, found, err := h.messageQueue.ProviderEvidence(s.ID, request)
+			proof, found, err := h.messageQueue.ProviderEvidenceContext(ctx, s.ID, request)
 			return err == nil && found && proof.Backend == backend.Claude && proof.Status == "succeeded" && h.claudeAnchorID(s, proof) != "" && anchor["source_message_id"] == h.claudeAnchorID(s, proof) && execution["provider_session_id"] == proof.ConversationID && execution["provider_token"] == proof.Token && seal.Hash == jarvisTextHash(proof.Text)
 		}
 		return h.nativeSealKnown(s, anchor, request, thread, turn)
@@ -48,6 +48,10 @@ func (h *Hub) jarvisResultSeal(ctx context.Context, s *session.Session, request,
 		if valid(seal) {
 			return seal, nil
 		}
+		return messagequeue.TaskSeal{}, missing
+	}
+	// A writer-held carry check may only read an already sealed native result.
+	if len(materialize) > 0 && !materialize[0] {
 		return messagequeue.TaskSeal{}, missing
 	}
 	// An original inbox assignment uses the existing queue, not a second Task API
@@ -71,7 +75,7 @@ func (h *Hub) jarvisResultSeal(ctx context.Context, s *session.Session, request,
 		text, _ = final["content"].(string)
 		execution = map[string]string{"backend": "codex", "native_thread_id": thread, "native_turn_id": turn}
 	} else if s.Backend() == backend.Claude {
-		proof, found, err := h.messageQueue.ProviderEvidence(s.ID, request)
+		proof, found, err := h.messageQueue.ProviderEvidenceContext(ctx, s.ID, request)
 		if err != nil || !found {
 			return messagequeue.TaskSeal{}, missing
 		}

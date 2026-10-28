@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -390,22 +391,32 @@ func (h *Hub) reconcileDelegation(ctx context.Context, r delegation.Record) erro
 						return errors.New("api_child_metadata_invalid")
 					}
 					intent, e := h.delegations.TaskJournal().OriginalCommandForRequest(ctx, r.ChildSessionID, executionRequest)
-					if e != nil {
-						return e
+					if e == sql.ErrNoRows {
+						// An automation continuation has its own original outbox
+						// receipt, not a fabricated provider command journal entry.
+						sealed, err := h.pipelineDelegationFinal(ctx, r, executionRequest)
+						if err != nil {
+							return err
+						}
+						result = sealed.Text
+					} else {
+						if e != nil {
+							return e
+						}
+						task, e := h.apiTask(ctx, intent)
+						if e != nil {
+							return e
+						}
+						seal, ok := task["seal_id"].(string)
+						if !ok || seal == "" {
+							return nil
+						}
+						sealed, e := h.messageQueue.TaskSeal(ctx, r.ChildSessionID, executionRequest, seal)
+						if e != nil {
+							return e
+						}
+						result = sealed.Text
 					}
-					task, e := h.apiTask(ctx, intent)
-					if e != nil {
-						return e
-					}
-					seal, ok := task["seal_id"].(string)
-					if !ok || seal == "" {
-						return nil
-					}
-					sealed, e := h.messageQueue.TaskSeal(ctx, r.ChildSessionID, executionRequest, seal)
-					if e != nil {
-						return e
-					}
-					result = sealed.Text
 				} else {
 					reader, ok := h.exec.(interface {
 						FinalAnswerForSession(*session.Session, string) (string, bool, error)

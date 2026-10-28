@@ -791,6 +791,12 @@ func (h *Hub) pipelineEffectCurrent(ctx context.Context, i p.Issuer, r p.Record)
 			return e
 		}
 	}
+	if r.Pipeline != nil && r.DefinitionRevision > 1 {
+		if _, e := h.pipelineCurrentFacts(ctx, i, r); e != nil {
+			return e
+		}
+	}
+
 	a := p.Auth(r)
 	if !a.Confirmed || a.Budget.DeadlineMS <= time.Now().UnixMilli() {
 		return unifiedError("authorization_expired")

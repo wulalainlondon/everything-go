@@ -11,6 +11,8 @@ import (
 	"everything-go/internal/taskapi"
 	p "everything-go/internal/taskpipeline"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -208,8 +210,11 @@ func TestPipelinePairedRootDelegationChildNativeAckOriginalReadback(t *testing.T
 	if !response.OK {
 		t.Fatal("actual child native ACK failed", response.Error)
 	}
+	actualAckRequest := append([]byte(nil), raw...)
+	actualAckResponse, _ := json.Marshal(response)
 	parentRead := pipelineRequest(t, "continuation_receipt_get", "", map[string]any{"manager": manager, "id": cont.ID, "original_intent_id": typed.IdempotencyKey, "original_operation": "continuation_ack", "expected_input_hash": unifiedHash(typed)})
-	response = decodePipeline(t, call("POST", "task-api", parentRead, "phone").Body.Bytes())
+	parentHTTP := call("POST", "task-api", parentRead, "phone")
+	response = decodePipeline(t, parentHTTP.Body.Bytes())
 	if !response.OK {
 		t.Fatal("original parent HTTP read failed", response.Error)
 	}
@@ -218,6 +223,32 @@ func TestPipelinePairedRootDelegationChildNativeAckOriginalReadback(t *testing.T
 	json.Unmarshal(raw, &received)
 	if received.Provenance == nil || received.Provenance.Source != target || received.Provenance.RequestID != actual || received.Record.Manager != manager || received.Provenance.ToolCallID != caller.CallID {
 		t.Fatal(received)
+	}
+	if out := os.Getenv("PIPELINE_NATIVE_WIRE_OUT"); out != "" {
+		if e := os.MkdirAll(out, 0700); e != nil {
+			t.Fatal(e)
+		}
+		parentRequest, _ := json.Marshal(parentRead)
+		files := map[string][]byte{"native-ack.request.json": actualAckRequest, "native-ack.typed-response.json": actualAckResponse, "parent-receipt.request.json": parentRequest, "parent-receipt.response.json": append([]byte(nil), parentHTTP.Body.Bytes()...)}
+		refs := map[string]any{}
+		for name, body := range files {
+			path := filepath.Join(out, name)
+			f, e := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+			if e != nil {
+				t.Fatal(e)
+			}
+			if _, e = f.Write(body); e != nil {
+				t.Fatal(e)
+			}
+			if e = f.Close(); e != nil {
+				t.Fatal(e)
+			}
+			refs[name] = map[string]any{"bytes": len(body), "sha256": taskapi.RawDigest(body)}
+		}
+		manifest, _ := json.MarshalIndent(map[string]any{"source_commit": os.Getenv("PIPELINE_SOURCE_COMMIT"), "source_tree_hash": os.Getenv("PIPELINE_SOURCE_TREE"), "raw_test_refs": []string{os.Getenv("PIPELINE_RAW_LOG"), os.Getenv("PIPELINE_RAW_RECEIPT")}, "scope": "isolated original managed child ExecuteTask native ACK; typed native response serialization and original paired HTTP parent receipt bytes; zero real provider/model/device/live effects", "response_http_status": parentHTTP.Code, "files": refs}, "", "  ")
+		if e := os.WriteFile(filepath.Join(out, "manifest.json"), manifest, 0600); e != nil {
+			t.Fatal(e)
+		}
 	}
 	ackInput["manager"] = manager
 	wrong := pipelineRequest(t, "continuation_ack", "r_dddddddddddddddddddddddddddddddd", ackInput)

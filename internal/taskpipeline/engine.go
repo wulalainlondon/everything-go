@@ -242,14 +242,18 @@ func (s *Store) Observe(ctx context.Context, id string, expected uint64, facts [
 			if e = tx.QueryRowContext(ctx, `SELECT count(*) FROM task_pipeline_events WHERE record_id=? AND source_key=? AND (node_id='' OR node_id=?)`, r.ID, key, st.ID).Scan(&count); e != nil {
 				return e
 			}
-			if count != 0 {
+			v := states[st.ID]
+			// Ingress identity is global to this record. A newly authorized DAG
+			// definition may still apply that exact, currently revalidated fact
+			// to its fresh step state; do not import a second observation.
+			if count != 0 && (r.Kind != "pipeline" || r.DefinitionRevision == 1 || v.EvidenceHash == key) {
 				continue
 			}
+			before := v
 			state := "received"
 			if f.Store != "" && f.Sequence > 0 {
 				state = "evidence_verified"
 			}
-			v := states[st.ID]
 			if v.State == "done" || (st.Action != nil && v.State == "failed") {
 				continue
 			}
@@ -271,11 +275,46 @@ func (s *Store) Observe(ctx context.Context, id string, expected uint64, facts [
 			}
 			states[st.ID] = v
 			ev := Event{ID: eventID, RecordID: id, NodeID: st.ID, State: state, Fact: f, AppliedRevision: r.Revision + 1}
-			if _, e = tx.ExecContext(ctx, `INSERT INTO task_pipeline_events(event_id,record_id,node_id,source_key,event) VALUES(?,?,?,?,?)`, ev.ID, id, st.ID, key, encode(ev)); e != nil {
-				return e
+			if count == 0 {
+				if _, e = tx.ExecContext(ctx, `INSERT INTO task_pipeline_events(event_id,record_id,node_id,source_key,event) VALUES(?,?,?,?,?)`, ev.ID, id, st.ID, key, encode(ev)); e != nil {
+					return e
+				}
+				changed = true
+			} else if before != v {
+				// The immutable RecordRevision persists the new definition's
+				// application, referencing the existing original fact/event.
+				changed = true
 			}
-			changed = true
 		}
+	}
+	carry, e := carryCandidates(ctx, tx, r, issuer)
+	if e != nil {
+		return e
+	}
+	for _, proof := range carry {
+		fresh := false
+		for _, f := range facts {
+			if SameFactProof(f, proof.Fact) {
+				fresh = true
+				break
+			}
+		}
+		if !fresh || !MatchCarryInputs(proof.Continuation, facts) {
+			continue
+		}
+		c := proof.Continuation
+		v := states[c.NodeID]
+		before := v
+		v.ID = c.NodeID
+		v.State = "done"
+		if proof.Fact.Terminal == "failed" || proof.Fact.Terminal == "cancelled" || proof.Fact.Terminal == "rejected" {
+			v.State = "failed"
+		}
+		v.EvidenceHash = sourceKey(proof.Fact)
+		v.ContinuationID = c.ID
+		v.Reason = "carried_original_checkpoint"
+		states[c.NodeID] = v
+		changed = changed || before != v
 	}
 	// Iterate topologically until no additional zero-effect eligibility exists.
 	for _, st := range Steps(r) {
@@ -284,6 +323,10 @@ func (s *Store) Observe(ctx context.Context, id string, expected uint64, facts [
 			v = StepState{ID: st.ID, State: "waiting_dependency"}
 		}
 		if (v.State == "satisfied" && r.Watch == nil && st.Action == nil) || v.State == "queued" || v.State == "done" {
+			states[st.ID] = v
+			continue
+		}
+		if v.Reason == "carried_original_checkpoint" && v.State == "failed" {
 			states[st.ID] = v
 			continue
 		}
@@ -334,7 +377,7 @@ func (s *Store) Observe(ctx context.Context, id string, expected uint64, facts [
 								return err
 							}
 							if predecessor.Action != nil {
-								matched, err := actionEdgeCheckpoint(ctx, tx, r, predecessor, x, original, edge.Condition)
+								matched, err := actionEdgeCheckpoint(ctx, tx, r, issuer, predecessor, x, original, edge.Condition)
 								if err != nil {
 									return err
 								}
@@ -376,6 +419,25 @@ func (s *Store) Observe(ctx context.Context, id string, expected uint64, facts [
 			eligible = states["source"].State == "satisfied"
 		}
 		if action != nil && eligible {
+			// A definition edit is not permission to repeat an already issued
+			// node. Preserve the old frozen effect; an operator may explicitly
+			// select its exact execution as a source-only node in the new DAG.
+			if r.Pipeline != nil && r.DefinitionRevision > 1 {
+				var prior string
+				err := tx.QueryRowContext(ctx, `SELECT id FROM task_pipeline_outbox WHERE record_id=? AND definition_revision<? AND node_id=? AND (state NOT IN ('ready','retired','rejected','no_progress') OR json_extract(continuation,'$.original_receipt') IS NOT NULL) ORDER BY definition_revision DESC LIMIT 1`, r.ID, r.DefinitionRevision, st.ID).Scan(&prior)
+				if err != nil && err != sql.ErrNoRows {
+					return err
+				}
+				if err == nil {
+					previous := v
+					v.State = "blocked"
+					v.Reason = "previous_definition_action_requires_exact_execution_reference"
+					v.ContinuationID = prior
+					states[st.ID] = v
+					changed = changed || previous != v
+					continue
+				}
+			}
 			var oldState, oldID, oldTerminal string
 			err := tx.QueryRowContext(ctx, `SELECT state,id,COALESCE(json_extract(continuation,'$.terminal'),'') FROM task_pipeline_outbox WHERE record_id=? AND definition_revision=? AND node_id=?`, r.ID, r.DefinitionRevision, st.ID).Scan(&oldState, &oldID, &oldTerminal)
 			if err == nil {
@@ -653,7 +715,7 @@ func shaText(b []byte) string             { h := sha256.Sum256(b); return hex.En
 // A node's Source is the prerequisite for its action, not the result of that
 // action. Downstream edges may consume only this definition's original action
 // checkpoint, never a sealed readiness/source event from an earlier round.
-func actionEdgeCheckpoint(ctx context.Context, tx *sql.Tx, r Record, st Step, x StepState, event Event, condition string) (bool, error) {
+func actionEdgeCheckpoint(ctx context.Context, tx *sql.Tx, r Record, issuer Issuer, st Step, x StepState, event Event, condition string) (bool, error) {
 	if x.ContinuationID == "" || event.State != "checkpointed" || event.RecordID != r.ID || event.NodeID != st.ID {
 		return false, nil
 	}
@@ -662,7 +724,7 @@ func actionEdgeCheckpoint(ctx context.Context, tx *sql.Tx, r Record, st Step, x 
 	}
 	var raw []byte
 	var state string
-	err := tx.QueryRowContext(ctx, `SELECT continuation,state FROM task_pipeline_outbox WHERE id=? AND record_id=? AND definition_revision=? AND node_id=?`, x.ContinuationID, r.ID, r.DefinitionRevision, st.ID).Scan(&raw, &state)
+	err := tx.QueryRowContext(ctx, `SELECT continuation,state FROM task_pipeline_outbox WHERE id=? AND record_id=? AND node_id=?`, x.ContinuationID, r.ID, st.ID).Scan(&raw, &state)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}
@@ -673,8 +735,17 @@ func actionEdgeCheckpoint(ctx context.Context, tx *sql.Tx, r Record, st Step, x 
 	if err = json.Unmarshal(raw, &c); err != nil {
 		return false, err
 	}
-	if state != "checkpointed" || c.State != "checkpointed" || c.ID != x.ContinuationID || c.RecordID != r.ID || c.DefinitionRevision != r.DefinitionRevision || c.NodeID != st.ID || st.Action == nil || digest(c.Action) != digest(*st.Action) || c.OriginalReceipt == nil {
+	if state != "checkpointed" || c.State != "checkpointed" || c.ID != x.ContinuationID || c.RecordID != r.ID || c.NodeID != st.ID || st.Action == nil || digest(c.Action) != digest(*st.Action) || c.OriginalReceipt == nil {
 		return false, nil
+	}
+	if c.DefinitionRevision != r.DefinitionRevision {
+		if x.Reason != "carried_original_checkpoint" {
+			return false, nil
+		}
+		matched, e := carryCompatible(ctx, tx, r, issuer, st, c)
+		if e != nil || !matched {
+			return false, e
+		}
 	}
 	f := event.Fact
 	receipt := c.OriginalReceipt

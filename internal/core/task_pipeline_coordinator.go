@@ -31,30 +31,8 @@ func (h *Hub) reconcileTaskPipelines(ctx context.Context) {
 		if e = check(ctx); e != nil {
 			continue
 		}
-		facts := []taskpipeline.Fact{}
-		valid := true
-		for _, step := range taskpipeline.Steps(r) {
-			if f, err := h.pipelineWorkRef(ctx, pipelineObserver(i, r), r.Manager.Session, step); err != nil {
-				valid = false
-				break
-			} else if f != nil {
-				facts = append(facts, *f)
-			}
-			if step.Source == nil {
-				continue
-			}
-			f, err := h.pipelineFact(ctx, pipelineObserver(i, r), r.Manager.Session, *step.Source)
-			if err != nil {
-				valid = false
-				break
-			}
-			if err = h.pipelineArtifactFact(ctx, step.Predicate, &f); err != nil {
-				valid = false
-				break
-			}
-			facts = append(facts, f)
-		}
-		if !valid {
+		facts, err := h.pipelineCurrentFacts(ctx, i, r)
+		if err != nil {
 			continue
 		}
 		if e = store.Observe(ctx, r.ID, r.Revision, facts, check); e != nil {
@@ -354,7 +332,7 @@ func (h *Hub) continuePipelineDelegation(ctx context.Context, parent *session.Se
 
 // This reader is only entered from a persisted original writer receipt owned by
 // this authorization. It does not resolve arbitrary private session histories.
-func (h *Hub) pipelineAdmittedFact(ctx context.Context, c taskpipeline.Continuation) (taskpipeline.Fact, error) {
+func (h *Hub) pipelineAdmittedFact(ctx context.Context, c taskpipeline.Continuation, existingOnly ...bool) (taskpipeline.Fact, error) {
 	receipt := c.OriginalReceipt
 	if receipt == nil {
 		return taskpipeline.Fact{}, errors.New("original_receipt_missing")
@@ -376,7 +354,7 @@ func (h *Hub) pipelineAdmittedFact(ctx context.Context, c taskpipeline.Continuat
 	if e != nil {
 		return f, e
 	}
-	if _, found, e := h.messageQueue.NativeStart(entry.SessionID, entry.RequestID); e != nil {
+	if _, found, e := h.messageQueue.NativeStartContext(ctx, entry.SessionID, entry.RequestID); e != nil {
 		return f, e
 	} else if found {
 		f.NativeStart = "observed"
@@ -394,7 +372,7 @@ func (h *Hub) pipelineAdmittedFact(ctx context.Context, c taskpipeline.Continuat
 		f.Terminal = string(entry.State)
 	}
 	if entry.State == messagequeue.Completed {
-		seal, e := h.jarvisResultSeal(ctx, target, entry.RequestID, "")
+		seal, e := h.jarvisResultSeal(ctx, target, entry.RequestID, "", len(existingOnly) == 0 || !existingOnly[0])
 		if e != nil {
 			return f, e
 		}
@@ -507,4 +485,125 @@ func pipelineSnapshotMatches(text string, c taskpipeline.Continuation) bool {
 		return false
 	}
 	return snapshot.Record.ID == c.RecordID && snapshot.Record.DefinitionRevision == c.DefinitionRevision && snapshot.Continuation.ID == c.ID && snapshot.Continuation.RequestID == c.RequestID && taskapi.Digest(snapshot.Continuation.Action) == taskapi.Digest(c.Action)
+}
+
+// Fresh source and carried execution proofs are sampled through the original
+// store readers. Writer callbacks repeat this exact read under their SQL fence.
+func (h *Hub) pipelineCurrentFacts(ctx context.Context, i taskpipeline.Issuer, r taskpipeline.Record) ([]taskpipeline.Fact, error) {
+	facts := []taskpipeline.Fact{}
+	for _, step := range taskpipeline.Steps(r) {
+		if f, e := h.pipelineWorkRef(ctx, pipelineObserver(i, r), r.Manager.Session, step); e != nil {
+			return nil, e
+		} else if f != nil {
+			facts = append(facts, *f)
+		}
+		if step.Source == nil {
+			continue
+		}
+		f, e := h.pipelineFact(ctx, pipelineObserver(i, r), r.Manager.Session, *step.Source)
+		if e != nil {
+			return nil, e
+		}
+		if e = h.pipelineArtifactFact(ctx, step.Predicate, &f); e != nil {
+			return nil, e
+		}
+		facts = append(facts, f)
+	}
+	carry, e := h.messageQueue.PipelineStore().CarryCandidates(ctx, r, i)
+	if e != nil {
+		return nil, e
+	}
+	for _, proof := range carry {
+		current, e := h.pipelineAdmittedFact(ctx, proof.Continuation, true)
+		if e != nil {
+			return nil, e
+		}
+		if !taskpipeline.SameFactProof(current, proof.Fact) {
+			return nil, taskpipeline.ErrScope
+		}
+		facts = append(facts, current)
+	}
+	// A current definition may retain an original selected input only while all
+	// those exact inputs still have canonical proof (including upstream carries).
+	for _, proof := range carry {
+		if !taskpipeline.MatchCarryInputs(proof.Continuation, facts) {
+			return nil, taskpipeline.ErrScope
+		}
+	}
+	for _, step := range r.Steps {
+		if step.Reason != "carried_original_checkpoint" {
+			continue
+		}
+		found := false
+		for _, proof := range carry {
+			if proof.Continuation.ID == step.ContinuationID && proof.Continuation.NodeID == step.ID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return nil, taskpipeline.ErrScope
+		}
+	}
+	return facts, nil
+}
+
+// Only an original pipeline-admitted retained round can use this reader. Other
+// API children still require their original TaskAPI command journal. This reads
+// the existing immutable native TaskSeal, never a provider transcript or text.
+func (h *Hub) pipelineDelegationFinal(ctx context.Context, d delegation.Record, request string) (messagequeue.TaskSeal, error) {
+	fail := errors.New("pipeline_original_final_unverified")
+	if h.messageQueue == nil || request != d.ChildRequestID {
+		return messagequeue.TaskSeal{}, fail
+	}
+	c, _, _, found, e := h.messageQueue.PipelineStore().ExecutionContext(ctx, d.ChildSessionID, request)
+	if e != nil {
+		return messagequeue.TaskSeal{}, e
+	}
+	if !found || c.OriginalReceipt == nil {
+		return messagequeue.TaskSeal{}, fail
+	}
+	receipt := c.OriginalReceipt
+	if c.Action.Kind != "delegation_continue" || receipt.Kind != "delegation_round" || receipt.NativeID != d.ID || receipt.Session != d.ChildSessionID || receipt.Request != request || receipt.Key != c.ID || receipt.InputHash != d.IntentHash || c.RequestID != d.OriginRequestID || c.ID != d.ToolCallID || d.IntentHash != taskapi.Digest(c.Action) {
+		return messagequeue.TaskSeal{}, fail
+	}
+	frozen, issuer, e := h.messageQueue.PipelineStore().OriginalDefinition(ctx, c.RecordID, c.DefinitionRevision)
+	if e != nil {
+		return messagequeue.TaskSeal{}, e
+	}
+	round, roundFound, e := h.delegations.Round(ctx, d.ID)
+	if e != nil {
+		return messagequeue.TaskSeal{}, e
+	}
+	sourceThread, sourceRevision, bound, e := h.delegations.SourceBinding(ctx, d.ID)
+	if e != nil {
+		return messagequeue.TaskSeal{}, e
+	}
+	if !roundFound || frozen.Manager.Session != d.ParentSessionID || c.Action.Target.Session != d.ChildSessionID || round.Authority != h.cfg.InstanceID || receipt.Authority != h.cfg.InstanceID || c.Action.Target.Authority != h.cfg.InstanceID || !bound || sourceThread != frozen.Manager.Thread || sourceRevision != frozen.Manager.Revision {
+		return messagequeue.TaskSeal{}, fail
+	}
+	if e = h.pipelineIssuerCurrent(ctx, issuer, frozen); e != nil {
+		return messagequeue.TaskSeal{}, e
+	}
+	if e = h.unifiedTarget(pipelineTarget(c.Action.Target), false); e != nil {
+		return messagequeue.TaskSeal{}, e
+	}
+	fact, e := h.pipelineAdmittedFact(ctx, c, true)
+	if e != nil {
+		return messagequeue.TaskSeal{}, e
+	}
+	if fact.Source.RoundID != d.ID || !taskpipeline.PredicateMet(taskpipeline.Predicate{Kind: "success_sealed"}, fact) {
+		return messagequeue.TaskSeal{}, fail
+	}
+	seal, e := h.messageQueue.TaskSeal(ctx, d.ChildSessionID, request, fact.SealID)
+	if e != nil {
+		return messagequeue.TaskSeal{}, e
+	}
+	if seal.Hash != fact.FullHash || taskapi.RawDigest([]byte(seal.Text)) != fact.FullHash {
+		return messagequeue.TaskSeal{}, fail
+	}
+	if e = h.pipelineIssuerCurrent(ctx, issuer, frozen); e != nil {
+		return messagequeue.TaskSeal{}, e
+	}
+	return seal, nil
 }
