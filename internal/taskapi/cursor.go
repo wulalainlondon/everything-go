@@ -217,25 +217,44 @@ func (s SnapshotEngine) Page(ctx context.Context, scope ReadScope, views []strin
 	// rc1 envelope (even a 512-character fully JSON-escaped correlation ID is
 	// smaller); list's wrapper is smaller than the snapshot wrapper.
 	const pageBytes = taskcontract.MaxBytes - 4096
-	for {
-		encoded, encodeErr := json.Marshal(result)
+	// Measure each body once. Re-marshalling every shrinking prefix would make
+	// a legal 100-row page quadratic in the size of private task contents.
+	prefixBytes := make([]int, len(result.Items)+1)
+	for i, item := range result.Items {
+		encoded, encodeErr := json.Marshal(item)
 		if encodeErr != nil {
 			return SnapshotPage{}, encodeErr
 		}
-		if len(encoded) <= pageBytes {
-			return result, nil
+		prefixBytes[i+1] = prefixBytes[i] + len(encoded)
+	}
+	for count := len(result.Items); ; count-- {
+		page := result
+		page.Items = []any{}
+		page.HasMore = more || count < len(result.Items)
+		page.NextPageCursor = ""
+		if page.HasMore {
+			p.After = rows[count-1].Key
+			page.NextPageCursor, err = s.Codec.encode(p)
+			if err != nil {
+				return SnapshotPage{}, err
+			}
 		}
-		if len(result.Items) <= 1 {
+		header, encodeErr := json.Marshal(page)
+		if encodeErr != nil {
+			return SnapshotPage{}, encodeErr
+		}
+		commas := 0
+		if count > 0 {
+			commas = count - 1
+		}
+		if len(header)+prefixBytes[count]+commas <= pageBytes {
+			page.Items = result.Items[:count]
+			return page, nil
+		}
+		if count <= 1 {
 			// Never skip a too-large original row or claim an empty complete
-			// result. Its original record remains available through exact reads.
+			// result. Do not change the original stored record.
 			return SnapshotPage{}, Failure("unsupported", "known_none", "read_capabilities")
-		}
-		result.Items = result.Items[:len(result.Items)-1]
-		result.HasMore = true
-		p.After = rows[len(result.Items)-1].Key
-		result.NextPageCursor, err = s.Codec.encode(p)
-		if err != nil {
-			return SnapshotPage{}, err
 		}
 	}
 }

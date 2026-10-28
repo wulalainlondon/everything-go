@@ -280,3 +280,40 @@ func TestSnapshotOversizedSingleRowCannotBecomeEmptyOrSkip(t *testing.T) {
 		})
 	}
 }
+
+type measuredSnapshotValue struct {
+	count *int
+	value string
+}
+
+func (v measuredSnapshotValue) MarshalJSON() ([]byte, error) {
+	*v.count++
+	return json.Marshal(v.value)
+}
+
+type measuredSnapshotSource struct{ rows []SnapshotRow }
+
+func (s measuredSnapshotSource) Capture(context.Context, ReadScope) (Freeze, error) {
+	return Freeze{"measured", 10000, []Watermark{{"original", 1}}}, nil
+}
+func (s measuredSnapshotSource) Page(context.Context, ReadScope, Freeze, string, int) ([]SnapshotRow, bool, error) {
+	return s.rows, false, nil
+}
+
+func TestSnapshotByteMeasurementEncodesEachOriginalBodyOnce(t *testing.T) {
+	codec, _ := NewCursorCodec(make([]byte, 32), func() time.Time { return time.UnixMilli(1) })
+	calls := 0
+	source := measuredSnapshotSource{}
+	for i := 0; i < 100; i++ {
+		source.rows = append(source.rows, SnapshotRow{fmt.Sprintf("task-%03d", i), measuredSnapshotValue{&calls, strings.Repeat("繁<&", 1600)}})
+	}
+	page, err := (SnapshotEngine{codec, source}).Page(context.Background(), ReadScope{"authority", "paired", "filter", 1}, []string{"self"}, "", 100)
+	if err != nil || !page.HasMore || len(page.Items) == 0 || calls != 100 {
+		t.Fatal("byte sizing repeatedly serialized private row bodies", len(page.Items), calls, err)
+	}
+	op := "snapshot"
+	raw, _ := json.Marshal(Response{Type: "task_api_response", Version: taskcontract.Version, CorrelationID: strings.Repeat("&", 512), Operation: &op, OK: true, Result: page})
+	if len(raw) > taskcontract.MaxBytes {
+		t.Fatal("measured page exceeds real envelope bound", len(raw))
+	}
+}

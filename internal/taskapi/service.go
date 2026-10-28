@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"log"
 	"strconv"
 	"unicode/utf8"
 
@@ -151,6 +152,7 @@ func (s *Service) Execute(ctx context.Context, caller BoundCaller, raw []byte) R
 		result, err = s.gateway.Read(ctx, command)
 	}
 	if err != nil {
+		readDiagnostic(request, binding.TaskSchemaHash, "gateway_read", err, 0)
 		return fail(err)
 	}
 	// Gateway reads may perform slow canonical I/O. A revoked invocation never
@@ -185,13 +187,50 @@ func (s *Service) Execute(ctx context.Context, caller BoundCaller, raw []byte) R
 	response.Result = result
 	response.RequestVersion = nil
 	encoded, marshalErr := json.Marshal(response)
-	if marshalErr != nil || validator.Validate(encoded, "Response") != nil {
+	validationErr := marshalErr
+	if marshalErr != nil {
+		readDiagnostic(request, binding.TaskSchemaHash, "response_marshal", marshalErr, 0)
+	} else {
+		validationErr = validator.Validate(encoded, "Response")
+		if validationErr != nil {
+			readDiagnostic(request, binding.TaskSchemaHash, "response_validate", validationErr, len(encoded))
+		}
+	}
+	if validationErr != nil {
 		response.OK = false
 		response.Result = nil
 		response.RequestVersion = &request.Version
 		return fail(Failure("unknown_acceptance", "unknown", "lookup_original"))
 	}
 	return response
+}
+
+// Only these two read routes emit bounded technical diagnostics. Never format
+// an error, input, result, identity or raw correlation: validators and drivers
+// may include private values in their error strings.
+func readDiagnostic(request Request, schema, stage string, err error, size int) {
+	if request.Operation != "list" && request.Operation != "snapshot" {
+		return
+	}
+	if stage != "gateway_read" && stage != "response_marshal" && stage != "response_validate" {
+		return
+	}
+	reason := "other"
+	switch {
+	case errors.Is(err, context.Canceled):
+		reason = "context_cancelled"
+	case errors.Is(err, context.DeadlineExceeded):
+		reason = "context_deadline"
+	case stage == "response_validate" && size > taskcontract.MaxBytes:
+		reason = "frame_bound"
+	case stage == "response_validate":
+		reason = "schema"
+	}
+	if schema != taskcontract.MediaHash() {
+		schema = taskcontract.Hash()
+	}
+	digest := sha256.Sum256([]byte(request.CorrelationID))
+	log.Printf("task_api_read_diagnostic correlation_sha256=%x operation=%s stage=%s reason=%s response_bytes=%d contract_sha256=%s", digest, request.Operation, stage, reason, size, schema)
 }
 
 func MakeNamespace(c VerifiedContext, l Locator, r Request) (Namespace, error) {
