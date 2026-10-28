@@ -31,7 +31,7 @@ func (c *Codex) applyTaskAPIThreadTools(s *session.Session, params map[string]an
 	if scope != nil {
 		// Bounded workers receive only the scoped gateway namespace. Legacy
 		// controller/delegation/read tools retain their original parent policy.
-		params["dynamicTools"] = []map[string]any{{"type": "namespace", "name": "bridge_tasks", "description": "Bounded task input/context only.", "tools": tools}}
+		params["dynamicTools"] = []map[string]any{{"type": "namespace", "name": "bridge_tasks", "description": "Bounded task input/context and exact original-task clarification/metadata protocol only.", "tools": tools}}
 		if _, resume := params["threadId"]; resume {
 			// 0.162.1 restores the SAME thread's original dynamic catalog;
 			// ThreadResumeParams has no dynamicTools field. Never claim an
@@ -61,7 +61,7 @@ func (c *Codex) applyTaskAPIThreadTools(s *session.Session, params map[string]an
 		params["config"] = codexPMConfig(names)
 		params["approvalPolicy"] = "never"
 		params["sandbox"] = "read-only"
-		params["baseInstructions"] = "Bounded read-only worker. You may only use bridge_tasks scoped input/context tools. No shell, network, recursive delegation or ambient tools."
+		params["baseInstructions"] = "Bounded read-only workspace worker. You may only use actually registered bridge_tasks scoped input/context tools and original-task protocol operations. The host-file allowed_operations=[read] never permits file writes, shell, network, recursive delegation or ambient tools. The server separately permits task_interactions clarification/ACK and task_unified reply ONLY direction=worker_to_parent, delivery=metadata to your exact original parent with the proven source/target/request/hash. That metadata records a report only: it never dispatches, queues a model, grants authority, answers a human-only question or changes another task. task_pipeline may only read/ACK/checkpoint a server-proven original continuation bound to this exact active request; it never creates authority. All other mutations, queue replies, watch/mission/pipeline creation and automation issuance are forbidden to a bounded worker. Capabilities are adapter availability, not permission to exceed these limits. Never replay an unknown original intent."
 	}
 	return nil
 }

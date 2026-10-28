@@ -77,6 +77,13 @@ func (h *Hub) interactionBindingPath(ctx context.Context, child, request string,
 			return ti.Binding{}, e
 		}
 		if found {
+			// Logical identity belongs to immutable round metadata, not the base
+			// session_delegations row returned by ByChildRequest. Never adopt the
+			// latest round or infer a logical owner from a child/name.
+			round, roundFound, roundErr := h.delegations.Round(ctx, r.ID)
+			if roundErr != nil || !roundFound || round.ID != r.ID || round.LogicalID == "" || round.Authority != "" && round.Authority != h.cfg.InstanceID {
+				return ti.Binding{}, errors.New("interaction_round_unbound")
+			}
 			thread, rev, bound, e := h.delegations.SourceBinding(ctx, r.ID)
 			if e != nil || !bound || thread == "" {
 				return ti.Binding{}, errors.New("interaction_source_unbound")
@@ -93,7 +100,7 @@ func (h *Hub) interactionBindingPath(ctx context.Context, child, request string,
 			if e != nil || ct == "" || ct != s.ResumeID() {
 				return ti.Binding{}, errors.New("interaction_child_unbound")
 			}
-			return ti.Binding{Authority: h.cfg.InstanceID, Kind: "delegation", RelationID: r.ID, LogicalID: r.LogicalID, Child: child, ChildThread: ct, ChildRequest: request, ChildRevision: cr, Parent: r.ParentSessionID, ParentRequest: r.OriginRequestID, ParentThread: thread, ParentRevision: rev, ParentAuthority: h.cfg.InstanceID}, nil
+			return ti.Binding{Authority: h.cfg.InstanceID, Kind: "delegation", RelationID: r.ID, LogicalID: round.LogicalID, Child: child, ChildThread: ct, ChildRequest: request, ChildRevision: cr, Parent: r.ParentSessionID, ParentRequest: r.OriginRequestID, ParentThread: thread, ParentRevision: rev, ParentAuthority: h.cfg.InstanceID}, nil
 		}
 	}
 	if h.dispatches != nil {
@@ -138,7 +145,7 @@ func (h *Hub) validInteraction(ctx context.Context, r ti.Record) error {
 		return errors.New("interaction_child_changed")
 	}
 	current, e := h.interactionBinding(ctx, b.Child, b.ChildRequest)
-	if e != nil || current != b {
+	if e != nil || !interactionBindingCompatible(b, current) {
 		return errors.New("interaction_relation_changed")
 	}
 	if b.ParentAuthority == h.cfg.InstanceID {
@@ -158,6 +165,20 @@ func (h *Hub) validInteraction(ctx context.Context, r ti.Record) error {
 		}
 	}
 	return nil
+}
+
+// Version-zero persisted bindings omitted LogicalID. Compatibility is confined
+// to that field and an otherwise identical, currently proven ORIGINAL round.
+// This never mutates the question, its hash, or any provider/source binding.
+func interactionBindingCompatible(saved, proven ti.Binding) bool {
+	if saved == proven {
+		return true
+	}
+	if saved.Kind != "delegation" || proven.Kind != "delegation" || saved.LogicalID != "" || proven.LogicalID == "" {
+		return false
+	}
+	proven.LogicalID = ""
+	return saved == proven
 }
 func (h *Hub) interactionVisible(ctx context.Context, c taskapi.VerifiedContext, r ti.Record) bool {
 	// Paired humans may inspect an orphan receipt through a still-visible local

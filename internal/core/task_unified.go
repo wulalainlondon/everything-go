@@ -201,7 +201,10 @@ func (h *Hub) serveUnifiedTask(w http.ResponseWriter, r *http.Request, device st
 		http.Error(w, "paired principal changed", 403)
 		return
 	}
-	response, handled := h.executeUnified(r.Context(), caller, raw)
+	response, handled := h.executePipeline(r.Context(), caller, raw)
+	if !handled {
+		response, handled = h.executeUnified(r.Context(), caller, raw)
+	}
 	if !handled {
 		op := "capabilities"
 		response = taskapi.Response{Type: "task_api_unified_response", Version: unified.Version, Authority: h.cfg.InstanceID, CorrelationID: "invalid-request", Operation: &op, Error: taskapi.Failure("invalid_argument", "known_none", "refresh_snapshot")}

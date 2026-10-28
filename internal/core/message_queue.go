@@ -23,6 +23,8 @@ import (
 )
 
 type queuedPayload struct {
+	PipelineID string `json:"pipeline_id,omitempty"`
+
 	UnifiedBinding            *unifiedInputBinding       `json:"unified_binding,omitempty"`
 	OwnerCredentialGeneration uint64                     `json:"owner_credential_generation,omitempty"`
 	WorkspaceTask             *workspaceQueueBinding     `json:"workspace_task,omitempty"`
@@ -167,7 +169,11 @@ func (h *Hub) enqueueChatMessageExpectedInherited(c *Client, cmd clientproto.Com
 		return false
 	}
 	intentHash := sha256.Sum256(intent)
-	payload, err := json.Marshal(queuedPayload{VoiceContext: cmd.VoiceContext, VoiceID: cmd.VoiceID, VoiceThread: cmd.ThreadID, PartnerRole: role, CallbackOnComplete: cmd.CallbackOnComplete, VisualUserHash: userHash, VisualEffectiveHash: effectiveHash, VisualPresentation: cmd.VisualPresentation, MessagePurpose: cmd.MessagePurpose, OwnerDevice: owner, CallbackBinding: callbackBinding(c), Origin: cmd.TaskOrigin, Content: content, Images: cmd.Images, Files: files, Configuration: &config, ExpectedTarget: expected})
+	pipelineID := ""
+	if c.pipelineAdmission != nil {
+		pipelineID = c.pipelineAdmission.ID
+	}
+	payload, err := json.Marshal(queuedPayload{PipelineID: pipelineID, VoiceContext: cmd.VoiceContext, VoiceID: cmd.VoiceID, VoiceThread: cmd.ThreadID, PartnerRole: role, CallbackOnComplete: cmd.CallbackOnComplete, VisualUserHash: userHash, VisualEffectiveHash: effectiveHash, VisualPresentation: cmd.VisualPresentation, MessagePurpose: cmd.MessagePurpose, OwnerDevice: owner, CallbackBinding: callbackBinding(c), Origin: cmd.TaskOrigin, Content: content, Images: cmd.Images, Files: files, Configuration: &config, ExpectedTarget: expected})
 	if err != nil {
 		h.queueError(c, cmd, "invalid_message", err.Error())
 		return false
@@ -186,7 +192,7 @@ func (h *Hub) enqueueChatMessageExpectedInherited(c *Client, cmd clientproto.Com
 			return false
 		}
 	}
-	e, inserted, err := h.messageQueue.Enqueue(messagequeue.Entry{SessionID: cmd.SessionID, RequestID: cmd.RequestID, Content: truncateGraphemes(content, 4000), ImageCount: len(cmd.Images), FileNames: names, Payload: payload, PayloadHash: hex.EncodeToString(intentHash[:]), Inherited: inherited})
+	e, inserted, err := h.messageQueue.Enqueue(messagequeue.Entry{Pipeline: c.pipelineAdmission, SessionID: cmd.SessionID, RequestID: cmd.RequestID, Content: truncateGraphemes(content, 4000), ImageCount: len(cmd.Images), FileNames: names, Payload: payload, PayloadHash: hex.EncodeToString(intentHash[:]), Inherited: inherited})
 	if err != nil {
 		if errors.Is(err, messagequeue.ErrRejected) {
 			h.queueError(c, cmd, "message_rejected", "這則訊息先前已被拒絕，不會自動重送。請確認接管狀態後，以新訊息送出。")
@@ -294,6 +300,13 @@ func (h *Hub) runQueuedMessage(s *session.Session, requestID string) {
 		return
 	}
 
+	// A server-owned authorization is checked again at native consumption.
+	if payload.PipelineID != "" {
+		if err := h.pipelineSendGuard(context.Background(), payload.PipelineID, s.ID, requestID); err != nil {
+			h.Emit(backend.NewError(s.ID, requestID, "pipeline_authorization_retired", err.Error()))
+			return
+		}
+	}
 	// Recheck after activation/events/preview writes, immediately at Send.
 	if !payload.ExpectedTarget.matches(s) || (payload.ExpectedTarget != nil && payload.Configuration != nil && session.ConfigurationFrom(s.Snapshot()) != *payload.Configuration) {
 		h.Emit(backend.NewError(s.ID, requestID, "dispatch_target_changed", "Target changed before Send"))

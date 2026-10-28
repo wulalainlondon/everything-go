@@ -1461,3 +1461,10 @@ func newID(prefix string) string {
 	}
 	return prefix + "_" + hex.EncodeToString(b)
 }
+
+// Exact existing link only; this does not grant a global mission project access.
+func (s *Store) PipelineSessionLinked(ctx context.Context, item, session, thread string) (bool, error) {
+	var found bool
+	e := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM work_item_session_links WHERE work_item_id=? AND session_id=? AND thread_id_snapshot=? AND unlinked_at IS NULL)`, item, session, thread).Scan(&found)
+	return found, e
+}

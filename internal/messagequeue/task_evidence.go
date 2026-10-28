@@ -49,6 +49,17 @@ func (s *Store) RecordNativeAcceptance(session, request, thread, turn string) er
 		if _, err = tx.Exec(`INSERT INTO task_native_acceptance(session_id,request_id,thread_id,turn_id) VALUES(?,?,?,?)`, session, request, thread, turn); err != nil {
 			return err
 		}
+		if entry, found, e := lookup(tx, session, request); e != nil {
+			return e
+		} else if found {
+			effective, e := effectiveInput(context.Background(), tx, entry)
+			if e != nil {
+				return e
+			}
+			if _, e = tx.Exec(`INSERT INTO task_pipeline_native_inputs VALUES(?,?,?,?,?,?)`, session, request, thread, turn, effective.ContentRevision, effective.EffectiveHash); e != nil {
+				return e
+			}
+		}
 		return taskapi.ChangeTx(tx, session, request, "native_acceptance")
 	})
 	if err == nil && conflict {

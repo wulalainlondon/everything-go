@@ -19,6 +19,7 @@ func (h *Hub) StartTaskCoordinator(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
+				h.reconcileTaskPipelines(ctx)
 				for path, j := range h.apiJournals() {
 					if path == "pm_v1" {
 						continue

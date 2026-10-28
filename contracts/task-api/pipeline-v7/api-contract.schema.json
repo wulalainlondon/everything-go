@@ -1,0 +1,3071 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:bridge:task-api:pipeline-v7",
+  "$ref": "#/$defs/Request",
+  "$defs": {
+    "Identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "authority_instance_id": {
+          "type": "string",
+          "maxLength": 256,
+          "minLength": 1
+        },
+        "session_id": {
+          "type": "string",
+          "maxLength": 256,
+          "minLength": 1
+        },
+        "thread_id": {
+          "type": "string",
+          "maxLength": 256,
+          "minLength": 1
+        },
+        "config_revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "authority_instance_id",
+        "session_id",
+        "thread_id",
+        "config_revision"
+      ]
+    },
+    "Locator": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "controller",
+            "delegation",
+            "request",
+            "workspace"
+          ]
+        },
+        "authority_instance_id": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "task_id": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "native_id": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "round_id": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "session_id": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "request_id": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "thread_id": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "config_revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "kind",
+        "authority_instance_id",
+        "task_id",
+        "native_id",
+        "round_id",
+        "session_id",
+        "request_id",
+        "thread_id",
+        "config_revision"
+      ]
+    },
+    "Predicate": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "success_sealed",
+            "terminal",
+            "qa_pass",
+            "artifact_available",
+            "human_decision"
+          ]
+        },
+        "input_revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "input_hash": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "artifact_hash": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "decision_ref": {
+          "type": "string",
+          "maxLength": 32768
+        }
+      },
+      "required": [
+        "kind",
+        "input_revision",
+        "input_hash",
+        "artifact_hash",
+        "decision_ref"
+      ]
+    },
+    "Action": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "session_resume",
+            "delegation_continue"
+          ]
+        },
+        "target": {
+          "$ref": "#/$defs/Identity"
+        },
+        "original_task": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Locator"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "instruction": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "instruction_hash": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "disclosure": {
+          "type": "string",
+          "enum": [
+            "references_only",
+            "authorized_result"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "target",
+        "original_task",
+        "instruction",
+        "instruction_hash",
+        "disclosure"
+      ]
+    },
+    "Budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "deadline_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "max_effects": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 32
+        },
+        "max_model_turns": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 32
+        },
+        "max_no_progress": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8
+        }
+      },
+      "required": [
+        "deadline_ms",
+        "max_effects",
+        "max_model_turns",
+        "max_no_progress"
+      ]
+    },
+    "Authorization": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "source_ref": {
+          "type": "string",
+          "maxLength": 256,
+          "minLength": 1
+        },
+        "confirmed": {
+          "type": "boolean"
+        },
+        "budget": {
+          "$ref": "#/$defs/Budget"
+        }
+      },
+      "required": [
+        "source_ref",
+        "confirmed",
+        "budget"
+      ]
+    },
+    "WorkItemRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "item_id": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "project_id",
+        "item_id",
+        "revision"
+      ]
+    },
+    "Step": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Locator"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "predicate": {
+          "$ref": "#/$defs/Predicate"
+        },
+        "action": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Action"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "work_item": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkItemRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "required",
+        "source",
+        "predicate",
+        "action",
+        "work_item"
+      ]
+    },
+    "Mission": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "recovery_action": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Action"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "goal": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "completion": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Step"
+          },
+          "maxItems": 128
+        },
+        "authorization": {
+          "$ref": "#/$defs/Authorization"
+        }
+      },
+      "required": [
+        "recovery_action",
+        "goal",
+        "completion",
+        "steps",
+        "authorization"
+      ]
+    },
+    "Watch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/Locator"
+        },
+        "predicate": {
+          "$ref": "#/$defs/Predicate"
+        },
+        "destination": {
+          "$ref": "#/$defs/Identity"
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "notify_only",
+            "resume_authorized"
+          ]
+        },
+        "catch_up": {
+          "type": "boolean"
+        },
+        "action": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Action"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "authorization": {
+          "$ref": "#/$defs/Authorization"
+        }
+      },
+      "required": [
+        "source",
+        "predicate",
+        "destination",
+        "mode",
+        "catch_up",
+        "action",
+        "authorization"
+      ]
+    },
+    "Edge": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "from": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 32768
+          },
+          "maxItems": 128
+        },
+        "to": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "condition": {
+          "type": "string",
+          "enum": [
+            "on_success",
+            "on_terminal",
+            "on_QA_PASS",
+            "on_human_decision"
+          ]
+        },
+        "join": {
+          "type": "string",
+          "enum": [
+            "all_success",
+            "all_terminal",
+            "any_success"
+          ]
+        },
+        "output": {
+          "type": "string",
+          "enum": [
+            "references_only",
+            "authorized_result"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "from",
+        "to",
+        "condition",
+        "join",
+        "output"
+      ]
+    },
+    "Pipeline": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "nodes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Step"
+          },
+          "maxItems": 128
+        },
+        "edges": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Edge"
+          },
+          "maxItems": 128
+        },
+        "authorization": {
+          "$ref": "#/$defs/Authorization"
+        }
+      },
+      "required": [
+        "name",
+        "nodes",
+        "edges",
+        "authorization"
+      ]
+    },
+    "Checkpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "step_id": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "processed_event_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 32768
+          },
+          "maxItems": 128
+        },
+        "progress_hash": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "outcome": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "blockers": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 32768
+          },
+          "maxItems": 128
+        },
+        "request_id": {
+          "type": "string",
+          "maxLength": 32768
+        }
+      },
+      "required": [
+        "revision",
+        "step_id",
+        "processed_event_ids",
+        "progress_hash",
+        "outcome",
+        "blockers",
+        "request_id"
+      ]
+    },
+    "StepState": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "state": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "evidence_hash": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "continuation_id": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 32768
+        }
+      },
+      "required": [
+        "id",
+        "state",
+        "evidence_hash",
+        "continuation_id",
+        "reason"
+      ]
+    },
+    "Record": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "access_mode": {
+          "type": "string",
+          "enum": [
+            "owner",
+            "read_only_projection"
+          ]
+        },
+        "no_progress_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "recovery_generation": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "id": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "mission",
+            "watch",
+            "pipeline"
+          ]
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "definition_revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "state": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "manager": {
+          "$ref": "#/$defs/Identity"
+        },
+        "mission": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Mission"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "watch": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Watch"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pipeline": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Pipeline"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "checkpoint": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Checkpoint"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/StepState"
+          },
+          "maxItems": 128
+        },
+        "blocked_reason": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "created_at_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "updated_at_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "access_mode",
+        "no_progress_count",
+        "recovery_generation",
+        "id",
+        "kind",
+        "revision",
+        "definition_revision",
+        "state",
+        "manager",
+        "mission",
+        "watch",
+        "pipeline",
+        "checkpoint",
+        "steps",
+        "blocked_reason",
+        "created_at_ms",
+        "updated_at_ms"
+      ]
+    },
+    "Fact": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "consumed_input_revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "consumed_input_hash": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "evidence_status": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "source": {
+          "$ref": "#/$defs/Locator"
+        },
+        "store": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "input_revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "input_hash": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "admission": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "native_start": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "terminal": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "final": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "seal_id": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "full_hash": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "total_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "qa": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "qa_round_id": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "qa_owner_round_id": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "artifact_hash": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "decision_ref": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "observed_at_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "consumed_input_revision",
+        "consumed_input_hash",
+        "evidence_status",
+        "source",
+        "store",
+        "sequence",
+        "input_revision",
+        "input_hash",
+        "admission",
+        "native_start",
+        "terminal",
+        "final",
+        "seal_id",
+        "full_hash",
+        "total_bytes",
+        "qa",
+        "qa_round_id",
+        "qa_owner_round_id",
+        "artifact_hash",
+        "decision_ref",
+        "observed_at_ms"
+      ]
+    },
+    "Event": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "record_id": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "node_id": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "state": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "fact": {
+          "$ref": "#/$defs/Fact"
+        },
+        "applied_revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 32768
+        }
+      },
+      "required": [
+        "id",
+        "sequence",
+        "record_id",
+        "node_id",
+        "state",
+        "fact",
+        "applied_revision",
+        "reason"
+      ]
+    },
+    "NativeOperationRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "intent_id": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "operation": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "input_hash": {
+          "type": "string",
+          "maxLength": 32768
+        }
+      },
+      "required": [
+        "intent_id",
+        "operation",
+        "input_hash"
+      ]
+    },
+    "Continuation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "native_operations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NativeOperationRef"
+          },
+          "maxItems": 128
+        },
+        "original_node_id": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "start_progress_hash": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "id": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "record_id": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "definition_revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "node_id": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "state": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "action": {
+          "$ref": "#/$defs/Action"
+        },
+        "request_id": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Fact"
+          },
+          "maxItems": 128
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "fence": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "original_receipt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EffectReceipt"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "native_start": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "terminal": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "checkpoint_revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "native_operations",
+        "original_node_id",
+        "generation",
+        "start_progress_hash",
+        "id",
+        "record_id",
+        "definition_revision",
+        "node_id",
+        "state",
+        "action",
+        "request_id",
+        "evidence",
+        "attempt",
+        "fence",
+        "reason",
+        "original_receipt",
+        "native_start",
+        "terminal",
+        "checkpoint_revision"
+      ]
+    },
+    "EffectReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "session_input",
+            "delegation_round"
+          ]
+        },
+        "authority_instance_id": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "session_id": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "request_id": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "native_record_id": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "operation_key": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "input_hash": {
+          "type": "string",
+          "maxLength": 256
+        }
+      },
+      "required": [
+        "kind",
+        "authority_instance_id",
+        "session_id",
+        "request_id",
+        "native_record_id",
+        "operation_key",
+        "input_hash"
+      ]
+    },
+    "NativeProvenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/Identity"
+        },
+        "request_id": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "native_turn_id": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "tool_call_id": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "process_generation": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "correlation_id": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "actor_kind": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "tool": {
+          "type": "string",
+          "maxLength": 32768
+        }
+      },
+      "required": [
+        "source",
+        "request_id",
+        "native_turn_id",
+        "tool_call_id",
+        "process_generation",
+        "correlation_id",
+        "actor_kind",
+        "tool"
+      ]
+    },
+    "Receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "provenance": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NativeProvenance"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "kind": {
+          "const": "operation_receipt"
+        },
+        "intent_id": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "input_hash": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "operation": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "applied",
+            "rejected",
+            "unknown"
+          ]
+        },
+        "record": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Record"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "continuation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Continuation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "no_effect": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 32768
+        }
+      },
+      "required": [
+        "provenance",
+        "kind",
+        "intent_id",
+        "input_hash",
+        "operation",
+        "state",
+        "record",
+        "continuation",
+        "no_effect",
+        "reason"
+      ]
+    },
+    "EventPage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "events"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Event"
+          },
+          "maxItems": 128
+        },
+        "next_sequence": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "has_more": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "kind",
+        "items",
+        "next_sequence",
+        "has_more"
+      ]
+    },
+    "RecordList": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "records"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Record"
+          },
+          "maxItems": 128
+        },
+        "next_cursor": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "complete": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "kind",
+        "items",
+        "next_cursor",
+        "complete"
+      ]
+    },
+    "GuardStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "guard_status"
+        },
+        "outstanding": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "unknown": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "active_claims": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "ready": {
+          "type": "boolean"
+        },
+        "reasons": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 32768
+          },
+          "maxItems": 128
+        }
+      },
+      "required": [
+        "kind",
+        "outstanding",
+        "unknown",
+        "active_claims",
+        "ready",
+        "reasons"
+      ]
+    },
+    "Capabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "capabilities"
+        },
+        "schema_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "authority_instance_id": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "role": {
+          "type": "string",
+          "enum": [
+            "paired_human",
+            "native_dispatcher",
+            "native_agent",
+            "bounded_worker"
+          ]
+        },
+        "allowed_operations": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "capabilities",
+              "mission_create",
+              "mission_get",
+              "mission_list",
+              "mission_update",
+              "mission_checkpoint",
+              "mission_pause",
+              "mission_cancel",
+              "watch_create",
+              "watch_get",
+              "watch_list",
+              "watch_update",
+              "watch_pause",
+              "watch_cancel",
+              "pipeline_define",
+              "pipeline_get",
+              "pipeline_list",
+              "pipeline_enable",
+              "pipeline_pause",
+              "pipeline_cancel",
+              "event_history",
+              "continuation_get",
+              "continuation_ack",
+              "continuation_receipt_get",
+              "operation_get",
+              "guard_status"
+            ]
+          },
+          "maxItems": 128
+        },
+        "features": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "missions": {
+              "type": "boolean"
+            },
+            "exact_round_watch": {
+              "type": "boolean"
+            },
+            "pipeline_dag": {
+              "type": "boolean"
+            },
+            "server_automation": {
+              "type": "boolean"
+            },
+            "speech": {
+              "const": false
+            },
+            "remote_automation": {
+              "const": false
+            }
+          },
+          "required": [
+            "missions",
+            "exact_round_watch",
+            "pipeline_dag",
+            "server_automation",
+            "speech",
+            "remote_automation"
+          ]
+        },
+        "limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "max_records": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "max_nodes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "max_edges": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "max_events_per_read": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "max_response_bytes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "max_request_bytes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "max_records",
+            "max_nodes",
+            "max_edges",
+            "max_events_per_read",
+            "max_response_bytes",
+            "max_request_bytes"
+          ]
+        },
+        "scope": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "session_id": {
+              "type": "string",
+              "maxLength": 32768
+            },
+            "namespace_generation": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "session_id",
+            "namespace_generation"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "schema_hash",
+        "authority_instance_id",
+        "role",
+        "allowed_operations",
+        "features",
+        "limits",
+        "scope"
+      ]
+    },
+    "Error": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "acceptance": {
+          "type": "string",
+          "enum": [
+            "known_none",
+            "unknown",
+            "accepted"
+          ]
+        },
+        "recommended_action": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "receipt_id": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "capability": {
+          "type": "string",
+          "maxLength": 256
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "retryable",
+        "acceptance",
+        "recommended_action"
+      ]
+    },
+    "Request": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "task_api_pipeline_request"
+            },
+            "api_version": {
+              "const": "1.0.0-rc.7"
+            },
+            "correlation_id": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            },
+            "operation": {
+              "const": "capabilities"
+            },
+            "input": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {},
+              "required": []
+            }
+          },
+          "required": [
+            "type",
+            "api_version",
+            "correlation_id",
+            "operation",
+            "input"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "task_api_pipeline_request"
+            },
+            "api_version": {
+              "const": "1.0.0-rc.7"
+            },
+            "correlation_id": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            },
+            "operation": {
+              "const": "mission_create"
+            },
+            "input": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "manager": {
+                  "$ref": "#/$defs/Identity"
+                },
+                "mission": {
+                  "$ref": "#/$defs/Mission"
+                }
+              },
+              "required": [
+                "manager",
+                "mission"
+              ]
+            },
+            "idempotency_key": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            }
+          },
+          "required": [
+            "type",
+            "api_version",
+            "correlation_id",
+            "operation",
+            "input",
+            "idempotency_key"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "task_api_pipeline_request"
+            },
+            "api_version": {
+              "const": "1.0.0-rc.7"
+            },
+            "correlation_id": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            },
+            "operation": {
+              "const": "mission_get"
+            },
+            "input": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "manager": {
+                  "$ref": "#/$defs/Identity"
+                },
+                "id": {
+                  "type": "string",
+                  "maxLength": 256
+                }
+              },
+              "required": [
+                "manager",
+                "id"
+              ]
+            }
+          },
+          "required": [
+            "type",
+            "api_version",
+            "correlation_id",
+            "operation",
+            "input"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "task_api_pipeline_request"
+            },
+            "api_version": {
+              "const": "1.0.0-rc.7"
+            },
+            "correlation_id": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            },
+            "operation": {
+              "const": "mission_list"
+            },
+            "input": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "manager": {
+                  "$ref": "#/$defs/Identity"
+                },
+                "limit": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 50
+                },
+                "cursor": {
+                  "type": "string",
+                  "maxLength": 32768
+                }
+              },
+              "required": [
+                "manager"
+              ]
+            }
+          },
+          "required": [
+            "type",
+            "api_version",
+            "correlation_id",
+            "operation",
+            "input"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "task_api_pipeline_request"
+            },
+            "api_version": {
+              "const": "1.0.0-rc.7"
+            },
+            "correlation_id": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            },
+            "operation": {
+              "const": "mission_update"
+            },
+            "input": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "manager": {
+                  "$ref": "#/$defs/Identity"
+                },
+                "id": {
+                  "type": "string",
+                  "maxLength": 256
+                },
+                "expected_revision": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "mission": {
+                  "$ref": "#/$defs/Mission"
+                }
+              },
+              "required": [
+                "manager",
+                "id",
+                "expected_revision",
+                "mission"
+              ]
+            },
+            "idempotency_key": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            }
+          },
+          "required": [
+            "type",
+            "api_version",
+            "correlation_id",
+            "operation",
+            "input",
+            "idempotency_key"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "task_api_pipeline_request"
+            },
+            "api_version": {
+              "const": "1.0.0-rc.7"
+            },
+            "correlation_id": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            },
+            "operation": {
+              "const": "mission_checkpoint"
+            },
+            "input": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "manager": {
+                  "$ref": "#/$defs/Identity"
+                },
+                "id": {
+                  "type": "string",
+                  "maxLength": 256
+                },
+                "expected_revision": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "checkpoint": {
+                  "$ref": "#/$defs/Checkpoint"
+                }
+              },
+              "required": [
+                "manager",
+                "id",
+                "expected_revision",
+                "checkpoint"
+              ]
+            },
+            "idempotency_key": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            }
+          },
+          "required": [
+            "type",
+            "api_version",
+            "correlation_id",
+            "operation",
+            "input",
+            "idempotency_key"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "task_api_pipeline_request"
+            },
+            "api_version": {
+              "const": "1.0.0-rc.7"
+            },
+            "correlation_id": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            },
+            "operation": {
+              "const": "mission_pause"
+            },
+            "input": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "manager": {
+                  "$ref": "#/$defs/Identity"
+                },
+                "id": {
+                  "type": "string",
+                  "maxLength": 256
+                },
+                "expected_revision": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "manager",
+                "id",
+                "expected_revision"
+              ]
+            },
+            "idempotency_key": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            }
+          },
+          "required": [
+            "type",
+            "api_version",
+            "correlation_id",
+            "operation",
+            "input",
+            "idempotency_key"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "task_api_pipeline_request"
+            },
+            "api_version": {
+              "const": "1.0.0-rc.7"
+            },
+            "correlation_id": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            },
+            "operation": {
+              "const": "mission_cancel"
+            },
+            "input": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "manager": {
+                  "$ref": "#/$defs/Identity"
+                },
+                "id": {
+                  "type": "string",
+                  "maxLength": 256
+                },
+                "expected_revision": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "manager",
+                "id",
+                "expected_revision"
+              ]
+            },
+            "idempotency_key": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            }
+          },
+          "required": [
+            "type",
+            "api_version",
+            "correlation_id",
+            "operation",
+            "input",
+            "idempotency_key"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "task_api_pipeline_request"
+            },
+            "api_version": {
+              "const": "1.0.0-rc.7"
+            },
+            "correlation_id": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            },
+            "operation": {
+              "const": "watch_create"
+            },
+            "input": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "manager": {
+                  "$ref": "#/$defs/Identity"
+                },
+                "watch": {
+                  "$ref": "#/$defs/Watch"
+                }
+              },
+              "required": [
+                "manager",
+                "watch"
+              ]
+            },
+            "idempotency_key": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            }
+          },
+          "required": [
+            "type",
+            "api_version",
+            "correlation_id",
+            "operation",
+            "input",
+            "idempotency_key"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "task_api_pipeline_request"
+            },
+            "api_version": {
+              "const": "1.0.0-rc.7"
+            },
+            "correlation_id": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            },
+            "operation": {
+              "const": "watch_get"
+            },
+            "input": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "manager": {
+                  "$ref": "#/$defs/Identity"
+                },
+                "id": {
+                  "type": "string",
+                  "maxLength": 256
+                }
+              },
+              "required": [
+                "manager",
+                "id"
+              ]
+            }
+          },
+          "required": [
+            "type",
+            "api_version",
+            "correlation_id",
+            "operation",
+            "input"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "task_api_pipeline_request"
+            },
+            "api_version": {
+              "const": "1.0.0-rc.7"
+            },
+            "correlation_id": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            },
+            "operation": {
+              "const": "watch_list"
+            },
+            "input": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "manager": {
+                  "$ref": "#/$defs/Identity"
+                },
+                "limit": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 50
+                },
+                "cursor": {
+                  "type": "string",
+                  "maxLength": 32768
+                }
+              },
+              "required": [
+                "manager"
+              ]
+            }
+          },
+          "required": [
+            "type",
+            "api_version",
+            "correlation_id",
+            "operation",
+            "input"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "task_api_pipeline_request"
+            },
+            "api_version": {
+              "const": "1.0.0-rc.7"
+            },
+            "correlation_id": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            },
+            "operation": {
+              "const": "watch_update"
+            },
+            "input": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "manager": {
+                  "$ref": "#/$defs/Identity"
+                },
+                "id": {
+                  "type": "string",
+                  "maxLength": 256
+                },
+                "expected_revision": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "watch": {
+                  "$ref": "#/$defs/Watch"
+                }
+              },
+              "required": [
+                "manager",
+                "id",
+                "expected_revision",
+                "watch"
+              ]
+            },
+            "idempotency_key": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            }
+          },
+          "required": [
+            "type",
+            "api_version",
+            "correlation_id",
+            "operation",
+            "input",
+            "idempotency_key"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "task_api_pipeline_request"
+            },
+            "api_version": {
+              "const": "1.0.0-rc.7"
+            },
+            "correlation_id": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            },
+            "operation": {
+              "const": "watch_pause"
+            },
+            "input": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "manager": {
+                  "$ref": "#/$defs/Identity"
+                },
+                "id": {
+                  "type": "string",
+                  "maxLength": 256
+                },
+                "expected_revision": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "manager",
+                "id",
+                "expected_revision"
+              ]
+            },
+            "idempotency_key": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            }
+          },
+          "required": [
+            "type",
+            "api_version",
+            "correlation_id",
+            "operation",
+            "input",
+            "idempotency_key"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "task_api_pipeline_request"
+            },
+            "api_version": {
+              "const": "1.0.0-rc.7"
+            },
+            "correlation_id": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            },
+            "operation": {
+              "const": "watch_cancel"
+            },
+            "input": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "manager": {
+                  "$ref": "#/$defs/Identity"
+                },
+                "id": {
+                  "type": "string",
+                  "maxLength": 256
+                },
+                "expected_revision": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "manager",
+                "id",
+                "expected_revision"
+              ]
+            },
+            "idempotency_key": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            }
+          },
+          "required": [
+            "type",
+            "api_version",
+            "correlation_id",
+            "operation",
+            "input",
+            "idempotency_key"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "task_api_pipeline_request"
+            },
+            "api_version": {
+              "const": "1.0.0-rc.7"
+            },
+            "correlation_id": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            },
+            "operation": {
+              "const": "pipeline_define"
+            },
+            "input": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "manager": {
+                  "$ref": "#/$defs/Identity"
+                },
+                "pipeline": {
+                  "$ref": "#/$defs/Pipeline"
+                }
+              },
+              "required": [
+                "manager",
+                "pipeline"
+              ]
+            },
+            "idempotency_key": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            }
+          },
+          "required": [
+            "type",
+            "api_version",
+            "correlation_id",
+            "operation",
+            "input",
+            "idempotency_key"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "task_api_pipeline_request"
+            },
+            "api_version": {
+              "const": "1.0.0-rc.7"
+            },
+            "correlation_id": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            },
+            "operation": {
+              "const": "pipeline_get"
+            },
+            "input": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "manager": {
+                  "$ref": "#/$defs/Identity"
+                },
+                "id": {
+                  "type": "string",
+                  "maxLength": 256
+                }
+              },
+              "required": [
+                "manager",
+                "id"
+              ]
+            }
+          },
+          "required": [
+            "type",
+            "api_version",
+            "correlation_id",
+            "operation",
+            "input"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "task_api_pipeline_request"
+            },
+            "api_version": {
+              "const": "1.0.0-rc.7"
+            },
+            "correlation_id": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            },
+            "operation": {
+              "const": "pipeline_list"
+            },
+            "input": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "manager": {
+                  "$ref": "#/$defs/Identity"
+                },
+                "limit": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 50
+                },
+                "cursor": {
+                  "type": "string",
+                  "maxLength": 32768
+                }
+              },
+              "required": [
+                "manager"
+              ]
+            }
+          },
+          "required": [
+            "type",
+            "api_version",
+            "correlation_id",
+            "operation",
+            "input"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "task_api_pipeline_request"
+            },
+            "api_version": {
+              "const": "1.0.0-rc.7"
+            },
+            "correlation_id": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            },
+            "operation": {
+              "const": "pipeline_enable"
+            },
+            "input": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "manager": {
+                  "$ref": "#/$defs/Identity"
+                },
+                "id": {
+                  "type": "string",
+                  "maxLength": 256
+                },
+                "expected_revision": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "manager",
+                "id",
+                "expected_revision"
+              ]
+            },
+            "idempotency_key": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            }
+          },
+          "required": [
+            "type",
+            "api_version",
+            "correlation_id",
+            "operation",
+            "input",
+            "idempotency_key"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "task_api_pipeline_request"
+            },
+            "api_version": {
+              "const": "1.0.0-rc.7"
+            },
+            "correlation_id": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            },
+            "operation": {
+              "const": "pipeline_pause"
+            },
+            "input": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "manager": {
+                  "$ref": "#/$defs/Identity"
+                },
+                "id": {
+                  "type": "string",
+                  "maxLength": 256
+                },
+                "expected_revision": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "manager",
+                "id",
+                "expected_revision"
+              ]
+            },
+            "idempotency_key": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            }
+          },
+          "required": [
+            "type",
+            "api_version",
+            "correlation_id",
+            "operation",
+            "input",
+            "idempotency_key"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "task_api_pipeline_request"
+            },
+            "api_version": {
+              "const": "1.0.0-rc.7"
+            },
+            "correlation_id": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            },
+            "operation": {
+              "const": "pipeline_cancel"
+            },
+            "input": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "manager": {
+                  "$ref": "#/$defs/Identity"
+                },
+                "id": {
+                  "type": "string",
+                  "maxLength": 256
+                },
+                "expected_revision": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "manager",
+                "id",
+                "expected_revision"
+              ]
+            },
+            "idempotency_key": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            }
+          },
+          "required": [
+            "type",
+            "api_version",
+            "correlation_id",
+            "operation",
+            "input",
+            "idempotency_key"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "task_api_pipeline_request"
+            },
+            "api_version": {
+              "const": "1.0.0-rc.7"
+            },
+            "correlation_id": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            },
+            "operation": {
+              "const": "event_history"
+            },
+            "input": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "manager": {
+                  "$ref": "#/$defs/Identity"
+                },
+                "id": {
+                  "type": "string",
+                  "maxLength": 256
+                },
+                "after_sequence": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "limit": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 100
+                }
+              },
+              "required": [
+                "manager",
+                "id"
+              ]
+            }
+          },
+          "required": [
+            "type",
+            "api_version",
+            "correlation_id",
+            "operation",
+            "input"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "task_api_pipeline_request"
+            },
+            "api_version": {
+              "const": "1.0.0-rc.7"
+            },
+            "correlation_id": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            },
+            "operation": {
+              "const": "continuation_get"
+            },
+            "input": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "manager": {
+                  "$ref": "#/$defs/Identity"
+                },
+                "id": {
+                  "type": "string",
+                  "maxLength": 256
+                }
+              },
+              "required": [
+                "manager",
+                "id"
+              ]
+            }
+          },
+          "required": [
+            "type",
+            "api_version",
+            "correlation_id",
+            "operation",
+            "input"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "task_api_pipeline_request"
+            },
+            "api_version": {
+              "const": "1.0.0-rc.7"
+            },
+            "correlation_id": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            },
+            "operation": {
+              "const": "continuation_ack"
+            },
+            "input": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "manager": {
+                  "$ref": "#/$defs/Identity"
+                },
+                "id": {
+                  "type": "string",
+                  "maxLength": 256
+                },
+                "expected_revision": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "checkpoint": {
+                  "$ref": "#/$defs/Checkpoint"
+                }
+              },
+              "required": [
+                "manager",
+                "id",
+                "expected_revision",
+                "checkpoint"
+              ]
+            },
+            "idempotency_key": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            }
+          },
+          "required": [
+            "type",
+            "api_version",
+            "correlation_id",
+            "operation",
+            "input",
+            "idempotency_key"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "task_api_pipeline_request"
+            },
+            "api_version": {
+              "const": "1.0.0-rc.7"
+            },
+            "correlation_id": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            },
+            "operation": {
+              "const": "continuation_receipt_get"
+            },
+            "input": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "manager": {
+                  "$ref": "#/$defs/Identity"
+                },
+                "original_intent_id": {
+                  "type": "string",
+                  "maxLength": 256
+                },
+                "original_operation": {
+                  "type": "string",
+                  "enum": [
+                    "mission_checkpoint",
+                    "continuation_ack"
+                  ]
+                },
+                "expected_input_hash": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                },
+                "id": {
+                  "type": "string",
+                  "maxLength": 256
+                }
+              },
+              "required": [
+                "manager",
+                "original_intent_id",
+                "original_operation",
+                "expected_input_hash",
+                "id"
+              ]
+            }
+          },
+          "required": [
+            "type",
+            "api_version",
+            "correlation_id",
+            "operation",
+            "input"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "task_api_pipeline_request"
+            },
+            "api_version": {
+              "const": "1.0.0-rc.7"
+            },
+            "correlation_id": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            },
+            "operation": {
+              "const": "operation_get"
+            },
+            "input": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "manager": {
+                  "$ref": "#/$defs/Identity"
+                },
+                "original_intent_id": {
+                  "type": "string",
+                  "maxLength": 256
+                },
+                "original_operation": {
+                  "type": "string",
+                  "enum": [
+                    "mission_create",
+                    "mission_get",
+                    "mission_list",
+                    "mission_update",
+                    "mission_checkpoint",
+                    "mission_pause",
+                    "mission_cancel",
+                    "watch_create",
+                    "watch_get",
+                    "watch_list",
+                    "watch_update",
+                    "watch_pause",
+                    "watch_cancel",
+                    "pipeline_define",
+                    "pipeline_get",
+                    "pipeline_list",
+                    "pipeline_enable",
+                    "pipeline_pause",
+                    "pipeline_cancel",
+                    "event_history",
+                    "continuation_get",
+                    "continuation_ack",
+                    "continuation_receipt_get",
+                    "guard_status"
+                  ]
+                },
+                "expected_input_hash": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                }
+              },
+              "required": [
+                "manager",
+                "original_intent_id",
+                "original_operation",
+                "expected_input_hash"
+              ]
+            }
+          },
+          "required": [
+            "type",
+            "api_version",
+            "correlation_id",
+            "operation",
+            "input"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "task_api_pipeline_request"
+            },
+            "api_version": {
+              "const": "1.0.0-rc.7"
+            },
+            "correlation_id": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            },
+            "operation": {
+              "const": "guard_status"
+            },
+            "input": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "manager": {
+                  "$ref": "#/$defs/Identity"
+                }
+              },
+              "required": [
+                "manager"
+              ]
+            }
+          },
+          "required": [
+            "type",
+            "api_version",
+            "correlation_id",
+            "operation",
+            "input"
+          ]
+        }
+      ]
+    },
+    "Response": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "authority_instance_id": {
+              "type": "string",
+              "maxLength": 256
+            },
+            "type": {
+              "const": "task_api_pipeline_response"
+            },
+            "api_version": {
+              "const": "1.0.0-rc.7"
+            },
+            "correlation_id": {
+              "type": "string",
+              "maxLength": 256
+            },
+            "operation": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "capabilities",
+                    "mission_create",
+                    "mission_get",
+                    "mission_list",
+                    "mission_update",
+                    "mission_checkpoint",
+                    "mission_pause",
+                    "mission_cancel",
+                    "watch_create",
+                    "watch_get",
+                    "watch_list",
+                    "watch_update",
+                    "watch_pause",
+                    "watch_cancel",
+                    "pipeline_define",
+                    "pipeline_get",
+                    "pipeline_list",
+                    "pipeline_enable",
+                    "pipeline_pause",
+                    "pipeline_cancel",
+                    "event_history",
+                    "continuation_get",
+                    "continuation_ack",
+                    "continuation_receipt_get",
+                    "operation_get",
+                    "guard_status"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "request_api_version": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 32768
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "ok": {
+              "const": true
+            },
+            "result": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/Capabilities"
+                },
+                {
+                  "$ref": "#/$defs/Record"
+                },
+                {
+                  "$ref": "#/$defs/RecordList"
+                },
+                {
+                  "$ref": "#/$defs/EventPage"
+                },
+                {
+                  "$ref": "#/$defs/Continuation"
+                },
+                {
+                  "$ref": "#/$defs/Receipt"
+                },
+                {
+                  "$ref": "#/$defs/GuardStatus"
+                }
+              ]
+            }
+          },
+          "required": [
+            "authority_instance_id",
+            "type",
+            "api_version",
+            "correlation_id",
+            "operation",
+            "ok",
+            "result"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "authority_instance_id": {
+              "type": "string",
+              "maxLength": 256
+            },
+            "type": {
+              "const": "task_api_pipeline_response"
+            },
+            "api_version": {
+              "const": "1.0.0-rc.7"
+            },
+            "correlation_id": {
+              "type": "string",
+              "maxLength": 256
+            },
+            "operation": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "capabilities",
+                    "mission_create",
+                    "mission_get",
+                    "mission_list",
+                    "mission_update",
+                    "mission_checkpoint",
+                    "mission_pause",
+                    "mission_cancel",
+                    "watch_create",
+                    "watch_get",
+                    "watch_list",
+                    "watch_update",
+                    "watch_pause",
+                    "watch_cancel",
+                    "pipeline_define",
+                    "pipeline_get",
+                    "pipeline_list",
+                    "pipeline_enable",
+                    "pipeline_pause",
+                    "pipeline_cancel",
+                    "event_history",
+                    "continuation_get",
+                    "continuation_ack",
+                    "continuation_receipt_get",
+                    "operation_get",
+                    "guard_status"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "request_api_version": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 32768
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "ok": {
+              "const": false
+            },
+            "error": {
+              "$ref": "#/$defs/Error"
+            }
+          },
+          "required": [
+            "authority_instance_id",
+            "type",
+            "api_version",
+            "correlation_id",
+            "operation",
+            "ok",
+            "error"
+          ]
+        }
+      ]
+    }
+  }
+}

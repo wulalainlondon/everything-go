@@ -172,3 +172,7 @@ func (s *Service) AdvanceRun(ctx context.Context, sessionID, requestID, status, 
 func (s *Service) Diagnostics(ctx context.Context) (Diagnostics, error) {
 	return s.store.Diagnostics(ctx)
 }
+
+func (s *Service) PipelineSessionLinked(ctx context.Context, item, session, thread string) (bool, error) {
+	return s.store.PipelineSessionLinked(ctx, item, session, thread)
+}

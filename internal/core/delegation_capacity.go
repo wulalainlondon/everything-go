@@ -351,6 +351,9 @@ func (h *Hub) delegationExecutionGuard(ctx context.Context, target *session.Sess
 		}
 		return nil
 	}
+	if err := h.pipelineDelegationSendGuard(ctx, r); err != nil {
+		return err
+	}
 	if r.State != "provisioning" && r.State != "running" {
 		return errors.New("delegation_execution_not_admitted")
 	}

@@ -455,6 +455,30 @@ func (h *Hub) apiList(ctx context.Context, c taskapi.VerifiedContext, sessionID,
 			seen[record.TaskID] = true
 		}
 	}
+	if (pathFilter == "" || pathFilter == "controller") && h.dispatches != nil {
+		originals, e := h.dispatches.IndexRecords(ctx)
+		if e != nil {
+			return nil, e
+		}
+		for _, d := range originals {
+			if sessionID != "" && sessionID != d.ParentID && sessionID != d.SessionID {
+				continue
+			}
+			r, e := h.controllerIndexRecord(ctx, d)
+			if e != nil || seen[r.TaskID] {
+				continue
+			}
+			if e = h.checkAPIRecord(ctx, c, r); e != nil {
+				continue
+			}
+			task, e := h.apiCurrentTask(ctx, r)
+			if e != nil {
+				return nil, e
+			}
+			out = append(out, task)
+			seen[r.TaskID] = true
+		}
+	}
 	if pathFilter == "" || pathFilter == "ordinary" {
 		links, e := h.messageQueue.LegacySourceLinks(ctx)
 		if e != nil {

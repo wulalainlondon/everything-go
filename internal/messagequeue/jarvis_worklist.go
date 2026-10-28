@@ -321,6 +321,17 @@ func (s *Store) RecordNativeStart(p NativeStart) (bool, error) {
 				return ErrNativeConflict
 			}
 		}
+		if entry, found, e := lookup(tx, p.SessionID, p.RequestID); e != nil {
+			return e
+		} else if found {
+			effective, e := effectiveInput(context.Background(), tx, entry)
+			if e != nil {
+				return e
+			}
+			if _, e = tx.Exec(`INSERT OR IGNORE INTO task_pipeline_native_inputs VALUES(?,?,?,?,?,?)`, p.SessionID, p.RequestID, p.ThreadID, p.Token, effective.ContentRevision, effective.EffectiveHash); e != nil {
+				return e
+			}
+		}
 		if _, e := tx.Exec(`INSERT OR IGNORE INTO task_native_start_attempts VALUES(?,?,?,?)`, p.SessionID, p.RequestID, p.Token, raw); e != nil {
 			return e
 		}

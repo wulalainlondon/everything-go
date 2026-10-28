@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"everything-go/internal/taskapi"
+	"everything-go/internal/taskpipeline"
 	"fmt"
 	"log"
 	"os"
@@ -44,6 +45,8 @@ type APIAdmission struct {
 }
 
 type Entry struct {
+	Pipeline *taskpipeline.Admission
+
 	EffectiveBinding                 []byte
 	Unified                          *taskapi.QueueMutation
 	UnifiedData                      []byte
@@ -112,6 +115,10 @@ func Open(dataDir string) (*Store, error) {
 		return nil, err
 	}
 	if err = migrateNativeConflictSchema(db); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err = taskpipeline.Install(db); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -268,6 +275,9 @@ func (s *Store) Enqueue(e Entry) (Entry, bool, error) {
 			return previous, false, ErrConflict
 		}
 		return previous, false, nil
+	}
+	if err := taskpipeline.AdmitTx(s.nativeAcceptanceContext(context.Background(), tx), tx, e.Pipeline, e.SessionID, e.RequestID, hashText); err != nil {
+		return Entry{}, false, err
 	}
 	if err := contextBarrierTx(tx, e.SessionID); err != nil {
 		return Entry{}, false, err

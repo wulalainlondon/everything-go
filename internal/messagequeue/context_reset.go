@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"everything-go/internal/taskpipeline"
 	"time"
 )
 
@@ -113,6 +114,9 @@ func (s *Store) ReserveContextReset(ctx context.Context, scope, id string, revis
 	var count int
 	if e = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM queue_commands WHERE session_id=? AND state IN ('queued','running','uncertain','steering')`, v.SessionID).Scan(&count); e != nil || count != 0 {
 		return v, errors.New("context_queue_not_idle")
+	}
+	if e = taskpipeline.GuardTx(ctx, tx, v.SessionID); e != nil {
+		return v, e
 	}
 	var prior string
 	e = tx.QueryRowContext(ctx, `SELECT intent FROM jarvis_context_barriers WHERE session_id=? AND active=1`, v.SessionID).Scan(&prior)

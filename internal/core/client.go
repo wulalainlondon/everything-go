@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"everything-go/internal/taskpipeline"
 	"io"
 	"log"
 	"net"
@@ -117,6 +118,8 @@ func (w wsConn) EnrollmentEligible() bool { return w.canEnroll }
 // Client is one logical connection (WS or WebRTC DataChannel). A single write
 // pump goroutine drains the send channel so conn writes are never concurrent.
 type Client struct {
+	pipelineAdmission *taskpipeline.Admission // server-owned; never accepted from a socket
+
 	interactionControl bool // server-owned question delivery; never parsed from client input
 	callbackCapable    atomic.Bool
 	callbackNative     atomic.Bool

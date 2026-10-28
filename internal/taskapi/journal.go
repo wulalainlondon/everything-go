@@ -387,3 +387,10 @@ func (j *Journal) OutboxState(ctx context.Context, key string) (string, error) {
 func (j *Journal) OriginalCommandForRequest(ctx context.Context, session, request string) (IntentRecord, error) {
 	return scanIntent(j.db.QueryRowContext(ctx, "SELECT "+intentColumns+" FROM task_api_intents WHERE session_id=? AND request_id=? ORDER BY rowid LIMIT 1", session, request))
 }
+
+// SourceRevision is the original store committed sequence for this exact request.
+func (j *Journal) SourceRevision(ctx context.Context, session, request string) (uint64, error) {
+	var n uint64
+	e := j.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(seq),0) FROM task_api_changes WHERE session_id=? AND request_id=?`, session, request).Scan(&n)
+	return n, e
+}

@@ -247,6 +247,11 @@ func (s *Store) Create(ctx context.Context, r Record) (bool, error) {
 		return false, e
 	}
 	n, _ := result.RowsAffected()
+	if n == 1 {
+		if e = taskapi.ChangeTx(tx, r.SessionID, r.RequestID, "controller_admission"); e != nil {
+			return false, e
+		}
+	}
 	return n == 1, tx.Commit()
 }
 func (s *Store) Put(ctx context.Context, r Record) error {
@@ -259,8 +264,25 @@ func (s *Store) Put(ctx context.Context, r Record) error {
 	if e != nil {
 		return e
 	}
-	_, e = s.db.ExecContext(ctx, `UPDATE session_dispatches SET state=?,payload=json_set(CASE WHEN json_extract(payload,'$.result')!='' AND ?='' THEN json_set(?,'$.result',json_extract(payload,'$.result')) ELSE ? END,'$.terminal_at',COALESCE(NULLIF(json_extract(payload,'$.terminal_at'),0),?)) WHERE id=? AND parent_id=? AND intent_hash=? AND (state NOT IN ('completed','failed','cancelled','rejected') OR state=?)`, r.State, r.Result, string(raw), string(raw), r.TerminalAt, r.ID, r.ParentID, r.IntentHash, r.State)
-	return e
+	tx, e := s.db.BeginTx(ctx, nil)
+	if e != nil {
+		return e
+	}
+	defer tx.Rollback()
+	res, e := tx.ExecContext(ctx, `UPDATE session_dispatches SET state=?,payload=json_set(CASE WHEN json_extract(payload,'$.result')!='' AND ?='' THEN json_set(?,'$.result',json_extract(payload,'$.result')) ELSE ? END,'$.terminal_at',COALESCE(NULLIF(json_extract(payload,'$.terminal_at'),0),?)) WHERE id=? AND parent_id=? AND intent_hash=? AND (state NOT IN ('completed','failed','cancelled','rejected') OR state=?)`, r.State, r.Result, string(raw), string(raw), r.TerminalAt, r.ID, r.ParentID, r.IntentHash, r.State)
+	if e != nil {
+		return e
+	}
+	n, e := res.RowsAffected()
+	if e != nil {
+		return e
+	}
+	if n > 0 {
+		if e = taskapi.ChangeTx(tx, r.SessionID, r.RequestID, "controller_state"); e != nil {
+			return e
+		}
+	}
+	return tx.Commit()
 }
 func (s *Store) List(ctx context.Context, parent string) ([]Record, error) {
 	rows, e := s.db.QueryContext(ctx, `SELECT payload FROM session_dispatches WHERE parent_id=? ORDER BY rowid DESC LIMIT 100`, parent)
@@ -330,4 +352,31 @@ func (s *Store) ContextUnsettled(ctx context.Context, parent string) (bool, bool
 	var execution, delivery bool
 	e := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM session_dispatches WHERE parent_id=? AND state NOT IN ('completed','failed','cancelled','rejected')),EXISTS(SELECT 1 FROM session_dispatches WHERE parent_id=? AND COALESCE(json_extract(payload,'$.delivery_state'),'pending') NOT IN ('delivered','not_requested'))`, parent, parent).Scan(&execution, &delivery)
 	return execution, delivery, e
+}
+
+// IndexRecords exposes original controller receipts for the scoped TaskAPI
+// adapter. It does not create an admission journal or change original IDs.
+// Overflow is explicit, never an empty or falsely complete task catalog.
+func (s *Store) IndexRecords(ctx context.Context) ([]Record, error) {
+	rows, e := s.db.QueryContext(ctx, "SELECT payload FROM session_dispatches ORDER BY rowid LIMIT 4097")
+	if e != nil {
+		return nil, e
+	}
+	defer rows.Close()
+	out := []Record{}
+	for rows.Next() {
+		var b []byte
+		if e = rows.Scan(&b); e != nil {
+			return nil, e
+		}
+		var r Record
+		if e = json.Unmarshal(b, &r); e != nil {
+			return nil, e
+		}
+		out = append(out, r)
+		if len(out) > 4096 {
+			return nil, errors.New("controller_index_range_exceeded")
+		}
+	}
+	return out, rows.Err()
 }

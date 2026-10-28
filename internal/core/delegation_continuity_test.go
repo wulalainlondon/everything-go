@@ -650,7 +650,7 @@ func TestContinuityWorkersHaveNoGlobalTaskManagementGrant(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if len(tools) != 3 || tools[0]["name"] != "task_capabilities" || tools[1]["name"] != "task_interactions" || tools[2]["name"] != "task_unified" {
+	if len(tools) != 4 || tools[0]["name"] != "task_capabilities" || tools[1]["name"] != "task_interactions" || tools[2]["name"] != "task_pipeline" || tools[3]["name"] != "task_unified" {
 		t.Fatal("legacy worker exposed global management", tools)
 	}
 	caller := taskapi.VerifiedContext{Authority: h.cfg.InstanceID, StableScopeID: "session:" + child.ID, SourceSessionID: child.ID, SourceResumeID: child.ResumeID(), SourceConfigKnown: true, BindingKind: "native_tool"}

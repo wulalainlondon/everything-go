@@ -26,6 +26,11 @@ func (h *Hub) contextBlockers(s *session.Session) []string {
 	if h.messageQueue == nil {
 		return append(out, "durable_queue_unavailable")
 	}
+	if guard, err := h.messageQueue.PipelineStore().Guard(context.Background(), s.ID); err != nil {
+		out = append(out, "pipeline_state_unknown")
+	} else if !guard.Ready {
+		out = append(out, "pipeline_outstanding_or_unknown")
+	}
 	snap, e := h.messageQueue.Snapshot(s.ID)
 	if e != nil {
 		out = append(out, "queue_unknown")

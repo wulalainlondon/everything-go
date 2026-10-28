@@ -20,6 +20,7 @@ import (
 
 	artifactcontract "everything-go/contracts/task-api/artifacts-v4"
 	interactioncontract "everything-go/contracts/task-api/interactions-v5"
+	pipeline "everything-go/contracts/task-api/pipeline-v7"
 	unified "everything-go/contracts/task-api/unified-v6"
 	contract "everything-go/contracts/task-api/v1"
 	"everything-go/internal/backend"
@@ -167,6 +168,11 @@ func (h *Hub) TaskTools(s *session.Session) ([]map[string]any, error) {
 		return nil, unifiedErr
 	}
 	defs["task_unified"] = unifiedSchema
+	pipelineSchema, pipelineErr := pipeline.ToolInput()
+	if pipelineErr != nil {
+		return nil, pipelineErr
+	}
+	defs["task_pipeline"] = pipelineSchema
 	for name, input := range extra {
 		defs[name] = input
 	}
@@ -183,10 +189,10 @@ func (h *Hub) TaskTools(s *session.Session) ([]map[string]any, error) {
 		tools = append(tools, map[string]any{"type": "function", "name": "task_interactions", "description": "Original-task questions. ask_parent requests clarification; list/get/wait read exact questions; answer/escalate only for authorized original parent or human; ack confirms the child consumed the exact answer. Use api_version 1.0.0-rc.5 and operation interactions. Agent answers are never human authorization.", "inputSchema": interactioncontract.ToolInput()})
 	}
 	for name, schema := range defs {
-		if legacyWorker && name != "task_capabilities" && name != "task_unified" {
+		if legacyWorker && name != "task_capabilities" && name != "task_unified" && name != "task_pipeline" {
 			continue
 		}
-		if scope != nil && name != "task_read_input" && name != "task_capabilities" && name != "task_unified" {
+		if scope != nil && name != "task_read_input" && name != "task_capabilities" && name != "task_unified" && name != "task_pipeline" {
 			continue
 		}
 		tools = append(tools, map[string]any{"type": "function", "name": name, "description": "Authorized Bridge Task API. Native consumption, final, QA and delivery are independent evidence axes. Never replay unknown acceptance.", "inputSchema": schema})
@@ -237,7 +243,10 @@ func (h *Hub) ExecuteTask(ctx context.Context, c backend.TaskCaller, raw []byte)
 		})
 	}
 	caller, bindErr := taskapi.BindCaller(ctx, verifier, taskapi.Invocation{})
-	response, continuityHandled := h.executeUnified(ctx, caller, raw)
+	response, continuityHandled := h.executePipeline(ctx, caller, raw)
+	if !continuityHandled {
+		response, continuityHandled = h.executeUnified(ctx, caller, raw)
+	}
 	if !continuityHandled {
 		response, continuityHandled = h.executeInteractions(ctx, caller, raw)
 	}
@@ -267,7 +276,10 @@ func (h *Hub) handleTaskAPI(ctx context.Context, c *Client, raw []byte) {
 		return
 	}
 	caller, _ := h.taskHuman(c)
-	response, handled := h.executeUnified(ctx, caller, raw)
+	response, handled := h.executePipeline(ctx, caller, raw)
+	if !handled {
+		response, handled = h.executeUnified(ctx, caller, raw)
+	}
 	if !handled {
 		response, handled = h.executeInteractions(ctx, caller, raw)
 	}
@@ -338,7 +350,9 @@ func (h *Hub) Authorize(ctx context.Context, c taskapi.VerifiedContext, r taskap
 		record, err := h.apiRecord(ctx, c, in.TaskID)
 		var legacy legacySourceMetadata
 		json.Unmarshal(record.Metadata, &legacy)
-		if legacy.LegacyLinkID != "" && (r.Operation == "append" || r.Operation == "cancel") {
+		var originMetadata apiMetadata
+		_ = json.Unmarshal(record.Metadata, &originMetadata)
+		if (legacy.LegacyLinkID != "" || originMetadata.Transport == "original_controller_read_index") && (r.Operation == "append" || r.Operation == "cancel") {
 			return l, taskapi.Failure("unsupported", "known_none", "read_capabilities")
 		}
 		if err == nil && (r.Operation == "append" || r.Operation == "cancel") && (record.ScopeID != c.StableScopeID || record.Generation != c.NamespaceGeneration) {
@@ -664,8 +678,12 @@ func (h *Hub) apiRecord(ctx context.Context, c taskapi.VerifiedContext, id strin
 		}
 	}
 	record, err := j.Task(ctx, c.StableScopeID, c.NamespaceGeneration, id)
-	if err != nil && c.BindingKind == "paired_human" {
+	if err != nil && (c.BindingKind == "paired_human" || c.BindingKind == "automation_service") {
 		record, err = j.FindTask(ctx, id)
+	}
+	var missing *taskapi.APIError
+	if (errors.Is(err, sql.ErrNoRows) || (errors.As(err, &missing) && missing.Code == "not_found")) && ref[1] == "controller" {
+		return h.controllerIndexGet(ctx, c, id)
 	}
 	if err != nil {
 		return record, err
@@ -1131,7 +1149,7 @@ func (h *Hub) checkAPIRecord(ctx context.Context, c taskapi.VerifiedContext, r t
 	if r.ScopeID != c.StableScopeID || r.Generation != c.NamespaceGeneration {
 		// Existing paired-human task-mode permission can read a formally bound
 		// visible source/child relation, but does not gain mutation authority.
-		if c.BindingKind != "paired_human" || meta.Caller.SourceSessionID == "" || (meta.Caller.BindingKind != "native_tool" && meta.Caller.BindingKind != "mcp_process_binding") {
+		if (c.BindingKind != "paired_human" && !h.pipelineServiceReadAllowed(ctx, c, r)) || meta.Caller.SourceSessionID == "" || (meta.Caller.BindingKind != "native_tool" && meta.Caller.BindingKind != "mcp_process_binding" && meta.Caller.BindingKind != "controller_origin") {
 			return taskapi.Failure("permission", "known_none", "request_scope_change")
 		}
 		source, ok := h.registry.Get(meta.Caller.SourceSessionID)
