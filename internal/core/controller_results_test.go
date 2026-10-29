@@ -156,14 +156,29 @@ func controllerResultsBusyBatchCoverage(t *testing.T, base int) {
 	if starts.Load() != 1 {
 		t.Fatal("replayed")
 	}
-	for time.Now().Before(deadline) {
-		h.reconcileSessionDispatches(context.Background())
-		r, _, _ := h.dispatches.Get(context.Background(), "d0")
-		if r.DeliveryState == "delivered" {
+	// The provider's start callback precedes its durable done/seal commit.
+	// Wait for that actual original receipt separately, then run both canonical
+	// projection ticks. The earlier start deadline is not a delivery deadline.
+	completionDeadline := time.Now().Add(2 * time.Second)
+	for {
+		status, e := h.dispatches.Results().Status(context.Background(), cr.Scope{Parent: manager, Generation: parent.Snapshot().SourceRevision})
+		if e != nil || len(status.Batches) != 1 {
+			t.Fatal(status, e)
+		}
+		entry, found, e := h.messageQueue.Get(parent.ID, status.Batches[0].Request)
+		if e != nil {
+			t.Fatal(e)
+		}
+		if found && entry.State == messagequeue.Completed {
 			break
+		}
+		if !time.Now().Before(completionDeadline) {
+			t.Fatal("original aggregate did not complete", entry.State, found)
 		}
 		time.Sleep(time.Millisecond)
 	}
+	h.reconcileSessionDispatches(context.Background())
+	h.reconcileSessionDispatches(context.Background())
 	for i := 0; i < 72; i++ {
 		r, found, e := h.dispatches.Get(context.Background(), fmt.Sprint("d", i))
 		if e != nil || !found || r.DeliveryState != "delivered" {

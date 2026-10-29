@@ -1,0 +1,13 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {ControllerResultsClient} from './client.ts';
+import {StorageIntentJournal} from './journal.ts';
+import {apiVersion,schemaHash} from './schema-metadata.ts';
+import {inputHash} from './hash.ts';
+for(const field of ['source_intent','deadline_ms','max_batches','max_no_progress'] as const) test('closed control receipt refuses foreign '+field,async()=>{
+ const manager={authority_instance_id:'a',session_id:'parent',thread_id:'thread',config_revision:0};const memory=new Map<string,string>();const storage={get length(){return memory.size},key:(i:number)=>[...memory.keys()][i]??null,getItem:(k:string)=>memory.get(k)??null,setItem:(k:string,v:string)=>void memory.set(k,v)};const journal=new StorageIntentJournal(storage,{request:async(_key,fn)=>fn()},'synthetic');
+ const c=new ControllerResultsClient({journal,lease:()=>({authority:'a',namespace:'synthetic',generation:1,key:'epoch',manager}),correlation:()=> 'corr',send:async(raw)=>{const q=JSON.parse(raw);let result:any={kind:'capabilities',schema_hash:schemaHash,authority_instance_id:'a',role:'paired_human',allowed_operations:['capabilities','set_dispatch_return_control','operation_get'],features:{session_controller_results_v2:true,passive_inbox:true,native_version_ack:true,human_seen:true,aggregate_return:true,default_notify_only:true},limits:{default_groups:20,max_groups:50,max_batch_groups:32,max_request_bytes:262144,max_response_bytes:8388608}};
+ if(q.operation==='set_dispatch_return_control'){const i=q.input;const control={revision:i.expected_revision+1,mode:i.mode,paused:i.paused,deadline_ms:i.deadline_ms,max_batches:i.max_batches,max_no_progress:i.max_no_progress,issued_batches:0,no_progress:0,source_intent:q.idempotency_key};if(field==='source_intent')control.source_intent='foreign';else control[field]++;result={kind:'operation_receipt',operation:q.operation,intent_id:q.idempotency_key,input_hash:await inputHash(q.operation,q.input),state:'applied',versions:[],control}};
+ return JSON.stringify({type:'task_api_controller_results_response',api_version:apiVersion,authority_instance_id:'a',correlation_id:q.correlation_id,operation:q.operation,ok:true,result})}});
+ await c.read('capabilities',{});const p=await c.prepare('set_dispatch_return_control',{manager,expected_revision:0,mode:'resume_authorized',paused:false,deadline_ms:1900000000000,max_batches:1,max_no_progress:1},'exact-intent');await assert.rejects(c.send(p),/original_control_mismatch/);assert.equal((await journal.find('set_dispatch_return_control','exact-intent'))?.state,'unknown');
+});

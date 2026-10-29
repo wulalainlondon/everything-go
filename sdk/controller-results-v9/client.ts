@@ -29,7 +29,7 @@ export class ControllerResultsClient {
  const input=intent.request.input;
  if(intent.request.operation==='set_dispatch_return_control'){
   const q=input as InputOf<'set_dispatch_return_control'>;
-  if(!result.control||result.control.revision!==q.expected_revision+1||result.control.mode!==q.mode||result.control.paused!==q.paused||result.control.source_intent!==intent.request.idempotency_key)throw Error('original_control_mismatch');
+  if(!result.control||result.control.revision!==q.expected_revision+1||result.control.mode!==q.mode||result.control.paused!==q.paused||result.control.source_intent!==intent.request.idempotency_key||result.control.deadline_ms!==q.deadline_ms||result.control.max_batches!==q.max_batches||result.control.max_no_progress!==q.max_no_progress||result.versions.length!==0||result.native_provenance!==undefined)throw Error('original_control_mismatch');
  }else{
   const q=input as InputOf<'ack_dispatch_results'>;
   if(canonicalJSON(q.versions)!==canonicalJSON(result.versions))throw Error('original_versions_mismatch');

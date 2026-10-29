@@ -439,10 +439,13 @@ func (h *Hub) reconcileSessionDispatches(ctx context.Context) {
 		}
 		if r.DeliveryState != "inbound" && r.DeliveryState != "queued" {
 			// V2 is sticky: passive persistence precedes busy checks and never falls back to fanout.
-			if _, err := h.dispatches.Results().Cohort(ctx, r.ID); err == nil {
-				h.observeControllerResult(ctx, r)
+			if _, err := h.dispatches.Results().Cohort(ctx, r.ID); err != nil {
+				// An unavailable v2 ledger is unknown, never authorization to
+				// replay the same pending result through legacy v1 fanout.
 				continue
 			}
+			h.observeControllerResult(ctx, r)
+			continue
 		}
 		if r.DeliveryState == "queued" {
 			if receipt, found, err := h.messageQueue.Get(r.ParentID, "screturn_"+r.ID); err == nil && found {
