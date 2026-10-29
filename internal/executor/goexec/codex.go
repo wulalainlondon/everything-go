@@ -600,7 +600,9 @@ func (c *Codex) initializeRPC() error {
 		if c.rpc.transportEpoch.Load() != epoch {
 			return errProcDead
 		}
-		c.runtimeDiagnostics = map[string]any{"codex": existingProviderDiagnostics(raw, epoch, c.appServerSocket)}
+		diagnostics := existingProviderDiagnostics(raw, epoch, c.appServerSocket)
+		c.runtimeDiagnostics = map[string]any{"codex": diagnostics}
+		log.Printf("[codex] connect-only initialize version=%v transport_epoch=%d observed=%v", diagnostics["running_version"], epoch, diagnostics["version_observed"])
 	}
 	return nil
 }
