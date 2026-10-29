@@ -69,6 +69,9 @@ func TestOwnedFinalUsesCanonicalSealOnlyAfterOriginalAcceptance(t *testing.T) {
 				if err != nil || again.Hash != seal.Hash || ex.calls != 1 {
 					t.Fatal(again, err, ex.calls)
 				}
+				if wrong, err := h.jarvisResultSeal(context.Background(), s, "request", "seal_wrong"); err == nil || wrong.Text != "" || ex.calls != 1 {
+					t.Fatal("wrong existing seal ID triggered fallback", wrong, err, ex.calls)
+				}
 			} else {
 				if err == nil || seal.Text != "" {
 					t.Fatal("unproven final was sealed", seal, err)

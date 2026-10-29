@@ -44,8 +44,8 @@ func (h *Hub) jarvisResultSeal(ctx context.Context, s *session.Session, request,
 		}
 		return h.nativeSealKnown(s, anchor, request, thread, turn)
 	}
-	if seal, err := h.messageQueue.TaskSeal(ctx, s.ID, request, id); err == nil {
-		if valid(seal) {
+	if seal, err := h.messageQueue.TaskSeal(ctx, s.ID, request, ""); err == nil {
+		if (id == "" || id == seal.ID) && seal.Hash == jarvisTextHash(seal.Text) && valid(seal) {
 			return seal, nil
 		}
 		return messagequeue.TaskSeal{}, missing
