@@ -331,9 +331,21 @@ func (c *Codex) automaticProviderSubject() (string, error) {
 	// Codex's full-read recovery policy; no billing setting is changed here.
 	usableCredits := usage.Limits.Credits != nil && (*usage.Limits.Credits.HasCredits || *usage.Limits.Credits.Unlimited)
 	if (len(usage.Upsell) > 0 && string(usage.Upsell) != "null") ||
-		(usage.Limits.SpendReached != nil && *usage.Limits.SpendReached) || usage.Limits.ReachedType != nil ||
+		(usage.Limits.SpendReached != nil && *usage.Limits.SpendReached) ||
 		(!*usage.Allowed && !usableCredits) {
 		return "", errAutomaticUsageBlocked
+	}
+	if reached := usage.Limits.ReachedType; reached != nil {
+		// The protocol distinguishes included-plan exhaustion from workspace
+		// credit/spend restrictions. Only that exact plan-limit classification
+		// can be covered by affirmative existing credits; unknown types stay
+		// blocked. This exception requires explicit full-read hard-limit proof.
+		if *reached != "rate_limit_reached" || !usableCredits {
+			return "", errAutomaticUsageBlocked
+		}
+		if usage.Limits.SpendReached == nil || len(usage.Upsell) == 0 {
+			return "", recovery.ErrGuard
+		}
 	}
 	return recovery.Hash([]byte("chatgpt:" + *usage.AccountID)), nil
 }
