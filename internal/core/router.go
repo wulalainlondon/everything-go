@@ -213,6 +213,12 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		}
 		if !c.enrollmentOnly && h.dispatches != nil {
 			helloInput.Capabilities = append(helloInput.Capabilities, "session_controller_v1")
+			// Mobile captures an rc9 result source only after this authenticated
+			// handshake advertises it. Keep readiness aligned with the endpoint;
+			// enrollment and probes must never acquire a result-read scope.
+			if h.messageQueue != nil && h.pairedTaskDevice(c) != "" {
+				helloInput.Capabilities = append(helloInput.Capabilities, "session_controller_results_v2")
+			}
 		}
 		if !c.enrollmentOnly && h.deviceInventory != nil {
 			helloInput.Capabilities = append(helloInput.Capabilities, "device_inventory_v1")
