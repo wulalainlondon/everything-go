@@ -300,19 +300,36 @@ func (c *Codex) automaticProviderSubject() (string, error) {
 		return "", recovery.ErrGuard
 	}
 	var usage struct {
-		AccountID *string `json:"accountId"`
-		Allowed   *bool   `json:"ordinaryUsageAllowed"`
+		AccountID *string         `json:"accountId"`
+		Allowed   *bool           `json:"ordinaryUsageAllowed"`
+		Upsell    json.RawMessage `json:"rateLimitUpsell"`
+		Limits    *struct {
+			Credits *struct {
+				HasCredits bool `json:"hasCredits"`
+				Unlimited  bool `json:"unlimited"`
+			} `json:"credits"`
+			SpendReached *bool   `json:"spendControlReached"`
+			ReachedType  *string `json:"rateLimitReachedType"`
+		} `json:"rateLimits"`
 	}
 	if json.Unmarshal(raw, &usage) != nil {
 		return "", recovery.ErrGuard
 	}
-	if usage.Allowed != nil && !*usage.Allowed {
-		return "", errAutomaticUsageBlocked
-	}
 	if usage.AccountID == nil || *usage.AccountID == "" || c.rpc.transportEpoch.Load() != epoch {
 		return "", recovery.ErrGuard
 	}
-	if usage.Allowed != nil && !*usage.Allowed {
+	// Only this full, identity-bound read can establish eligibility. Sparse
+	// notifications, percentages and display balances never authorize recovery.
+	if usage.Allowed == nil || usage.Limits == nil {
+		return "", recovery.ErrGuard
+	}
+	// Included quota exhaustion can be covered by existing paid/unlimited
+	// credits. Backend-owned hard restrictions still take precedence, matching
+	// Codex's full-read recovery policy; no billing setting is changed here.
+	usableCredits := usage.Limits.Credits != nil && (usage.Limits.Credits.HasCredits || usage.Limits.Credits.Unlimited)
+	if (len(usage.Upsell) > 0 && string(usage.Upsell) != "null") ||
+		(usage.Limits.SpendReached != nil && *usage.Limits.SpendReached) || usage.Limits.ReachedType != nil ||
+		(!*usage.Allowed && !usableCredits) {
 		return "", errAutomaticUsageBlocked
 	}
 	return recovery.Hash([]byte("chatgpt:" + *usage.AccountID)), nil

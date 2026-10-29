@@ -69,8 +69,8 @@ func TestAutomaticProviderSubjectMissingUnsupportedAndNullUsage(t *testing.T) {
 			}
 			_, e := c.automaticProviderSubject()
 			if kind == "null-usage" {
-				if e != nil {
-					t.Fatal("null usage isn't an explicit block; stable ID remains valid", e)
+				if e != recovery.ErrGuard {
+					t.Fatal("unknown usage cannot authorize automatic recovery", e)
 				}
 			} else if e == nil {
 				t.Fatal("unknown account subject accepted")

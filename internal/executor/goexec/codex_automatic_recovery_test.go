@@ -170,6 +170,11 @@ func automaticExecutionFixture(t *testing.T) (*Codex, *automaticSQLFixture, *aut
 	return c, a, w, sink, func() { c.runTurn(s, st, "root", st.automaticInput, st.turnDone, "") }
 }
 func TestAutomaticCodexAcceptedFailedThenOneContinuationUsesSameThreadAndOneLogicalTerminal(t *testing.T) {
+	testAutomaticAcceptedFailureContinuation(t, nil)
+}
+
+func testAutomaticAcceptedFailureContinuation(t *testing.T, quota map[string]any) {
+	t.Helper()
 	c, a, w, sink, run := automaticExecutionFixture(t)
 	n := 0
 	items := []any{map[string]any{"type": "userMessage", "id": "original"}, map[string]any{"type": "reasoning", "id": "reasoning"}}
@@ -180,7 +185,10 @@ func TestAutomaticCodexAcceptedFailedThenOneContinuationUsesSameThreadAndOneLogi
 		case "account/read":
 			return autoResult(map[string]any{"account": map[string]string{"type": "chatgpt"}}), nil
 		case "account/rateLimits/read":
-			return autoResult(map[string]any{"accountId": "original", "ordinaryUsageAllowed": true}), nil
+			if quota != nil {
+				return autoResult(quota), nil
+			}
+			return autoResult(map[string]any{"accountId": "original", "ordinaryUsageAllowed": true, "rateLimits": map[string]any{}}), nil
 		case "turn/start":
 			n++
 			status := "failed"
@@ -243,7 +251,7 @@ func TestAutomaticCodexIngressRejectionRetriesImmutableInput(t *testing.T) {
 		case "account/read":
 			return autoResult(map[string]any{"account": map[string]string{"type": "chatgpt"}}), nil
 		case "account/rateLimits/read":
-			return autoResult(map[string]any{"accountId": "original"}), nil
+			return autoResult(map[string]any{"accountId": "original", "ordinaryUsageAllowed": true, "rateLimits": map[string]any{}}), nil
 		case "thread/read":
 			return autoResult(map[string]any{"thread": map[string]any{"id": "root", "status": map[string]string{"type": "idle"}}}), nil
 		case "turn/start":
@@ -287,7 +295,7 @@ func TestAutomaticCodexPartialWriteAndTerminalStorageFailureNeverReplayOrPublish
 				case "account/read":
 					return autoResult(map[string]any{"account": map[string]string{"type": "chatgpt"}}), nil
 				case "account/rateLimits/read":
-					return autoResult(map[string]any{"accountId": "original"}), nil
+					return autoResult(map[string]any{"accountId": "original", "ordinaryUsageAllowed": true, "rateLimits": map[string]any{}}), nil
 				case "turn/start":
 					if kind == "partial-write" {
 						return nil, errors.New("partial transport write")
@@ -527,7 +535,7 @@ func TestAutomaticScopeContentionWaitsWithoutWriterOrUnknownThenSettlesOnce(t *t
 				case "account/read":
 					return autoResult(map[string]any{"account": map[string]string{"type": "chatgpt"}}), nil
 				case "account/rateLimits/read":
-					return autoResult(map[string]any{"accountId": "original"}), nil
+					return autoResult(map[string]any{"accountId": "original", "ordinaryUsageAllowed": true, "rateLimits": map[string]any{}}), nil
 				case "thread/read":
 					return autoResult(map[string]any{"thread": map[string]any{"id": "root", "status": map[string]string{"type": "idle"}}}), nil
 				case "turn/start":
@@ -708,7 +716,7 @@ func TestAutomaticFinalWriterRechecksLocalAccountAndOwnedTupleAfterCoreReads(t *
 				case "account/read":
 					return autoResult(map[string]any{"account": map[string]string{"type": "chatgpt"}}), nil
 				case "account/rateLimits/read":
-					return autoResult(map[string]any{"accountId": "original"}), nil
+					return autoResult(map[string]any{"accountId": "original", "ordinaryUsageAllowed": true, "rateLimits": map[string]any{}}), nil
 				case "thread/read":
 					return autoResult(map[string]any{"thread": map[string]any{"id": "root", "status": map[string]string{"type": "idle"}}}), nil
 				case "turn/start":
@@ -742,7 +750,7 @@ func TestAutomaticTerminalFailureDeadlineIncludesCanonicalReconciliationTime(t *
 		case "account/read":
 			return autoResult(map[string]any{"account": map[string]string{"type": "chatgpt"}}), nil
 		case "account/rateLimits/read":
-			return autoResult(map[string]any{"accountId": "original"}), nil
+			return autoResult(map[string]any{"accountId": "original", "ordinaryUsageAllowed": true, "rateLimits": map[string]any{}}), nil
 		case "thread/read":
 			return autoResult(map[string]any{"thread": map[string]any{"id": "root", "status": map[string]string{"type": "idle"}}}), nil
 		case "turn/start":
