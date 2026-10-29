@@ -29,7 +29,7 @@ func TestAutomaticCreditFailedTurnContinuation(t *testing.T) {
 }
 
 func TestAutomaticCreditQuotaFullRead(t *testing.T) {
-	for _, kind := range []string{"paid", "unlimited", "included", "exhausted", "no-credits", "upsell", "upsell-included", "spend", "reached", "reached-empty", "unknown-allowed", "unknown-even-with-credits", "missing-rate-limits", "missing-account", "malformed-credits", "epoch-change", "api-key"} {
+	for _, kind := range []string{"paid", "unlimited", "included", "exhausted", "no-credits", "upsell", "upsell-included", "spend", "reached", "reached-empty", "unknown-allowed", "unknown-even-with-credits", "missing-rate-limits", "missing-account", "malformed-credits", "missing-has-credits", "null-has-credits", "missing-unlimited", "null-unlimited", "partial-credits-even-if-included", "epoch-change", "api-key"} {
 		t.Run(kind, func(t *testing.T) {
 			c, _, _, w, _ := livenessFixture(t)
 			quota := creditQuota(false, map[string]any{"hasCredits": true, "unlimited": false})
@@ -77,6 +77,23 @@ func TestAutomaticCreditQuotaFullRead(t *testing.T) {
 				want = recovery.ErrGuard
 			case "malformed-credits":
 				limits["credits"] = map[string]any{"hasCredits": "true"}
+				want = recovery.ErrGuard
+			case "missing-has-credits", "null-has-credits", "missing-unlimited", "null-unlimited", "partial-credits-even-if-included":
+				credits := map[string]any{"hasCredits": true, "unlimited": true}
+				switch kind {
+				case "missing-has-credits":
+					delete(credits, "hasCredits")
+				case "null-has-credits":
+					credits["hasCredits"] = nil
+				case "missing-unlimited", "partial-credits-even-if-included":
+					delete(credits, "unlimited")
+					if kind == "partial-credits-even-if-included" {
+						quota["ordinaryUsageAllowed"] = true
+					}
+				case "null-unlimited":
+					credits["unlimited"] = nil
+				}
+				limits["credits"] = credits
 				want = recovery.ErrGuard
 			case "epoch-change", "api-key":
 				want = recovery.ErrGuard

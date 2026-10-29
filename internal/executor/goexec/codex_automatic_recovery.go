@@ -305,8 +305,8 @@ func (c *Codex) automaticProviderSubject() (string, error) {
 		Upsell    json.RawMessage `json:"rateLimitUpsell"`
 		Limits    *struct {
 			Credits *struct {
-				HasCredits bool `json:"hasCredits"`
-				Unlimited  bool `json:"unlimited"`
+				HasCredits *bool `json:"hasCredits"`
+				Unlimited  *bool `json:"unlimited"`
 			} `json:"credits"`
 			SpendReached *bool   `json:"spendControlReached"`
 			ReachedType  *string `json:"rateLimitReachedType"`
@@ -323,10 +323,13 @@ func (c *Codex) automaticProviderSubject() (string, error) {
 	if usage.Allowed == nil || usage.Limits == nil {
 		return "", recovery.ErrGuard
 	}
+	if credits := usage.Limits.Credits; credits != nil && (credits.HasCredits == nil || credits.Unlimited == nil) {
+		return "", recovery.ErrGuard
+	}
 	// Included quota exhaustion can be covered by existing paid/unlimited
 	// credits. Backend-owned hard restrictions still take precedence, matching
 	// Codex's full-read recovery policy; no billing setting is changed here.
-	usableCredits := usage.Limits.Credits != nil && (usage.Limits.Credits.HasCredits || usage.Limits.Credits.Unlimited)
+	usableCredits := usage.Limits.Credits != nil && (*usage.Limits.Credits.HasCredits || *usage.Limits.Credits.Unlimited)
 	if (len(usage.Upsell) > 0 && string(usage.Upsell) != "null") ||
 		(usage.Limits.SpendReached != nil && *usage.Limits.SpendReached) || usage.Limits.ReachedType != nil ||
 		(!*usage.Allowed && !usableCredits) {
