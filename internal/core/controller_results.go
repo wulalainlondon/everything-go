@@ -182,7 +182,7 @@ func (h *Hub) executeControllerResults(ctx context.Context, caller taskapi.Bound
 			if role == "paired_human" && x == "ack_dispatch_results" {
 				continue
 			}
-			if role == "native_agent" && (x == "mark_dispatch_results_seen" || x == "set_dispatch_return_control") {
+			if role == "native_agent" && x == "mark_dispatch_results_seen" {
 				continue
 			}
 			allowed = append(allowed, x)
@@ -358,14 +358,27 @@ func (h *Hub) executeControllerResults(ctx context.Context, caller taskapi.Bound
 			result, e = store.Mark(ctx, scope, proof, in.ReadReceipt, in.Versions, req.IdempotencyKey, hash, kind, local)
 		}
 	case "set_dispatch_return_control":
-		if b.BindingKind != "paired_human" {
-			return fail(unifiedError("permission"))
-		}
 		if e = h.unifiedTarget(resultTarget(in.Manager), true); e != nil {
 			return fail(e)
 		}
 		h.messageQueueMu.Lock()
-		result, e = store.SetControl(ctx, scope, in.Expected, cr.Control{Mode: in.Mode, Paused: in.Paused, Deadline: in.Deadline, MaxBatches: in.MaxBatches, MaxNoProgress: in.MaxNoProgress}, req.IdempotencyKey, hash, local)
+		control := cr.Control{Mode: in.Mode, Paused: in.Paused, Deadline: in.Deadline, MaxBatches: in.MaxBatches, MaxNoProgress: in.MaxNoProgress}
+		if proof.Native {
+			e = h.messageQueue.WithNativeAcceptanceRead(ctx, func(txctx context.Context) error {
+				current, err := caller.Check(txctx)
+				if err != nil || current != b {
+					return unifiedError("caller_unbound")
+				}
+				native, known, err := h.messageQueue.ExactNativeAcceptanceContext(txctx, b.SourceSessionID, b.SourceRequestID)
+				if err != nil || !known || native.ThreadID != b.SourceResumeID || native.TurnID != b.NativeTurnID {
+					return unifiedError("caller_unbound")
+				}
+				result, err = store.SetControl(txctx, scope, in.Expected, control, req.IdempotencyKey, hash, local, cr.NativeProvenance{Source: scope.Parent, Request: proof.Request, Turn: proof.Turn, CallID: b.ToolCallID})
+				return err
+			})
+		} else {
+			result, e = store.SetControl(ctx, scope, in.Expected, control, req.IdempotencyKey, hash, local)
+		}
 		h.messageQueueMu.Unlock()
 	default:
 		return fail(unifiedError("unsupported"))

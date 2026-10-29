@@ -242,7 +242,18 @@ func saveOperation(ctx context.Context, tx *sql.Tx, scope string, r Receipt) err
 	_, e := tx.ExecContext(ctx, `INSERT INTO controller_result_operations VALUES(?,?,?,?)`, scope, r.Intent, r.InputHash, marshal(r))
 	return e
 }
-func (s *Store) SetControl(ctx context.Context, scope Scope, expected uint64, c Control, key, hash string, check func() error) (Receipt, error) {
+func (s *Store) SetControl(ctx context.Context, scope Scope, expected uint64, c Control, key, hash string, check func() error, native ...NativeProvenance) (Receipt, error) {
+	if len(native) > 1 {
+		return Receipt{}, ErrScope
+	}
+	var provenance *NativeProvenance
+	if len(native) == 1 {
+		p := native[0]
+		if p.Source != scope.Parent || p.Request == "" || p.Turn == "" || p.CallID == "" || p.ReadReceipt != "" {
+			return Receipt{}, ErrScope
+		}
+		provenance = &p
+	}
 	tx, e := s.db.BeginTx(ctx, nil)
 	if e != nil {
 		return Receipt{}, e
@@ -253,6 +264,9 @@ func (s *Store) SetControl(ctx context.Context, scope Scope, expected uint64, c 
 		return Receipt{}, e
 	}
 	if r, ok, e := operation(ctx, tx, sk, key, hash); ok || e != nil {
+		if ok && provenance != nil && r.NativeProvenance == nil {
+			return Receipt{}, ErrScope
+		}
 		return r, e
 	}
 	old, e := control(ctx, tx, sk)
@@ -274,6 +288,21 @@ func (s *Store) SetControl(ctx context.Context, scope Scope, expected uint64, c 
 	if c.Mode == "resume_authorized" && (!c.Paused && (c.Deadline <= now() || c.MaxBatches < 1 || c.MaxBatches > 16 || c.MaxNoProgress < 1 || c.MaxNoProgress > 4)) {
 		return Receipt{}, ErrBudget
 	}
+	// Native control is an attenuation of a durable, original human policy.
+	// It never claims the provider proved a human instruction or grants resume.
+	if provenance != nil {
+		if old.Revision == 0 || !ControlAuthorized(scope, old) || c.Mode != "notify_only" || !c.Paused || c.Deadline != old.Deadline || c.MaxBatches != old.MaxBatches || c.MaxNoProgress != old.MaxNoProgress {
+			return Receipt{}, ErrScope
+		}
+		var raw []byte
+		if e := tx.QueryRowContext(ctx, `SELECT receipt FROM controller_result_operations WHERE scope=? AND intent=?`, sk, old.SourceIntent).Scan(&raw); e != nil {
+			return Receipt{}, ErrScope
+		}
+		var human Receipt
+		if json.Unmarshal(raw, &human) != nil || human.Kind != "operation_receipt" || human.Operation != "set_dispatch_return_control" || human.State != "applied" || human.Intent != old.SourceIntent || human.NativeProvenance != nil || human.Control == nil || human.Control.SourceIntent != human.Intent || human.Control.Revision > old.Revision || human.Control.Deadline != old.Deadline || human.Control.MaxBatches != old.MaxBatches || human.Control.MaxNoProgress != old.MaxNoProgress {
+			return Receipt{}, ErrScope
+		}
+	}
 	c.Revision = old.Revision + 1
 	c.Issued = old.Issued
 	c.NoProgress = old.NoProgress
@@ -282,6 +311,9 @@ func (s *Store) SetControl(ctx context.Context, scope Scope, expected uint64, c 
 		c.NoProgress = 0
 	}
 	c.SourceIntent = key
+	if provenance != nil {
+		c.SourceIntent = old.SourceIntent
+	}
 	revision := scope.GrantRevision
 	c.grantRevision = &revision
 	if _, e = tx.ExecContext(ctx, `INSERT OR IGNORE INTO controller_result_scopes VALUES(?,?)`, sk, marshal(scope)); e != nil {
@@ -291,7 +323,7 @@ func (s *Store) SetControl(ctx context.Context, scope Scope, expected uint64, c 
 	if e != nil {
 		return Receipt{}, e
 	}
-	r := Receipt{Kind: "operation_receipt", Intent: key, Operation: "set_dispatch_return_control", InputHash: hash, State: "applied", Versions: []Version{}, Control: &c}
+	r := Receipt{Kind: "operation_receipt", Intent: key, Operation: "set_dispatch_return_control", InputHash: hash, State: "applied", Versions: []Version{}, Control: &c, NativeProvenance: provenance}
 	if e = saveOperation(ctx, tx, sk, r); e != nil {
 		return r, e
 	}

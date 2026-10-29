@@ -32,6 +32,7 @@ export class StorageIntentJournal implements IntentJournal {
     if (!isMutation(intent.request.operation) || !Number.isSafeInteger(intent.namespaceGeneration) || intent.namespaceGeneration < 0 || intent.namespace !== this.namespace || !intent.authority || !intent.request.idempotency_key ||
         !['prepared', 'unknown', 'resolved'].includes(intent.state) ||
         intent.inputHash !== await inputHash(intent.request.operation, intent.request.input)) throw new Error('Corrupt intent journal entry');
+    if(intent.nativeControlSourceIntent!==undefined&&(intent.request.operation!=='set_dispatch_return_control'||typeof intent.nativeControlSourceIntent!=='string'||!intent.nativeControlSourceIntent))throw Error('Corrupt native attenuation origin');
     if(intent.receipt)validate(intent.receipt,'Receipt');
     if (intent.receipt && (intent.receipt.intent_id !== intent.request.idempotency_key || intent.receipt.input_hash !== intent.inputHash || intent.receipt.operation !== intent.request.operation)) {
       throw new Error('Corrupt original receipt');
@@ -55,7 +56,7 @@ export class StorageIntentJournal implements IntentJournal {
       const previous = await this.load(key);
       if (previous) {
         if (previous.authority !== intent.authority || previous.namespaceGeneration !== intent.namespaceGeneration || previous.inputHash !== intent.inputHash ||
-            canonicalJSON(previous.request) !== canonicalJSON(intent.request)) throw new Error('Immutable original intent conflict');
+            canonicalJSON(previous.request) !== canonicalJSON(intent.request) || previous.nativeControlSourceIntent !== intent.nativeControlSourceIntent) throw new Error('Immutable original intent conflict');
         if (previous.state === 'resolved' && canonicalJSON(previous) !== canonicalJSON(intent)) throw new Error('Resolved original intent is immutable');
         if (previous.state === 'unknown' && intent.state === 'prepared') throw new Error('Unknown intent cannot be prepared again');
       } else if (intent.state !== 'prepared') throw new Error('Original prepared intent missing');
@@ -68,7 +69,7 @@ export class StorageIntentJournal implements IntentJournal {
     return this.locks.request(key, async () => {
       const previous = await this.load(key);
       if (!previous || previous.state !== 'prepared') return false;
-      if (previous.authority !== intent.authority || previous.namespaceGeneration !== intent.namespaceGeneration || canonicalJSON(previous.request) !== canonicalJSON(intent.request)) throw new Error('Original claim identity conflict');
+      if (previous.authority !== intent.authority || previous.namespaceGeneration !== intent.namespaceGeneration || canonicalJSON(previous.request) !== canonicalJSON(intent.request) || previous.nativeControlSourceIntent !== intent.nativeControlSourceIntent) throw new Error('Original claim identity conflict');
       this.storage.setItem(key, canonicalJSON({ ...previous, state: 'unknown' }));
       return true;
     });
