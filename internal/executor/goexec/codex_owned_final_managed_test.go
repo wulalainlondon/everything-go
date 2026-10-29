@@ -3,11 +3,14 @@ package goexec
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
+	"time"
 
 	"everything-go/internal/recovery"
 	"everything-go/internal/session"
@@ -212,6 +215,69 @@ func TestManagedOwnedFinalLegacyAndObservedExecutionNeverBackfilled(t *testing.T
 			}
 			if _, err := os.Stat(filepath.Join(c.dataDir, "codex-exact-final-reads")); !os.IsNotExist(err) {
 				t.Fatal("legacy read created once journal", err)
+			}
+		})
+	}
+}
+
+func TestManagedOwnedFinalNonregularCachedMarkerNeverBlocks(t *testing.T) {
+	for _, mode := range []string{"fifo", "socket", "directory", "symlink"} {
+		t.Run(mode, func(t *testing.T) {
+			c, s, w := managedOwnedFixture(t, "single")
+			if _, err := c.ExactProviderFinalForRequest(s, "request-1", "root", "turn-1"); err != nil {
+				t.Fatal(err)
+			}
+			n := len(w.methods)
+			dir := filepath.Join(c.dataDir, "codex-exact-final-reads")
+			entries, err := os.ReadDir(dir)
+			if err != nil || len(entries) != 1 {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, entries[0].Name())
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			switch mode {
+			case "fifo":
+				if err := syscall.Mkfifo(path, 0600); err != nil {
+					t.Fatal(err)
+				}
+			case "socket":
+				l, err := net.Listen("unix", path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer l.Close()
+			case "directory":
+				if err := os.Mkdir(path, 0700); err != nil {
+					t.Fatal(err)
+				}
+			case "symlink":
+				target := filepath.Join(t.TempDir(), "regular")
+				os.WriteFile(target, []byte("metadata"), 0600)
+				if err := os.Symlink(target, path); err != nil {
+					t.Fatal(err)
+				}
+			}
+			done := make(chan bool, 1)
+			go func() {
+				f, err := c.ExactProviderFinalForRequest(s, "request-1", "root", "turn-1")
+				done <- f == nil && err != nil
+			}()
+			select {
+			case rejected := <-done:
+				if !rejected || len(w.methods) != n {
+					t.Fatal("nonregular marker accepted/repolled")
+				}
+			case <-time.After(400 * time.Millisecond):
+				// Release a regressed FIFO reader before failing; never leave a blocked test.
+				if mode == "fifo" {
+					f, _ := os.OpenFile(path, os.O_WRONLY|syscall.O_NONBLOCK, 0)
+					if f != nil {
+						f.Close()
+					}
+				}
+				t.Fatal("nonregular marker blocked under final-reader mutex")
 			}
 		})
 	}

@@ -322,7 +322,7 @@ func (c *Codex) ownedFinalMarkerMatches(key, subject string, epoch, config, sour
 	if err != nil {
 		return false
 	}
-	f, err := os.OpenFile(filepath.Join(dir, key+".json"), os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	f, err := os.OpenFile(filepath.Join(dir, key+".json"), os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return false
 	}
