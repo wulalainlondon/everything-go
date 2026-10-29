@@ -273,3 +273,16 @@ func (c *CursorCodec) OpaqueHandle(scope, value string) string {
 	mac.Write([]byte("unified-queue\x00" + scope + "\x00" + value))
 	return "uqh_" + hex.EncodeToString(mac.Sum(nil))
 }
+
+// SourcePageCursor signs only a bounded read position under the existing exact
+// credential/source scope. It cannot be consumed by task/event cursor methods.
+func (c *CursorCodec) SourcePageCursor(namespace string, scope ReadScope, freeze Freeze, after string) (string, error) {
+	if namespace == "" || len(namespace) > 80 || len(after) > 256 {
+		return "", errors.New("invalid_source_cursor")
+	}
+	return c.encode(cursorPayload{Kind: "source-page:" + namespace, Schema: taskcontract.Hash(), Scope: scope, Freeze: freeze, After: after})
+}
+func (c *CursorCodec) SourcePagePosition(namespace, token string, scope ReadScope) (Freeze, string, error) {
+	p, e := c.decode(token, scope, "source-page:"+namespace)
+	return p.Freeze, p.After, e
+}

@@ -317,3 +317,31 @@ func TestSnapshotByteMeasurementEncodesEachOriginalBodyOnce(t *testing.T) {
 		t.Fatal("measured page exceeds real envelope bound", len(raw))
 	}
 }
+
+func TestOverviewSourceCursorCannotCrossEpochNamespaceOrTamper(t *testing.T) {
+	codec, e := NewCursorCodec([]byte(strings.Repeat("x", 32)), nil)
+	if e != nil {
+		t.Fatal(e)
+	}
+	scope := ReadScope{Authority: "a", StableScopeID: "phone-epoch1", FilterHash: "source-one"}
+	freeze := Freeze{ID: "source-page", ExpiresAt: time.Now().Add(time.Minute).UnixMilli(), Watermarks: []Watermark{{Store: "attachments", Sequence: 23}}}
+	token, e := codec.SourcePageCursor("overview-assets-v1", scope, freeze, "9")
+	if e != nil {
+		t.Fatal(e)
+	}
+	got, after, e := codec.SourcePagePosition("overview-assets-v1", token, scope)
+	if e != nil || got.ID != freeze.ID || after != "9" {
+		t.Fatal(got, after, e)
+	}
+	other := scope
+	other.StableScopeID = "phone-epoch2"
+	if _, _, e = codec.SourcePagePosition("overview-assets-v1", token, other); e == nil {
+		t.Fatal("epoch bypass")
+	}
+	if _, _, e = codec.SourcePagePosition("other-source", token, scope); e == nil {
+		t.Fatal("namespace bypass")
+	}
+	if _, _, e = codec.SourcePagePosition("overview-assets-v1", token+"x", scope); e == nil {
+		t.Fatal("tamper bypass")
+	}
+}

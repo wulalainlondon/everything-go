@@ -393,3 +393,28 @@ func (s *Store) saveLocked() {
 		_ = os.Rename(tmp, s.path)
 	}
 }
+
+// SessionPage is a read-only source page with a captured sequence high-water
+// mark. No other session records, ACKs, or pin relationships are changed.
+func (s *Store) SessionPage(sessionID string, before, high uint64, limit int) ([]Record, bool, uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if limit < 1 || limit > 20 {
+		limit = 20
+	}
+	if high == 0 {
+		high = s.nextSequence
+	}
+	out := []Record{}
+	for i := len(s.records) - 1; i >= 0; i-- {
+		r := s.records[i]
+		if r.SessionID != sessionID || r.Sequence > high || before > 0 && r.Sequence >= before {
+			continue
+		}
+		out = append(out, cloneRecord(r))
+		if len(out) > limit {
+			return out[:limit], true, high
+		}
+	}
+	return out, false, high
+}

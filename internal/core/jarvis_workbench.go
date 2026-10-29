@@ -165,7 +165,7 @@ func (h *Hub) jarvisOperations() []string {
 		ops = append(ops, "custom_inbox_assignment", "human_resolution")
 	}
 	if h.messageQueue != nil {
-		ops = append(ops, "work_elapsed_read", "worklist_read_v1", "worklist_notes_v1", "work_start_notice_v1", "context_reset_v1", "task_api_unified_rc6")
+		ops = append(ops, "work_elapsed_read", "worklist_read_v1", "worklist_notes_v1", "work_start_notice_v1", "context_reset_v1", "task_api_unified_rc6", "jarvis_overview_read_v1", "jarvis_project_annotations_v1", "jarvis_asset_read_v1", "jarvis_pins_v1")
 		if h.fcm != nil {
 			ops = append(ops, "work_start_push_v1")
 		}
@@ -197,6 +197,10 @@ func (h *Hub) ServeJarvisAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	if strings.HasPrefix(path, "context/") {
 		h.serveContext(w, r, device, path)
+		return
+	}
+	if strings.HasPrefix(path, "overview/") {
+		h.serveOverview(w, r, device, path)
 		return
 	}
 	if strings.HasPrefix(path, "worklist/") {
