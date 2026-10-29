@@ -16,7 +16,7 @@ import (
 // Set only on the one designated supervisor. Shared clients must not decide
 // ownership from their own (incomplete) view of active work.
 func (c *Codex) healthRestartOwner() bool {
-	return c.appServerSocket == "" && envBool("EVERYTHING_GO_CODEX_DAEMON_RECOVERY_OWNER", false)
+	return !c.connectOnly && c.appServerSocket == "" && envBool("EVERYTHING_GO_CODEX_DAEMON_RECOVERY_OWNER", false)
 }
 
 func (c *Codex) captureHealthEvidence(status string, result codexProbeResult, detail string) {

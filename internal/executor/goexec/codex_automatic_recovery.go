@@ -353,6 +353,9 @@ func (c *Codex) automaticProviderSubject() (string, error) {
 var errAutomaticUsageBlocked = errors.New("provider ordinary usage is explicitly blocked")
 
 func (c *Codex) automaticLocalSubject() (string, error) {
+	if c.connectOnly && c.appSandbox != nil {
+		return "", recovery.ErrGuard
+	}
 	if c.appSandbox != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
@@ -362,7 +365,16 @@ func (c *Codex) automaticLocalSubject() (string, error) {
 		}
 		return recovery.Hash([]byte("chatgpt:" + tokens.AccountID)), nil
 	}
-	f, e := os.Open(c.authPath)
+	path := c.authPath
+	if c.connectOnly {
+		if e := c.validateExistingProviderConnection(); e != nil {
+			return "", recovery.ErrGuard
+		}
+		// Read only the original provider's subject. Credentials are neither
+		// copied into the isolated runtime nor passed to the daemon connection.
+		path = c.subjectAuthPath
+	}
+	f, e := os.Open(path)
 	if e != nil {
 		return "", recovery.ErrGuard
 	}

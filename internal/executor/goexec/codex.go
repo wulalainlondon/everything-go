@@ -258,6 +258,8 @@ type Codex struct {
 	checkpointMaxBytes int
 	appServerMode      string // daemon (default) | stdio (compatibility fallback)
 	appServerSocket    string
+	connectOnly        bool
+	subjectAuthPath    string
 	runtimeMu          sync.RWMutex
 	runtimeDiagnostics map[string]any
 	reconnectMu        sync.Mutex
@@ -307,6 +309,8 @@ func NewCodex(sink executor.Sink, codexBin string) *Codex {
 		remoteReconnect:    true,
 		appServerMode:      codexAppServerMode(),
 		appServerSocket:    strings.TrimSpace(os.Getenv("EVERYTHING_GO_CODEX_APP_SERVER_SOCKET")),
+		connectOnly:        envBool("EVERYTHING_GO_CODEX_CONNECT_ONLY", false),
+		subjectAuthPath:    strings.TrimSpace(os.Getenv("EVERYTHING_GO_CODEX_PROVIDER_SUBJECT_AUTH_PATH")),
 	}
 }
 
@@ -353,6 +357,15 @@ func decodeCodexDaemonVersion(raw []byte) (map[string]any, error) {
 }
 
 func (c *Codex) refreshRuntimeDiagnostics(codexHome string) {
+	if c.connectOnly {
+		c.runtimeMu.Lock()
+		c.runtimeDiagnostics = map[string]any{"codex": map[string]any{
+			"status": "externally_managed", "connection_only": true,
+			"socket_path": c.appServerSocket, "checked_at_ms": time.Now().UnixMilli(),
+		}}
+		c.runtimeMu.Unlock()
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, c.codexBin, "app-server", "daemon", "version")
@@ -456,6 +469,16 @@ func (c *Codex) ensureServer() error {
 }
 
 func (c *Codex) startServerLocked() error {
+	if c.connectOnly {
+		// An explicit existing-provider connection has no daemon lifecycle or
+		// credential ownership. Fail before any CLI/config write and retain the
+		// original local account fence via its separately configured read source.
+		if err := c.validateExistingProviderConnection(); err != nil {
+			return err
+		}
+		c.refreshRuntimeDiagnostics(filepath.Dir(c.sessionsRoot))
+		return c.startRemoteServerLocked(filepath.Dir(c.sessionsRoot))
+	}
 	log.Printf("[codex] connecting app-server mode=%s", c.appServerMode)
 	if c.appSandbox == nil {
 		if changed, err := ensureBrowserElicitationRouting(filepath.Dir(c.sessionsRoot)); err != nil {
@@ -596,6 +619,11 @@ func (c *Codex) daemonSocketPath(codexHome string) string {
 }
 
 func (c *Codex) startRemoteServerLocked(codexHome string) error {
+	if c.connectOnly {
+		if err := c.validateExistingProviderConnection(); err != nil {
+			return err
+		}
+	}
 	socketPath := c.daemonSocketPath(codexHome)
 	dialer := &net.Dialer{Timeout: 10 * time.Second}
 	httpClient := &http.Client{Transport: &http.Transport{
@@ -2254,7 +2282,7 @@ func (c *Codex) Send(ctx context.Context, s *session.Session, reqID, content str
 		subject, e := c.automaticProviderSubject()
 		if e != nil {
 			_ = auto.NativeFinished("disabled")
-			if errors.Is(e, errAutomaticUsageBlocked) {
+			if errors.Is(e, errAutomaticUsageBlocked) || c.connectOnly {
 				return e
 			}
 			ctx = recovery.WithAutomatic(ctx, nil)
