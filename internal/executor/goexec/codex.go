@@ -358,12 +358,7 @@ func decodeCodexDaemonVersion(raw []byte) (map[string]any, error) {
 
 func (c *Codex) refreshRuntimeDiagnostics(codexHome string) {
 	if c.connectOnly {
-		c.runtimeMu.Lock()
-		c.runtimeDiagnostics = map[string]any{"codex": map[string]any{
-			"status": "externally_managed", "connection_only": true,
-			"socket_path": c.appServerSocket, "checked_at_ms": time.Now().UnixMilli(),
-		}}
-		c.runtimeMu.Unlock()
+		c.refreshExistingProviderDiagnostics()
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -578,22 +573,34 @@ func (c *Codex) startServerLocked() error {
 }
 
 func (c *Codex) initializeRPC() error {
-	if _, err := c.rpc.request("initialize", map[string]any{
-		"clientInfo": map[string]any{
-			"name":    "claude-bridge",
-			"title":   "Averything Bridge",
-			"version": "1.0",
-		},
-		"capabilities": map[string]any{
-			"experimentalApi":                true,
-			"requestAttestation":             false,
-			"mcpServerOpenaiFormElicitation": true,
-		},
-	}, 30*time.Second); err != nil {
+	params := map[string]any{
+		"clientInfo":   map[string]any{"name": "claude-bridge", "title": "Averything Bridge", "version": "1.0"},
+		"capabilities": map[string]any{"experimentalApi": true, "requestAttestation": false, "mcpServerOpenaiFormElicitation": true},
+	}
+	epoch := c.rpc.transportEpoch.Load()
+	var raw json.RawMessage
+	var err error
+	if c.connectOnly {
+		raw, err = c.rpc.requestAtEpoch("initialize", params, 30*time.Second, &epoch)
+	} else {
+		raw, err = c.rpc.request("initialize", params, 30*time.Second)
+	}
+	if err != nil {
 		return err
+	}
+	if c.connectOnly && c.rpc.transportEpoch.Load() != epoch {
+		return errProcDead
 	}
 	if err := c.rpc.notify("initialized", nil); err != nil {
 		return err
+	}
+	if c.connectOnly {
+		c.runtimeMu.Lock()
+		defer c.runtimeMu.Unlock()
+		if c.rpc.transportEpoch.Load() != epoch {
+			return errProcDead
+		}
+		c.runtimeDiagnostics = map[string]any{"codex": existingProviderDiagnostics(raw, epoch, c.appServerSocket)}
 	}
 	return nil
 }

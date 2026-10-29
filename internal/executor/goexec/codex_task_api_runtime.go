@@ -160,6 +160,12 @@ func (c *Codex) taskDaemonVersion() string {
 	if native == nil {
 		return "unknown"
 	}
+	if c.connectOnly {
+		epoch, observed := native["version_transport_epoch"].(uint64)
+		if !observed || epoch != c.rpc.transportEpoch.Load() || native["version_source"] != "initialize.userAgent" {
+			return "unknown"
+		}
+	}
 	version, _ := native["running_version"].(string)
 	if version == "" {
 		return "unknown"
