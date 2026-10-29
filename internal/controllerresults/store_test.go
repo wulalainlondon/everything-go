@@ -7,6 +7,7 @@ import (
 	cr "everything-go/internal/controllerresults"
 	"everything-go/internal/sessiondispatch"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -406,5 +407,171 @@ func TestControllerResultsSeenIsExplicitConsistentAndNeverNative(t *testing.T) {
 	members, e := st.Members(ctx, scope, g.ID, "", 20)
 	if e != nil || !members.Group.HumanSeen || members.Group.NativeRead || members.Group.Acknowledged || members.Group.NativeConsumed || members.Group.MissionApplied {
 		t.Fatal(members, e)
+	}
+}
+func TestControllerResultsTypedFailureNoFinalAndNoUnverifiedWake(t *testing.T) {
+	s, scope := fixture(t)
+	ctx := context.Background()
+	st := s.Results()
+	for _, state := range []string{"failed", "cancelled", "rejected"} {
+		for _, verified := range []bool{false, true} {
+			o := obs(scope, state+fmt.Sprint(verified), state+fmt.Sprint(verified))
+			o.State = state
+			o.Verified = verified
+			g, e := st.Observe(ctx, o)
+			if e != nil || g.State != state || g.Final != nil {
+				t.Fatal(g, e)
+			}
+		}
+	}
+	if _, e := st.SetControl(ctx, scope, 0, cr.Control{Mode: "resume_authorized", Deadline: time.Now().Add(time.Hour).UnixMilli(), MaxBatches: 1, MaxNoProgress: 1}, "enable", "hash", func() error { return nil }); e != nil {
+		t.Fatal(e)
+	}
+	b, created, e := st.Freeze(ctx, scope, func() error { return nil })
+	if e != nil || !created || len(b.Versions) != 3 {
+		t.Fatal(b, e)
+	}
+	for _, v := range b.Versions {
+		m, e := st.Members(ctx, scope, v.ID, "", 20)
+		if e != nil || m.Group.Final != nil {
+			t.Fatal(m, e)
+		}
+		for _, member := range m.Members {
+			if strings.HasSuffix(member.DispatchID, "false") {
+				t.Fatal("unverified failure triggered wake", member)
+			}
+		}
+	}
+}
+
+func TestControllerResultsVersionAxesNeverCarryForward(t *testing.T) {
+	for _, quarantine := range []bool{false, true} {
+		t.Run(fmt.Sprint("quarantine=", quarantine), func(t *testing.T) { controllerResultsVersionAxes(t, quarantine) })
+	}
+}
+func controllerResultsVersionAxes(t *testing.T, quarantine bool) {
+	s, scope := fixture(t)
+	ctx := context.Background()
+	st := s.Results()
+	o := obs(scope, "versioned", "versioned")
+	g, e := st.Observe(ctx, o)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e = st.SetControl(ctx, scope, 0, cr.Control{Mode: "resume_authorized", Deadline: time.Now().Add(time.Hour).UnixMilli(), MaxBatches: 2, MaxNoProgress: 2}, "enable", "hash", func() error { return nil }); e != nil {
+		t.Fatal(e)
+	}
+	batch, created, e := st.Freeze(ctx, scope, func() error { return nil })
+	if e != nil || !created {
+		t.Fatal(batch, created, e)
+	}
+	native := cr.ReadProof{Principal: "native", Request: "processing", Turn: "turn", Native: true}
+	page, e := st.Read(ctx, scope, native, "", 20)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e = st.Mark(ctx, scope, native, page.ReadReceipt.ID, page.ReadReceipt.Versions, "ack", "ackhash", "ack", func() error { return nil }); e != nil {
+		t.Fatal(e)
+	}
+	human := cr.ReadProof{Principal: "human"}
+	hp, e := st.Read(ctx, scope, human, "", 20)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e = st.Mark(ctx, scope, human, hp.ReadReceipt.ID, hp.ReadReceipt.Versions, "seen", "seenhash", "seen", func() error { return nil }); e != nil {
+		t.Fatal(e)
+	}
+	if e = st.SetBatchState(ctx, batch.ID, "completed", "processing-turn"); e != nil {
+		t.Fatal(e)
+	}
+	app := cr.MissionApplication{RecordID: "mission", GroupVersion: g.Version, FactHash: g.FactHash, IntentID: "checkpoint"}
+	if e = st.ApplyMission(ctx, scope, g.ID, app); e != nil {
+		t.Fatal(e)
+	}
+	before, e := st.Members(ctx, scope, g.ID, "", 20)
+	if e != nil || !before.Group.NativeRead || !before.Group.Acknowledged || !before.Group.HumanSeen || !before.Group.NativeConsumed || !before.Group.MissionApplied {
+		t.Fatal(before, e)
+	}
+	o.Final = &cr.Final{SealID: "conflicting", Hash: cr.Hash("conflicting"), Request: o.Execution.Request}
+	var after cr.Group
+	if quarantine {
+		e = st.Quarantine(ctx, o.Member.DispatchID, "native conflict")
+		if e == nil {
+			var m cr.MembersPage
+			m, e = st.Members(ctx, scope, g.ID, "", 20)
+			after = m.Group
+		}
+	} else {
+		after, e = st.Observe(ctx, o)
+	}
+	if e != nil || after.State != "conflicted" || after.Version != g.Version+1 {
+		t.Fatal(after, e)
+	}
+	for _, actual := range []cr.Group{after, func() cr.Group {
+		m, e := st.Members(ctx, scope, g.ID, "", 20)
+		if e != nil {
+			t.Fatal(e)
+		}
+		return m.Group
+	}()} {
+		if actual.NativeRead || actual.NativeReadAt != 0 || actual.NativeReadReceipt != "" || actual.Acknowledged || actual.HumanSeen || actual.NativeConsumed || actual.MissionApplied || actual.ProcessedAt != 0 || len(actual.MissionApplications) != 0 || !actual.Unread {
+			t.Fatal("old version evidence falsely carried", actual)
+		}
+	}
+	// Immutable original receipts, checkpoint proof and full prior projection survive.
+	old, found, e := st.Operation(ctx, scope, "ack", "ackhash")
+	if e != nil || !found || old.Versions[0].Version != g.Version {
+		t.Fatal(old, found, e)
+	}
+	if e = s.TaskJournal().Transaction(ctx, func(tx *sql.Tx) error {
+		var raw []byte
+		if e := tx.QueryRow(`SELECT payload FROM controller_result_versions WHERE group_id=? AND version=?`, g.ID, g.Version).Scan(&raw); e != nil {
+			return e
+		}
+		var retained cr.Group
+		if e := json.Unmarshal(raw, &retained); e != nil {
+			return e
+		}
+		if !retained.MissionApplied || len(retained.MissionApplications) != 1 || !retained.NativeConsumed || !retained.Acknowledged || !retained.HumanSeen {
+			return fmt.Errorf("old evidence lost: %+v", retained)
+		}
+		return nil
+	}); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = st.Mark(ctx, scope, native, page.ReadReceipt.ID, page.ReadReceipt.Versions, "late", "latehash", "ack", func() error { return nil }); e == nil {
+		t.Fatal("stale ACK accepted")
+	}
+}
+
+func TestControllerResultsPendingFinalVersionClearsReadAndSeen(t *testing.T) {
+	s, scope := fixture(t)
+	ctx := context.Background()
+	st := s.Results()
+	o := obs(scope, "pending", "pending")
+	final := o.Final
+	o.Final = nil
+	g, e := st.Observe(ctx, o)
+	if e != nil || g.State != "pending_final" {
+		t.Fatal(g, e)
+	}
+	for _, native := range []bool{false, true} {
+		proof := cr.ReadProof{Principal: "reader", Request: "actual", Turn: "turn", Native: native}
+		page, e := st.Read(ctx, scope, proof, "", 20)
+		if e != nil {
+			t.Fatal(e)
+		}
+		kind := "seen"
+		if native {
+			kind = "ack"
+		}
+		if _, e = st.Mark(ctx, scope, proof, page.ReadReceipt.ID, page.ReadReceipt.Versions, kind, kind, kind, func() error { return nil }); e != nil {
+			t.Fatal(e)
+		}
+	}
+	o.Final = final
+	g, e = st.Observe(ctx, o)
+	if e != nil || g.State != "final" || g.Version != 2 || g.Acknowledged || g.HumanSeen || g.NativeRead || g.NativeReadAt != 0 || g.ProcessedAt != 0 || !g.Unread {
+		t.Fatal(g, e)
 	}
 }

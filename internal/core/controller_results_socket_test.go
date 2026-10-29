@@ -50,6 +50,14 @@ func TestControllerResultsActualProtocol3SocketClosedResponseAndEvents(t *testin
 	h.mu.Unlock()
 	defer close(c.quit)
 	manager := cr.Identity{h.cfg.InstanceID, parent.ID, parent.ResumeID(), 0}
+	capRequest := mustPipelineJSON(resultsRequest("capabilities", "", map[string]any{}))
+	if e := c.dispatchFrame(context.Background(), capRequest); e != nil {
+		t.Fatal(e)
+	}
+	capResponse := controllerResultsWaitRaw(t, c, "task_api_controller_results_response")
+	if r := resultsDecode(t, capResponse); !r.OK {
+		t.Fatal(r.Error)
+	}
 	request := mustPipelineJSON(resultsRequest("read_dispatch_inbox", "", map[string]any{"manager": manager, "cursor": "", "limit": 20}))
 	if e := c.dispatchFrame(context.Background(), request); e != nil {
 		t.Fatal(e)
@@ -73,7 +81,7 @@ func TestControllerResultsActualProtocol3SocketClosedResponseAndEvents(t *testin
 	retirement := controllerResultsWaitRaw(t, c, "controller_results_retired")
 	controllerResultValidateEvent(t, retirement, "Retirement")
 	if directory := os.Getenv("CONTROLLER_RESULTS_SOCKET_OUT"); directory != "" {
-		for name, b := range map[string][]byte{"inbox.request.json": request, "inbox.response.json": response, "invalidation.json": invalidation, "retirement.json": retirement} {
+		for name, b := range map[string][]byte{"capabilities.request.json": capRequest, "capabilities.response.json": capResponse, "inbox.request.json": request, "inbox.response.json": response, "invalidation.json": invalidation, "retirement.json": retirement} {
 			if e := os.WriteFile(filepath.Join(directory, name), b, 0600); e != nil {
 				t.Fatal(e)
 			}

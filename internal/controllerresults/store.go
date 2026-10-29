@@ -17,6 +17,7 @@ func Install(db *sql.DB) error {
 	_, e := db.Exec(`
 CREATE TABLE IF NOT EXISTS controller_result_scopes(scope TEXT PRIMARY KEY,payload BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS controller_result_groups(id TEXT PRIMARY KEY,scope TEXT NOT NULL,identity TEXT NOT NULL,version INTEGER NOT NULL,fact_hash TEXT NOT NULL,payload BLOB NOT NULL,historical INTEGER NOT NULL,legacy_outstanding INTEGER NOT NULL,UNIQUE(scope,identity));
+CREATE TABLE IF NOT EXISTS controller_result_versions(group_id TEXT NOT NULL,version INTEGER NOT NULL,scope TEXT NOT NULL,payload BLOB NOT NULL,PRIMARY KEY(group_id,version));
 CREATE TABLE IF NOT EXISTS controller_result_members(dispatch_id TEXT PRIMARY KEY,group_id TEXT NOT NULL,payload BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS controller_result_changes(scope TEXT NOT NULL,seq INTEGER NOT NULL,kind TEXT NOT NULL,PRIMARY KEY(scope,seq));
 CREATE TABLE IF NOT EXISTS controller_result_member_pages(id TEXT PRIMARY KEY,scope TEXT NOT NULL,payload BLOB NOT NULL);
@@ -54,6 +55,13 @@ func getGroup(ctx context.Context, q interface {
 	return g, e
 }
 
+func observationIdentity(e Execution, unverified string) string {
+	return Hash(struct {
+		E          Execution
+		Unverified string
+	}{e, unverified})
+}
+
 // Observe atomically links an immutable original dispatch member. Only actual
 // facts change a version/high-water mark; updated_at polling is deliberately absent.
 func (s *Store) Observe(ctx context.Context, o Observation) (Group, error) {
@@ -67,15 +75,11 @@ func (s *Store) Observe(ctx context.Context, o Observation) (Group, error) {
 		return Group{}, e
 	}
 
-	identity := Hash(struct {
-		E          Execution
-		Unverified string
-	}{o.Execution, func() string {
-		if !o.Verified {
-			return o.Member.DispatchID
-		}
-		return ""
-	}()})
+	unverified := ""
+	if !o.Verified {
+		unverified = o.Member.DispatchID
+	}
+	identity := observationIdentity(o.Execution, unverified)
 	id := "crg_" + Hash([]string{sk, identity})
 	var existingID string
 	e = tx.QueryRowContext(ctx, `SELECT group_id FROM controller_result_members WHERE dispatch_id=?`, o.Member.DispatchID).Scan(&existingID)
@@ -91,8 +95,11 @@ func (s *Store) Observe(ctx context.Context, o Observation) (Group, error) {
 		return g, e
 	}
 	state := o.State
-	if !o.Verified {
+	if state == "failed" || state == "cancelled" || state == "rejected" {
+		o.Final = nil
+	} else if !o.Verified {
 		state = "historical_unverified"
+		o.Final = nil
 	} else if state == "completed" {
 		if o.Final == nil {
 			state = "pending_final"
@@ -100,6 +107,7 @@ func (s *Store) Observe(ctx context.Context, o Observation) (Group, error) {
 			state = "final"
 		}
 	}
+	prior := g
 	fact := Hash(struct {
 		State string
 		Final *Final
@@ -142,6 +150,12 @@ func (s *Store) Observe(ctx context.Context, o Observation) (Group, error) {
 				changed = true
 			}
 		}
+	}
+	if !fresh && g.Version != prior.Version {
+		if e = retainVersion(ctx, tx, sk, prior); e != nil {
+			return g, e
+		}
+		clearVersionAxes(&g, !o.Historical)
 	}
 	res, e := tx.ExecContext(ctx, `INSERT OR IGNORE INTO controller_result_members VALUES(?,?,?)`, o.Member.DispatchID, id, marshal(o.Member))
 	if e != nil {
@@ -189,7 +203,13 @@ func control(ctx context.Context, q interface {
 		return c, nil
 	}
 	if e == nil {
-		e = json.Unmarshal(b, &c)
+		var saved struct {
+			Control
+			GrantRevision *uint64 `json:"authorization_grant_revision"`
+		}
+		e = json.Unmarshal(b, &saved)
+		c = saved.Control
+		c.grantRevision = saved.GrantRevision
 	}
 	return c, e
 }
@@ -257,15 +277,17 @@ func (s *Store) SetControl(ctx context.Context, scope Scope, expected uint64, c 
 	c.Revision = old.Revision + 1
 	c.Issued = old.Issued
 	c.NoProgress = old.NoProgress
-	if old.Paused && c.Mode == "resume_authorized" && !c.Paused {
+	if (old.Paused || !ControlAuthorized(scope, old)) && c.Mode == "resume_authorized" && !c.Paused {
 		c.Issued = 0
 		c.NoProgress = 0
 	}
 	c.SourceIntent = key
+	revision := scope.GrantRevision
+	c.grantRevision = &revision
 	if _, e = tx.ExecContext(ctx, `INSERT OR IGNORE INTO controller_result_scopes VALUES(?,?)`, sk, marshal(scope)); e != nil {
 		return Receipt{}, e
 	}
-	_, e = tx.ExecContext(ctx, `INSERT INTO controller_return_control VALUES(?,?) ON CONFLICT(scope) DO UPDATE SET payload=excluded.payload`, sk, marshal(c))
+	_, e = tx.ExecContext(ctx, `INSERT INTO controller_return_control VALUES(?,?) ON CONFLICT(scope) DO UPDATE SET payload=excluded.payload`, sk, marshalControl(c))
 	if e != nil {
 		return Receipt{}, e
 	}
@@ -568,6 +590,10 @@ func (s *Store) Quarantine(ctx context.Context, dispatch, reason string) error {
 	if g.State == "conflicted" {
 		return nil
 	}
+	if e = retainVersion(ctx, tx, scope, g); e != nil {
+		return e
+	}
+	clearVersionAxes(&g, true)
 	g.State = "conflicted"
 	g.MissionApplied = false
 	g.ConflictHashes = []string{g.FactHash, Hash(reason)}
@@ -645,4 +671,21 @@ func (s *Store) ApplyMission(ctx context.Context, scope Scope, id string, proof 
 		return e
 	}
 	return tx.Commit()
+}
+
+func retainVersion(ctx context.Context, tx *sql.Tx, scope string, g Group) error {
+	_, e := tx.ExecContext(ctx, `INSERT OR IGNORE INTO controller_result_versions VALUES(?,?,?,?)`, g.ID, g.Version, scope, marshal(g))
+	return e
+}
+func clearVersionAxes(g *Group, unread bool) {
+	g.Acknowledged = false
+	g.HumanSeen = false
+	g.NativeRead = false
+	g.NativeReadAt = 0
+	g.NativeReadReceipt = ""
+	g.NativeConsumed = false
+	g.MissionApplied = false
+	g.MissionApplications = nil
+	g.ProcessedAt = 0
+	g.Unread = unread
 }

@@ -214,6 +214,9 @@ func (s *Store) Freeze(ctx context.Context, scope Scope, check func() error) (Ba
 	if c.Paused || c.Mode != "resume_authorized" {
 		return Batch{}, false, nil
 	}
+	if !ControlAuthorized(scope, c) {
+		return Batch{}, false, ErrScope
+	}
 	if c.Deadline <= now() || c.Issued >= c.MaxBatches || c.NoProgress >= c.MaxNoProgress {
 		return Batch{}, false, ErrBudget
 	}
@@ -223,7 +226,7 @@ func (s *Store) Freeze(ctx context.Context, scope Scope, check func() error) (Ba
 	if e = check(); e != nil {
 		return Batch{}, false, e
 	}
-	rows, e := tx.QueryContext(ctx, `SELECT g.payload FROM controller_result_groups g WHERE g.scope=? AND g.historical=0 AND g.legacy_outstanding=0 AND json_extract(g.payload,'$.state') IN ('final','failed','cancelled','rejected') AND NOT EXISTS(SELECT 1 FROM controller_result_acks a WHERE a.scope=g.scope AND a.group_id=g.id AND a.version=g.version AND a.kind='ack') AND NOT EXISTS(SELECT 1 FROM controller_delivery_links l JOIN controller_return_batches b ON b.id=l.batch_id WHERE l.group_id=g.id AND l.version=g.version AND b.state!='retired') ORDER BY g.rowid LIMIT 32`, sk)
+	rows, e := tx.QueryContext(ctx, `SELECT g.payload,g.identity FROM controller_result_groups g WHERE g.scope=? AND g.historical=0 AND g.legacy_outstanding=0 AND json_extract(g.payload,'$.state') IN ('final','failed','cancelled','rejected') AND NOT EXISTS(SELECT 1 FROM controller_result_acks a WHERE a.scope=g.scope AND a.group_id=g.id AND a.version=g.version AND a.kind='ack') AND NOT EXISTS(SELECT 1 FROM controller_delivery_links l JOIN controller_return_batches b ON b.id=l.batch_id WHERE l.group_id=g.id AND l.version=g.version AND b.state!='retired') ORDER BY g.rowid LIMIT 4097`, sk)
 	if e != nil {
 		return Batch{}, false, e
 	}
@@ -231,13 +234,20 @@ func (s *Store) Freeze(ctx context.Context, scope Scope, check func() error) (Ba
 	for rows.Next() {
 		var raw []byte
 		var g Group
-		if e = rows.Scan(&raw); e != nil {
+		var identity string
+		if e = rows.Scan(&raw, &identity); e != nil {
 			break
 		}
 		if e = json.Unmarshal(raw, &g); e != nil {
 			break
 		}
+		if identity != observationIdentity(g.Execution, "") {
+			continue
+		} // Missing/foreign native proof remains passive typed terminal data.
 		versions = append(versions, Version{g.ID, g.Version, g.FactHash})
+		if len(versions) == 32 {
+			break
+		}
 	}
 	if e == nil {
 		e = rows.Err()
@@ -274,7 +284,7 @@ func (s *Store) Freeze(ctx context.Context, scope Scope, check func() error) (Ba
 		}
 	}
 	c.Issued++
-	_, e = tx.ExecContext(ctx, `UPDATE controller_return_control SET payload=? WHERE scope=?`, marshal(c), sk)
+	_, e = tx.ExecContext(ctx, `UPDATE controller_return_control SET payload=? WHERE scope=?`, marshalControl(c), sk)
 	if e != nil {
 		return batch, false, e
 	}
@@ -333,24 +343,26 @@ func (s *Store) SetBatchState(ctx context.Context, id, state, turn string) error
 		if e != nil {
 			return e
 		}
-		unprocessed := 0
-		for _, ref := range v.Versions {
-			var ack bool
-			e = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM controller_result_acks WHERE scope=? AND group_id=? AND version=? AND kind='ack')`, sk, ref.ID, ref.Version).Scan(&ack)
-			if e != nil {
+		if c.Revision == v.ControlRevision {
+			unprocessed := 0
+			for _, ref := range v.Versions {
+				var ack bool
+				e = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM controller_result_acks WHERE scope=? AND group_id=? AND version=? AND kind='ack')`, sk, ref.ID, ref.Version).Scan(&ack)
+				if e != nil {
+					return e
+				}
+				if !ack {
+					unprocessed++
+				}
+			}
+			if unprocessed > 0 {
+				c.NoProgress++
+			} else {
+				c.NoProgress = 0
+			}
+			if _, e = tx.ExecContext(ctx, `UPDATE controller_return_control SET payload=? WHERE scope=?`, marshalControl(c), sk); e != nil {
 				return e
 			}
-			if !ack {
-				unprocessed++
-			}
-		}
-		if unprocessed > 0 {
-			c.NoProgress++
-		} else {
-			c.NoProgress = 0
-		}
-		if _, e = tx.ExecContext(ctx, `UPDATE controller_return_control SET payload=? WHERE scope=?`, marshal(c), sk); e != nil {
-			return e
 		}
 	}
 	_, e = tx.ExecContext(ctx, `UPDATE controller_return_batches SET state=?,payload=? WHERE id=?`, state, marshal(v), id)

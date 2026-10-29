@@ -9,7 +9,9 @@ import (
 	cr "everything-go/internal/controllerresults"
 	"everything-go/internal/messagequeue"
 	"everything-go/internal/sessiondispatch"
+	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -204,4 +206,75 @@ func TestControllerResultsStatusClosedWaitReasonsFromOriginalGuards(t *testing.T
 	read("native_state_unknown")
 	h.SetExecutor(&queuedReasonExec{fakeExec: fe})
 	read("ready")
+}
+
+func TestControllerResultsGrantABARequiresFreshExplicitControl(t *testing.T) {
+	for _, frozen := range []bool{false, true} {
+		t.Run(fmt.Sprint("frozen=", frozen), func(t *testing.T) {
+			h, _, parent, target := unifiedFixtureSessions(t)
+			ctx := context.Background()
+			fe := h.exec.(*scopeFixtureExecutor).fakeExec
+			useNativeCorrelationFixture(h, fe, target.ResumeID(), "producer", "native-producer")
+			original := seedControllerResult(t, h, parent, target, "primary", "producer", false)
+			scope, ok := h.observeControllerResult(ctx, original)
+			if !ok {
+				t.Fatal("observe")
+			}
+			h.runtimes.Update(parent.ID, "completed", "", 0, "", "")
+			st := h.dispatches.Results()
+			if _, e := st.SetControl(ctx, scope, 0, cr.Control{Mode: "resume_authorized", Deadline: time.Now().Add(time.Hour).UnixMilli(), MaxBatches: 1, MaxNoProgress: 1}, "enable", "hash", func() error { return nil }); e != nil {
+				t.Fatal(e)
+			}
+			var old cr.Batch
+			if frozen {
+				var e error
+				old, _, e = st.Freeze(ctx, scope, func() error { return nil })
+				if e != nil {
+					t.Fatal(e)
+				}
+			}
+			disabled, e := h.dispatches.SetGrant(ctx, parent.ID, sessiondispatch.Grant{}, scope.GrantRevision)
+			if e != nil {
+				t.Fatal(e)
+			}
+			grant, e := h.dispatches.SetGrant(ctx, parent.ID, sessiondispatch.Grant{Enabled: true, Local: true}, disabled.Revision)
+			if e != nil {
+				t.Fatal(e)
+			}
+			current := scope
+			current.GrantRevision = grant.Revision
+			if scope.Key() != current.Key() {
+				t.Fatal("inbox key changed")
+			}
+			h.reconcileControllerResultBatch(ctx, current)
+			if frozen {
+				if _, found, e := h.messageQueue.Get(parent.ID, old.Request); e != nil || found {
+					t.Fatal("old frozen authorization admitted", found, e)
+				}
+			}
+			status, e := st.Status(ctx, current)
+			if e != nil {
+				t.Fatal(e)
+			}
+			if reason := h.controllerResultWaitReason(ctx, current, status.Control, false); reason != "scope_changed" {
+				t.Fatal("old grant authorization survived", reason)
+			}
+			snap, e := h.messageQueue.Snapshot(parent.ID)
+			if e != nil {
+				t.Fatal(e)
+			}
+			for _, v := range snap.Items {
+				if strings.HasPrefix(v.RequestID, "screturn_batch_") {
+					t.Fatal("grant ABA silently resumed", v)
+				}
+			}
+			if _, e = st.SetControl(ctx, current, 1, cr.Control{Mode: "resume_authorized", Deadline: time.Now().Add(time.Hour).UnixMilli(), MaxBatches: 2, MaxNoProgress: 2}, "new-human-enable", "newhash", func() error { return nil }); e != nil {
+				t.Fatal(e)
+			}
+			batch, created, e := st.Freeze(ctx, current, func() error { return nil })
+			if e != nil || !created || batch.ControlRevision != 2 {
+				t.Fatal(batch, created, e)
+			}
+		})
+	}
 }

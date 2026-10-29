@@ -1059,6 +1059,8 @@ func (h *Hub) claudeAnchorID(target *session.Session, proof messagequeue.Provide
 
 func (h *Hub) apiDelivery(ctx context.Context, r taskapi.IntentRecord) (string, any) {
 	parentID, requestID, threadID, state := "", "", "", "pending"
+	var aggregate *cr.Batch
+	var aggregateScope cr.Scope
 	var metadata apiMetadata
 	json.Unmarshal(r.Metadata, &metadata)
 	if r.Path == "delegation" {
@@ -1103,6 +1105,8 @@ func (h *Hub) apiDelivery(ctx context.Context, r taskapi.IntentRecord) (string, 
 				return "not_requested", nil
 			}
 			requestID = batch.Request
+			aggregate = &batch
+			aggregateScope = scope
 		} else if r.RequestID != original.RequestID {
 			return "not_requested", nil
 		}
@@ -1124,6 +1128,18 @@ func (h *Hub) apiDelivery(ctx context.Context, r taskapi.IntentRecord) (string, 
 		return "unknown", nil
 	}
 	if conflict, e := h.messageQueue.NativeConflictContext(ctx, parentID, requestID); e != nil || conflict {
+		return "unknown", nil
+	}
+	// Aggregate delivery is read from its ORIGINAL terminal MQ input and formal
+	// native seal. It does not depend on a second, possibly unloaded history
+	// projection and never upgrades ACK-only or a foreign/mutated input.
+	if aggregate != nil && aggregate.State == "completed" && entry.State == messagequeue.Completed && h.controllerResultEntryMatches(aggregateScope, *aggregate, entry) {
+		if seal, err := h.jarvisResultSeal(ctx, parent, requestID, "", false); err == nil {
+			var anchor map[string]any
+			if json.Unmarshal(seal.Anchor, &anchor) == nil {
+				return "delivered", anchor
+			}
+		}
 		return "unknown", nil
 	}
 	var anchor any

@@ -119,6 +119,9 @@ func (h *Hub) controllerResultWaitReason(ctx context.Context, scope cr.Scope, c 
 	if c.Mode != "resume_authorized" {
 		return "notify_only"
 	}
+	if !cr.ControlAuthorized(scope, c) {
+		return "scope_changed"
+	}
 	if c.Deadline <= crNow() || c.Issued >= c.MaxBatches || c.NoProgress >= c.MaxNoProgress {
 		return "budget_exhausted"
 	}
@@ -269,7 +272,7 @@ func (h *Hub) reconcileControllerResultBatch(ctx context.Context, scope cr.Scope
 		if e != nil {
 			return
 		}
-		if current.Revision != b.ControlRevision || current.Paused || current.Mode != "resume_authorized" {
+		if !cr.ControlAuthorized(scope, current) || current.Revision != b.ControlRevision || current.Paused || current.Mode != "resume_authorized" {
 			// Frozen+positive original MQ absence means dispatch-only intent; retire
 			// ONLY before writer admission. Unknown/queued receipts never take this path.
 			h.messageQueueMu.Lock()
@@ -299,7 +302,7 @@ func (h *Hub) reconcileControllerResultBatch(ctx context.Context, scope cr.Scope
 		if e != nil {
 			return e
 		}
-		if c.Revision != batch.ControlRevision || c.Paused || c.Mode != "resume_authorized" || c.Deadline <= crNow() {
+		if !cr.ControlAuthorized(scope, c) || c.Revision != batch.ControlRevision || c.Paused || c.Mode != "resume_authorized" || c.Deadline <= crNow() {
 			return cr.ErrScope
 		}
 		status, err := store.Status(ctx, scope)
@@ -579,6 +582,9 @@ func (h *Hub) reconcileControllerResultApplications(ctx context.Context, scope c
 // The controller pause can only restrict an existing mission's recovery of
 // these exact receipt facts; default notify-only never creates new authority.
 func (h *Hub) controllerResultMissionFence(ctx context.Context, manager taskpipeline.Identity, generation uint64, facts []taskpipeline.Fact) error {
+	if h.dispatches == nil {
+		return nil
+	} // No controller ledger/control exists; retain original mission behavior.
 	scope := cr.Scope{Parent: cr.Identity{manager.Authority, manager.Session, manager.Thread, manager.Revision}, Generation: generation}
 	control, e := h.dispatches.Results().Control(ctx, scope)
 	if e != nil {

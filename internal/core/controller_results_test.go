@@ -176,6 +176,13 @@ func controllerResultsBusyBatchCoverage(t *testing.T, base int) {
 			t.Fatal("coverage missing", i, r, e)
 		}
 	}
+	for i := 0; i < 72; i++ {
+		original, _, _ := h.dispatches.Get(context.Background(), fmt.Sprint("d", i))
+		state, anchor := h.apiDelivery(context.Background(), taskapi.IntentRecord{Path: "controller", NativeID: original.ID, SessionID: original.SessionID, RequestID: original.RequestID})
+		if state != "delivered" || anchor == nil {
+			t.Fatalf("actual TaskAPI member %d delivery=%s anchor=%v", i, state, anchor)
+		}
+	}
 	pageResult := resultsDecode(t, call("POST", "task-api", req, "phone").Body.Bytes())
 	b, _ := json.Marshal(pageResult.Result)
 	json.Unmarshal(b, &page)

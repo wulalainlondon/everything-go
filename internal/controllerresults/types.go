@@ -93,6 +93,8 @@ type Observation struct {
 	CompletedAt       int64
 }
 type Control struct {
+	grantRevision *uint64 // private original authorization; never caller-supplied or public wire
+
 	Revision      uint64 `json:"revision"`
 	Mode          string `json:"mode"`
 	Paused        bool   `json:"paused"`
@@ -205,4 +207,16 @@ type MissionApplication struct {
 	ProcessingRequest  string   `json:"processing_request_id"`
 	GroupVersion       uint64   `json:"group_version"`
 	FactHash           string   `json:"fact_hash"`
+}
+
+// ControlAuthorized never adopts a revoked authorization after grant ABA.
+// Missing legacy authorization is readable but cannot trigger a new effect.
+func ControlAuthorized(scope Scope, c Control) bool {
+	return c.grantRevision != nil && *c.grantRevision == scope.GrantRevision
+}
+func marshalControl(c Control) []byte {
+	return marshal(struct {
+		Control
+		GrantRevision *uint64 `json:"authorization_grant_revision"`
+	}{c, c.grantRevision})
 }
