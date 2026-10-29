@@ -24,10 +24,14 @@ type automaticTurnLineage struct {
 	Continuation  bool   `json:"continuation"`
 }
 type codexTurnRequests struct {
-	Recovery map[string]automaticTurnLineage `json:"recovery,omitempty"`
-	Version  int                             `json:"version"`
-	ThreadID string                          `json:"thread_id"`
-	Requests map[string]string               `json:"requests"`
+	// Qualification is written only for a newly accepted execution by this
+	// implementation. Existing/observed histories never acquire it by reading,
+	// loading or repeating an already remembered acceptance.
+	ExactFinalReadRequests map[string]string               `json:"exact_final_read_requests,omitempty"`
+	Recovery               map[string]automaticTurnLineage `json:"recovery,omitempty"`
+	Version                int                             `json:"version"`
+	ThreadID               string                          `json:"thread_id"`
+	Requests               map[string]string               `json:"requests"`
 }
 
 func (c *Codex) turnRequestsPath(threadID string) string {
@@ -93,6 +97,12 @@ func (c *Codex) saveTurnRequest(threadID, turnID, requestID string, accepted boo
 		}
 	}
 	r.Requests[turnID] = requestID
+	if accepted {
+		if r.ExactFinalReadRequests == nil {
+			r.ExactFinalReadRequests = map[string]string{}
+		}
+		r.ExactFinalReadRequests[turnID] = requestID
+	}
 	return c.writeTurnRequestsLocked(r)
 }
 

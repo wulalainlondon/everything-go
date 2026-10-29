@@ -50,6 +50,14 @@ func (c *Codex) ExactProviderFinalForRequest(s *session.Session, request, thread
 	if e != nil || len(decoded) != 32 || strings.ToLower(pin) != pin || s == nil || request == "" || thread == "" || turn == "" || strings.HasPrefix(request, "codex_external_") {
 		return nil, errOwnedFinalUnavailable
 	}
+	if production {
+		c.historyRequestMu.Lock()
+		accepted, err := c.loadTurnRequests(thread)
+		c.historyRequestMu.Unlock()
+		if err != nil || accepted.ExactFinalReadRequests[turn] != request {
+			return nil, nil
+		}
+	}
 	snap := s.Snapshot()
 	if snap.ResumeID != thread || snap.Backend != backend.Codex || snap.Hidden || s.State() == session.Closed || c.ValidateNativeAcceptance(s, thread, request, turn) != nil {
 		return nil, errOwnedFinalUnavailable

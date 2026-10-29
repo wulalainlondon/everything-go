@@ -182,3 +182,37 @@ func TestManagedOwnedFinalReservationContendsAcrossHosts(t *testing.T) {
 		t.Fatal("exclusive reservation winners", wins)
 	}
 }
+
+func TestManagedOwnedFinalLegacyAndObservedExecutionNeverBackfilled(t *testing.T) {
+	for _, mode := range []string{"legacy", "observed", "repeated-acceptance"} {
+		t.Run(mode, func(t *testing.T) {
+			c, s, w := managedOwnedFixture(t, "single")
+			if err := os.Remove(c.turnRequestsPath("root")); err != nil {
+				t.Fatal(err)
+			}
+			if err := c.rememberTurnRequest("root", "turn-1", "request-1"); err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.ReadFile(c.turnRequestsPath("root"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if mode == "repeated-acceptance" {
+				if err := c.rememberAcceptedTurnRequest("root", "turn-1", "request-1"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got, err := c.ExactProviderFinalForRequest(s, "request-1", "root", "turn-1")
+			if got != nil || err != nil || len(w.methods) != 0 {
+				t.Fatal("legacy execution acquired fallback", got, err, w.methods)
+			}
+			after, _ := os.ReadFile(c.turnRequestsPath("root"))
+			if string(before) != string(after) {
+				t.Fatal("legacy map backfilled")
+			}
+			if _, err := os.Stat(filepath.Join(c.dataDir, "codex-exact-final-reads")); !os.IsNotExist(err) {
+				t.Fatal("legacy read created once journal", err)
+			}
+		})
+	}
+}
