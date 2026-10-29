@@ -55,6 +55,14 @@ func (c *Codex) ExactProviderFinalForRequest(s *session.Session, request, thread
 	if e != nil || local != pin || c.rpc.transportEpoch.Load() != epoch || current.ResumeID != thread || current.SourceRevision != snap.SourceRevision || current.ConfigRevision != snap.ConfigRevision || current.Hidden || current.Backend != snap.Backend || s.State() == session.Closed || c.ValidateNativeAcceptance(s, thread, request, turn) != nil {
 		return nil, errOwnedFinalUnavailable
 	}
+	// This opt-in reader has one provider epoch per host lifetime. A retired
+	// transport cannot spend the same read budget again under a successor key.
+	if c.ownedFinalEpoch == 0 {
+		c.ownedFinalEpoch = epoch
+	}
+	if c.ownedFinalEpoch != epoch {
+		return nil, errOwnedFinalUnavailable
+	}
 	key := pin + ":" + s.ID + ":" + thread + ":" + request + ":" + turn + ":" + strconv.FormatUint(epoch, 10) + ":" + strconv.FormatUint(snap.ConfigRevision, 10) + ":" + strconv.FormatUint(snap.SourceRevision, 10)
 	if cached, ok := c.ownedFinals[key]; ok {
 		fresh := s.Snapshot()

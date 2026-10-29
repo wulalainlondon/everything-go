@@ -252,6 +252,7 @@ type Codex struct {
 	failureJournal     *recovery.Journal
 	historyRequestMu   sync.Mutex
 	ownedFinalMu       sync.Mutex
+	ownedFinalEpoch    uint64
 	ownedFinals        map[string]ownedFinalCacheEntry
 	maintenanceMu      sync.Mutex
 	maintenance        map[string]backend.Maintenance

@@ -214,3 +214,18 @@ func TestOwnedFinalKeepsHistoryCatalogIsolated(t *testing.T) {
 		t.Fatal(ids, err)
 	}
 }
+
+func TestOwnedFinalRetiredEpochCannotReadAgain(t *testing.T) {
+	for _, mode := range []string{"single", "unknown", "epoch-change"} {
+		t.Run(mode, func(t *testing.T) {
+			c, s, w := ownedFinalFixture(t, mode)
+			c.ExactProviderFinalForRequest(s, "request-1", "root", "turn-1")
+			count := len(w.methods)
+			c.rpc.transportEpoch.Add(1)
+			got, err := c.ExactProviderFinalForRequest(s, "request-1", "root", "turn-1")
+			if got != nil || err == nil || len(w.methods) != count {
+				t.Fatal("retired epoch reissued original read", got, err, w.methods)
+			}
+		})
+	}
+}
