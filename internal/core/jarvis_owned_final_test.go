@@ -12,17 +12,21 @@ import (
 
 type ownedFinalFixtureExec struct {
 	*fakeExec
-	final *backend.ExactProviderFinal
-	calls int
+	final             *backend.ExactProviderFinal
+	calls             int
+	closeBeforeReturn bool
 }
 
-func (e *ownedFinalFixtureExec) ExactProviderFinalForRequest(*session.Session, string, string, string) (*backend.ExactProviderFinal, error) {
+func (e *ownedFinalFixtureExec) ExactProviderFinalForRequest(s *session.Session, _ string, _ string, _ string) (*backend.ExactProviderFinal, error) {
 	e.calls++
+	if e.closeBeforeReturn {
+		s.Close()
+	}
 	return e.final, nil
 }
 
 func TestOwnedFinalUsesCanonicalSealOnlyAfterOriginalAcceptance(t *testing.T) {
-	for _, mode := range []string{"valid", "wrong-session", "wrong-request", "wrong-thread", "wrong-turn", "wrong-source", "missing-subject", "missing-pages", "missing-native", "not-completed"} {
+	for _, mode := range []string{"closed-before-seal", "valid", "wrong-session", "wrong-request", "wrong-thread", "wrong-turn", "wrong-source", "missing-subject", "missing-pages", "missing-native", "not-completed"} {
 		t.Run(mode, func(t *testing.T) {
 			h, fe := newTestHub(t)
 			s := h.registry.Create("owned", "target", t.TempDir(), backend.Codex, "", "read-only", "thread")
@@ -54,7 +58,7 @@ func TestOwnedFinalUsesCanonicalSealOnlyAfterOriginalAcceptance(t *testing.T) {
 			case "missing-pages":
 				f.ItemPageSHA256 = nil
 			}
-			ex := &ownedFinalFixtureExec{fakeExec: fe, final: f}
+			ex := &ownedFinalFixtureExec{fakeExec: fe, final: f, closeBeforeReturn: mode == "closed-before-seal"}
 			h.SetExecutor(ex)
 			seal, err := h.jarvisResultSeal(context.Background(), s, "request", "")
 			if mode == "valid" {

@@ -92,6 +92,9 @@ func ownedFinalFixture(t *testing.T, mode string) (*Codex, *session.Session, *to
 			if mode == "config-change" {
 				s.SetModel("different-fixture-model")
 			}
+			if mode == "closed" {
+				s.Close()
+			}
 			if mode == "missing-cursor" {
 				return map[string]any{"data": data}, nil
 			}
@@ -126,7 +129,7 @@ func TestOwnedFinalExactPublicCompletedPagesAndCache(t *testing.T) {
 }
 
 func TestOwnedFinalRejectsUnknownSourceTerminalAndIncompleteProof(t *testing.T) {
-	for _, mode := range []string{"missing-cursor", "subject-after-change", "other-subject", "wrong-turn", "failed", "commentary", "other-item-turn", "duplicate", "two-finals", "cursor-loop", "unknown", "epoch-change", "config-change"} {
+	for _, mode := range []string{"closed", "missing-cursor", "subject-after-change", "other-subject", "wrong-turn", "failed", "commentary", "other-item-turn", "duplicate", "two-finals", "cursor-loop", "unknown", "epoch-change", "config-change"} {
 		t.Run(mode, func(t *testing.T) {
 			c, s, w := ownedFinalFixture(t, mode)
 			got, err := c.ExactProviderFinalForRequest(s, "request-1", "root", "turn-1")
@@ -146,6 +149,25 @@ func TestOwnedFinalRejectsUnknownSourceTerminalAndIncompleteProof(t *testing.T) 
 				}
 			}
 		})
+	}
+}
+
+func TestOwnedFinalCacheKeepsSessionAndClosedSourceDistinct(t *testing.T) {
+	c, s, w := ownedFinalFixture(t, "single")
+	first, err := c.ExactProviderFinalForRequest(s, "request-1", "root", "turn-1")
+	if err != nil || first == nil {
+		t.Fatal(first, err)
+	}
+	other := session.NewRegistry().Create("other-session", "test", "/work", "codex", "", "", "root")
+	second, err := c.ExactProviderFinalForRequest(other, "request-1", "root", "turn-1")
+	if err != nil || second == nil || second.SessionID != other.ID || len(w.methods) != 10 {
+		t.Fatal("session cache aliased", second, err, w.methods)
+	}
+	s.Close()
+	n := len(w.methods)
+	got, err := c.ExactProviderFinalForRequest(s, "request-1", "root", "turn-1")
+	if err == nil || got != nil || len(w.methods) != n {
+		t.Fatal("closed source reused cache", got, err)
 	}
 }
 

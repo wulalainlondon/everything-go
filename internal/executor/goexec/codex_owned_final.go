@@ -52,11 +52,15 @@ func (c *Codex) ExactProviderFinalForRequest(s *session.Session, request, thread
 	defer c.ownedFinalMu.Unlock()
 	current := s.Snapshot()
 	local, e = c.automaticLocalSubject()
-	if e != nil || local != pin || c.rpc.transportEpoch.Load() != epoch || current.ResumeID != thread || current.SourceRevision != snap.SourceRevision || current.ConfigRevision != snap.ConfigRevision || c.ValidateNativeAcceptance(s, thread, request, turn) != nil {
+	if e != nil || local != pin || c.rpc.transportEpoch.Load() != epoch || current.ResumeID != thread || current.SourceRevision != snap.SourceRevision || current.ConfigRevision != snap.ConfigRevision || current.Hidden || current.Backend != snap.Backend || s.State() == session.Closed || c.ValidateNativeAcceptance(s, thread, request, turn) != nil {
 		return nil, errOwnedFinalUnavailable
 	}
-	key := pin + ":" + thread + ":" + request + ":" + turn + ":" + strconv.FormatUint(epoch, 10) + ":" + strconv.FormatUint(snap.ConfigRevision, 10) + ":" + strconv.FormatUint(snap.SourceRevision, 10)
+	key := pin + ":" + s.ID + ":" + thread + ":" + request + ":" + turn + ":" + strconv.FormatUint(epoch, 10) + ":" + strconv.FormatUint(snap.ConfigRevision, 10) + ":" + strconv.FormatUint(snap.SourceRevision, 10)
 	if cached, ok := c.ownedFinals[key]; ok {
+		fresh := s.Snapshot()
+		if s.State() == session.Closed || fresh.Hidden || fresh.Backend != backend.Codex || fresh.ResumeID != thread || fresh.SourceRevision != snap.SourceRevision || fresh.ConfigRevision != snap.ConfigRevision || c.rpc.transportEpoch.Load() != epoch || c.ValidateNativeAcceptance(s, thread, request, turn) != nil {
+			return nil, errOwnedFinalUnavailable
+		}
 		return cloneOwnedFinal(cached.Final), cached.Err
 	}
 	if c.ownedFinals == nil {
@@ -75,7 +79,7 @@ func (c *Codex) ExactProviderFinalForRequest(s *session.Session, request, thread
 	guard := func() bool {
 		now := s.Snapshot()
 		subject, err := c.automaticLocalSubject()
-		return err == nil && subject == pin && c.rpc.transportEpoch.Load() == epoch && now.ResumeID == thread && now.ConfigRevision == snap.ConfigRevision && now.SourceRevision == snap.SourceRevision && now.Backend == snap.Backend && c.ValidateNativeAcceptance(s, thread, request, turn) == nil
+		return err == nil && subject == pin && c.rpc.transportEpoch.Load() == epoch && s.State() != session.Closed && !now.Hidden && now.ResumeID == thread && now.ConfigRevision == snap.ConfigRevision && now.SourceRevision == snap.SourceRevision && now.Backend == snap.Backend && c.ValidateNativeAcceptance(s, thread, request, turn) == nil
 	}
 	if !guard() {
 		return nil, errOwnedFinalUnavailable

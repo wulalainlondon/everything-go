@@ -1,7 +1,11 @@
 package session
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -65,6 +69,16 @@ func (st *Store) Load() map[string]savedEntry {
 	raw := st.loadRawLocked()
 	out := make(map[string]savedEntry, len(raw))
 	for id, obj := range raw {
+		if value, present := obj["source_revision"]; present {
+			var revision uint64
+			if string(value) == "null" || json.Unmarshal(value, &revision) != nil {
+				// Do not restore malformed source identity as generation zero.
+				// Unloaded raw entries are not owned/deleted by this registry.
+				log.Printf("[session] invalid saved source revision id=%s", id)
+				delete(st.knownIDs, id)
+				continue
+			}
+		}
 		out[id] = entryFromRaw(obj)
 		st.knownIDs[id] = true
 	}
@@ -192,6 +206,7 @@ func putKnownFields(obj map[string]json.RawMessage, entry savedEntry) {
 	put("name", entry.Name)
 	put("metadata_revision", entry.MetadataRevision)
 	put("config_revision", entry.ConfigRevision)
+	put("source_revision", entry.SourceRevision)
 	put("name_updated_at", entry.NameUpdatedAt)
 	put("name_updated_by", entry.NameUpdatedBy)
 	put("last_name_mutation_id", entry.LastNameMutationID)
@@ -291,6 +306,7 @@ func entryFromRaw(obj map[string]json.RawMessage) savedEntry {
 		createdAt = float64(lastUsed)
 	}
 	return savedEntry{
+		SourceRevision:      rawUint64(obj, "source_revision"),
 		Name:                rawString(obj, "name"),
 		MetadataRevision:    uint64(rawInt64(obj, "metadata_revision")),
 		ConfigRevision:      uint64(rawInt64(obj, "config_revision")),
@@ -317,4 +333,66 @@ func entryFromRaw(obj map[string]json.RawMessage) savedEntry {
 		Pinned:              rawBool(obj, "pinned"),
 		Hidden:              rawBool(obj, "hidden"),
 	}
+}
+
+func rawUint64(obj map[string]json.RawMessage, key string) uint64 {
+	var value uint64
+	_ = json.Unmarshal(obj[key], &value)
+	return value
+}
+
+// BackfillMissingSourceRevision is an operator maintenance reconciliation,
+// called only after a fresh authenticated read proves the exact live scope and
+// the original host is stopped. It uses the normal Store lock/atomic writer.
+// It cannot change an existing value, thread, configuration or any other field.
+func (st *Store) BackfillMissingSourceRevision(expectedSHA, id, thread string, configuration, generation uint64) error {
+	if len(expectedSHA) != 64 || id == "" || thread == "" || generation == 0 {
+		return errors.New("source_revision_reconciliation_invalid")
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	unlock, err := st.lock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	info, err := os.Lstat(st.path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() > 8<<20 {
+		return errors.New("source_revision_store_unavailable")
+	}
+	data, err := os.ReadFile(st.path)
+	if err != nil {
+		return err
+	}
+	digest := sha256.Sum256(data)
+	if hex.EncodeToString(digest[:]) != expectedSHA {
+		return errors.New("source_revision_store_changed")
+	}
+	var raw map[string]map[string]json.RawMessage
+	if json.Unmarshal(data, &raw) != nil || raw == nil {
+		return errors.New("source_revision_store_invalid")
+	}
+	obj, ok := raw[id]
+	if !ok || obj == nil {
+		return errors.New("source_revision_source_missing")
+	}
+	if _, present := obj["source_revision"]; present {
+		return errors.New("source_revision_already_present")
+	}
+	var actualConfiguration uint64
+	value, present := obj["config_revision"]
+	if !present || string(value) == "null" || json.Unmarshal(value, &actualConfiguration) != nil || actualConfiguration != configuration {
+		return errors.New("source_revision_configuration_unknown")
+	}
+	hidden := false
+	if value, present := obj["hidden"]; present {
+		if string(value) == "null" || json.Unmarshal(value, &hidden) != nil {
+			return errors.New("source_revision_visibility_unknown")
+		}
+	}
+	if rawString(obj, "backend") != "codex" || rawString(obj, "resume_id") != thread || rawString(obj, "claude_uuid") != thread || hidden {
+		return errors.New("source_revision_source_changed")
+	}
+	obj["source_revision"], _ = json.Marshal(generation)
+	return st.writeRawLocked(raw)
 }
