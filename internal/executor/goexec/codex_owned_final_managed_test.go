@@ -243,11 +243,22 @@ func TestManagedOwnedFinalNonregularCachedMarkerNeverBlocks(t *testing.T) {
 					t.Fatal(err)
 				}
 			case "socket":
-				l, err := net.Listen("unix", path)
+				// Darwin limits sockaddr_un path length; bind at a short temporary
+				// name, then move the real socket node to the cache marker.
+				shortDir, err := os.MkdirTemp("/tmp", "owned-final-socket-")
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer os.RemoveAll(shortDir)
+				shortPath := filepath.Join(shortDir, "s")
+				l, err := net.Listen("unix", shortPath)
 				if err != nil {
 					t.Fatal(err)
 				}
 				defer l.Close()
+				if err := os.Rename(shortPath, path); err != nil {
+					t.Fatal(err)
+				}
 			case "directory":
 				if err := os.Mkdir(path, 0700); err != nil {
 					t.Fatal(err)
