@@ -254,6 +254,7 @@ type Codex struct {
 	ownedFinalMu       sync.Mutex
 	ownedFinalEpoch    uint64
 	ownedFinals        map[string]ownedFinalCacheEntry
+	ownedFinalOrder    []string
 	maintenanceMu      sync.Mutex
 	maintenance        map[string]backend.Maintenance
 	rolloverEnabled    bool

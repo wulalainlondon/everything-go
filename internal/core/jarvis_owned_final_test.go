@@ -85,3 +85,50 @@ func TestOwnedFinalUsesCanonicalSealOnlyAfterOriginalAcceptance(t *testing.T) {
 		})
 	}
 }
+
+type fileFirstOwnedFixture struct {
+	*ownedFinalFixtureExec
+	proof *workspaceFixtureHistory
+}
+
+func (e *fileFirstOwnedFixture) ProviderFor(*session.Session) (backend.HistoryProvider, bool) {
+	return e.proof, true
+}
+func TestOwnedFinalFileFirstAndMismatchNeverFallsThrough(t *testing.T) {
+	for _, mode := range []string{"valid", "seal-mismatch", "thread-mismatch", "turn-mismatch", "carry-only"} {
+		t.Run(mode, func(t *testing.T) {
+			h, fe := newTestHub(t)
+			s := h.registry.Create("file-first", "target", t.TempDir(), backend.Codex, "", "read-only", "thread")
+			taskEntry(t, h, s.ID, "request", "owner", messagequeue.Completed)
+			p := &workspaceFixtureHistory{correlationHistoryFixture: correlationHistoryFixture{Owners: map[string]string{}}, finals: map[string][]map[string]any{}}
+			p.add(s, "request", "turn", "original file final")
+			useNativeCorrelationFixture(h, fe, "thread", "request", "turn")
+			if err := h.messageQueue.RecordNativeAcceptance(s.ID, "request", "thread", "turn"); err != nil {
+				t.Fatal(err)
+			}
+			ex := &fileFirstOwnedFixture{ownedFinalFixtureExec: &ownedFinalFixtureExec{fakeExec: fe}, proof: p}
+			h.SetExecutor(ex)
+			id := ""
+			switch mode {
+			case "seal-mismatch":
+				id = "seal_wrong"
+			case "thread-mismatch":
+				p.finals["thread"][0]["source_thread_id"] = "other"
+			case "turn-mismatch":
+				p.finals["thread"][0]["source_turn_id"] = "other"
+			}
+			allow := mode != "carry-only"
+			seal, err := h.jarvisResultSeal(context.Background(), s, "request", id, allow)
+			if ex.calls != 0 {
+				t.Fatal("existing/conflicting file or carry-only reached provider")
+			}
+			if mode == "valid" {
+				if err != nil || seal.Text != "original file final" {
+					t.Fatal(seal, err)
+				}
+			} else if err == nil {
+				t.Fatal("mismatch accepted", seal)
+			}
+		})
+	}
+}

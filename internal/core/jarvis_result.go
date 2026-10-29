@@ -54,44 +54,48 @@ func (h *Hub) jarvisResultSeal(ctx context.Context, s *session.Session, request,
 	if len(materialize) > 0 && !materialize[0] {
 		return messagequeue.TaskSeal{}, missing
 	}
-	// An original inbox assignment uses the existing queue, not a second Task API
-	// intake journal. Materialize its final through the original session read model.
-	if s.Backend() == backend.Codex {
-		if reader, ok := h.exec.(interface {
-			ExactProviderFinalForRequest(*session.Session, string, string, string) (*backend.ExactProviderFinal, error)
-		}); ok {
-			originalSource := s.Snapshot()
-			f, err := reader.ExactProviderFinalForRequest(s, request, thread, turn)
-			if err != nil {
-				return messagequeue.TaskSeal{}, missing
-			}
-			if f != nil {
-				currentSource := func() bool {
-					x := s.Snapshot()
-					registered, exists := h.registry.Get(s.ID)
-					return exists && registered == s && s.State() != session.Closed && !x.Hidden && x.Backend == backend.Codex && x.ResumeID == thread && x.SourceRevision == originalSource.SourceRevision && x.ConfigRevision == originalSource.ConfigRevision
-				}
-				if !currentSource() {
+	finals, _ := h.sessionTaskFinals(s)
+	// Existing history is authoritative. A present but conflicting final must
+	// fail here, without falling through to a second provider interpretation.
+	if s.Backend() == backend.Codex && finals[request] == nil {
+		// An original inbox assignment uses the existing queue, not a second Task API
+		// intake journal. Materialize its final through the original session read model.
+		if s.Backend() == backend.Codex {
+			if reader, ok := h.exec.(interface {
+				ExactProviderFinalForRequest(*session.Session, string, string, string) (*backend.ExactProviderFinal, error)
+			}); ok {
+				originalSource := s.Snapshot()
+				f, err := reader.ExactProviderFinalForRequest(s, request, thread, turn)
+				if err != nil {
 					return messagequeue.TaskSeal{}, missing
 				}
-				if f.SessionID != s.ID || f.RequestID != request || f.ThreadID != thread || f.TurnID != turn || f.ConfigRevision != s.SettingsSnapshot().ConfigRevision || f.SourceRevision != s.Snapshot().SourceRevision || f.SourceMessageID == "" || f.Text == "" || len(f.Text) > 262144 || len(f.SubjectSHA256) != 64 || len(f.SubjectBeforeSHA256) != 64 || len(f.SubjectAfterSHA256) != 64 || f.TransportEpoch == 0 || len(f.TurnResponseSHA256) != 64 || len(f.ItemPageSHA256) == 0 || len(f.ItemPageSHA256) > 4 {
-					return messagequeue.TaskSeal{}, missing
+				if f != nil {
+					currentSource := func() bool {
+						x := s.Snapshot()
+						registered, exists := h.registry.Get(s.ID)
+						return exists && registered == s && s.State() != session.Closed && !x.Hidden && x.Backend == backend.Codex && x.ResumeID == thread && x.SourceRevision == originalSource.SourceRevision && x.ConfigRevision == originalSource.ConfigRevision
+					}
+					if !currentSource() {
+						return messagequeue.TaskSeal{}, missing
+					}
+					if f.SessionID != s.ID || f.RequestID != request || f.ThreadID != thread || f.TurnID != turn || f.ConfigRevision != s.SettingsSnapshot().ConfigRevision || f.SourceRevision != s.Snapshot().SourceRevision || f.SourceMessageID == "" || f.Text == "" || len(f.Text) > 262144 || len(f.SubjectSHA256) != 64 || len(f.SubjectBeforeSHA256) != 64 || len(f.SubjectAfterSHA256) != 64 || f.TransportEpoch == 0 || len(f.TurnResponseSHA256) != 64 || len(f.ItemPageSHA256) == 0 || len(f.ItemPageSHA256) > 4 {
+						return messagequeue.TaskSeal{}, missing
+					}
+					hash := jarvisTextHash(f.Text)
+					sealID := "seal_" + hash
+					if id != "" && id != sealID {
+						return messagequeue.TaskSeal{}, missing
+					}
+					anchor, _ := json.Marshal(map[string]any{"instance_id": h.cfg.InstanceID, "session_id": s.ID, "request_id": request, "source_message_id": f.SourceMessageID, "execution": map[string]string{"backend": "codex", "native_thread_id": thread, "native_turn_id": turn}, "exact_provider_final": f})
+					seal := messagequeue.TaskSeal{ID: sealID, SessionID: s.ID, RequestID: request, Hash: hash, Text: f.Text, Anchor: anchor}
+					if !valid(seal) || !currentSource() {
+						return messagequeue.TaskSeal{}, missing
+					}
+					return h.messageQueue.SealTask(ctx, seal)
 				}
-				hash := jarvisTextHash(f.Text)
-				sealID := "seal_" + hash
-				if id != "" && id != sealID {
-					return messagequeue.TaskSeal{}, missing
-				}
-				anchor, _ := json.Marshal(map[string]any{"instance_id": h.cfg.InstanceID, "session_id": s.ID, "request_id": request, "source_message_id": f.SourceMessageID, "execution": map[string]string{"backend": "codex", "native_thread_id": thread, "native_turn_id": turn}, "exact_provider_final": f})
-				seal := messagequeue.TaskSeal{ID: sealID, SessionID: s.ID, RequestID: request, Hash: hash, Text: f.Text, Anchor: anchor}
-				if !valid(seal) || !currentSource() {
-					return messagequeue.TaskSeal{}, missing
-				}
-				return h.messageQueue.SealTask(ctx, seal)
 			}
 		}
 	}
-	finals, _ := h.sessionTaskFinals(s)
 	projected := h.projectSessionTask(s, entry, "", finals)
 	if projected.State != "completed" || projected.APIAxes["final"] != "sealed" || projected.SourceMessageID == "" {
 		return messagequeue.TaskSeal{}, missing
