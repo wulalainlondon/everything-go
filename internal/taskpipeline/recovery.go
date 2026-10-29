@@ -261,3 +261,10 @@ func ExternalWaiting(r Record) bool {
 	}
 	return false
 }
+
+// HasRecoveryOwner reserves wake ownership for the original mission even while paused.
+func (s *Store) HasRecoveryOwner(ctx context.Context, manager string) (bool, error) {
+	var found bool
+	e := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM task_pipeline_records WHERE json_extract(record,'$.manager.session_id')=? AND json_extract(record,'$.mission.recovery_action') IS NOT NULL AND state NOT IN ('done','cancelled','expired'))`, manager).Scan(&found)
+	return found, e
+}

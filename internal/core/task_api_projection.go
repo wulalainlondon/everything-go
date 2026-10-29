@@ -16,6 +16,7 @@ import (
 
 	contract "everything-go/contracts/task-api/v1"
 	"everything-go/internal/backend"
+	cr "everything-go/internal/controllerresults"
 	"everything-go/internal/delegation"
 	"everything-go/internal/history"
 	"everything-go/internal/messagequeue"
@@ -1078,11 +1079,33 @@ func (h *Hub) apiDelivery(ctx context.Context, r taskapi.IntentRecord) (string, 
 		if e != nil || !found {
 			return "unknown", nil
 		}
-		if r.RequestID != original.RequestID {
-			return "not_requested", nil
-		}
+
 		parentID = original.ParentID
 		requestID = "screturn_" + original.ID
+		if batch, version, covered, err := h.dispatches.Results().Link(ctx, original.ID); err != nil {
+			return "unknown", nil
+		} else if covered {
+			// Exact immutable batch member/version coverage selects the ORIGINAL MQ
+			// request. ACK alone never upgrades delivery or supplies a native anchor.
+			if batch.Parent.Session != original.ParentID || batch.Parent.Thread != original.ParentThreadID || batch.Parent.Revision != original.ParentConfigRevision || version.ID == "" || version.Version == 0 {
+				return "unknown", nil
+			}
+			current, exists := h.registry.Get(original.ParentID)
+			if !exists {
+				return "unknown", nil
+			}
+			scope := cr.Scope{Parent: cr.Identity{h.cfg.InstanceID, current.ID, current.ResumeID(), current.SettingsSnapshot().ConfigRevision}, Generation: current.Snapshot().SourceRevision}
+			same, err := h.dispatches.Results().LinkScopeCurrent(ctx, original.ID, scope)
+			if err != nil || !same {
+				return "unknown", nil
+			}
+			if r.RequestID != original.RequestID && r.RequestID != original.ExecutionRequestID {
+				return "not_requested", nil
+			}
+			requestID = batch.Request
+		} else if r.RequestID != original.RequestID {
+			return "not_requested", nil
+		}
 		threadID = original.ParentThreadID
 		state = original.DeliveryState
 	}

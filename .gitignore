@@ -48,3 +48,6 @@ push_relay_client.json
 # Managed LINE account and media runtimes
 /services/*/node_modules/
 /services/line-account/dist/
+
+# Portable rc9 SDK install dependencies are reproducible, not product source.
+sdk/**/node_modules

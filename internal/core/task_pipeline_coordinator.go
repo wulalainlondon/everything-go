@@ -40,7 +40,9 @@ func (h *Hub) reconcileTaskPipelines(ctx context.Context) {
 		}
 		current, _, found, err := store.Get(ctx, i.Scope, r.ID)
 		if err == nil && found {
-			_ = store.EnsureRecovery(ctx, current.ID, current.Revision, facts, check)
+			if current.Mission != nil && h.controllerResultMissionFence(ctx, current.Manager, i.SourceGeneration, facts) == nil {
+				_ = store.EnsureRecovery(ctx, current.ID, current.Revision, facts, check)
+			}
 		}
 	}
 	h.reconcilePipelineNotifications(ctx)
@@ -59,6 +61,11 @@ func (h *Hub) reconcileTaskPipelines(ctx context.Context) {
 			}
 			if e := store.TriggerSourceGuard(ctx, r); e != nil {
 				return e
+			}
+			if r.Mission != nil {
+				if e := h.controllerResultMissionFence(ctx, r.Manager, i.SourceGeneration, c.Evidence); e != nil {
+					return e
+				}
 			}
 			return h.pipelineEffectCurrent(ctx, i, r)
 		}

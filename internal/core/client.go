@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"everything-go/internal/messagequeue"
 	"everything-go/internal/taskpipeline"
 	"io"
 	"log"
@@ -177,9 +178,12 @@ type Client struct {
 	// is queued on the same TCP stream. A pong can otherwise sit behind several
 	// megabytes of binary frames and look like a dead client on slower mobile
 	// links even though upload bytes are still arriving.
-	uploadActive    atomic.Bool
-	dispatchActive  atomic.Bool
-	dispatchStarted atomic.Int64
+	uploadActive                  atomic.Bool
+	controllerResultFence         func() error
+	controllerResultAdmission     *messagequeue.ControllerResultAdmission
+	controllerResultSubscriptions sync.Map
+	dispatchActive                atomic.Bool
+	dispatchStarted               atomic.Int64
 }
 
 func (c *Client) wireAuthority() string {
@@ -584,7 +588,7 @@ func (c *Client) dispatchFrame(ctx context.Context, data []byte) error {
 		c.hub.handleTaskCallback(ctx, c, data)
 		return nil
 	}
-	if json.Unmarshal(data, &taskHeader) == nil && (taskHeader.Type == "task_api_request" || taskHeader.Type == "task_api_unified_request") {
+	if json.Unmarshal(data, &taskHeader) == nil && (taskHeader.Type == "task_api_request" || taskHeader.Type == "task_api_unified_request" || taskHeader.Type == "task_api_controller_results_request") {
 		c.hub.handleTaskAPI(ctx, c, data)
 		return nil
 	}

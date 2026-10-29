@@ -91,7 +91,7 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		h.handleWorkspace(c, cmd)
 	case "partner_profile_request":
 		h.handlePartnerProfile(c, cmd)
-	case "task_api_request", "task_api_unified_request":
+	case "task_api_request", "task_api_unified_request", "task_api_controller_results_request":
 		return // Strict original frame handled by Client before legacy ParseCommand.
 	case "voice_call_prepare":
 		h.handleVoicePrepare(c, cmd)

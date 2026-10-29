@@ -201,7 +201,10 @@ func (h *Hub) serveUnifiedTask(w http.ResponseWriter, r *http.Request, device st
 		http.Error(w, "paired principal changed", 403)
 		return
 	}
-	response, handled := h.executePipeline(r.Context(), caller, raw)
+	response, handled := h.executeControllerResults(r.Context(), caller, raw)
+	if !handled {
+		response, handled = h.executePipeline(r.Context(), caller, raw)
+	}
 	if !handled {
 		response, handled = h.executeUnified(r.Context(), caller, raw)
 	}

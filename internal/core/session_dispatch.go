@@ -428,6 +428,22 @@ func (h *Hub) reconcileSessionDispatches(ctx context.Context) {
 		} else {
 			r = h.refreshSessionDispatch(ctx, r)
 		}
+		if r.DeliveryState == "pending" && (r.State == "completed" || r.State == "failed" || r.State == "cancelled" || r.State == "rejected") {
+			parent, ok := h.registry.Get(r.ParentID)
+			if !ok || parent.State() == session.Closed || r.ParentThreadID == "" || parent.ResumeID() != r.ParentThreadID || (r.ParentConfigKnown && parent.SettingsSnapshot().ConfigRevision != r.ParentConfigRevision) {
+				r.DeliveryState = "failed"
+				r.DeliveryError = "controller_return_parent_changed_or_closed"
+				_ = h.dispatches.Put(ctx, r)
+				continue
+			}
+		}
+		if r.DeliveryState != "inbound" && r.DeliveryState != "queued" {
+			// V2 is sticky: passive persistence precedes busy checks and never falls back to fanout.
+			if _, err := h.dispatches.Results().Cohort(ctx, r.ID); err == nil {
+				h.observeControllerResult(ctx, r)
+				continue
+			}
+		}
 		if r.DeliveryState == "queued" {
 			if receipt, found, err := h.messageQueue.Get(r.ParentID, "screturn_"+r.ID); err == nil && found {
 				switch string(receipt.State) {
@@ -474,6 +490,7 @@ func (h *Hub) reconcileSessionDispatches(ctx context.Context) {
 			_ = h.dispatches.Put(ctx, r)
 		}
 	}
+	h.reconcileControllerResults(ctx)
 }
 
 func (h *Hub) controllerInScope(s *session.Session) bool {

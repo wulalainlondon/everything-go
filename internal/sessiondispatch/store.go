@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"everything-go/internal/controllerresults"
 	"everything-go/internal/taskapi"
 	_ "modernc.org/sqlite"
 	"os"
@@ -133,6 +134,10 @@ func Open(dir string) (*Store, error) {
 		return nil, err
 	}
 	if err := taskapi.InstallJournal(db); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err := controllerresults.Install(db); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -377,6 +382,33 @@ func (s *Store) IndexRecords(ctx context.Context) ([]Record, error) {
 		if len(out) > 4096 {
 			return nil, errors.New("controller_index_range_exceeded")
 		}
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) Results() *controllerresults.Store { return controllerresults.New(s.db) }
+
+// Complete bounded source scan, separate from the presentation latest-100 list.
+func (s *Store) ListForResults(ctx context.Context, parent string) ([]Record, error) {
+	rows, e := s.db.QueryContext(ctx, `SELECT payload FROM session_dispatches WHERE parent_id=? ORDER BY rowid LIMIT 4097`, parent)
+	if e != nil {
+		return nil, e
+	}
+	defer rows.Close()
+	out := []Record{}
+	for rows.Next() {
+		var b []byte
+		var r Record
+		if e = rows.Scan(&b); e != nil {
+			return nil, e
+		}
+		if e = json.Unmarshal(b, &r); e != nil {
+			return nil, e
+		}
+		out = append(out, r)
+	}
+	if len(out) > 4096 {
+		return nil, errors.New("controller_result_capacity")
 	}
 	return out, rows.Err()
 }

@@ -45,6 +45,8 @@ type APIAdmission struct {
 }
 
 type Entry struct {
+	ControllerResult *ControllerResultAdmission
+
 	Pipeline *taskpipeline.Admission
 
 	EffectiveBinding                 []byte
@@ -100,6 +102,7 @@ func Open(dataDir string) (*Store, error) {
  payload_hash TEXT NOT NULL, message TEXT NOT NULL DEFAULT '',
  active_request_id TEXT NOT NULL DEFAULT '', turn_id TEXT NOT NULL DEFAULT '',
  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, payload BLOB NOT NULL, UNIQUE(session_id, request_id));
+ CREATE TABLE IF NOT EXISTS controller_result_native_inputs(session_id TEXT NOT NULL,request_id TEXT NOT NULL,payload BLOB NOT NULL,PRIMARY KEY(session_id,request_id));
  CREATE INDEX IF NOT EXISTS queue_pending ON queue_commands(session_id, state, seq);
  CREATE TABLE IF NOT EXISTS task_admissions (session_id TEXT NOT NULL, request_id TEXT NOT NULL, origin_instance TEXT NOT NULL, origin_session TEXT NOT NULL, metadata BLOB NOT NULL, PRIMARY KEY(session_id,request_id));
  CREATE INDEX IF NOT EXISTS task_origin ON task_admissions(origin_instance,origin_session);
@@ -275,6 +278,9 @@ func (s *Store) Enqueue(e Entry) (Entry, bool, error) {
 			return previous, false, ErrConflict
 		}
 		return previous, false, nil
+	}
+	if err := controllerResultAdmitTx(tx, e, hashText); err != nil {
+		return Entry{}, false, err
 	}
 	if err := taskpipeline.AdmitTx(s.nativeAcceptanceContext(context.Background(), tx), tx, e.Pipeline, e.SessionID, e.RequestID, hashText); err != nil {
 		return Entry{}, false, err

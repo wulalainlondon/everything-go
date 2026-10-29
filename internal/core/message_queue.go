@@ -131,6 +131,12 @@ func (h *Hub) enqueueChatMessageExpectedInherited(c *Client, cmd clientproto.Com
 	}
 	h.messageQueueMu.Lock()
 	defer h.messageQueueMu.Unlock()
+	if c.controllerResultFence != nil {
+		if err := c.controllerResultFence(); err != nil {
+			h.queueError(c, cmd, "controller_result_boundary_changed", "Original return boundary changed")
+			return false
+		}
+	}
 	config := session.ConfigurationFrom(s.SettingsSnapshot())
 	if err := h.jarvisFirstEffect(context.Background(), h.pairedTaskDevice(c), s.ID, cmd.RequestID, "legacy_message", cmd.Content); err != nil {
 		h.queueError(c, cmd, "jarvis_first_effect_required", err.Error())
@@ -192,7 +198,7 @@ func (h *Hub) enqueueChatMessageExpectedInherited(c *Client, cmd clientproto.Com
 			return false
 		}
 	}
-	e, inserted, err := h.messageQueue.Enqueue(messagequeue.Entry{Pipeline: c.pipelineAdmission, SessionID: cmd.SessionID, RequestID: cmd.RequestID, Content: truncateGraphemes(content, 4000), ImageCount: len(cmd.Images), FileNames: names, Payload: payload, PayloadHash: hex.EncodeToString(intentHash[:]), Inherited: inherited})
+	e, inserted, err := h.messageQueue.Enqueue(messagequeue.Entry{ControllerResult: c.controllerResultAdmission, Pipeline: c.pipelineAdmission, SessionID: cmd.SessionID, RequestID: cmd.RequestID, Content: truncateGraphemes(content, 4000), ImageCount: len(cmd.Images), FileNames: names, Payload: payload, PayloadHash: hex.EncodeToString(intentHash[:]), Inherited: inherited})
 	if err != nil {
 		if errors.Is(err, messagequeue.ErrRejected) {
 			h.queueError(c, cmd, "message_rejected", "這則訊息先前已被拒絕，不會自動重送。請確認接管狀態後，以新訊息送出。")

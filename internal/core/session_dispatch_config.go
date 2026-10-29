@@ -103,7 +103,9 @@ func (h *Hub) setControllerGrant(c *Client, cmd clientproto.Command) {
 		}
 		key = "peer:" + input.PeerID
 	}
+	h.messageQueueMu.Lock()
 	grant, e := h.dispatches.SetGrant(controllerClientContext(c), key, input.Grant, cmd.Revision)
+	h.messageQueueMu.Unlock()
 	if e != nil {
 		reject(e)
 		return

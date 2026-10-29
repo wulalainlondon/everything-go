@@ -19,6 +19,7 @@ import (
 	"time"
 
 	artifactcontract "everything-go/contracts/task-api/artifacts-v4"
+	resultscontract "everything-go/contracts/task-api/controller-results-v9"
 	interactioncontract "everything-go/contracts/task-api/interactions-v5"
 	pipeline "everything-go/contracts/task-api/pipeline-v8"
 	unified "everything-go/contracts/task-api/unified-v6"
@@ -173,6 +174,11 @@ func (h *Hub) TaskTools(s *session.Session) ([]map[string]any, error) {
 		return nil, pipelineErr
 	}
 	defs["task_pipeline"] = pipelineSchema
+	resultSchema, resultErr := resultscontract.ToolInput()
+	if resultErr != nil {
+		return nil, resultErr
+	}
+	defs["task_controller_results"] = resultSchema
 	for name, input := range extra {
 		defs[name] = input
 	}
@@ -243,7 +249,10 @@ func (h *Hub) ExecuteTask(ctx context.Context, c backend.TaskCaller, raw []byte)
 		})
 	}
 	caller, bindErr := taskapi.BindCaller(ctx, verifier, taskapi.Invocation{})
-	response, continuityHandled := h.executePipeline(ctx, caller, raw)
+	response, continuityHandled := h.executeControllerResults(ctx, caller, raw)
+	if !continuityHandled {
+		response, continuityHandled = h.executePipeline(ctx, caller, raw)
+	}
 	if !continuityHandled {
 		response, continuityHandled = h.executeUnified(ctx, caller, raw)
 	}
@@ -276,7 +285,10 @@ func (h *Hub) handleTaskAPI(ctx context.Context, c *Client, raw []byte) {
 		return
 	}
 	caller, _ := h.taskHuman(c)
-	response, handled := h.executePipeline(ctx, caller, raw)
+	response, handled := h.executeControllerResults(ctx, caller, raw)
+	if !handled {
+		response, handled = h.executePipeline(ctx, caller, raw)
+	}
 	if !handled {
 		response, handled = h.executeUnified(ctx, caller, raw)
 	}
@@ -289,6 +301,7 @@ func (h *Hub) handleTaskAPI(ctx context.Context, c *Client, raw []byte) {
 	if !handled {
 		response = h.taskService.Execute(ctx, caller, raw)
 	}
+	h.subscribeControllerResults(ctx, c, raw, response)
 	c.enqueueEvent(response)
 }
 func (h *Hub) Authorize(ctx context.Context, c taskapi.VerifiedContext, r taskapi.Request) (taskapi.Locator, error) {
@@ -813,7 +826,7 @@ func (h *Hub) Mutate(ctx context.Context, c taskapi.AuthorizedCommand) (any, err
 			record.RequestID = "scjob_scd_" + id
 			record.NativeID = "scd_" + id
 			record.TaskID = apiID(h.cfg.InstanceID, "controller", record.NativeID)
-			r := sessiondispatch.Record{ID: record.NativeID, ParentID: c.Caller.SourceSessionID, ParentThreadID: c.Caller.SourceResumeID, OriginRequestID: c.Caller.SourceRequestID, ToolCallID: c.Caller.ToolCallID, TurnID: c.Caller.NativeTurnID, InstanceID: h.cfg.InstanceID, SessionID: record.SessionID, ThreadID: in.Existing.ResumeID, ConfigRevision: in.Existing.ConfigRevision, RequestID: record.RequestID, Content: in.Instruction, Mode: "queue", IntentHash: c.IntentHash}
+			r := sessiondispatch.Record{ID: record.NativeID, ParentID: c.Caller.SourceSessionID, ParentThreadID: c.Caller.SourceResumeID, ParentConfigRevision: c.Caller.SourceConfigRevision, ParentConfigKnown: c.Caller.SourceConfigKnown, ParentExecutionRequestID: c.Caller.SourceRequestID, OriginRequestID: c.Caller.SourceRequestID, ToolCallID: c.Caller.ToolCallID, TurnID: c.Caller.NativeTurnID, InstanceID: h.cfg.InstanceID, SessionID: record.SessionID, ThreadID: in.Existing.ResumeID, ConfigRevision: in.Existing.ConfigRevision, RequestID: record.RequestID, Content: in.Instruction, Mode: "queue", IntentHash: c.IntentHash}
 			stored, created, err := h.dispatches.CreateAPI(ctx, c, record, r)
 			if err != nil {
 				return nil, err
