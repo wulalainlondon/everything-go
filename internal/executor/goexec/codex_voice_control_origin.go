@@ -6,7 +6,6 @@ import (
 	"everything-go/internal/backend"
 	"everything-go/internal/session"
 	"everything-go/internal/voicecontrol"
-	"os"
 	"path/filepath"
 	"sync"
 )
@@ -16,9 +15,35 @@ type voiceCommandProof struct {
 	fingerprint string
 }
 type voiceOriginState struct {
+	entry   string
 	mu      sync.Mutex
 	proofs  map[string]voiceCommandProof
 	blocked bool
+}
+
+// SetVoiceControlEntry binds native proof to the operator-selected fixed entry.
+// Startup calls this before registering daemon notifications.
+func (c *Codex) SetVoiceControlEntry(entry string) error {
+	if !filepath.IsAbs(entry) || filepath.Clean(entry) != entry {
+		return errors.New("voice_control_entry_invalid")
+	}
+	c.voiceControlOrigins.mu.Lock()
+	defer c.voiceControlOrigins.mu.Unlock()
+	if len(c.voiceControlOrigins.proofs) != 0 {
+		return errors.New("voice_control_entry_in_use")
+	}
+	c.voiceControlOrigins.entry = entry
+	return nil
+}
+
+func (c *Codex) voiceControlEntry() string {
+	c.voiceControlOrigins.mu.Lock()
+	entry := c.voiceControlOrigins.entry
+	c.voiceControlOrigins.mu.Unlock()
+	if entry == "" {
+		_, entry, _ = voicecontrol.Paths("")
+	}
+	return entry
 }
 
 func (c *Codex) observeVoiceControlNative(s *session.Session, method string, raw json.RawMessage) {
@@ -37,8 +62,7 @@ func (c *Codex) observeVoiceControlNative(s *session.Session, method string, raw
 		return
 	}
 	argv, ok := simpleMediaCommand(p.Item.CommandActions[0].Command)
-	home, e := os.UserHomeDir()
-	if !ok || e != nil || len(argv) < 2 || argv[0] != filepath.Join(home, ".local", "bin", "bridge-voice") || !unambiguousPublicJSON(raw) {
+	if !ok || len(argv) < 2 || argv[0] != c.voiceControlEntry() || !unambiguousPublicJSON(raw) {
 		return
 	}
 	q, e := voicecontrol.ParseInvocation(argv[1:])

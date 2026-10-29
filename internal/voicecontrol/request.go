@@ -137,6 +137,12 @@ func ParseInvocation(argv []string) (Request, error) {
 	return q, nil
 }
 func RunCLI(args []string, out, stderr io.Writer) int {
+	return RunCLIWithManifest(args, DefaultManifest(), out, stderr)
+}
+
+// RunCLIWithManifest selects only the local transport; provider proof and live
+// caller checks still run in the instance that receives the original request.
+func RunCLIWithManifest(args []string, manifest string, out, stderr io.Writer) int {
 	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
 		io.WriteString(stderr, "Usage: bridge-voice --id vtr_UNIQUE_INTENT --method list_sessions|voice_transfer|get_voice_transfer --params JSON\nOriginal provider-observed command, live Android call and existing controller grants are required. An explicit voice request authorizes capable Android clients to transfer without another tap; receipt acceptance is not connected. No text dispatch.\n")
 		return 0
@@ -152,7 +158,7 @@ func RunCLI(args []string, out, stderr io.Writer) int {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 55*time.Second)
 	defer cancel()
-	r, e := Send(ctx, DefaultManifest(), q)
+	r, e := Send(ctx, manifest, q)
 	if e != nil {
 		return fail(e)
 	}

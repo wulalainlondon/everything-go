@@ -56,6 +56,9 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 2 && os.Args[1] == "voice-control-instance" {
+		os.Exit(voicecontrol.RunCLIWithManifest(os.Args[3:], os.Args[2], os.Stdout, os.Stderr))
+	}
 	if len(os.Args) > 1 && os.Args[1] == "voice-control" {
 		os.Exit(voicecontrol.RunCLI(os.Args[2:], os.Stdout, os.Stderr))
 	}
@@ -75,6 +78,7 @@ func main() {
 	pairingWindow := flag.Duration("pairing-window", 0, "Explicit short pairing window for a loopback-only local acceptance instance")
 	listenHost := flag.String("listen-host", "", "IP to bind (empty = all interfaces; use 127.0.0.1 for isolated local acceptance)")
 	port := flag.Int("port", 8767, "WebSocket listen port (Python prod uses 8766)")
+	voiceControlDir := flag.String("voice-control-dir", "", "private voice-control entry directory for a dedicated Bridge instance (default = existing global entry)")
 	mediaControl := flag.Bool("media-control", false, "Enable fixed local media control after provider origin verification")
 	execName := flag.String("executor", "go", "AI executor: go | python")
 	claudeBin := flag.String("claude-bin", "claude", "path to the claude CLI binary")
@@ -109,6 +113,9 @@ func main() {
 	mode := flag.String("mode", "bridge", "run mode: bridge | index | devices (read-only local device inventory)")
 	indexPathsStdin := flag.Bool("index-paths-stdin", false, "index only newline-delimited transcript paths read from stdin")
 	flag.Parse()
+	if _, _, err := voicecontrol.Paths(*voiceControlDir); err != nil {
+		log.Fatal(err)
+	}
 	if *lineConfigCheck {
 		os.Exit(runLineCheck([]string{"--data-dir", *dataDir}, os.Stdout))
 	}
@@ -220,6 +227,7 @@ func main() {
 		log.Fatalf("load instance id: %v", err)
 	}
 	cfg := core.Config{
+		VoiceControlDir:                  *voiceControlDir,
 		WorkspaceEnabled:                 *workspaceEnabled,
 		WorkspaceOverviewDisabled:        *workspaceOverviewDisabled,
 		WorkspaceOverviewCompactDisabled: *workspaceOverviewCompactDisabled,
@@ -329,6 +337,10 @@ func main() {
 		codex.SetDelegationProvider(hub)
 		codex.SetSessionControlProvider(hub)
 		codex.SetDataDir(*dataDir)
+		_, voiceEntry, _ := voicecontrol.Paths(*voiceControlDir)
+		if err := codex.SetVoiceControlEntry(voiceEntry); err != nil {
+			log.Fatal(err)
+		}
 		codex.RegisterExistingDaemonObservation()
 		ollama := goexec.NewOllama(terminal, *ollamaHost, "")
 		backends := map[string]executor.Executor{

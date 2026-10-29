@@ -151,7 +151,7 @@ func (h *Hub) handleVoiceStart(c *Client, cmd clientproto.Command) {
 	h.voiceMu.Unlock()
 	mediaInstructions, mediaError := h.openVoiceMediaLocal(c, call)
 	if call.externalMusicPlatform == "android" {
-		mediaInstructions += voiceControlInstructions()
+		mediaInstructions += h.voiceControlInstructions()
 	}
 	if mediaError != nil {
 		log.Printf("[voice-media] private local control unavailable")

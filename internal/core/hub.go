@@ -61,6 +61,7 @@ import (
 // Config carries the connection-identity fields surfaced in hello_ack so the
 // app can label the bridge and respect its filesystem jail.
 type Config struct {
+	VoiceControlDir                  string
 	WorkspaceEnabled                 bool
 	WorkspaceOverviewDisabled        bool
 	WorkspaceOverviewCompactDisabled bool

@@ -44,6 +44,23 @@ func DefaultManifest() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".everything-go-runtime", "voice-control", "current.json")
 }
+
+// Paths keeps the primary entry unchanged and lets an operator isolate a
+// dedicated instance without replacing another instance's manifest or launcher.
+func Paths(directory string) (manifest, launcher string, err error) {
+	if directory == "" {
+		home, e := os.UserHomeDir()
+		if e != nil {
+			return "", "", e
+		}
+		return DefaultManifest(), filepath.Join(home, ".local", "bin", "bridge-voice"), nil
+	}
+	if !filepath.IsAbs(directory) || filepath.Clean(directory) != directory {
+		return "", "", errors.New("voice_control_directory_invalid")
+	}
+	return filepath.Join(directory, "current.json"), filepath.Join(directory, "bridge-voice"), nil
+}
+
 func privateDir(path string) error {
 	if e := os.MkdirAll(path, 0700); e != nil {
 		return e

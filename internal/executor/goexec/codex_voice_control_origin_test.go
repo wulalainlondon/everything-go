@@ -72,3 +72,29 @@ func TestVoiceControlCLIRejectsQuotedMentionsShellChainsAndDelegatedCaller(t *te
 		t.Fatal("delegation acquired voice transfer")
 	}
 }
+
+func TestVoiceControlDedicatedEntryOnlyAcceptsItsOwnNativeCommand(t *testing.T) {
+	c, s := voiceControlOriginFixture(t)
+	entry := filepath.Join(t.TempDir(), "bridge-voice")
+	if err := c.SetVoiceControlEntry(entry); err != nil {
+		t.Fatal(err)
+	}
+	q, _ := voicecontrol.ParseInvocation([]string{"--id", "vtr_dedicated_read", "--method", "list_sessions"})
+	_, defaultEntry, _ := voicecontrol.Paths("")
+	for _, wrong := range []string{defaultEntry, filepath.Join(t.TempDir(), "bridge-voice")} {
+		voiceControlCommandEvent(t, c, s, wrong+" --id vtr_dedicated_read --method list_sessions", "agent", "foreign-entry", s.ResumeID())
+		if _, err := c.ResolveVoiceControlCaller(s.ResumeID(), q.ID, q.Fingerprint()); err == nil {
+			t.Fatal("foreign entry acquired proof")
+		}
+	}
+	voiceControlCommandEvent(t, c, s, entry+" --id vtr_dedicated_read --method list_sessions", "agent", "own-entry", s.ResumeID())
+	if _, err := c.ResolveVoiceControlCaller(s.ResumeID(), q.ID, q.Fingerprint()); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.SetVoiceControlEntry(defaultEntry); err == nil {
+		t.Fatal("live proof rebound to another entry")
+	}
+	if err := c.SetVoiceControlEntry("relative"); err == nil {
+		t.Fatal("relative entry accepted")
+	}
+}

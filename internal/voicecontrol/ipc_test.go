@@ -82,3 +82,48 @@ func TestVoiceControlCLIProofSurvivesJSONTransportEscapingWithoutWeakeningIdenti
 		t.Fatal("ambiguous JSON accepted")
 	}
 }
+
+func TestVoiceControlInstanceCLIUsesOnlySelectedPrivateManifest(t *testing.T) {
+	t.Setenv("CODEX_THREAD_ID", "own-native-thread")
+	t.Setenv("CODEX_SESSION_ID", "")
+	var calls [2]atomic.Int32
+	var manifests [2]string
+	for i := range manifests {
+		root := t.TempDir()
+		manifest, _, err := Paths(filepath.Join(root, "private"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		manifests[i] = manifest
+		index := i
+		server, err := OpenServer(root, root, manifest, func(_ context.Context, q Request) (Result, error) {
+			if q.Thread != "own-native-thread" {
+				t.Fatal("thread altered")
+			}
+			calls[index].Add(1)
+			return Result{OK: true}, nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer server.Close()
+	}
+	var out bytes.Buffer
+	args := []string{"--id", "vtr_instance_read", "--method", "list_sessions"}
+	if code := RunCLIWithManifest(args, manifests[1], &out, &out); code != 0 {
+		t.Fatal(out.String())
+	}
+	if calls[0].Load() != 0 || calls[1].Load() != 1 {
+		t.Fatal("cross-instance routing")
+	}
+	if _, _, err := Paths("relative"); err == nil {
+		t.Fatal("relative directory accepted")
+	}
+	if _, _, err := Paths("/tmp/../foreign"); err == nil {
+		t.Fatal("unclean directory accepted")
+	}
+	t.Setenv("CODEX_THREAD_ID", "")
+	if RunCLIWithManifest(args, manifests[1], &out, &out) == 0 || calls[1].Load() != 1 {
+		t.Fatal("instance transport bypassed origin check")
+	}
+}
