@@ -192,6 +192,18 @@ func (m *Mux) FinalAnswerForSession(s *session.Session, requestID string) (strin
 	return reader.FinalAnswerForRequest(s, requestID)
 }
 
+// ExactProviderFinalForRequest preserves the selected backend and original
+// request identity; an unsupported backend keeps its existing history path.
+func (m *Mux) ExactProviderFinalForRequest(s *session.Session, request, thread, turn string) (*backend.ExactProviderFinal, error) {
+	reader, ok := m.pick(s).(interface {
+		ExactProviderFinalForRequest(*session.Session, string, string, string) (*backend.ExactProviderFinal, error)
+	})
+	if !ok {
+		return nil, nil
+	}
+	return reader.ExactProviderFinalForRequest(s, request, thread, turn)
+}
+
 // AllProviders returns the distinct history providers across all backends,
 // for aggregating resumable sessions.
 func (m *Mux) AllProviders() []backend.HistoryProvider {

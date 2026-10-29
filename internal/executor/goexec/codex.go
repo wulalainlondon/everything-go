@@ -251,6 +251,8 @@ type Codex struct {
 	failureJournalMu   sync.Mutex
 	failureJournal     *recovery.Journal
 	historyRequestMu   sync.Mutex
+	ownedFinalMu       sync.Mutex
+	ownedFinals        map[string]ownedFinalCacheEntry
 	maintenanceMu      sync.Mutex
 	maintenance        map[string]backend.Maintenance
 	rolloverEnabled    bool
