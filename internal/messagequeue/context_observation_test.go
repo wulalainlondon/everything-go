@@ -88,14 +88,14 @@ func TestContextObservationAtomicConflictAndSourceTime(t *testing.T) {
 	if e = s.RecordContextObservation(c, "one", nil, "completed", []string{"two"}, 200); e == nil {
 		t.Fatal("ambiguous canonical merge allowed")
 	}
-	nativeTime := int64(1)
+	nativeTime := int64(101) // after the completion source time 100, before receipt 300
 	used := 30
 	max := 100
 	if e = s.RecordContextObservation(c, "usage-native", &protocol.ContextUsageObservation{UsedTokens: &used, MaxTokens: &max, ReportedAtMS: &nativeTime}, "", nil, 300); e != nil {
 		t.Fatal(e)
 	}
 	r, _, e := s.ContextObservation(c)
-	if e != nil || r.Completed != 2 || r.UsageAt != 1 || r.AsOf != 300 || r.InvalidatedAt != 0 {
+	if e != nil || r.Completed != 2 || r.UsageAt != 101 || r.AsOf != 300 || r.InvalidatedAt != 0 {
 		t.Fatalf("native report time/atomicity: %+v %v", r, e)
 	}
 }
