@@ -3,6 +3,8 @@ package core
 import (
 	"everything-go/internal/nativewatch"
 	"everything-go/internal/session"
+	"strconv"
+	"strings"
 )
 
 // Require two consecutive complete catalogs before retiring imported rows.
@@ -15,6 +17,20 @@ func (h *Hub) reconcileNativeCatalog(opts nativewatch.Options, previous map[stri
 	candidates := map[string]bool{}
 	for _, s := range h.registry.List() {
 		snap := s.Snapshot()
+		key := snap.ID + "\x00" + snap.ResumeID
+		if strings.HasPrefix(snap.ID, "s_") {
+			// Native thread/start may precede the first materialized rollout.
+			// Only a positive, complete catalog observation for this exact
+			// logical creation and native generation can establish later loss.
+			// This proof is intentionally process-local: after restart an
+			// unknown absence is retained until presence is observed again.
+			observed := "\x00observed\x00" + strconv.FormatFloat(snap.CreatedAt, 'g', -1, 64) + "\x00" + key
+			if catalog.HasSession(snap.Backend, snap.ResumeID) || previous[observed] {
+				candidates[observed] = true
+			} else {
+				continue
+			}
+		}
 		missing := catalog.MissingSession(snap.Backend, snap.ResumeID)
 		// A logical conversation may own older physical threads. Never retire
 		// it while any original thread remains available.

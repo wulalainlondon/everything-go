@@ -2856,10 +2856,6 @@ func (c *Codex) SetGoal(ctx context.Context, s *session.Session, objective, stat
 }
 
 func (c *Codex) GetGoal(ctx context.Context, s *session.Session) error {
-	if err := c.ensureServer(); err != nil {
-		c.sink.Emit(backend.NewSessionWarning(s.ID, "codex app-server failed: "+err.Error()))
-		return err
-	}
 	st := c.state(s.ID)
 	st.mu.Lock()
 	threadID := st.threadID
@@ -2871,15 +2867,14 @@ func (c *Codex) GetGoal(ctx context.Context, s *session.Session) error {
 		threadID = s.ResumeID()
 	}
 	if threadID == "" {
-		if err := c.ensureThread(s, st); err != nil {
-			if !errors.Is(err, backend.ErrThreadActiveWriter) {
-				c.sink.Emit(backend.NewSessionWarning(s.ID, "failed to start codex thread: "+err.Error()))
-			}
-			return err
-		}
-		st.mu.Lock()
-		threadID = st.threadID
-		st.mu.Unlock()
+		// A fresh logical conversation has no native goal yet. A read-only
+		// UI lookup must not create a native thread before the first user turn.
+		c.sink.Emit(backend.NewGoalCleared(s.ID))
+		return nil
+	}
+	if err := c.ensureServer(); err != nil {
+		c.sink.Emit(backend.NewSessionWarning(s.ID, "codex app-server failed: "+err.Error()))
+		return err
 	}
 	raw, err := c.rpcCall("thread/goal/get", map[string]any{"threadId": threadID}, 30*time.Second)
 	if err != nil && isStaleThreadError(err) {

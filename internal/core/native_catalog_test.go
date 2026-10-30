@@ -59,7 +59,17 @@ func TestBridgeCreatedNativeDeletionKeepsHistoricalAndQueuedBindings(t *testing.
 	if _, _, err := h.messageQueue.Enqueue(messagequeue.Entry{SessionID: "s_queued", RequestID: "r_keep", Content: "keep", Payload: []byte(`{}`)}); err != nil {
 		t.Fatal(err)
 	}
-	previous, n := h.reconcileNativeCatalog(opts, nil)
+	// Establish that this exact Bridge-created generation actually had a
+	// rollout before testing confirmed deletion. Initial absence is unknown.
+	materialized := filepath.Join(root, "rollout-2026-01-01-"+missing+".jsonl")
+	if err := os.WriteFile(materialized, []byte("{}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	previous, _ := h.reconcileNativeCatalog(opts, nil)
+	if err := os.Remove(materialized); err != nil {
+		t.Fatal(err)
+	}
+	previous, n := h.reconcileNativeCatalog(opts, previous)
 	if n != 0 {
 		t.Fatal("retired on first scan")
 	}

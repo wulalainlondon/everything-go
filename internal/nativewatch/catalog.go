@@ -63,6 +63,16 @@ func ScanTranscriptCatalog(roots map[string]string) TranscriptCatalog {
 	return c
 }
 
+// HasSession is positive evidence from a complete readable catalog. An absent
+// file is not evidence that a newly bound thread ever materialized a rollout.
+func (c TranscriptCatalog) HasSession(backend, id string) bool {
+	if !uuidRE.MatchString(id) || !c.healthy[backend] || !c.ids[backend][id] {
+		return false
+	}
+	info, err := os.Stat(c.roots[backend])
+	return err == nil && info.IsDir()
+}
+
 func (c TranscriptCatalog) MissingSession(backend, id string) bool {
 	if !uuidRE.MatchString(id) || !c.healthy[backend] || c.ids[backend][id] {
 		return false

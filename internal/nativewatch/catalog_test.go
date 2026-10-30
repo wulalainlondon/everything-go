@@ -53,3 +53,25 @@ func TestCatalogRetainsZstdArchivedTranscript(t *testing.T) {
 		t.Fatal("compressed original treated as deleted")
 	}
 }
+
+func TestCatalogPositiveObservationRequiresCompleteOriginalSource(t *testing.T) {
+	root := t.TempDir()
+	id := "61a18e76-66d8-7e70-afbc-74c93671eb68"
+	file := filepath.Join(root, "rollout-2026-10-31-"+id+".jsonl.zst")
+	if err := os.WriteFile(file, []byte("fixture"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	scan := func() TranscriptCatalog { return ScanTranscriptCatalog(map[string]string{BackendCodex: root}) }
+	if !scan().HasSession(BackendCodex, id) {
+		t.Fatal("existing compressed native source not observed")
+	}
+	if scan().HasSession(BackendCodex, "71a18e76-66d8-7e70-afbc-74c93671eb68") {
+		t.Fatal("foreign generation counted present")
+	}
+	if err := os.Symlink(t.TempDir(), filepath.Join(root, "unknown")); err != nil {
+		t.Fatal(err)
+	}
+	if scan().HasSession(BackendCodex, id) {
+		t.Fatal("partial catalog claimed positive presence")
+	}
+}
