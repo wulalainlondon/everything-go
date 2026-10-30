@@ -1502,7 +1502,7 @@ func (h *Hub) sessionSummaries() []protocol.SessionSummary {
 		out = append(out, protocol.SessionSummary{
 			ClaudeUUID:  snap.ResumeID,
 			ContextUsed: knownContextUsed(snap), ContextMax: knownContextMax(snap),
-			ContextObservation: h.contextObservation(snap),
+			ContextObservation: h.contextObservation(active),
 			ActiveModel:        active.Model, ActiveEffort: active.Effort, ActiveServiceTier: active.ServiceTier, ActiveConfigRevision: active.ConfigRevision,
 			ConfigRevision: snap.ConfigRevision,
 			ID:             snap.ID, Name: snap.Name, IsStreaming: snap.Streaming || runtimePhaseActive(runtimePhase[snap.ID]),

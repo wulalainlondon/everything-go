@@ -341,3 +341,77 @@ func TestContextInitialHistoryInvalidatesWithoutCountingAndPostUsageRecovers(t *
 		return o.Usage.Status == "fresh" && o.Compactions.Completed != nil && *o.Compactions.Completed == 0 && o.Usage.ReportedAtMS != nil && *o.Usage.ReportedAtMS > now.UnixMilli()
 	})
 }
+
+func TestContextActualConfigurationACKKeepsActiveAndDefaultDistinct(t *testing.T) {
+	h, fe := newTestHub(t)
+	c := newTestClient(h)
+	s := h.registry.Create("config-wire", "Root", t.TempDir(), "codex", "gpt-6-astra", "read-only", "")
+	s.SetResumeID("root")
+	starts := make(chan session.Snapshot, 3)
+	fe.onSend = func(s *session.Session, _, _ string) { starts <- s.Snapshot() }
+	used, max := 20, 100
+	h.Emit(backend.ContextTelemetry{SessionID: s.ID, Backend: "codex", NativeGeneration: "root", SourceRevision: s.Snapshot().SourceRevision, EventID: "initial-config-usage", Origin: "codex_native_token_usage", MaxOrigin: "codex_native_token_usage", UsedTokens: &used, MaxTokens: &max})
+	route(h, c, `{"type":"message","session_id":"config-wire","request_id":"isolated-first","content":"isolated test only"}`)
+	select {
+	case <-starts:
+	case <-time.After(time.Second):
+		t.Fatal("isolated first callback missing")
+	}
+	route(h, c, `{"type":"message","session_id":"config-wire","request_id":"isolated-old-queued","content":"isolated test only"}`)
+	route(h, c, `{"type":"switch_session_config","session_id":"config-wire","mutation_id":"future-only","expected_config_revision":0,"config_scope":"next_message","model":"gpt-6-sol"}`)
+	future := waitForType(t, c, "session_config_result")
+	for future["mutation_id"] != "future-only" {
+		future = waitForType(t, c, "session_config_result")
+	}
+	stages := []map[string]any{}
+	capture := func(label string, ack map[string]any) {
+		summaries := h.sessionSummaries()
+		var exact protocol.SessionSummary
+		for _, row := range summaries {
+			if row.ID == s.ID {
+				exact = row
+			}
+		}
+		if exact.ConfigRevision != 1 || exact.ActiveConfigRevision != 0 || exact.ContextObservation == nil || exact.ContextObservation.ConfigRevision != 0 {
+			t.Fatalf("default configuration mislabeled active: %+v", exact)
+		}
+		summaryBytes, e := marshalEvent(h.client.SessionsList([]protocol.SessionSummary{exact}), "i1")
+		if e != nil {
+			t.Fatal(e)
+		}
+		contextBytes, e := marshalEvent(protocol.ContextObservationEvent{Type: "context_observation", SessionID: s.ID, AuthorityInstanceID: "i1", ContextObservation: *exact.ContextObservation}, "i1")
+		if e != nil {
+			t.Fatal(e)
+		}
+		stages = append(stages, map[string]any{"stage": label, "session_config_result": ack, "sessions_list": json.RawMessage(summaryBytes), "event": json.RawMessage(contextBytes)})
+	}
+	if future["config_revision"] != float64(1) || future["effective_boundary"] != "new_messages_only" || future["active_configuration"] != nil {
+		t.Fatal("future ACK claims an active configuration", future)
+	}
+	capture("future_default_one_active_zero_summary_authoritative", future)
+	h.Emit(protocol.NewDone(s.ID, "isolated-first"))
+	select {
+	case snap := <-starts:
+		if snap.ConfigRevision != 0 {
+			t.Fatal("already admitted queue changed configuration")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("isolated queued callback missing")
+	}
+	active := waitForType(t, c, "session_config_result")
+	for active["effective_boundary"] != "active_run_snapshot" {
+		active = waitForType(t, c, "session_config_result")
+	}
+	actual, ok := active["active_configuration"].(map[string]any)
+	if !ok || actual["revision"] != float64(0) || active["config_revision"] != float64(1) {
+		t.Fatal("active/default ACK revisions not distinct", active)
+	}
+	capture("active_run_zero_default_one_exact_join", active)
+	h.Emit(protocol.NewDone(s.ID, "isolated-old-queued"))
+	if path := os.Getenv("CONTEXT_CONFIG_WIRE_FIXTURE"); path != "" {
+		raw, _ := json.MarshalIndent(map[string]any{"schema": 1, "fixture": "Actual isolated router admission, future settings ACK, old queue activation ACK, real summary and marshalEvent; fake executor only, no provider/model", "stages": stages}, "", "  ")
+		if e := os.WriteFile(path, append(raw, '\n'), 0600); e != nil {
+			t.Fatal(e)
+		}
+	}
+}
