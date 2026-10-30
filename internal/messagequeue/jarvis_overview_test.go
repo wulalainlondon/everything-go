@@ -16,7 +16,7 @@ func TestOverviewDurableCASIntentsAssetScopeAndDecisionAtomicity(t *testing.T) {
 	}
 	ctx := t.Context()
 	scope := "phone\x001"
-	asset := &OverviewAsset{ID: "asset", SHA256: strings.Repeat("a", 64), MIME: "image/png", Width: 2, Height: 2, Bytes: []byte("original bytes"), Thumbnail: []byte("thumb bytes")}
+	asset := &OverviewAsset{ID: "asset", SHA256: strings.Repeat("a", 64), MIME: "image/png", Width: 2, Height: 2, Bytes: []byte("original bytes"), Thumbnail: []byte("thumb bytes"), SourceAttachment: "original_attachment", SourceJSON: json.RawMessage(`{"attachment_id":"original_attachment"}`)}
 	out, e := s.MutateOverview(ctx, scope, "collection", "c", "r_overview_original", "overview/collections/mutate", strings.Repeat("b", 64), 0, json.RawMessage(`{"collection_id":"c","pins":[]}`), asset)
 	if e != nil || out.Revision != 1 {
 		t.Fatal(out, e)
@@ -60,11 +60,11 @@ func TestOverviewDurableCASIntentsAssetScopeAndDecisionAtomicity(t *testing.T) {
 		t.Fatal(e)
 	}
 	decision := WorkDecision{State: "approved", Instruction: "人的原文", SourceRef: "r_human_decision"}
-	d, e := s.RecordOverviewDecision(ctx, scope, "manager", item.ID, "r_human_decision", "overview/decision/record", strings.Repeat("d", 64), item.Revision, decision, json.RawMessage(`{}`))
+	d, e := s.RecordOverviewDecision(ctx, scope, scope, "manager", item.ID, "r_human_decision", "overview/decision/record", strings.Repeat("d", 64), item.Revision, decision, json.RawMessage(`{}`))
 	if e != nil || d.Revision != 2 {
 		t.Fatal(d, e)
 	}
-	same, e := s.RecordOverviewDecision(ctx, scope, "manager", item.ID, "r_human_decision", "overview/decision/record", strings.Repeat("d", 64), 1, decision, json.RawMessage(`{}`))
+	same, e := s.RecordOverviewDecision(ctx, scope, scope, "manager", item.ID, "r_human_decision", "overview/decision/record", strings.Repeat("d", 64), 1, decision, json.RawMessage(`{}`))
 	if e != nil || same.Revision != 2 {
 		t.Fatal(same, e)
 	}

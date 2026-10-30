@@ -37,6 +37,7 @@ type overviewRequest struct {
 	ProjectID        string                 `json:"project_id,omitempty"`
 	CollectionID     string                 `json:"collection_id,omitempty"`
 	IntentID         string                 `json:"intent_id,omitempty"`
+	PlanRevision     uint64                 `json:"revision,omitempty"`
 	ExpectedRevision uint64                 `json:"expected_revision,omitempty"`
 	Title            string                 `json:"title,omitempty"`
 	Phase            string                 `json:"phase,omitempty"`
@@ -126,14 +127,23 @@ func (h *Hub) overviewScope(r *http.Request, device string, in jarvisWorkScope) 
 		return nil, "", "", e
 	}
 	refs := []overviewNavigation{}
+	grants := map[string]uint64{}
 	for _, s := range h.overviewSessions() {
 		refs = append(refs, h.overviewNavigation(s))
+		if h.dispatches != nil {
+			grant, err := h.dispatches.Grant(r.Context(), s.ID)
+			if err != nil {
+				return nil, "", "", err
+			}
+			grants[s.ID] = grant.Revision
+		}
 	}
 	return m, p, jarvisHash(struct {
-		Manager   jarvisWorkScope
-		Principal string
-		Sources   []overviewNavigation
-	}{in, p, refs}), nil
+		Manager          jarvisWorkScope
+		Principal        string
+		Sources          []overviewNavigation
+		ControllerGrants map[string]uint64
+	}{in, p, refs, grants}), nil
 }
 func (h *Hub) overviewNavAllowed(n overviewNavigation) bool {
 	s, ok := h.registry.Get(n.SessionID)
@@ -178,15 +188,21 @@ func (h *Hub) serveOverview(w http.ResponseWriter, r *http.Request, device, path
 	manager, principal, scopeHash, e := h.overviewScope(r, device, in.jarvisWorkScope)
 	if e != nil {
 		if mutation && jarvisID.MatchString(in.IntentID) {
-			receipt, err := h.messageQueue.RejectOverviewIntent(r.Context(), jarvisRequestPrincipal(r, device), in.IntentID, in.Operation, in.InputHash, "scope_changed")
+			receipt, err := h.messageQueue.RejectOverviewIntent(r.Context(), h.overviewStoreScope(jarvisRequestPrincipal(r, device)), in.IntentID, in.Operation, in.InputHash, "scope_changed")
 			if err == nil && receipt.Phase == "rejected" && receipt.KnownNoEffect {
 				w.WriteHeader(403)
-				jarvisWorkJSON(w, map[string]any{"error": map[string]string{"code": "scope_changed"}, "receipt": receipt})
+				value := map[string]any{"error": map[string]string{"code": "scope_changed"}, "receipt": receipt}
+				h.overviewEnvelope(value, "")
+				jarvisWorkJSON(w, value)
 				return
 			}
 		}
 		overviewError(w, "scope_changed", 403)
 		return
+	}
+	if mutation {
+		h.jarvisMu.Lock()
+		defer h.jarvisMu.Unlock()
 	}
 	{
 		originalWriter := w
@@ -211,7 +227,7 @@ func (h *Hub) serveOverview(w http.ResponseWriter, r *http.Request, device, path
 				if failure.Error.Code == "" {
 					failure.Error.Code = "pre_effect_rejected"
 				}
-				if receipt, err := h.messageQueue.RejectOverviewIntent(r.Context(), principal, in.IntentID, in.Operation, in.InputHash, failure.Error.Code); err == nil && receipt.Phase == "rejected" && receipt.KnownNoEffect {
+				if receipt, err := h.messageQueue.RejectOverviewIntent(r.Context(), h.overviewStoreScope(principal), in.IntentID, in.Operation, in.InputHash, failure.Error.Code); err == nil && receipt.Phase == "rejected" && receipt.KnownNoEffect {
 					capture.body.Reset()
 					_ = json.NewEncoder(&capture.body).Encode(map[string]any{"error": map[string]string{"code": failure.Error.Code}, "receipt": receipt})
 				} else if !errors.Is(err, messagequeue.ErrWorkConflict) {
@@ -219,6 +235,12 @@ func (h *Hub) serveOverview(w http.ResponseWriter, r *http.Request, device, path
 					capture.body.Reset()
 					_ = json.NewEncoder(&capture.body).Encode(map[string]any{"error": map[string]string{"code": "intent_status_unknown"}})
 				}
+			}
+			var envelope map[string]any
+			if json.Unmarshal(capture.body.Bytes(), &envelope) == nil {
+				h.overviewEnvelope(envelope, scopeHash)
+				capture.body.Reset()
+				_ = json.NewEncoder(&capture.body).Encode(envelope)
 			}
 			for k, v := range capture.header {
 				originalWriter.Header()[k] = v
@@ -232,9 +254,7 @@ func (h *Hub) serveOverview(w http.ResponseWriter, r *http.Request, device, path
 		return
 	}
 	if path == "overview/project/annotation" || path == "overview/decision/record" || path == "overview/collections/mutate" {
-		h.jarvisMu.Lock()
-		defer h.jarvisMu.Unlock()
-		if prior, err := h.messageQueue.OverviewOperation(r.Context(), principal, in.IntentID); err == nil {
+		if prior, err := h.messageQueue.OverviewOperation(r.Context(), h.overviewStoreScope(principal), in.IntentID); err == nil {
 			if prior.InputHash != in.InputHash || prior.Operation != path {
 				overviewError(w, "revision_or_intent_conflict", 409)
 				return
@@ -255,18 +275,10 @@ func (h *Hub) serveOverview(w http.ResponseWriter, r *http.Request, device, path
 		h.serveOverviewSnapshot(w, r, device, in, manager, principal, scopeHash)
 		return
 	case "overview/project/get":
-		projects, _, err := h.overviewProjects(r, device, principal)
-		if err != nil {
-			overviewError(w, "source_offline", 503)
-			return
-		}
-		for _, p := range projects {
-			if p["project_id"] == in.ProjectID {
-				jarvisWorkJSON(w, map[string]any{"project": overviewPublic(p), "scope_revision": scopeHash})
-				return
-			}
-		}
-		overviewError(w, "not_found", 404)
+		h.serveOverviewProject(w, r, device, in, principal, scopeHash)
+	case "overview/project/plan":
+		h.readOverviewPlan(w, r, device, in, principal, scopeHash)
+
 	case "overview/project/annotation":
 		h.mutateOverviewProject(w, r, device, in, principal, scopeHash)
 	case "overview/decision/record":
@@ -280,7 +292,7 @@ func (h *Hub) serveOverview(w http.ResponseWriter, r *http.Request, device, path
 			overviewError(w, "not_found", 404)
 			return
 		}
-		if !h.overviewCollectionAllowed(c) {
+		if !h.overviewCollectionAllowed(r.Context(), principal, c) {
 			overviewError(w, "permission_denied", 403)
 			return
 		}
@@ -290,7 +302,7 @@ func (h *Hub) serveOverview(w http.ResponseWriter, r *http.Request, device, path
 	case "overview/assets/read":
 		h.readOverviewAsset(w, r, in, principal, scopeHash)
 	case "overview/operation/get":
-		receipt, err := h.messageQueue.OverviewOperation(r.Context(), principal, in.IntentID)
+		receipt, err := h.messageQueue.OverviewOperation(r.Context(), h.overviewStoreScope(principal), in.IntentID)
 		if errors.Is(err, sql.ErrNoRows) {
 			jarvisWorkJSON(w, map[string]any{"phase": "not_dispatched", "intent_id": in.IntentID})
 			return
@@ -363,7 +375,7 @@ func (h *Hub) overviewProjects(r *http.Request, device, principal string) ([]map
 			if title == "." || title == string(filepath.Separator) {
 				title = "未命名專案"
 			}
-			p = map[string]any{"project_id": pid, "namespace": "folder", "project_kind": "folder", "source_label": h.cfg.InstanceName, "folder_label": filepath.Base(filepath.Dir(cwd)) + "/" + filepath.Base(cwd), "title": title, "revision": uint64(0), "phase": "unassociated", "next_step": "尚未關聯計畫", "navigation": h.overviewNavigation(s), "sources": []overviewNavigation{}, "work_items": []overviewWorkItem{}, "executions": []any{}, "progress": map[string]any{"state": "unassociated"}, "_authorization": []overviewAuthorization{}}
+			p = map[string]any{"project_id": pid, "namespace": "folder", "project_kind": "folder", "source_label": h.cfg.InstanceName, "folder_label": filepath.Base(filepath.Dir(cwd)) + "/" + filepath.Base(cwd), "title": title, "revision": uint64(0), "phase": "unassociated", "next_step": "尚未關聯計畫", "navigation": h.overviewNavigation(s), "sources": []overviewNavigation{}, "work_items": []overviewWorkItem{}, "executions": []any{}, "progress": map[string]any{"state": "unassociated"}, "_authorization": []overviewAuthorization{}, "_work_rows": []map[string]any{}}
 			projects[pid] = p
 		}
 		if p != nil {
@@ -398,6 +410,7 @@ func (h *Hub) overviewProjects(r *http.Request, device, principal string) ([]map
 				p["work_items"] = append(p["work_items"].([]overviewWorkItem), overviewWorkItem{WorkItem: visible, SourceManager: s.ID, SourceItemID: item.ID})
 				p["executions"] = append(p["executions"].([]any), row["executions"].([]any)...)
 				p["_authorization"] = append(p["_authorization"].([]overviewAuthorization), auth)
+				p["_work_rows"] = append(p["_work_rows"].([]map[string]any), map[string]any{"item": overviewWorkItem{WorkItem: visible, SourceManager: s.ID, SourceItemID: item.ID}, "executions": row["executions"], "authorization": []overviewAuthorization{auth}})
 			}
 			state := item.RecordingState
 			unknown := false
@@ -417,7 +430,7 @@ func (h *Hub) overviewProjects(r *http.Request, device, principal string) ([]map
 	}
 	out := []map[string]any{}
 	for pid, p := range projects {
-		if record, e := h.messageQueue.OverviewRecord(r.Context(), principal, "project", pid); e == nil {
+		if record, e := h.messageQueue.OverviewRecord(r.Context(), h.overviewStoreScope(principal), "project", pid); e == nil {
 			var a overviewAnnotation
 			if json.Unmarshal(record.Payload, &a) != nil {
 				return nil, nil, errors.New("corrupt_metadata")
@@ -519,7 +532,7 @@ func (h *Hub) overviewEvidence(r *http.Request, device, principal string, m over
 		if item.Decision == nil || item.Decision.State != "approved" {
 			return false
 		}
-		receipt, err := h.messageQueue.OverviewOperation(r.Context(), principal, item.Decision.SourceRef)
+		receipt, err := h.messageQueue.OverviewOperation(r.Context(), h.overviewStoreScope(principal), item.Decision.SourceRef)
 		if err != nil || receipt.Operation != "overview/decision/record" || receipt.Phase != "applied" {
 			return false
 		}
@@ -590,7 +603,7 @@ func (h *Hub) mutateOverviewProject(w http.ResponseWriter, r *http.Request, devi
 		return
 	}
 	a := overviewAnnotation{}
-	if previous, err := h.messageQueue.OverviewRecord(r.Context(), principal, "project", in.ProjectID); err == nil {
+	if previous, err := h.messageQueue.OverviewRecord(r.Context(), h.overviewStoreScope(principal), "project", in.ProjectID); err == nil {
 		if json.Unmarshal(previous.Payload, &a) != nil {
 			overviewError(w, "storage_unavailable", 503)
 			return
@@ -663,7 +676,7 @@ func (h *Hub) mutateOverviewProject(w http.ResponseWriter, r *http.Request, devi
 		overviewError(w, "scope_changed", 403)
 		return
 	}
-	out, e := h.messageQueue.MutateOverview(r.Context(), principal, "project", in.ProjectID, in.IntentID, in.Operation, in.InputHash, in.ExpectedRevision, raw, nil)
+	out, e := h.messageQueue.MutateOverview(r.Context(), h.overviewStoreScope(principal), "project", in.ProjectID, in.IntentID, in.Operation, in.InputHash, in.ExpectedRevision, raw, nil)
 	if e != nil {
 		overviewMutationFailure(w, e)
 		return
@@ -693,7 +706,7 @@ func (h *Hub) recordOverviewDecision(w http.ResponseWriter, r *http.Request, dev
 		return
 	}
 	decision := messagequeue.WorkDecision{State: in.State, SourceRef: in.IntentID, Instruction: in.Instruction}
-	out, e := h.messageQueue.RecordOverviewDecision(r.Context(), principal, s.ID, in.ItemID, in.IntentID, in.Operation, in.InputHash, in.ExpectedRevision, decision, mustOverviewJSON(h.overviewNavigation(s)))
+	out, e := h.messageQueue.RecordOverviewDecision(r.Context(), principal, h.overviewStoreScope(principal), s.ID, in.ItemID, in.IntentID, in.Operation, in.InputHash, in.ExpectedRevision, decision, mustOverviewJSON(h.overviewNavigation(s)))
 	if e != nil {
 		overviewMutationFailure(w, e)
 		return
@@ -701,7 +714,7 @@ func (h *Hub) recordOverviewDecision(w http.ResponseWriter, r *http.Request, dev
 	jarvisWorkJSON(w, out)
 }
 func (h *Hub) readOverviewCollection(ctx context.Context, principal, id string) (overviewCollection, error) {
-	v, e := h.messageQueue.OverviewRecord(ctx, principal, "collection", id)
+	v, e := h.messageQueue.OverviewRecord(ctx, h.overviewStoreScope(principal), "collection", id)
 	var c overviewCollection
 	if e == nil {
 		e = json.Unmarshal(v.Payload, &c)
@@ -711,20 +724,20 @@ func (h *Hub) readOverviewCollection(ctx context.Context, principal, id string) 
 	}
 	return c, e
 }
-func (h *Hub) overviewPinAllowed(p overviewPin) bool {
-	if !h.overviewNavAllowed(p.Navigation) || h.attachments == nil {
+func (h *Hub) overviewPinAllowed(ctx context.Context, principal string, p overviewPin) bool {
+	if !h.overviewNavAllowed(p.Navigation) {
 		return false
 	}
-	a, ok := h.attachments.Get(p.Navigation.AttachmentID)
-	if !ok {
+	a, err := h.overviewStoredSource(ctx, principal, p.Navigation.AttachmentID)
+	if err != nil {
 		return false
 	}
 	n, e := h.overviewAttachmentNavigation(a)
 	return e == nil && n == p.Navigation
 }
-func (h *Hub) overviewCollectionAllowed(c overviewCollection) bool {
+func (h *Hub) overviewCollectionAllowed(ctx context.Context, principal string, c overviewCollection) bool {
 	for _, p := range c.Pins {
-		if !h.overviewPinAllowed(p) {
+		if !h.overviewPinAllowed(ctx, principal, p) {
 			return false
 		}
 	}
@@ -758,7 +771,7 @@ func (h *Hub) overviewReceiptAllowed(r *http.Request, device string, v messagequ
 	}
 	var c overviewCollection
 	if json.Unmarshal(v.Record.Payload, &c) == nil && c.ID != "" {
-		return h.overviewCollectionAllowed(c)
+		return h.overviewCollectionAllowed(r.Context(), jarvisRequestPrincipal(r, device), c)
 	}
 	return true
 }
@@ -780,6 +793,9 @@ func (h *Hub) inspectOverviewImage(a attachmentjournal.Record) (messagequeue.Ove
 	raw, e := io.ReadAll(io.LimitReader(f, 20<<20+1))
 	if e != nil || len(raw) > 20<<20 {
 		return out, errors.New("decode_limit")
+	}
+	if e = overviewStaticRaster(raw); e != nil {
+		return out, e
 	}
 	cfg, format, e := image.DecodeConfig(bytes.NewReader(raw))
 	if e != nil || cfg.Width < 1 || cfg.Height < 1 || int64(cfg.Width)*int64(cfg.Height) > 40_000_000 {
@@ -835,7 +851,7 @@ func (h *Hub) mutateOverviewCollection(w http.ResponseWriter, r *http.Request, d
 		overviewError(w, "invalid_intent", 400)
 		return
 	}
-	if prior, e := h.messageQueue.OverviewOperation(r.Context(), principal, in.IntentID); e == nil {
+	if prior, e := h.messageQueue.OverviewOperation(r.Context(), h.overviewStoreScope(principal), in.IntentID); e == nil {
 		if prior.InputHash != in.InputHash {
 			overviewError(w, "revision_or_intent_conflict", 409)
 			return
@@ -854,7 +870,7 @@ func (h *Hub) mutateOverviewCollection(w http.ResponseWriter, r *http.Request, d
 		overviewError(w, "not_found", 404)
 		return
 	}
-	if !h.overviewCollectionAllowed(c) {
+	if !h.overviewCollectionAllowed(r.Context(), principal, c) {
 		overviewError(w, "permission_denied", 403)
 		return
 	}
@@ -887,6 +903,10 @@ func (h *Hub) mutateOverviewCollection(w http.ResponseWriter, r *http.Request, d
 			overviewError(w, "hash_mismatch", 409)
 			return
 		}
+		v.SourceAttachment = a.AttachmentID
+		a.AckedByDevice = nil
+		a.PinnedByWork = nil
+		v.SourceJSON = mustOverviewJSON(a)
 		asset = &v
 		n, err := h.overviewAttachmentNavigation(a)
 		if err != nil {
@@ -940,17 +960,28 @@ func (h *Hub) mutateOverviewCollection(w http.ResponseWriter, r *http.Request, d
 	c.PinCount = len(c.Pins)
 	raw, _ := json.Marshal(c)
 	_, _, now, e := h.overviewScope(r, device, in.jarvisWorkScope)
-	if e != nil || now != scopeHash || !h.overviewCollectionAllowed(c) {
+	// New pin provenance commits with bytes; recheck its original navigation
+	// directly before SQL registration. Existing pins still use retained SQL proof.
+	allowed := true
+	if asset == nil {
+		allowed = h.overviewCollectionAllowed(r.Context(), principal, c)
+	} else {
+		for _, pin := range c.Pins {
+			if pin.AssetID == asset.ID {
+				allowed = allowed && h.overviewNavAllowed(pin.Navigation)
+			} else {
+				allowed = allowed && h.overviewPinAllowed(r.Context(), principal, pin)
+			}
+		}
+	}
+	if e != nil || now != scopeHash || !allowed {
 		overviewError(w, "scope_changed", 403)
 		return
 	}
-	out, e := h.messageQueue.MutateOverview(r.Context(), principal, "collection", c.ID, in.IntentID, in.Operation, in.InputHash, in.ExpectedRevision, raw, asset)
+	out, e := h.messageQueue.MutateOverview(r.Context(), h.overviewStoreScope(principal), "collection", c.ID, in.IntentID, in.Operation, in.InputHash, in.ExpectedRevision, raw, asset)
 	if e != nil {
 		overviewMutationFailure(w, e)
 		return
-	}
-	if in.Action == "pin" {
-		h.attachments.Pin(in.AttachmentID, "overview:"+jarvisHash([]string{principal, c.ID}))
 	}
 
 	c.Revision = out.Revision
@@ -959,7 +990,7 @@ func (h *Hub) mutateOverviewCollection(w http.ResponseWriter, r *http.Request, d
 }
 func (h *Hub) readOverviewAsset(w http.ResponseWriter, r *http.Request, in overviewRequest, principal, scopeHash string) {
 	c, e := h.readOverviewCollection(r.Context(), principal, in.CollectionID)
-	if e != nil || !h.overviewCollectionAllowed(c) {
+	if e != nil || !h.overviewCollectionAllowed(r.Context(), principal, c) {
 		overviewError(w, "permission_denied", 403)
 		return
 	}
@@ -977,8 +1008,8 @@ func (h *Hub) readOverviewAsset(w http.ResponseWriter, r *http.Request, in overv
 		overviewError(w, "hash_mismatch", 409)
 		return
 	}
-	source, found := h.attachments.Get(pin.Navigation.AttachmentID)
-	if !found {
+	source, sourceErr := h.overviewStoredSource(r.Context(), principal, pin.Navigation.AttachmentID)
+	if sourceErr != nil {
 		overviewError(w, "source_unavailable", 404)
 		return
 	}
@@ -991,7 +1022,7 @@ func (h *Hub) readOverviewAsset(w http.ResponseWriter, r *http.Request, in overv
 		overviewError(w, "source_version_changed", 409)
 		return
 	}
-	a, e := h.messageQueue.OverviewAsset(r.Context(), principal, pin.AssetID)
+	a, e := h.messageQueue.OverviewAsset(r.Context(), h.overviewStoreScope(principal), pin.AssetID)
 	if e != nil || a.SHA256 != pin.SHA256 || jarvisTextHash(string(a.Bytes)) != pin.SHA256 {
 		overviewError(w, "hash_mismatch", 409)
 		return
@@ -1016,7 +1047,7 @@ func (h *Hub) readOverviewAsset(w http.ResponseWriter, r *http.Request, in overv
 	if end > len(raw) {
 		end = len(raw)
 	}
-	if !h.overviewPinAllowed(*pin) {
+	if !h.overviewPinAllowed(r.Context(), principal, *pin) {
 		overviewError(w, "scope_changed", 403)
 		return
 	}
@@ -1162,5 +1193,34 @@ func overviewMutationFailure(w http.ResponseWriter, e error) {
 		overviewError(w, "invalid_metadata", 400)
 	default:
 		overviewError(w, "storage_or_commit_unknown", 503)
+	}
+}
+
+func (h *Hub) overviewStoreScope(principal string) string {
+	return "overview-v1\x00" + h.cfg.InstanceID + "\x00" + principal
+}
+func (h *Hub) overviewStoredSource(ctx context.Context, principal, attachment string) (attachmentjournal.Record, error) {
+	var record attachmentjournal.Record
+	raw, e := h.messageQueue.OverviewSource(ctx, h.overviewStoreScope(principal), attachment)
+	if e == nil {
+		e = json.Unmarshal(raw, &record)
+	}
+	if e == nil && record.AttachmentID != attachment {
+		e = errors.New("source_identity_conflict")
+	}
+	return record, e
+}
+func (h *Hub) overviewEnvelope(value map[string]any, scopeHash string) {
+	value["schema_version"] = 1
+	value["authority_instance_id"] = h.cfg.InstanceID
+	value["scope_revision"] = scopeHash
+	if original, ok := value["receipt"]; ok {
+		raw, _ := json.Marshal(original)
+		var receipt map[string]any
+		if json.Unmarshal(raw, &receipt) == nil {
+			receipt["authority_instance_id"] = h.cfg.InstanceID
+			receipt["schema_version"] = 1
+			value["receipt"] = receipt
+		}
 	}
 }

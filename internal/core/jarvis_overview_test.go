@@ -3,18 +3,22 @@ package core
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"everything-go/internal/attachmentjournal"
 	"everything-go/internal/messagequeue"
 	"everything-go/internal/sessiondispatch"
 	"fmt"
+	"hash/crc32"
 	"image"
 	"image/color"
+	"image/gif"
 	"image/png"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func overviewFixture(t *testing.T) (*Hub, func(string, map[string]any) map[string]any, map[string]any) {
@@ -34,6 +38,9 @@ func overviewFixture(t *testing.T) (*Hub, func(string, map[string]any) map[strin
 		var out map[string]any
 		if e := json.Unmarshal(w.Body.Bytes(), &out); e != nil {
 			t.Fatal(e)
+		}
+		if out["authority_instance_id"] != h.cfg.InstanceID || out["schema_version"] != float64(1) {
+			t.Fatalf("%s missing real authority envelope: %v", path, out)
 		}
 		return out
 	}, scope
@@ -182,7 +189,7 @@ func TestOverviewManagedPinHashChunksExactSourceAndRevocation(t *testing.T) {
 	}
 	result := []byte{}
 	for offset := 0; ; {
-		part := call("assets/read", map[string]any{"collection_id": "album-one", "pin_id": p["pin_id"], "sha256": p["source_sha256"], "variant": "original", "offset": offset, "limit": 127})
+		part := call("assets/read", map[string]any{"collection_id": "album-one", "pin_id": p["pin_id"], "sha256": p["source_sha256"], "variant": "original", "offset": offset, "limit": 65536})
 		raw, e := base64.StdEncoding.DecodeString(part["bytes_base64"].(string))
 		if e != nil {
 			t.Fatal(e)
@@ -200,7 +207,8 @@ func TestOverviewManagedPinHashChunksExactSourceAndRevocation(t *testing.T) {
 	if thumb["variant_sha256"] == thumb["source_sha256"] {
 		t.Fatal("variant hash conflated")
 	}
-	call("collections/mutate", body) // exact replay returns original durable receipt, no duplicate
+	call("collections/mutate", body)                   // exact replay returns original durable receipt, no duplicate
+	h.attachments = attachmentjournal.New(t.TempDir()) // Original journal retired; committed source provenance remains atomically managed.
 	detail := call("collections/get", map[string]any{"collection_id": "album-one"})
 	if len(detail["pins"].([]any)) != 1 {
 		t.Fatal(detail)
@@ -281,9 +289,14 @@ func TestOverviewFrozenPaginationScopeAndCredentialFences(t *testing.T) {
 		t.Fatal("foreign device", r)
 	}
 }
-func TestOverviewFrozenExecutionGrantRevocationRedactsPrivateRows(t *testing.T) {
+func TestOverviewFrozenExecutionGrantRevocationRetiresEntireFreeze(t *testing.T) {
 	h, call, a, b := unifiedFixtureSessions(t)
 	loc := seedUnifiedController(t, h, a, b, "scd_overview_private")
+	dir := filepath.Join(h.cfg.RootDir, "other-project")
+	if e := os.MkdirAll(dir, 0700); e != nil {
+		t.Fatal(e)
+	}
+	h.registry.Create("s_second_project", "another project", dir, "codex", "model", "read-only", "other-thread")
 	_, _, e := h.messageQueue.Enqueue(messagequeue.Entry{SessionID: b.ID, RequestID: "r_" + loc.NativeID, Payload: []byte(`{}`)})
 	if e != nil {
 		t.Fatal(e)
@@ -307,13 +320,8 @@ func TestOverviewFrozenExecutionGrantRevocationRedactsPrivateRows(t *testing.T) 
 	}
 	scope["cursor"] = page["cursor"]
 	after := call("POST", "overview/snapshot", scope, "phone")
-	if after.Code != 200 || strings.Contains(after.Body.String(), "original scd_overview_private") {
-		t.Fatal("revoked relation private title leaked", after.Code, after.Body.String())
-	}
-	var value map[string]any
-	_ = json.Unmarshal(after.Body.Bytes(), &value)
-	if value["coverage"].(map[string]any)["partial"] != true {
-		t.Fatal(value)
+	if after.Code != 409 || strings.Contains(after.Body.String(), "original scd_overview_private") {
+		t.Fatal("revoked relation freeze survived", after.Code, after.Body.String())
 	}
 }
 func TestOverviewUnassociatedCwdAttentionAndAnnotationPatch(t *testing.T) {
@@ -467,5 +475,210 @@ func TestOverviewStorageFailureCannotBeRecordedAsKnownNoEffect(t *testing.T) {
 	r := overviewHTTP(h, "collections/mutate", raw, "phone")
 	if r.status != 503 || strings.Contains(r.body, "known_no_effect") || strings.Contains(r.body, "\"phase\":\"rejected\"") {
 		t.Fatal(r)
+	}
+}
+
+func TestOverviewLargeProjectPagedDetailsAndExactPlanReceiver(t *testing.T) {
+	h, call, scope := overviewFixture(t)
+	principal := jarvisPrincipal("phone", jarvisTokenGeneration("jarvis-token"))
+	for i := 0; i < 400; i++ {
+		if _, e := h.messageQueue.MutateWork(t.Context(), principal, "s_overview_manager", messagequeue.WorkMutation{IntentID: fmt.Sprintf("r_large_note_%04d", i), WorkItem: messagequeue.WorkItem{ID: fmt.Sprintf("note-%04d", i), Kind: "discussion_note", Title: fmt.Sprintf("原資料 %04d", i), Body: strings.Repeat("原始內容", 100), RecordingState: "recorded"}}); e != nil {
+			t.Fatal(e)
+		}
+	}
+	snapshot := call("snapshot", map[string]any{"section": "projects"})
+	project := snapshot["projects"].(map[string]any)["items"].([]any)[0].(map[string]any)
+	seen := map[string]bool{}
+	cursor := ""
+	var freeze any
+	firstCursor := ""
+	for {
+		out := call("project/get", map[string]any{"project_id": project["project_id"], "cursor": cursor, "limit": 20})
+		if freeze == nil {
+			freeze = out["freeze_id"]
+			firstCursor = out["cursor"].(string)
+		} else if freeze != out["freeze_id"] {
+			t.Fatal("detail freeze changed")
+		}
+		p := out["project"].(map[string]any)
+		for _, item := range p["work_items"].([]any) {
+			row := item.(map[string]any)
+			if row["source_manager"] != "s_overview_manager" {
+				t.Fatal(row)
+			}
+			id := row["source_item_id"].(string)
+			if seen[id] {
+				t.Fatal("duplicate", id)
+			}
+			seen[id] = true
+		}
+		encoded, _ := json.Marshal(out)
+		if len(encoded) > 240<<10 {
+			t.Fatal("detail envelope too large", len(encoded))
+		}
+		cursor = out["cursor"].(string)
+		if cursor == "" {
+			break
+		}
+	}
+	if len(seen) != 400 {
+		t.Fatal(len(seen))
+	}
+	h.registry.Create("s_z_changed_source", "new source", h.cfg.RootDir, "codex", "model", "read-only", "new-source-thread")
+	stale := map[string]any{"project_id": project["project_id"], "cursor": firstCursor, "limit": 20}
+	for k, v := range scope {
+		stale[k] = v
+	}
+	staleBytes, _ := json.Marshal(stale)
+	if response := overviewHTTP(h, "project/get", staleBytes, "phone"); response.status != 409 {
+		t.Fatal("changed source detail cursor survived", response)
+	}
+	body := []byte(strings.Repeat("原始計畫 e\u0301 😀\n", 17000))
+	path := filepath.Join(h.cfg.RootDir, "original-plan.txt")
+	if e := os.WriteFile(path, body, 0600); e != nil {
+		t.Fatal(e)
+	}
+	plan := messagequeue.WorkPlan{Path: path, SHA256: jarvisTextHash(string(body)), Revision: 11, Checklist: []string{"來源", "階段"}}
+	call("project/annotation", map[string]any{"project_id": project["project_id"], "intent_id": "r_large_original_plan", "expected_revision": 0, "plan_ref": plan, "phase": "正在規劃"})
+	assembled := []byte{}
+	offset := 0
+	for {
+		out := call("project/plan", map[string]any{"project_id": project["project_id"], "sha256": plan.SHA256, "revision": plan.Revision, "offset": offset, "limit": 65536})
+		chunk, e := base64.StdEncoding.DecodeString(out["bytes_base64"].(string))
+		if e != nil {
+			t.Fatal(e)
+		}
+		if !utf8.Valid(chunk) || out["sha256"] != plan.SHA256 {
+			t.Fatal("plan bytes/locator changed", out)
+		}
+		assembled = append(assembled, chunk...)
+		if out["complete"] == true {
+			break
+		}
+		offset = int(out["next_offset"].(float64))
+	}
+	if !bytes.Equal(assembled, body) || jarvisTextHash(string(assembled)) != plan.SHA256 {
+		t.Fatal("original plan incomplete")
+	}
+	if e := os.WriteFile(path, []byte("changed plan bytes"), 0600); e != nil {
+		t.Fatal(e)
+	}
+	req := map[string]any{"project_id": project["project_id"], "sha256": plan.SHA256, "revision": plan.Revision}
+	for k, v := range scope {
+		req[k] = v
+	}
+	raw, _ := json.Marshal(req)
+	if response := overviewHTTP(h, "project/plan", raw, "phone"); response.status != 409 {
+		t.Fatal("stale plan served", response)
+	}
+	req["sha256"] = strings.Repeat("a", 64)
+	raw, _ = json.Marshal(req)
+	if response := overviewHTTP(h, "project/plan", raw, "phone"); response.status != 404 {
+		t.Fatal("arbitrary plan locator", response)
+	}
+}
+func TestOverviewStaticRasterRejectsAggregateAnimationBeforeDecode(t *testing.T) {
+	img := image.NewPaletted(image.Rect(0, 0, 2, 2), color.Palette{color.Black, color.White})
+	var static, animated bytes.Buffer
+	if e := gif.Encode(&static, img, nil); e != nil {
+		t.Fatal(e)
+	}
+	if e := gif.EncodeAll(&animated, &gif.GIF{Image: []*image.Paletted{img, img}, Delay: []int{0, 0}}); e != nil {
+		t.Fatal(e)
+	}
+	if e := overviewStaticRaster(static.Bytes()); e != nil {
+		t.Fatal(e)
+	}
+	if e := overviewStaticRaster(animated.Bytes()); e == nil || e.Error() != "animated_gif_unsupported" {
+		t.Fatal(e)
+	}
+	bomb := append([]byte(nil), static.Bytes()...)
+	descriptor := bytes.IndexByte(bomb, 0x2c)
+	if descriptor < 0 {
+		t.Fatal("fixture descriptor")
+	}
+	binary.LittleEndian.PutUint16(bomb[descriptor+5:descriptor+7], 65000)
+	binary.LittleEndian.PutUint16(bomb[descriptor+7:descriptor+9], 65000)
+	if e := overviewStaticRaster(bomb); e == nil || e.Error() != "gif_frame_decode_limit" {
+		t.Fatal(e)
+	}
+	var pngFile bytes.Buffer
+	if e := png.Encode(&pngFile, image.NewNRGBA(image.Rect(0, 0, 2, 2))); e != nil {
+		t.Fatal(e)
+	}
+	chunk := make([]byte, 20)
+	binary.BigEndian.PutUint32(chunk[:4], 8)
+	copy(chunk[4:8], "acTL")
+	binary.BigEndian.PutUint32(chunk[8:12], 2)
+	binary.BigEndian.PutUint32(chunk[16:20], crc32.ChecksumIEEE(chunk[4:16]))
+	apng := append(append(append([]byte{}, pngFile.Bytes()[:33]...), chunk...), pngFile.Bytes()[33:]...)
+	if e := overviewStaticRaster(apng); e == nil || e.Error() != "animated_png_unsupported" {
+		t.Fatal(e)
+	}
+}
+func TestOverviewAuthorityNamespaceAndRejectedEnvelopeAreExact(t *testing.T) {
+	h, call, scope := overviewFixture(t)
+	call("collections/mutate", map[string]any{"intent_id": "r_authority_collection", "collection_id": "c", "action": "create", "name": "authority private", "expected_revision": 0})
+	h.cfg.InstanceID = "other-authority"
+	manager, _ := h.registry.Get("s_overview_manager")
+	scope["authority_instance_id"] = h.cfg.InstanceID
+	scope["manager"] = h.overviewNavigation(manager)
+	req := map[string]any{"collection_id": "c"}
+	for k, v := range scope {
+		req[k] = v
+	}
+	raw, _ := json.Marshal(req)
+	if result := overviewHTTP(h, "collections/get", raw, "phone"); result.status != 404 || strings.Contains(result.body, "authority private") {
+		t.Fatal("authority store reused", result)
+	}
+	req = map[string]any{"collection_id": "missing", "action": "rename", "name": "name", "intent_id": "r_rejected_authority", "expected_revision": 0}
+	for k, v := range scope {
+		req[k] = v
+	}
+	raw, _ = json.Marshal(req)
+	response := overviewHTTP(h, "collections/mutate", raw, "phone")
+	var decoded map[string]any
+	_ = json.Unmarshal([]byte(response.body), &decoded)
+	if response.status != 404 || decoded["authority_instance_id"] != h.cfg.InstanceID || decoded["receipt"].(map[string]any)["authority_instance_id"] != h.cfg.InstanceID {
+		t.Fatal(response)
+	}
+}
+
+func TestOverviewAllInterleavesActualSectionsBeyondTwoHundredAttention(t *testing.T) {
+	h, call, _ := overviewFixture(t)
+	principal := jarvisPrincipal("phone", jarvisTokenGeneration("jarvis-token"))
+	for i := 0; i < 220; i++ {
+		if _, e := h.messageQueue.MutateWork(t.Context(), principal, "s_overview_manager", messagequeue.WorkMutation{IntentID: fmt.Sprintf("r_interleave_note_%04d", i), WorkItem: messagequeue.WorkItem{ID: fmt.Sprintf("note-%04d", i), Kind: "discussion_note", Title: fmt.Sprintf("待決定 %04d", i), RecordingState: "recorded", Decision: &messagequeue.WorkDecision{State: "pending"}}}); e != nil {
+			t.Fatal(e)
+		}
+	}
+	call("collections/mutate", map[string]any{"collection_id": "actual-album", "action": "create", "name": "真圖冊", "intent_id": "r_interleave_album", "expected_revision": 0})
+	out := call("snapshot", map[string]any{"section": "all", "limit": 3})
+	for _, section := range []string{"attention", "projects", "albums"} {
+		if len(out[section].(map[string]any)["items"].([]any)) != 1 {
+			t.Fatal("section starved", section, out)
+		}
+	}
+	seen := map[string]bool{}
+	freeze := out["freeze_id"]
+	for {
+		for _, item := range out["attention"].(map[string]any)["items"].([]any) {
+			id := item.(map[string]any)["item_id"].(string)
+			if seen[id] {
+				t.Fatal("duplicate", id)
+			}
+			seen[id] = true
+		}
+		cursor := out["cursor"].(string)
+		if cursor == "" {
+			break
+		}
+		out = call("snapshot", map[string]any{"section": "all", "limit": 20, "cursor": cursor})
+		if out["freeze_id"] != freeze {
+			t.Fatal("freeze changed")
+		}
+	}
+	if len(seen) != 220 {
+		t.Fatal("attention lost", len(seen))
 	}
 }

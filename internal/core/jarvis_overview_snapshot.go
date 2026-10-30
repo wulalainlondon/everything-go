@@ -6,8 +6,8 @@ import (
 	"errors"
 	"everything-go/internal/session"
 	"everything-go/internal/taskapi"
+	"fmt"
 	"net/http"
-	"sort"
 	"strings"
 	"time"
 )
@@ -31,7 +31,7 @@ func (s overviewSnapshotSource) Capture(ctx context.Context, scope taskapi.ReadS
 		if e != nil {
 			return taskapi.Freeze{}, e
 		}
-		rows := []taskapi.SnapshotRow{}
+		buckets := [][]taskapi.SnapshotRow{{}, {}, {}}
 		partial := false
 		for _, p := range projects {
 			if p["source_partial"] == true {
@@ -40,16 +40,16 @@ func (s overviewSnapshotSource) Capture(ctx context.Context, scope taskapi.ReadS
 		}
 		for _, a := range attention {
 			if s.section == "all" || s.section == "attention" {
-				rows = append(rows, taskapi.SnapshotRow{Key: "a:" + a["item_id"].(string), Value: map[string]any{"section": "attention", "value": overviewPublic(a), "authorization": a["_authorization"]}})
+				buckets[0] = append(buckets[0], taskapi.SnapshotRow{Value: map[string]any{"section": "attention", "value": overviewPublic(a), "authorization": a["_authorization"]}})
 			}
 		}
 		for _, p := range projects {
 			if s.section == "all" || s.section == "projects" {
-				rows = append(rows, taskapi.SnapshotRow{Key: "p:" + p["project_id"].(string), Value: map[string]any{"section": "projects", "value": overviewProjectSummary(p), "authorization": p["_authorization"]}})
+				buckets[1] = append(buckets[1], taskapi.SnapshotRow{Value: map[string]any{"section": "projects", "value": overviewProjectSummary(p), "authorization": p["_authorization"]}})
 			}
 		}
 		if s.section == "all" || s.section == "albums" {
-			collections, e := s.h.messageQueue.OverviewRecords(ctx, s.principal, "collection")
+			collections, e := s.h.messageQueue.OverviewRecords(ctx, s.h.overviewStoreScope(s.principal), "collection")
 			if e != nil {
 				return taskapi.Freeze{}, e
 			}
@@ -61,15 +61,30 @@ func (s overviewSnapshotSource) Capture(ctx context.Context, scope taskapi.ReadS
 				c.Revision = v.Revision
 				c.UpdatedAt = v.UpdatedAt
 				c.PinCount = len(c.Pins)
-				if !s.h.overviewCollectionAllowed(c) {
+				if !s.h.overviewCollectionAllowed(ctx, s.principal, c) {
 					partial = true
 					continue
 				}
-				rows = append(rows, taskapi.SnapshotRow{Key: "l:" + c.ID, Value: map[string]any{"section": "albums", "value": overviewAlbumSummary(c)}})
+				buckets[2] = append(buckets[2], taskapi.SnapshotRow{Value: map[string]any{"section": "albums", "value": overviewAlbumSummary(c)}})
 			}
 		}
-		rows = append(rows, taskapi.SnapshotRow{Key: "\x00overview_header", Value: map[string]any{"section": "coverage", "partial": partial}})
-		sort.Slice(rows, func(i, j int) bool { return rows[i].Key < rows[j].Key })
+		// Rank preserves each original section's order (including unknown first)
+		// while giving every nonempty section an initial preview in all mode.
+		rows := []taskapi.SnapshotRow{{Key: "\x00overview_header", Value: map[string]any{"section": "coverage", "partial": partial}}}
+		for rank := 0; ; rank++ {
+			added := false
+			for _, bucket := range buckets {
+				if rank < len(bucket) {
+					row := bucket[rank]
+					row.Key = fmt.Sprintf("r:%09d", len(rows))
+					rows = append(rows, row)
+					added = true
+				}
+			}
+			if !added {
+				break
+			}
+		}
 		raw, _ := json.Marshal(rows)
 		if len(raw) > 16<<20 {
 			return taskapi.Freeze{}, errors.New("snapshot_capacity_originals_preserved")
@@ -121,7 +136,7 @@ func (s overviewSnapshotSource) Page(ctx context.Context, scope taskapi.ReadScop
 		}
 	}
 	for _, row := range rows {
-		if row.Key > after {
+		if row.Key != "\x00overview_header" && row.Key > after {
 			out = append(out, row)
 			if len(out) > limit {
 				return out[:limit], true, nil
@@ -148,6 +163,8 @@ func (h *Hub) overviewFrozenAllowed(r *http.Request, device string, raw map[stri
 		if json.Unmarshal(b, &a) != nil || !h.overviewNavAllowed(a.Navigation) {
 			return false
 		}
+	case "project_item":
+		return true
 	case "projects":
 		var p struct {
 			Sources    []overviewNavigation `json:"sources"`
@@ -168,7 +185,7 @@ func (h *Hub) overviewFrozenAllowed(r *http.Request, device string, raw map[stri
 		}
 	case "albums":
 		var c overviewCollection
-		if json.Unmarshal(b, &c) != nil || !h.overviewCollectionAllowed(c) {
+		if json.Unmarshal(b, &c) != nil || !h.overviewCollectionAllowed(r.Context(), jarvisRequestPrincipal(r, device), c) {
 			return false
 		}
 	default:

@@ -34,10 +34,12 @@ type OverviewAsset struct {
 	MIME             string
 	Width, Height    int
 	Bytes, Thumbnail []byte
+	SourceAttachment string
+	SourceJSON       json.RawMessage
 }
 
 func (s *Store) installOverview() error {
-	_, e := s.db.Exec(`CREATE TABLE IF NOT EXISTS jarvis_overview_records(scope TEXT NOT NULL,kind TEXT NOT NULL,id TEXT NOT NULL,revision INTEGER NOT NULL,updated INTEGER NOT NULL,payload BLOB NOT NULL,PRIMARY KEY(scope,kind,id)); CREATE TABLE IF NOT EXISTS jarvis_overview_ops(scope TEXT NOT NULL,intent TEXT NOT NULL,hash TEXT NOT NULL,payload BLOB NOT NULL,PRIMARY KEY(scope,intent)); CREATE TABLE IF NOT EXISTS jarvis_overview_assets(scope TEXT NOT NULL,id TEXT NOT NULL,sha TEXT NOT NULL,mime TEXT NOT NULL,width INTEGER NOT NULL,height INTEGER NOT NULL,bytes BLOB NOT NULL,thumbnail BLOB NOT NULL,PRIMARY KEY(scope,id));`)
+	_, e := s.db.Exec(`CREATE TABLE IF NOT EXISTS jarvis_overview_records(scope TEXT NOT NULL,kind TEXT NOT NULL,id TEXT NOT NULL,revision INTEGER NOT NULL,updated INTEGER NOT NULL,payload BLOB NOT NULL,PRIMARY KEY(scope,kind,id)); CREATE TABLE IF NOT EXISTS jarvis_overview_ops(scope TEXT NOT NULL,intent TEXT NOT NULL,hash TEXT NOT NULL,payload BLOB NOT NULL,PRIMARY KEY(scope,intent)); CREATE TABLE IF NOT EXISTS jarvis_overview_assets(scope TEXT NOT NULL,id TEXT NOT NULL,sha TEXT NOT NULL,mime TEXT NOT NULL,width INTEGER NOT NULL,height INTEGER NOT NULL,bytes BLOB NOT NULL,thumbnail BLOB NOT NULL,PRIMARY KEY(scope,id)); CREATE TABLE IF NOT EXISTS jarvis_overview_sources(scope TEXT NOT NULL,attachment TEXT NOT NULL,payload BLOB NOT NULL,PRIMARY KEY(scope,attachment));`)
 	return e
 }
 func (s *Store) OverviewRecord(ctx context.Context, scope, kind, id string) (OverviewRecord, error) {
@@ -102,10 +104,10 @@ func (s *Store) MutateOverview(ctx context.Context, scope, kind, id, intent, ope
 		return out, ErrWorkConflict
 	}
 	var metaBytes int64
-	if e = tx.QueryRowContext(ctx, `SELECT COALESCE((SELECT SUM(length(payload)) FROM jarvis_overview_records WHERE scope=?),0)+COALESCE((SELECT SUM(length(payload)) FROM jarvis_overview_ops WHERE scope=?),0)`, scope, scope).Scan(&metaBytes); e != nil {
+	if e = tx.QueryRowContext(ctx, `SELECT COALESCE((SELECT SUM(length(payload)) FROM jarvis_overview_records WHERE scope=?),0)+COALESCE((SELECT SUM(length(payload)) FROM jarvis_overview_ops WHERE scope=?),0)+COALESCE((SELECT SUM(length(payload)) FROM jarvis_overview_sources WHERE scope=?),0)`, scope, scope, scope).Scan(&metaBytes); e != nil {
 		return out, e
 	}
-	if metaBytes > 64<<20 {
+	if metaBytes+int64(2*len(payload)+32*1024) > 64<<20 {
 		return out, errors.New("metadata_capacity_originals_preserved")
 	}
 	var used int64
@@ -113,11 +115,22 @@ func (s *Store) MutateOverview(ctx context.Context, scope, kind, id, intent, ope
 		return out, e
 	}
 	if asset != nil {
+		if asset.SourceAttachment == "" || len(asset.SourceJSON) == 0 || len(asset.SourceJSON) > 64<<10 {
+			return out, errors.New("invalid_asset_provenance")
+		}
+		if metaBytes+int64(len(asset.SourceJSON)+2*len(payload)+32*1024) > 64<<20 {
+			return out, errors.New("metadata_capacity_originals_preserved")
+		}
 		if used+int64(len(asset.Bytes)+len(asset.Thumbnail)) > 128<<20 {
 			return out, errors.New("storage_capacity_originals_preserved")
 		}
 		if _, e = tx.ExecContext(ctx, `INSERT INTO jarvis_overview_assets VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(scope,id) DO NOTHING`, scope, asset.ID, asset.SHA256, asset.MIME, asset.Width, asset.Height, asset.Bytes, asset.Thumbnail); e != nil {
 			return out, e
+		}
+		if asset.SourceAttachment != "" && len(asset.SourceJSON) > 0 {
+			if _, e = tx.ExecContext(ctx, `INSERT INTO jarvis_overview_sources VALUES(?,?,?) ON CONFLICT(scope,attachment) DO NOTHING`, scope, asset.SourceAttachment, asset.SourceJSON); e != nil {
+				return out, e
+			}
 		}
 	}
 	out = OverviewReceipt{Operation: operation, IntentID: intent, InputHash: hash, Phase: "applied", Revision: revision + 1, Record: OverviewRecord{ID: id, Revision: revision + 1, UpdatedAt: time.Now().UnixMilli(), Payload: payload}}
@@ -151,7 +164,7 @@ func (s *Store) OverviewAsset(ctx context.Context, scope, id string) (OverviewAs
 
 // A human decision and its exact overview intent receipt commit together. It is
 // metadata only; no call into queue enqueue/start/send or native runtime occurs.
-func (s *Store) RecordOverviewDecision(ctx context.Context, scope, manager, id, intent, operation, hash string, expected uint64, decision WorkDecision, source json.RawMessage) (OverviewReceipt, error) {
+func (s *Store) RecordOverviewDecision(ctx context.Context, scope, overviewScope, manager, id, intent, operation, hash string, expected uint64, decision WorkDecision, source json.RawMessage) (OverviewReceipt, error) {
 	var out OverviewReceipt
 	if len(intent) < 10 || len(intent) > 90 || !strings.HasPrefix(intent, "r_") || len(hash) != 64 {
 		return out, errors.New("invalid_intent")
@@ -171,7 +184,7 @@ func (s *Store) RecordOverviewDecision(ctx context.Context, scope, manager, id, 
 	defer tx.Rollback()
 	var oldHash string
 	var raw []byte
-	e = tx.QueryRowContext(ctx, `SELECT hash,payload FROM jarvis_overview_ops WHERE scope=? AND intent=?`, scope, intent).Scan(&oldHash, &raw)
+	e = tx.QueryRowContext(ctx, `SELECT hash,payload FROM jarvis_overview_ops WHERE scope=? AND intent=?`, overviewScope, intent).Scan(&oldHash, &raw)
 	if e == nil {
 		if oldHash != hash {
 			return out, ErrWorkConflict
@@ -198,13 +211,19 @@ func (s *Store) RecordOverviewDecision(ctx context.Context, scope, manager, id, 
 	item.Revision++
 	item.UpdatedAt = time.Now().UnixMilli()
 	raw, _ = json.Marshal(item)
+	if len(raw) > 96<<10 {
+		return out, errors.New("metadata_capacity_originals_preserved")
+	}
 	if _, e = tx.ExecContext(ctx, `UPDATE jarvis_work_items SET revision=?,payload=?,updated_at=? WHERE scope=? AND manager=? AND item_id=?`, item.Revision, raw, item.UpdatedAt, scope, manager, id); e != nil {
 		return out, e
 	}
 	wrapped, _ := json.Marshal(map[string]any{"item": item, "source": source})
 	out = OverviewReceipt{Operation: operation, IntentID: intent, InputHash: hash, Phase: "applied", Revision: item.Revision, Record: OverviewRecord{ID: manager + ":" + id, Revision: item.Revision, UpdatedAt: item.UpdatedAt, Payload: wrapped}}
 	receipt, _ := json.Marshal(out)
-	if _, e = tx.ExecContext(ctx, `INSERT INTO jarvis_overview_ops VALUES(?,?,?,?)`, scope, intent, hash, receipt); e != nil {
+	if e = overviewMetadataCapacity(ctx, tx, overviewScope, len(receipt)); e != nil {
+		return out, e
+	}
+	if _, e = tx.ExecContext(ctx, `INSERT INTO jarvis_overview_ops VALUES(?,?,?,?)`, overviewScope, intent, hash, receipt); e != nil {
 		return out, e
 	}
 	if e = taskapi.ChangeTx(tx, manager, intent, "jarvis_overview_decision"); e != nil {
@@ -236,6 +255,9 @@ func (s *Store) RejectOverviewIntent(ctx context.Context, scope, intent, operati
 		return out, e
 	}
 	raw, _ = json.Marshal(out)
+	if e = overviewMetadataCapacity(ctx, tx, scope, len(raw)); e != nil {
+		return out, e
+	}
 	if _, e = tx.ExecContext(ctx, `INSERT INTO jarvis_overview_ops VALUES(?,?,?,?)`, scope, intent, hash, raw); e != nil {
 		return out, e
 	}
@@ -243,4 +265,21 @@ func (s *Store) RejectOverviewIntent(ctx context.Context, scope, intent, operati
 		return out, e
 	}
 	return out, tx.Commit()
+}
+
+func (s *Store) OverviewSource(ctx context.Context, scope, attachment string) (json.RawMessage, error) {
+	var raw []byte
+	e := s.db.QueryRowContext(ctx, `SELECT payload FROM jarvis_overview_sources WHERE scope=? AND attachment=?`, scope, attachment).Scan(&raw)
+	return json.RawMessage(raw), e
+}
+
+func overviewMetadataCapacity(ctx context.Context, tx *sql.Tx, scope string, additional int) error {
+	var used int64
+	if e := tx.QueryRowContext(ctx, `SELECT COALESCE((SELECT SUM(length(payload)) FROM jarvis_overview_records WHERE scope=?),0)+COALESCE((SELECT SUM(length(payload)) FROM jarvis_overview_ops WHERE scope=?),0)+COALESCE((SELECT SUM(length(payload)) FROM jarvis_overview_sources WHERE scope=?),0)`, scope, scope, scope).Scan(&used); e != nil {
+		return e
+	}
+	if used+int64(additional) > 64<<20 {
+		return errors.New("metadata_capacity_originals_preserved")
+	}
+	return nil
 }
