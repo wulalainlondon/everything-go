@@ -49,7 +49,7 @@ func (h *Hub) contextObservation(s session.Snapshot) *protocol.ContextObservatio
 		until := r.UsageAt + contextFreshMS
 		o.Usage.FreshUntilMS = &until
 		o.Usage.Status = "stale"
-		if r.InvalidatedAt > 0 || r.UsageRevision != s.SourceRevision {
+		if r.InvalidatedAt > 0 || r.UsageRevision != s.SourceRevision || s.ContextNotBeforeMS > 0 && r.UsageAt <= s.ContextNotBeforeMS {
 			o.Usage.Status = "invalidated"
 		} else if o.Usage.UsedTokens == nil || o.Usage.MaxTokens == nil {
 			o.Usage.Status = "unknown"
@@ -87,6 +87,9 @@ func (h *Hub) observeContextTelemetry(e backend.ContextTelemetry) {
 		}
 		u = &protocol.ContextUsageObservation{UsedTokens: e.UsedTokens, MaxTokens: e.MaxTokens, Origin: &e.Origin, MaxOrigin: &e.MaxOrigin, Status: "unknown"}
 		if e.ReportedAtMS > 0 {
+			if snap.ContextNotBeforeMS > 0 && e.ReportedAtMS <= snap.ContextNotBeforeMS {
+				return
+			}
 			if e.ReportedAtMS > time.Now().Add(time.Minute).UnixMilli() {
 				return
 			}

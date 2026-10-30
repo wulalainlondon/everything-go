@@ -15,11 +15,11 @@ import (
 // text or compacted summary bytes. Compacted rows are already durable provider
 // completions. The initial tail establishes usage only, not a lifetime count.
 type ContextActivity struct {
-	Session              NativeSession
-	TurnID, EventID      string
-	Used, Max            *int
-	Completed            bool
-	Offset, ReportedAtMS int64
+	Session               NativeSession
+	TurnID, EventID       string
+	Used, Max             *int
+	Completed, Historical bool
+	Offset, ReportedAtMS  int64
 }
 
 const contextWindowBytes int64 = 32 << 20
@@ -139,8 +139,13 @@ func (w *TurnWatcher) pollContext(f *turnFile, size int64, emit func(ContextActi
 			} else {
 				emit(a)
 			}
-		} else if row.Type == "compacted" && !initial {
-			a.Completed = true
+		} else if row.Type == "compacted" {
+			if initial && latest != nil {
+				emit(*latest)
+				latest = nil
+			}
+			a.Completed = !initial
+			a.Historical = initial
 			a.EventID = contextRowID("compacted", f.session.ResumeID, turn, line)
 			emit(a)
 		}

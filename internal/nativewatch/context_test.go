@@ -41,18 +41,19 @@ func TestContextWatcherInitialHistoryLiveCompletionAndReplayIdentity(t *testing.
 	appendRow(fmt.Sprintf(`{"timestamp":%q,"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":0},"model_context_window":1000}}}`, stamp) + "\n")
 	emit := func(a ContextActivity) { *events = append(*events, a) }
 	w.poll(func(TurnActivity) {}, emit)
-	if len(*events) != 1 || (*events)[0].Completed || (*events)[0].Used == nil || *(*events)[0].Used != 0 {
-		t.Fatalf("initial history must only establish actual zero usage: %+v", *events)
+	if len(*events) != 2 || !(*events)[0].Historical || (*events)[0].Completed || (*events)[1].Used == nil || *(*events)[1].Used != 0 {
+		t.Fatalf("initial history must invalidate without counting, then establish actual zero usage: %+v", *events)
 	}
+	row = fmt.Sprintf(`{"timestamp":%q,"type":"compacted","payload":{"message":"new synthetic completion"}}`, time.Now().UTC().Format(time.RFC3339Nano)) + "\n"
 	appendRow(row)
 	w.poll(func(TurnActivity) {}, emit)
-	if len(*events) != 2 || !(*events)[1].Completed {
+	if len(*events) != 3 || !(*events)[2].Completed {
 		t.Fatalf("new durable compaction missing: %+v", *events)
 	}
-	id := (*events)[1].EventID
+	id := (*events)[2].EventID
 	appendRow(row)
 	w.poll(func(TurnActivity) {}, emit)
-	if len(*events) != 3 || (*events)[2].EventID != id {
+	if len(*events) != 4 || (*events)[3].EventID != id {
 		t.Fatal("same original row replay acquired new identity")
 	}
 	// A new watcher/restored process must not count old history again.

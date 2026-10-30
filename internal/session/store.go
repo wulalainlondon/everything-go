@@ -16,6 +16,7 @@ import (
 // saved_sessions.json. Store writes known fields back into the original raw JSON
 // object so Python-only metadata survives Go updates.
 type savedEntry struct {
+	ContextNotBeforeMS  int64    `json:"context_not_before_ms,omitempty"`
 	SourceRevision      uint64   `json:"source_revision,omitempty"`
 	ConfigRevision      uint64   `json:"config_revision,omitempty"`
 	Name                string   `json:"name"`
@@ -79,6 +80,14 @@ func (st *Store) Load() map[string]savedEntry {
 				continue
 			}
 		}
+		if value, present := obj["context_not_before_ms"]; present {
+			var stamp int64
+			if string(value) == "null" || json.Unmarshal(value, &stamp) != nil || stamp < 0 {
+				log.Printf("[session] invalid saved context source time id=%s", id)
+				delete(st.knownIDs, id)
+				continue
+			}
+		}
 		out[id] = entryFromRaw(obj)
 		st.knownIDs[id] = true
 	}
@@ -116,9 +125,16 @@ func (st *Store) Save(sessions []*Session) error {
 		if lastUsed <= 0 {
 			lastUsed = now
 		}
+		contextNotBefore := snap.ContextNotBeforeMS
+		// A future default can be persisted while an older admitted turn is
+		// active. On restore the default becomes active: old native usage must
+		// not acquire that restored configuration's report eligibility.
+		if ConfigurationFrom(snap) != ConfigurationFrom(s.Snapshot()) {
+			contextNotBefore = max(contextNotBefore, time.Now().UnixMilli())
+		}
 		entry := savedEntry{
 			Name: snap.Name, ResumeID: snap.ResumeID, ClaudeUUID: snap.ResumeID,
-			ConfigRevision: snap.ConfigRevision, SourceRevision: snap.SourceRevision, MetadataRevision: snap.MetadataRevision, NameUpdatedAt: snap.NameUpdatedAt,
+			ConfigRevision: snap.ConfigRevision, SourceRevision: snap.SourceRevision, ContextNotBeforeMS: contextNotBefore, MetadataRevision: snap.MetadataRevision, NameUpdatedAt: snap.NameUpdatedAt,
 			NameUpdatedBy: snap.NameUpdatedBy, LastNameMutationID: snap.LastNameMutationID,
 			LastUsed: lastUsed, Cwd: snap.Cwd, Backend: snap.Backend, Model: snap.Model,
 			PreviewText: snap.PreviewText, PreviewRole: snap.PreviewRole,
@@ -207,6 +223,7 @@ func putKnownFields(obj map[string]json.RawMessage, entry savedEntry) {
 	put("metadata_revision", entry.MetadataRevision)
 	put("config_revision", entry.ConfigRevision)
 	put("source_revision", entry.SourceRevision)
+	put("context_not_before_ms", entry.ContextNotBeforeMS)
 	put("name_updated_at", entry.NameUpdatedAt)
 	put("name_updated_by", entry.NameUpdatedBy)
 	put("last_name_mutation_id", entry.LastNameMutationID)
@@ -307,6 +324,7 @@ func entryFromRaw(obj map[string]json.RawMessage) savedEntry {
 	}
 	return savedEntry{
 		SourceRevision:      rawUint64(obj, "source_revision"),
+		ContextNotBeforeMS:  rawInt64(obj, "context_not_before_ms"),
 		Name:                rawString(obj, "name"),
 		MetadataRevision:    uint64(rawInt64(obj, "metadata_revision")),
 		ConfigRevision:      uint64(rawInt64(obj, "config_revision")),

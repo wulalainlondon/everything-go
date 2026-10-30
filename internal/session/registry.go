@@ -26,12 +26,13 @@ import (
 // All mutable fields are private; callers go through the methods below so the
 // mutex is always held and reads see a consistent view.
 type Session struct {
-	mu             sync.Mutex
-	configUpdating bool
-	contextResetID string
-	configRevision uint64
-	sourceRevision uint64
-	futureConfig   *Configuration
+	mu                 sync.Mutex
+	configUpdating     bool
+	contextResetID     string
+	configRevision     uint64
+	sourceRevision     uint64
+	contextNotBeforeMS int64
+	futureConfig       *Configuration
 
 	// ID and CreatedAt are set once at construction and never change, so they
 	// are exported and safe to read concurrently without the lock.
@@ -83,6 +84,7 @@ type Session struct {
 // that need several at once (summaries, task listings, spawn argument building).
 type Snapshot struct {
 	SourceRevision      uint64
+	ContextNotBeforeMS  int64
 	ConfigRevision      uint64
 	ID                  string
 	Name                string
@@ -126,7 +128,7 @@ func (s *Session) Snapshot() Snapshot {
 
 func (s *Session) snapshotLocked() Snapshot {
 	return Snapshot{
-		ConfigRevision: s.configRevision, SourceRevision: s.sourceRevision,
+		ConfigRevision: s.configRevision, SourceRevision: s.sourceRevision, ContextNotBeforeMS: s.contextNotBeforeMS,
 		ID: s.ID, Name: s.name, Cwd: s.cwd, Backend: s.backend,
 		MetadataRevision: s.metadataRevision, NameUpdatedAt: s.nameUpdatedAt,
 		NameUpdatedBy: s.nameUpdatedBy, LastNameMutationID: s.lastNameMutationID,
@@ -171,7 +173,7 @@ func (s *Session) SetName(name string) {
 func (s *Session) SetEffort(effort string) {
 	s.mu.Lock()
 	if s.effort != effort {
-		s.sourceRevision++
+		s.advanceSourceRevisionLocked()
 	}
 	s.effort = effort
 	s.mu.Unlock()
@@ -182,7 +184,7 @@ func (s *Session) SetEffort(effort string) {
 func (s *Session) SetModel(model string) {
 	s.mu.Lock()
 	if s.model != model {
-		s.sourceRevision++
+		s.advanceSourceRevisionLocked()
 	}
 	s.model = model
 	s.mu.Unlock()
@@ -195,19 +197,19 @@ func (s *Session) ApplyCodexSettings(serviceTier, collaborationMode, personality
 	s.mu.Lock()
 	if serviceTier != nil {
 		if s.serviceTier != *serviceTier {
-			s.sourceRevision++
+			s.advanceSourceRevisionLocked()
 		}
 		s.serviceTier = *serviceTier
 	}
 	if collaborationMode != nil {
 		if s.collaborationMode != *collaborationMode {
-			s.sourceRevision++
+			s.advanceSourceRevisionLocked()
 		}
 		s.collaborationMode = *collaborationMode
 	}
 	if personality != nil {
 		if s.personality != *personality {
-			s.sourceRevision++
+			s.advanceSourceRevisionLocked()
 		}
 		s.personality = *personality
 	}
@@ -220,7 +222,7 @@ func (s *Session) ApplyCodexSettings(serviceTier, collaborationMode, personality
 func (s *Session) RestoreConfig(snap Snapshot) {
 	s.mu.Lock()
 	if s.backend != snap.Backend || s.model != snap.Model || s.sandbox != snap.Sandbox || s.effort != snap.Effort || s.serviceTier != snap.ServiceTier || s.collaborationMode != snap.CollaborationMode || s.personality != snap.Personality {
-		s.sourceRevision++
+		s.advanceSourceRevisionLocked()
 	}
 	s.backend = snap.Backend
 	s.model = snap.Model
@@ -240,7 +242,7 @@ func (s *Session) SetMeta(pinned, hidden *bool) {
 	}
 	if hidden != nil {
 		if s.hidden != *hidden {
-			s.sourceRevision++
+			s.advanceSourceRevisionLocked()
 		}
 		s.hidden = *hidden
 	}
@@ -253,19 +255,19 @@ func (s *Session) ApplyConfig(backend, model, sandbox string) {
 	s.mu.Lock()
 	if backend != "" {
 		if s.backend != backend {
-			s.sourceRevision++
+			s.advanceSourceRevisionLocked()
 		}
 		s.backend = backend
 	}
 	if model != "" {
 		if s.model != model {
-			s.sourceRevision++
+			s.advanceSourceRevisionLocked()
 		}
 		s.model = model
 	}
 	if sandbox != "" {
 		if s.sandbox != sandbox {
-			s.sourceRevision++
+			s.advanceSourceRevisionLocked()
 		}
 		s.sandbox = sandbox
 	}
@@ -283,7 +285,11 @@ func (s *Session) SetResumeID(id string) {
 		s.contextUsed = 0
 		s.contextMax = 0
 		s.contextUsedKnown = false
-		s.sourceRevision++
+		if s.resumeID == "" && s.sourceRevision == 0 {
+			s.sourceRevision++
+		} else {
+			s.advanceSourceRevisionLocked()
+		}
 	}
 	s.resumeID = id
 	s.mu.Unlock()
@@ -295,7 +301,7 @@ func (s *Session) SetResumeID(id string) {
 func (s *Session) ClearResumeIDs() {
 	s.mu.Lock()
 	if s.resumeID != "" {
-		s.sourceRevision++
+		s.advanceSourceRevisionLocked()
 	}
 	s.resumeID = ""
 	s.contextUsed = 0
@@ -395,7 +401,7 @@ func (r *Registry) AttachStore(store *Store) {
 			created = float64(e.LastUsed)
 		}
 		s := &Session{
-			configRevision: e.ConfigRevision, sourceRevision: e.SourceRevision,
+			configRevision: e.ConfigRevision, sourceRevision: e.SourceRevision, contextNotBeforeMS: e.ContextNotBeforeMS,
 			ID: id, CreatedAt: created,
 			name: e.Name, cwd: e.Cwd, backend: e.Backend,
 			metadataRevision: e.MetadataRevision, nameUpdatedAt: e.NameUpdatedAt,
@@ -836,7 +842,7 @@ func (r *Registry) UpsertExternal(id, name, cwd, backend, resumeID string, lastU
 		}
 		if s.backend == "" {
 			if s.backend != backend {
-				s.sourceRevision++
+				s.advanceSourceRevisionLocked()
 			}
 			s.backend = backend
 		}
@@ -868,7 +874,7 @@ func (r *Registry) UpsertExternal(id, name, cwd, backend, resumeID string, lastU
 			}
 			s.cwd = cwd
 			if s.backend != backend {
-				s.sourceRevision++
+				s.advanceSourceRevisionLocked()
 			}
 			s.backend = backend
 		} else if s.resumeID != resumeID {
@@ -886,7 +892,7 @@ func (r *Registry) UpsertExternal(id, name, cwd, backend, resumeID string, lastU
 			}
 			s.cwd = cwd
 			if s.backend != backend {
-				s.sourceRevision++
+				s.advanceSourceRevisionLocked()
 			}
 			s.backend = backend
 		}
@@ -953,4 +959,11 @@ func (s *Session) SetContextForGeneration(thread string, revision uint64, used, 
 	} else if !known {
 		s.contextMax = 0
 	}
+}
+
+// Caller holds s.mu. Keep source report eligibility across configuration,
+// generation and Go restart; observer time must not re-authorize old native rows.
+func (s *Session) advanceSourceRevisionLocked() {
+	s.sourceRevision++
+	s.contextNotBeforeMS = max(time.Now().UnixMilli(), s.contextNotBeforeMS+1)
 }

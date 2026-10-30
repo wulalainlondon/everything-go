@@ -2,6 +2,7 @@ package messagequeue
 
 import (
 	"everything-go/internal/protocol"
+	"fmt"
 	"testing"
 )
 
@@ -143,5 +144,68 @@ func TestContextProviderTimeAfterCompactionClearsFenceDespiteDelayedPoll(t *test
 	r, _, e := s.ContextObservation(scope)
 	if e != nil || r.InvalidatedAt != 0 || r.UsageAt != 101 {
 		t.Fatalf("new native report did not clear fence: %+v %v", r, e)
+	}
+}
+
+func TestContextCompletionFrontierNeverMovesBackOrInvalidatesNewerUsage(t *testing.T) {
+	for _, order := range [][]int64{{100, 200}, {200, 100}} {
+		t.Run(fmt.Sprint(order), func(t *testing.T) {
+			s, e := Open(t.TempDir())
+			if e != nil {
+				t.Fatal(e)
+			}
+			defer s.Close()
+			scope := ContextScope{"authority", "ordered", "codex", "root", 1}
+			used, max := 10, 100
+			for i, sourceTime := range order {
+				if e = s.RecordContextObservation(scope, fmt.Sprint("op", sourceTime), nil, "completed", nil, int64(1000+i), sourceTime); e != nil {
+					t.Fatal(e)
+				}
+			}
+			report := int64(150)
+			if e = s.RecordContextObservation(scope, "between", &protocol.ContextUsageObservation{UsedTokens: &used, MaxTokens: &max, ReportedAtMS: &report}, "", nil, 1002); e != nil {
+				t.Fatal(e)
+			}
+			r, _, _ := s.ContextObservation(scope)
+			if r.InvalidatedAt == 0 || r.Completed != 2 {
+				t.Fatal("latest completion frontier was lowered")
+			}
+			report = 201
+			if e = s.RecordContextObservation(scope, "newer", &protocol.ContextUsageObservation{UsedTokens: &used, MaxTokens: &max, ReportedAtMS: &report}, "", nil, 1003); e != nil {
+				t.Fatal(e)
+			}
+			if e = s.RecordContextObservation(scope, "late-old-independent", nil, "completed", nil, 1004, 125); e != nil {
+				t.Fatal(e)
+			}
+			r, _, _ = s.ContextObservation(scope)
+			if r.InvalidatedAt != 0 || r.UsageAt != 201 || r.Completed != 3 {
+				t.Fatal("older completion invalidated newer native usage or count did not increase")
+			}
+		})
+	}
+}
+func TestContextHistoricalInvalidationDoesNotCountOrPromoteOnReplay(t *testing.T) {
+	s, e := Open(t.TempDir())
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer s.Close()
+	scope := ContextScope{"authority", "history", "codex", "root", 1}
+	if e = s.RecordContextObservation(scope, "old-native-row", nil, "historical", nil, 1000, 100); e != nil {
+		t.Fatal(e)
+	}
+	used, max := 10, 100
+	report := int64(101)
+	if e = s.RecordContextObservation(scope, "new-usage", &protocol.ContextUsageObservation{UsedTokens: &used, MaxTokens: &max, ReportedAtMS: &report}, "", nil, 1001); e != nil {
+		t.Fatal(e)
+	}
+	for _, state := range []string{"historical", "completed"} {
+		if e = s.RecordContextObservation(scope, "old-native-row", nil, state, nil, 1002, 100); e != nil {
+			t.Fatal(e)
+		}
+	}
+	r, _, _ := s.ContextObservation(scope)
+	if r.Completed != 0 || r.InvalidatedAt != 0 || r.UsageAt != 101 {
+		t.Fatal("historical replay invented count or invalidated later usage")
 	}
 }

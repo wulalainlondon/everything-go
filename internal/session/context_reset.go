@@ -40,7 +40,7 @@ func (s *Session) DetachReservedContext(old string) error {
 	}
 	s.historicalResumeIDs = appendUniqueResumeID(s.historicalResumeIDs, old, "")
 	s.resumeID = ""
-	s.sourceRevision++
+	s.advanceSourceRevisionLocked()
 	s.contextUsed = 0
 	s.contextMax = 0
 	s.contextUsedKnown = false

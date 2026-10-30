@@ -47,10 +47,11 @@ func (s *Store) RecordContextObservation(c ContextScope, id string, usage *proto
 		return err
 	}
 	if completionState != "" {
-		if completionState != "observed" && completionState != "completed" && completionState != "failed" && completionState != "unknown" {
+		if completionState != "observed" && completionState != "completed" && completionState != "failed" && completionState != "unknown" && completionState != "historical" {
 			return errors.New("invalid completion state")
 		}
 		canonical := ""
+		alreadySeen := false
 		all := append([]string{id}, aliases...)
 		for _, alias := range all {
 			if alias == "" || len(alias) > 512 {
@@ -62,6 +63,9 @@ func (s *Store) RecordContextObservation(c ContextScope, id string, usage *proto
 				return err
 			}
 			if err == nil {
+				if alias == id {
+					alreadySeen = true
+				}
 				if canonical != "" && canonical != found {
 					return errors.New("context completion identity conflict")
 				}
@@ -84,7 +88,7 @@ func (s *Store) RecordContextObservation(c ContextScope, id string, usage *proto
 			next = "observed"
 		}
 		// Item aliases cannot manufacture the terminal of a managed operation.
-		if id == canonical {
+		if id == canonical && previous != "historical" {
 			if previous == "failed" && completionState == "completed" {
 				return errors.New("failed compaction cannot become completed")
 			}
@@ -102,12 +106,12 @@ func (s *Store) RecordContextObservation(c ContextScope, id string, usage *proto
 				return err
 			}
 		}
-		if isNew {
+		if isNew || completionState == "historical" && !alreadySeen {
 			sourceAt := at
 			if len(completionSourceAt) > 0 && completionSourceAt[0] > 0 {
 				sourceAt = completionSourceAt[0]
 			}
-			if _, err = tx.Exec(`UPDATE context_observation_scopes SET invalidated_at=?,invalidated_source_at=?,as_of=? WHERE scope=?`, at, sourceAt, at, key); err != nil {
+			if _, err = tx.Exec(`UPDATE context_observation_scopes SET invalidated_at=CASE WHEN usage_at<=MAX(invalidated_source_at,?) THEN MAX(invalidated_at,?) ELSE invalidated_at END,invalidated_source_at=MAX(invalidated_source_at,?),as_of=MAX(as_of,?) WHERE scope=?`, sourceAt, at, sourceAt, at, key); err != nil {
 				return err
 			}
 		}
@@ -139,7 +143,7 @@ func (s *Store) RecordContextObservation(c ContextScope, id string, usage *proto
 			if invalidatedSourceAt > 0 && reported <= invalidatedSourceAt {
 				return tx.Commit()
 			}
-			if _, err = tx.Exec(`UPDATE context_observation_scopes SET usage=?,usage_at=?,usage_source_revision=?,invalidated_at=0,invalidated_source_at=0,as_of=? WHERE scope=?`, raw, reported, c.SourceRevision, at, key); err != nil {
+			if _, err = tx.Exec(`UPDATE context_observation_scopes SET usage=?,usage_at=?,usage_source_revision=?,invalidated_at=0,as_of=? WHERE scope=?`, raw, reported, c.SourceRevision, at, key); err != nil {
 				return err
 			}
 		}

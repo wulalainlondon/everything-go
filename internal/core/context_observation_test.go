@@ -255,3 +255,85 @@ func TestContextCompactedAfterSettledManagedIntervalIsIndependent(t *testing.T) 
 		t.Fatal("settled old operation suppressed later independent completion")
 	}
 }
+
+func TestContextNativeSourceTimeConfigurationFenceSurvivesRestore(t *testing.T) {
+	h, _ := newTestHub(t)
+	s := h.registry.Create("configured", "Configured", t.TempDir(), "codex", "old", "", "")
+	s.SetResumeID("root")
+	used, max := 20, 100
+	old := time.Now().Add(-time.Second).UnixMilli()
+	a := nativewatch.ContextActivity{Session: nativewatch.NativeSession{ID: s.ID, ResumeID: "root", Backend: "codex"}, EventID: "old-initial", Used: &used, Max: &max, ReportedAtMS: old}
+	h.observeNativeContext(a)
+	if h.contextObservation(s.Snapshot()).Usage.Status != "fresh" {
+		t.Fatal("initial known source not fresh")
+	}
+	s.SetModel("new")
+	a.EventID = "late-before-model"
+	a.ReportedAtMS = old + 1
+	h.observeNativeContext(a)
+	if h.contextObservation(s.Snapshot()).Usage.Status != "invalidated" {
+		t.Fatal("pre-model report revived capacity")
+	}
+	storePath := filepath.Join(t.TempDir(), "saved.json")
+	ss := session.NewStore(storePath)
+	if e := ss.Save(h.registry.List()); e != nil {
+		t.Fatal(e)
+	}
+	restored := session.NewRegistry()
+	restored.AttachStore(session.NewStore(storePath))
+	h.registry = restored
+	s, _ = restored.Get(s.ID)
+	a.EventID = "late-after-restore"
+	h.observeNativeContext(a)
+	if h.contextObservation(s.Snapshot()).Usage.Status != "invalidated" {
+		t.Fatal("restore forgot native source time fence")
+	}
+	a.EventID = "new-native-report"
+	a.ReportedAtMS = s.Snapshot().ContextNotBeforeMS + 1
+	h.observeNativeContext(a)
+	if o := h.contextObservation(s.Snapshot()); o.Usage.Status != "fresh" || o.Usage.MaxTokens == nil || *o.Usage.MaxTokens != 100 {
+		t.Fatal("truly new report could not restore capacity")
+	}
+}
+func TestContextInitialHistoryInvalidatesWithoutCountingAndPostUsageRecovers(t *testing.T) {
+	h, _ := newTestHub(t)
+	s := h.registry.Create("initial-history", "Root", t.TempDir(), "codex", "", "", "")
+	s.SetResumeID("root")
+	path := filepath.Join(t.TempDir(), "rollout.jsonl")
+	now := time.Now()
+	usage := func(at time.Time) string {
+		return fmt.Sprintf(`{"timestamp":%q,"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":90},"model_context_window":100}}}`+"\n", at.UTC().Format(time.RFC3339Nano))
+	}
+	historical := fmt.Sprintf(`{"timestamp":%q,"type":"compacted","payload":{"message":"synthetic history"}}`+"\n", now.UTC().Format(time.RFC3339Nano))
+	if e := os.WriteFile(path, []byte(`{"type":"session_meta","payload":{"id":"root","source":"exec"}}`+"\n"+usage(now.Add(-time.Second))+historical), 0600); e != nil {
+		t.Fatal(e)
+	}
+	w := nativewatch.NewTurnWatcher()
+	w.Track(nativewatch.NativeSession{ID: s.ID, ResumeID: "root", Backend: "codex", Path: path})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); w.Run(ctx, func(nativewatch.TurnActivity) {}, h.observeNativeContext) }()
+	defer func() { cancel(); <-done }()
+	waitContext(t, h, s, func(o *protocol.ContextObservation) bool {
+		return o.Usage.UsedTokens != nil && o.Usage.Status == "invalidated" && o.Compactions.Completed != nil && *o.Compactions.Completed == 0
+	})
+	appendRow := func(text string) {
+		f, e := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0600)
+		if e != nil {
+			t.Fatal(e)
+		}
+		_, e = f.WriteString(text)
+		f.Close()
+		if e != nil {
+			t.Fatal(e)
+		}
+	}
+	appendRow(usage(time.Now()))
+	waitContext(t, h, s, func(o *protocol.ContextObservation) bool { return o.Usage.Status == "fresh" })
+	appendRow(historical)
+	// A later genuine usage is a callback barrier after the replayed row.
+	appendRow(usage(time.Now().Add(time.Millisecond)))
+	waitContext(t, h, s, func(o *protocol.ContextObservation) bool {
+		return o.Usage.Status == "fresh" && o.Compactions.Completed != nil && *o.Compactions.Completed == 0 && o.Usage.ReportedAtMS != nil && *o.Usage.ReportedAtMS > now.UnixMilli()
+	})
+}
