@@ -42,7 +42,7 @@ func (*controllerResultCatalogFixture) TaskTools(*session.Session) ([]map[string
 func (*controllerResultCatalogFixture) ExecuteTask(context.Context, backend.TaskCaller, []byte) taskapi.Response {
 	return taskapi.Response{}
 }
-func TestControllerResultsNewGoalMetadataInitializesCatalogWithoutModel(t *testing.T) {
+func TestControllerResultsExplicitThreadInitializationKeepsCatalogWithoutModel(t *testing.T) {
 	sink := &capSink{}
 	c := NewCodex(sink, "unused")
 	c.appServerMode = "daemon"
@@ -52,7 +52,16 @@ func TestControllerResultsNewGoalMetadataInitializesCatalogWithoutModel(t *testi
 	c.rpc.setWriter(writer)
 	s := session.NewRegistry().Create("new-authorized-repair-session", "synthetic", t.TempDir(), backend.Codex, "", "read-only", "")
 	done := make(chan error, 1)
-	go func() { done <- c.GetGoal(context.Background(), s) }()
+	// Establish a native thread explicitly; a fresh read-only GetGoal must no
+	// longer create one. The original tool-catalog and no-model assertions
+	// below remain unchanged for real authorized thread initialization.
+	go func() {
+		if err := c.ensureThread(s, c.state(s.ID)); err != nil {
+			done <- err
+			return
+		}
+		done <- c.GetGoal(context.Background(), s)
+	}()
 	for _, method := range []string{"thread/start", "thread/goal/get"} {
 		var frame struct {
 			ID     int            `json:"id"`
