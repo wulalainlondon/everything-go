@@ -2,6 +2,8 @@ package core
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"everything-go/internal/backend"
 	"everything-go/internal/messagequeue"
@@ -186,5 +188,70 @@ func TestContextScopeRevisionInvalidatesCapacityWithoutResettingPhysicalCount(t 
 	o := h.contextObservation(s.Snapshot())
 	if o.Usage.Status != "invalidated" {
 		t.Fatal("old model capacity remained fresh under new configuration")
+	}
+}
+
+func TestContextManagedNativeAndTerminalAreOneDurableOperation(t *testing.T) {
+	for _, terminalFirst := range []bool{false, true} {
+		t.Run(fmt.Sprint(terminalFirst), func(t *testing.T) {
+			h, base := newTestHub(t)
+			s := h.registry.Create("managed-root", "Root", t.TempDir(), "codex", "", "", "")
+			s.SetResumeID("thread")
+			now := time.Now().UnixMilli()
+			r := backend.Maintenance{SessionID: s.ID, ThreadID: "thread", TurnID: "turn", OperationID: "exact-operation", State: "running", StartedAt: now - 100, UpdatedAt: now - 100, LogOffset: 20}
+			h.exec = &recoveringMaintenanceExec{fakeExec: base, record: r}
+			raw, _ := json.Marshal([]string{"codex_maintenance", r.OperationID})
+			sum := sha256.Sum256(raw)
+			terminal := backend.ContextTelemetry{SessionID: s.ID, Backend: "codex", NativeGeneration: "thread", SourceRevision: s.Snapshot().SourceRevision, EventID: hex.EncodeToString(sum[:]), CompletionState: "completed"}
+			native := nativewatch.ContextActivity{Session: nativewatch.NativeSession{ID: s.ID, ResumeID: "thread", Backend: "codex"}, TurnID: "turn", EventID: "durable-compacted-row", Completed: true, Offset: 30, ReportedAtMS: now}
+			if terminalFirst {
+				h.Emit(terminal)
+			}
+			h.observeNativeContext(native)
+			if !terminalFirst {
+				o := h.contextObservation(s.Snapshot())
+				if o.Compactions.Completed == nil || *o.Compactions.Completed != 0 {
+					t.Fatal("manual row counted before confirmed operation terminal")
+				}
+				h.Emit(terminal)
+			}
+			h.observeNativeContext(native)
+			h.Emit(terminal)
+			o := h.contextObservation(s.Snapshot())
+			if o.Compactions.Completed == nil || *o.Compactions.Completed != 1 {
+				t.Fatal("same native/manual operation counted twice")
+			}
+		})
+	}
+}
+func TestContextAmbiguousManagedCompactedRowDoesNotInventTerminal(t *testing.T) {
+	for _, state := range []string{"running", "unknown", "failed", "completed"} {
+		t.Run(state, func(t *testing.T) {
+			h, base := newTestHub(t)
+			s := h.registry.Create("managed-ambiguous", "Root", t.TempDir(), "codex", "", "", "")
+			s.SetResumeID("thread")
+			now := time.Now().UnixMilli()
+			h.exec = &recoveringMaintenanceExec{fakeExec: base, record: backend.Maintenance{SessionID: s.ID, ThreadID: "thread", TurnID: "turn", OperationID: "pending-op", State: state, StartedAt: now - 100, UpdatedAt: now + 100, LogOffset: 20}}
+			// A bounded native tail can lack turn_context for a long turn. Its row
+			// must not bypass the unresolved managed operation's completion fence.
+			h.observeNativeContext(nativewatch.ContextActivity{Session: nativewatch.NativeSession{ID: s.ID, ResumeID: "thread", Backend: "codex"}, EventID: "ambiguous-row", Completed: true, Offset: 30, ReportedAtMS: now})
+			o := h.contextObservation(s.Snapshot())
+			if o.Compactions.Completed == nil || *o.Compactions.Completed != 0 {
+				t.Fatalf("%s operation counted without exact terminal", state)
+			}
+		})
+	}
+}
+
+func TestContextCompactedAfterSettledManagedIntervalIsIndependent(t *testing.T) {
+	h, base := newTestHub(t)
+	s := h.registry.Create("after-managed", "Root", t.TempDir(), "codex", "", "", "")
+	s.SetResumeID("thread")
+	now := time.Now().UnixMilli()
+	h.exec = &recoveringMaintenanceExec{fakeExec: base, record: backend.Maintenance{SessionID: s.ID, ThreadID: "thread", TurnID: "old", OperationID: "old-op", State: "completed", StartedAt: now - 1000, UpdatedAt: now - 500, LogOffset: 20}}
+	h.observeNativeContext(nativewatch.ContextActivity{Session: nativewatch.NativeSession{ID: s.ID, ResumeID: "thread", Backend: "codex"}, EventID: "new-independent-row", Completed: true, Offset: 100, ReportedAtMS: now})
+	o := h.contextObservation(s.Snapshot())
+	if o.Compactions.Completed == nil || *o.Compactions.Completed != 1 {
+		t.Fatal("settled old operation suppressed later independent completion")
 	}
 }

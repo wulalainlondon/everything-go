@@ -22,7 +22,19 @@ func (h *Hub) observeNativeContext(a nativewatch.ContextActivity) {
 		e.CompletionState = "completed"
 		if p, ok := h.exec.(backend.MaintenanceProvider); ok {
 			for _, r := range p.MaintenanceRecords() {
-				if r.SessionID == s.ID && r.ThreadID == snap.ResumeID && r.TurnID == a.TurnID && r.OperationID != "" && a.Offset >= r.LogOffset {
+				if r.SessionID != s.ID || r.ThreadID != snap.ResumeID || r.OperationID == "" || a.Offset < r.LogOffset {
+					continue
+				}
+				if r.TurnID == "" || a.TurnID == "" {
+					// A bounded tail may have lost turn_context. During the managed
+					// operation's native interval this row is not an independent
+					// confirmed operation. Do not guess an alias or bypass UNKNOWN.
+					if a.ReportedAtMS >= r.StartedAt && (r.BlocksQueue() || a.ReportedAtMS <= r.UpdatedAt) {
+						e.CompletionState = "observed"
+					}
+					continue
+				}
+				if r.TurnID == a.TurnID {
 					raw, _ := json.Marshal([]string{"codex_maintenance", r.OperationID})
 					sum := sha256.Sum256(raw)
 					e.Aliases = []string{hex.EncodeToString(sum[:])}
