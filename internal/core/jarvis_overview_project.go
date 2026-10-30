@@ -105,8 +105,18 @@ func (s overviewProjectSource) Page(ctx context.Context, scope taskapi.ReadScope
 			*s.header = header["value"].(map[string]any)
 		}
 	}
+	headerBytes, _ := json.Marshal(*s.header)
+	used := len(headerBytes)
 	for _, row := range rows {
 		if row.Key != "\x00project_header" && row.Key > after {
+			n := overviewPublicRowBytes(row)
+			if used+n > 224<<10 {
+				if len(out) == 0 {
+					return nil, false, errors.New("project_row_capacity_originals_preserved")
+				}
+				return out, true, nil
+			}
+			used += n
 			out = append(out, row)
 			if len(out) > limit {
 				return out[:limit], true, nil

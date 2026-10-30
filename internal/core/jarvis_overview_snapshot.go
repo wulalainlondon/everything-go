@@ -135,8 +135,17 @@ func (s overviewSnapshotSource) Page(ctx context.Context, scope taskapi.ReadScop
 			}
 		}
 	}
+	used := 0
 	for _, row := range rows {
 		if row.Key != "\x00overview_header" && row.Key > after {
+			n := overviewPublicRowBytes(row)
+			if used+n > 224<<10 {
+				if len(out) == 0 {
+					return nil, false, errors.New("snapshot_row_capacity_originals_preserved")
+				}
+				return out, true, nil
+			}
+			used += n
 			out = append(out, row)
 			if len(out) > limit {
 				return out[:limit], true, nil
@@ -264,7 +273,37 @@ func overviewProjectSummary(p map[string]any) map[string]any {
 		out["executions"] = executions[:8]
 		out["executions_truncated"] = true
 	}
+	// Preview size includes full original plan descriptors, which can be wide.
+	// Preserve complete detail rows in the frozen detail reader instead of
+	// making the whole snapshot unreadable or truncating an exact PlanRef.
+	for {
+		raw, _ := json.Marshal(out)
+		if len(raw) <= 112<<10 {
+			break
+		}
+		if items, ok := out["work_items"].([]overviewWorkItem); ok && len(items) > 0 {
+			out["work_items"] = items[:len(items)-1]
+			out["detail_truncated"] = true
+			continue
+		}
+		if es, ok := out["executions"].([]any); ok && len(es) > 0 {
+			out["executions"] = es[:len(es)-1]
+			out["executions_truncated"] = true
+			continue
+		}
+		break
+	}
 	return out
+}
+
+func overviewPublicRowBytes(row taskapi.SnapshotRow) int {
+	raw, _ := json.Marshal(row.Value)
+	var object map[string]any
+	if json.Unmarshal(raw, &object) != nil {
+		return 1 << 30
+	}
+	public, _ := json.Marshal(map[string]any{"value": object["value"], "executions": object["executions"]})
+	return len(public) + 4
 }
 
 func overviewAlbumSummary(c overviewCollection) overviewCollection {

@@ -682,3 +682,85 @@ func TestOverviewAllInterleavesActualSectionsBeyondTwoHundredAttention(t *testin
 		t.Fatal("attention lost", len(seen))
 	}
 }
+
+func TestOverviewWideLegalPlansFitFinalSnapshotAndDetailEnvelope(t *testing.T) {
+	h, call, scope := overviewFixture(t)
+	initial := call("snapshot", map[string]any{"section": "projects"})
+	project := initial["projects"].(map[string]any)["items"].([]any)[0].(map[string]any)
+	ids := []string{}
+	milestones := []map[string]string{}
+	for i := 0; i < 180; i++ {
+		id := fmt.Sprintf("milestone-%03d-", i) + strings.Repeat("x", 140)
+		ids = append(ids, id)
+		milestones = append(milestones, map[string]string{"id": id})
+	}
+	raw, _ := json.Marshal(map[string]any{"schema_version": 1, "revision": 1, "milestones": milestones})
+	path := filepath.Join(h.cfg.RootDir, "wide-original-plan.json")
+	if e := os.WriteFile(path, raw, 0600); e != nil {
+		t.Fatal(e)
+	}
+	plan := messagequeue.WorkPlan{Path: path, SHA256: jarvisTextHash(string(raw)), Revision: 1, Checklist: ids}
+	principal := jarvisPrincipal("phone", jarvisTokenGeneration("jarvis-token"))
+	for i := 0; i < 24; i++ {
+		if _, e := h.messageQueue.MutateWork(t.Context(), principal, "s_overview_manager", messagequeue.WorkMutation{IntentID: fmt.Sprintf("r_wide_plan_%04d", i), WorkItem: messagequeue.WorkItem{ID: fmt.Sprintf("wide-%04d", i), Kind: "planning", Title: "原始寬計畫", Plan: &plan, RecordingState: "recorded"}}); e != nil {
+			t.Fatal(e)
+		}
+	}
+	call("project/annotation", map[string]any{"project_id": project["project_id"], "plan_ref": plan, "expected_revision": 0, "intent_id": "r_wide_plan_associate"})
+	cursor := ""
+	seen := 0
+	for {
+		out := call("project/get", map[string]any{"project_id": project["project_id"], "limit": 20, "cursor": cursor})
+		seen += len(out["project"].(map[string]any)["work_items"].([]any))
+		encoded, _ := json.Marshal(out)
+		if len(encoded) > 240<<10 {
+			t.Fatal("final detail exceeds bound")
+		}
+		cursor = out["cursor"].(string)
+		if cursor == "" {
+			break
+		}
+	}
+	if seen != 24 {
+		t.Fatal("wide original rows lost", seen)
+	}
+	req := map[string]any{"section": "all", "limit": 20}
+	for k, v := range scope {
+		req[k] = v
+	}
+	b, _ := json.Marshal(req)
+	response := overviewHTTP(h, "snapshot", b, "phone")
+	if response.status != 200 || len(response.body) > 240<<10 {
+		t.Fatal("wide snapshot dead end", response.status, len(response.body))
+	}
+	// A still wider annotation is a known pre-effect refusal, never a saved
+	// header that makes the original detail reader a permanent dead end.
+	tooWide := []string{}
+	tooMany := []map[string]string{}
+	for i := 0; i < 200; i++ {
+		id := fmt.Sprintf("large-%03d-", i) + strings.Repeat("y", 225)
+		tooWide = append(tooWide, id)
+		tooMany = append(tooMany, map[string]string{"id": id})
+	}
+	largeRaw, _ := json.Marshal(map[string]any{"schema_version": 1, "revision": 2, "milestones": tooMany})
+	largePath := filepath.Join(h.cfg.RootDir, "too-wide-plan.json")
+	if e := os.WriteFile(largePath, largeRaw, 0600); e != nil {
+		t.Fatal(e)
+	}
+	largePlan := messagequeue.WorkPlan{Path: largePath, SHA256: jarvisTextHash(string(largeRaw)), Revision: 2, Checklist: tooWide}
+	refused := map[string]any{"project_id": project["project_id"], "expected_revision": 1, "intent_id": "r_too_wide_annotation", "plan_ref": largePlan}
+	for k, v := range scope {
+		refused[k] = v
+	}
+	encoded, _ := json.Marshal(refused)
+	if r := overviewHTTP(h, "project/annotation", encoded, "phone"); r.status != 409 || !strings.Contains(r.body, "annotation_capacity_originals_preserved") {
+		t.Fatal("unreadable header accepted", r)
+	}
+	proof := call("operation/get", map[string]any{"intent_id": "r_too_wide_annotation"})
+	if proof["phase"] != "rejected" || proof["known_no_effect"] != true {
+		t.Fatal("capacity rejection not durable", proof)
+	}
+	if saved := call("project/get", map[string]any{"project_id": project["project_id"]})["project"].(map[string]any); saved["revision"] != float64(1) {
+		t.Fatal("refusal mutated original annotation", saved)
+	}
+}

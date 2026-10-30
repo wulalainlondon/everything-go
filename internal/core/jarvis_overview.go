@@ -670,6 +670,28 @@ func (h *Hub) mutateOverviewProject(w http.ResponseWriter, r *http.Request, devi
 			a.Sources = append(a.Sources, h.overviewNavigation(source))
 		}
 	}
+	// Refuse an unsupported annotation before effect; a saved annotation must
+	// leave room for at least one original detail row in the closed transport.
+	for _, project := range projects {
+		if project["project_id"] != in.ProjectID {
+			continue
+		}
+		header := overviewPublic(project)
+		delete(header, "work_items")
+		delete(header, "executions")
+		header["annotation"] = a
+		header["progress"] = h.overviewProgress(r, device, principal, a)
+		header["phase"] = a.Phase
+		header["next_step"] = a.NextStep
+		if a.Title != "" {
+			header["title"] = a.Title
+		}
+		encoded, _ := json.Marshal(header)
+		if len(encoded) > 64<<10 {
+			overviewError(w, "annotation_capacity_originals_preserved", 409)
+			return
+		}
+	}
 	raw, _ := json.Marshal(a)
 	_, _, now, e := h.overviewScope(r, device, in.jarvisWorkScope)
 	if e != nil || now != scopeHash {
