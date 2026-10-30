@@ -128,6 +128,7 @@
         "claim_ack",
         "codex_live_diff",
         "codex_voice_event",
+        "context_observation",
         "dir_listing",
         "document",
         "done",
