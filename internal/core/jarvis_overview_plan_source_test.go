@@ -129,3 +129,41 @@ func TestOverviewHighEntropyThumbnailFitsBoundWithoutChangingOriginal(t *testing
 		t.Fatal("adaptive raster did not shrink", config, e)
 	}
 }
+
+func TestOverviewOriginalEmptyAndIncompleteDraftPlansRemainReadable(t *testing.T) {
+	h, call, _ := overviewFixture(t)
+	body := []byte("原始草稿，尚無里程碑清單")
+	path := filepath.Join(h.cfg.RootDir, "zero-milestone-draft.txt")
+	if e := os.WriteFile(path, body, 0600); e != nil {
+		t.Fatal(e)
+	}
+	plan := messagequeue.WorkPlan{Path: path, SHA256: jarvisTextHash(string(body)), Revision: 1}
+	seedOverviewPlan(t, h, "s_overview_manager", "empty-original-plan", plan)
+	seedOverviewPlan(t, h, "s_overview_manager", "incomplete-original-plan", messagequeue.WorkPlan{Path: "incomplete-draft"})
+	out := call("snapshot", map[string]any{"section": "projects"})
+	p := out["projects"].(map[string]any)["items"].([]any)[0].(map[string]any)
+	for _, value := range p["work_items"].([]any) {
+		item := value.(map[string]any)
+		if item["source_item_id"] == "empty-original-plan" {
+			ref := item["plan_ref"].(map[string]any)
+			if len(ref["checklist"].([]any)) != 0 {
+				t.Fatal(ref)
+			}
+		} else if item["source_item_id"] == "incomplete-original-plan" {
+			if item["plan_ref"] != nil || item["detail_truncated"] != true {
+				t.Fatal("unusable draft descriptor leaked as readable plan", item)
+			}
+		}
+	}
+	plan.Checklist = []string{} // Same exact zero original milestones, not invented IDs.
+	call("project/annotation", map[string]any{"project_id": p["project_id"], "plan_ref": plan, "intent_id": "r_associate_empty_original", "expected_revision": 0})
+	detail := call("project/get", map[string]any{"project_id": p["project_id"]})["project"].(map[string]any)
+	progress := detail["progress"].(map[string]any)
+	if progress["state"] != "unverified" || progress["percent"] != nil || progress["total"] != nil {
+		t.Fatal("empty plan invented progress", progress)
+	}
+	read := call("project/plan", map[string]any{"project_id": p["project_id"], "sha256": plan.SHA256, "revision": 1})
+	if read["complete"] != true || read["source_item_id"] != "empty-original-plan" {
+		t.Fatal("original zero-milestone draft unavailable", read)
+	}
+}

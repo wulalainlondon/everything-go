@@ -399,7 +399,7 @@ func (h *Hub) overviewProjects(r *http.Request, device, principal string) ([]map
 			row := h.workSummaryRow(r, device, s, item, strings.HasPrefix(item.ID, "intake_") || strings.HasPrefix(item.ID, "controller_") || strings.HasPrefix(item.ID, "delegation_"))
 			visible := row["item"].(messagequeue.WorkItem)
 			if row["source_partial"] != true {
-				visible.Plan = item.Plan
+				visible.Plan = overviewReadablePlan(item.Plan)
 				if item.Decision != nil {
 					visible.Decision = &messagequeue.WorkDecision{State: item.Decision.State, SourceRef: item.Decision.SourceRef}
 				}
@@ -624,7 +624,7 @@ func (h *Hub) mutateOverviewProject(w http.ResponseWriter, r *http.Request, devi
 		}
 	}
 	oldPlanHash := jarvisHash([]any{a.Plan, a.PlanSource})
-	previousPlanHash := jarvisHash(a.Plan)
+	previousPlanHash := overviewPlanHash(a.Plan)
 	if in.Fields["title"] {
 		a.Title = in.Title
 	}
@@ -636,6 +636,11 @@ func (h *Hub) mutateOverviewProject(w http.ResponseWriter, r *http.Request, devi
 	}
 	if in.Fields["plan_ref"] {
 		a.Plan = in.Plan
+		if a.Plan != nil && a.Plan.Checklist == nil {
+			copy := *a.Plan
+			copy.Checklist = []string{}
+			a.Plan = &copy
+		}
 	}
 	if in.Fields["plan_source"] && !in.Fields["plan_ref"] {
 		overviewError(w, "plan_source_requires_plan_ref", 400)
@@ -646,7 +651,7 @@ func (h *Hub) mutateOverviewProject(w http.ResponseWriter, r *http.Request, devi
 			a.PlanSource = nil
 		} else {
 			selected := in.PlanSource
-			if selected == nil && jarvisHash(in.Plan) == previousPlanHash && a.PlanSource != nil {
+			if selected == nil && overviewPlanHash(in.Plan) == previousPlanHash && a.PlanSource != nil {
 				selected = a.PlanSource
 			}
 			var err error

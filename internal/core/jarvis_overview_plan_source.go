@@ -21,7 +21,7 @@ func (h *Hub) selectOverviewPlanSource(projects []map[string]any, projectID stri
 			continue
 		}
 		for _, item := range project["work_items"].([]overviewWorkItem) {
-			if item.Plan == nil || jarvisHash(item.Plan) != jarvisHash(plan) {
+			if item.Plan == nil || overviewPlanHash(item.Plan) != overviewPlanHash(plan) {
 				continue
 			}
 			if selected != nil && (item.SourceManager != selected.SourceManager || item.SourceItemID != selected.SourceItemID) {
@@ -56,8 +56,32 @@ func (h *Hub) overviewPlanSourceAllowed(r *http.Request, device, principal strin
 		return false
 	}
 	item, e := h.messageQueue.WorkItem(r.Context(), principal, source.SourceManager, source.SourceItemID)
-	if e != nil || item.Plan == nil || jarvisHash(item.Plan) != jarvisHash(a.Plan) {
+	if e != nil || item.Plan == nil || overviewPlanHash(item.Plan) != overviewPlanHash(a.Plan) {
 		return false
 	}
 	return h.overviewAuthorizationsAllowed(r, device, []overviewAuthorization{{Manager: *source.Navigation, Links: item.Links}})
+}
+
+func overviewReadablePlan(plan *messagequeue.WorkPlan) *messagequeue.WorkPlan {
+	if plan == nil || plan.Path == "" || !jarvisSHA.MatchString(plan.SHA256) || plan.Revision == 0 {
+		return nil
+	}
+	copy := *plan
+	if copy.Checklist == nil {
+		copy.Checklist = []string{}
+	}
+	return &copy
+}
+
+// Nil and empty checklist both mean exactly zero known milestones in original
+// draft metadata. Request input hashes remain the exact original full JSON.
+func overviewPlanHash(plan *messagequeue.WorkPlan) string {
+	if plan == nil {
+		return jarvisHash(nil)
+	}
+	copy := *plan
+	if copy.Checklist == nil {
+		copy.Checklist = []string{}
+	}
+	return jarvisHash(copy)
 }

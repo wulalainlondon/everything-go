@@ -83,6 +83,10 @@ func TestOverviewHTTPContractFixture(t *testing.T) {
 	}
 	plan := messagequeue.WorkPlan{Path: path, SHA256: jarvisTextHash(string(body)), Revision: 9, Checklist: []string{"一", "二"}}
 	seedOverviewPlan(t, h, "s_overview_manager", "http-plan-source", plan)
+	emptyDraft := plan
+	emptyDraft.Checklist = nil
+	seedOverviewPlan(t, h, "s_overview_manager", "http-empty-draft", emptyDraft)
+	seedOverviewPlan(t, h, "s_overview_manager", "http-incomplete-draft", messagequeue.WorkPlan{Path: "unavailable-draft-plan"})
 	call("project/annotation", map[string]any{"project_id": project["project_id"], "expected_revision": 0, "intent_id": "r_http_plan_annotation", "plan_ref": plan, "phase": "隔離驗收"}, 200)
 	assembled := []byte{}
 	offset := 0
@@ -152,7 +156,7 @@ func assertOverviewKnownArrays(t *testing.T, value any) {
 	case map[string]any:
 		for key, item := range v {
 			switch key {
-			case "completed_milestones", "pins", "executions", "work_items", "source_refs", "sources", "links", "items":
+			case "completed_milestones", "checklist", "pins", "executions", "work_items", "source_refs", "sources", "links", "items":
 				if item == nil {
 					t.Errorf("known empty array %s encoded null", key)
 				}
