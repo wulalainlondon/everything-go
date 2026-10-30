@@ -21,7 +21,7 @@ func (c ContextScope) key() (string, error) {
 	return string(b), nil
 }
 func (s *Store) installContextObservations() error {
-	_, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS context_observation_scopes(scope TEXT PRIMARY KEY,tracked_since INTEGER NOT NULL,usage BLOB,usage_at INTEGER NOT NULL DEFAULT 0,usage_source_revision INTEGER NOT NULL DEFAULT 0,invalidated_at INTEGER NOT NULL DEFAULT 0,as_of INTEGER NOT NULL);
+	_, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS context_observation_scopes(scope TEXT PRIMARY KEY,tracked_since INTEGER NOT NULL,usage BLOB,usage_at INTEGER NOT NULL DEFAULT 0,usage_source_revision INTEGER NOT NULL DEFAULT 0,invalidated_at INTEGER NOT NULL DEFAULT 0,invalidated_source_at INTEGER NOT NULL DEFAULT 0,as_of INTEGER NOT NULL);
  CREATE TABLE IF NOT EXISTS context_usage_seen(scope TEXT NOT NULL,event_id TEXT NOT NULL,PRIMARY KEY(scope,event_id));
  CREATE TABLE IF NOT EXISTS context_compaction_operations(scope TEXT NOT NULL,canonical TEXT NOT NULL,state TEXT NOT NULL,observed_at INTEGER NOT NULL,PRIMARY KEY(scope,canonical));
  CREATE TABLE IF NOT EXISTS context_compaction_aliases(scope TEXT NOT NULL,alias TEXT NOT NULL,canonical TEXT NOT NULL,observed_at INTEGER NOT NULL,PRIMARY KEY(scope,alias));`)
@@ -30,7 +30,7 @@ func (s *Store) installContextObservations() error {
 
 // RecordContextObservation commits dedupe, completion and invalidation together.
 // Duplicate/replayed observations never refresh the original report time.
-func (s *Store) RecordContextObservation(c ContextScope, id string, usage *protocol.ContextUsageObservation, completionState string, aliases []string, at int64) error {
+func (s *Store) RecordContextObservation(c ContextScope, id string, usage *protocol.ContextUsageObservation, completionState string, aliases []string, at int64, completionSourceAt ...int64) error {
 	key, err := c.key()
 	if err != nil {
 		return err
@@ -103,7 +103,11 @@ func (s *Store) RecordContextObservation(c ContextScope, id string, usage *proto
 			}
 		}
 		if isNew {
-			if _, err = tx.Exec(`UPDATE context_observation_scopes SET invalidated_at=?,as_of=? WHERE scope=?`, at, at, key); err != nil {
+			sourceAt := at
+			if len(completionSourceAt) > 0 && completionSourceAt[0] > 0 {
+				sourceAt = completionSourceAt[0]
+			}
+			if _, err = tx.Exec(`UPDATE context_observation_scopes SET invalidated_at=?,invalidated_source_at=?,as_of=? WHERE scope=?`, at, sourceAt, at, key); err != nil {
 				return err
 			}
 		}
@@ -114,8 +118,8 @@ func (s *Store) RecordContextObservation(c ContextScope, id string, usage *proto
 		}
 		n, _ := result.RowsAffected()
 		if n > 0 {
-			var lastReport int64
-			if e = tx.QueryRow(`SELECT usage_at FROM context_observation_scopes WHERE scope=?`, key).Scan(&lastReport); e != nil {
+			var lastReport, invalidatedSourceAt int64
+			if e = tx.QueryRow(`SELECT usage_at,invalidated_source_at FROM context_observation_scopes WHERE scope=?`, key).Scan(&lastReport, &invalidatedSourceAt); e != nil {
 				return e
 			}
 			if usage.ReportedAtMS != nil && *usage.ReportedAtMS < lastReport {
@@ -129,7 +133,13 @@ func (s *Store) RecordContextObservation(c ContextScope, id string, usage *proto
 			if usage.ReportedAtMS != nil {
 				reported = *usage.ReportedAtMS
 			}
-			if _, err = tx.Exec(`UPDATE context_observation_scopes SET usage=?,usage_at=?,usage_source_revision=?,invalidated_at=0,as_of=? WHERE scope=?`, raw, reported, c.SourceRevision, at, key); err != nil {
+			// Compare provider time with provider time. A delayed pre-compaction
+			// report must not revive health; a genuinely newer native report can
+			// clear the fence even if both were first observed in one later poll.
+			if invalidatedSourceAt > 0 && reported <= invalidatedSourceAt {
+				return tx.Commit()
+			}
+			if _, err = tx.Exec(`UPDATE context_observation_scopes SET usage=?,usage_at=?,usage_source_revision=?,invalidated_at=0,invalidated_source_at=0,as_of=? WHERE scope=?`, raw, reported, c.SourceRevision, at, key); err != nil {
 				return err
 			}
 		}

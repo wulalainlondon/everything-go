@@ -97,7 +97,7 @@ func (h *Hub) observeContextTelemetry(e backend.ContextTelemetry) {
 	if e.Completed {
 		state = "completed"
 	}
-	if err := h.messageQueue.RecordContextObservation(contextScope(h.cfg.InstanceID, snap), e.EventID, u, state, e.Aliases, time.Now().UnixMilli()); err != nil {
+	if err := h.messageQueue.RecordContextObservation(contextScope(h.cfg.InstanceID, snap), e.EventID, u, state, e.Aliases, time.Now().UnixMilli(), e.ReportedAtMS); err != nil {
 		// Persistence failure is explicit/unavailable, never an optimistic increment.
 		event := h.contextObservation(s.Snapshot())
 		event.Compactions.Completed = nil

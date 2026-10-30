@@ -99,3 +99,49 @@ func TestContextObservationAtomicConflictAndSourceTime(t *testing.T) {
 		t.Fatalf("native report time/atomicity: %+v %v", r, e)
 	}
 }
+
+func TestContextDelayedUsageCannotClearConfirmedCompactionInvalidation(t *testing.T) {
+	s, e := Open(t.TempDir())
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer s.Close()
+	scope := ContextScope{"authority", "s", "codex", "root", 1}
+	used, max := 10, 100
+	// A newly observed usage record can have a provider timestamp preceding
+	// the confirmed compaction even when it arrives later at this server.
+	if e = s.RecordContextObservation(scope, "compact", nil, "completed", nil, 200); e != nil {
+		t.Fatal(e)
+	}
+	before := int64(190)
+	if e = s.RecordContextObservation(scope, "delayed", &protocol.ContextUsageObservation{UsedTokens: &used, MaxTokens: &max, ReportedAtMS: &before}, "", nil, 210); e != nil {
+		t.Fatal(e)
+	}
+	r, _, e := s.ContextObservation(scope)
+	if e != nil || r.InvalidatedAt != 200 {
+		t.Fatalf("old native usage cleared invalidation: %+v %v", r, e)
+	}
+}
+
+func TestContextProviderTimeAfterCompactionClearsFenceDespiteDelayedPoll(t *testing.T) {
+	s, e := Open(t.TempDir())
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer s.Close()
+	scope := ContextScope{"authority", "s", "codex", "root", 1}
+	used, max := 10, 100
+	// Both observations arrive at 1000+, but their native source times are
+	// 100 then 101. Server receipt time is not the native ordering frontier.
+	if e = s.RecordContextObservation(scope, "compact", nil, "completed", nil, 1000, 100); e != nil {
+		t.Fatal(e)
+	}
+	after := int64(101)
+	if e = s.RecordContextObservation(scope, "after", &protocol.ContextUsageObservation{UsedTokens: &used, MaxTokens: &max, ReportedAtMS: &after}, "", nil, 1001); e != nil {
+		t.Fatal(e)
+	}
+	r, _, e := s.ContextObservation(scope)
+	if e != nil || r.InvalidatedAt != 0 || r.UsageAt != 101 {
+		t.Fatalf("new native report did not clear fence: %+v %v", r, e)
+	}
+}
