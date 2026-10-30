@@ -125,6 +125,7 @@ func (c *Codex) updateMaintenance(id, state, message, turn string, expectedOpera
 		c.maintenance[id] = r
 	}
 	c.maintenanceMu.Unlock()
+	c.maintenanceContextCompletion(r)
 	c.sink.Emit(r)
 }
 

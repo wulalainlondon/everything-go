@@ -532,7 +532,7 @@ func (h *Hub) StartNativeWatcher(ctx context.Context, onTranscriptChange ...func
 				observer.ObserveNativeLifecycle(s, activity.TurnID, activity.Phase)
 			}
 		}
-	})
+	}, h.observeNativeContext)
 	if v := strings.TrimSpace(os.Getenv("EVERYTHING_GO_NATIVE_POLL_INTERVAL")); v != "" {
 		if d, err := time.ParseDuration(v); err == nil && d > 0 {
 			opts.PollInterval = d
@@ -645,6 +645,10 @@ func (h *Hub) connectedDeviceIDs(exclude string) []string {
 // event for replay on the next reconnect (the offline-recovery path). Safe for
 // concurrent use.
 func (h *Hub) Emit(event any) {
+	if evidence, ok := event.(backend.ContextTelemetry); ok {
+		h.observeContextTelemetry(evidence)
+		return
+	}
 	h.observeWorkspaceResearch(event)
 	if e, ok := event.(protocol.InteractionResolved); ok {
 		h.observeInteractionResolution(e)

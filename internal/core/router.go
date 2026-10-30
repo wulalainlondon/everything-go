@@ -232,6 +232,9 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		if !c.enrollmentOnly && h.pairedTaskDevice(c) != "" && len(h.jarvisOperations()) > 0 {
 			helloInput.Capabilities = append(helloInput.Capabilities, "jarvis_workbench_v1")
 		}
+		if !c.enrollmentOnly && !c.inventoryProbe && !cmd.ConnectionProbe {
+			helloInput.Capabilities = append(helloInput.Capabilities, "context_observation_v1")
+		}
 		c.enqueueEvent(h.client.HelloAck(helloInput))
 		if c.inventoryProbe || cmd.ConnectionProbe {
 			return
@@ -1499,7 +1502,8 @@ func (h *Hub) sessionSummaries() []protocol.SessionSummary {
 		out = append(out, protocol.SessionSummary{
 			ClaudeUUID:  snap.ResumeID,
 			ContextUsed: knownContextUsed(snap), ContextMax: knownContextMax(snap),
-			ActiveModel: active.Model, ActiveEffort: active.Effort, ActiveServiceTier: active.ServiceTier, ActiveConfigRevision: active.ConfigRevision,
+			ContextObservation: h.contextObservation(snap),
+			ActiveModel:        active.Model, ActiveEffort: active.Effort, ActiveServiceTier: active.ServiceTier, ActiveConfigRevision: active.ConfigRevision,
 			ConfigRevision: snap.ConfigRevision,
 			ID:             snap.ID, Name: snap.Name, IsStreaming: snap.Streaming || runtimePhaseActive(runtimePhase[snap.ID]),
 			AuthorityInstanceID: h.cfg.InstanceID, MetadataRevision: snap.MetadataRevision,

@@ -1460,6 +1460,11 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 
 	case "item/completed":
 		if isRootThread && p.Item.Type == "contextCompaction" {
+			if (p.Item.Status == "" || p.Item.Status == "completed") && (len(p.Item.Failure) == 0 || string(p.Item.Failure) == "null") {
+				c.contextCompletion(s, p.ThreadID, p.TurnID, p.Item.ID)
+			} else {
+				c.contextCompletion(s, p.ThreadID, p.TurnID, p.Item.ID, true)
+			}
 			st.mu.Lock()
 			managedCompact := st.compactActive
 			st.mu.Unlock()
@@ -1608,13 +1613,14 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 		if !isRootThread {
 			return
 		}
+		c.contextUsage(s, p.ThreadID, p.TurnID, m.Params)
 		used, maxCtx := codexUsageValues(p.TokenUsage)
 		if used == 0 && maxCtx == 0 {
 			used, maxCtx = codexUsageValues(p.Usage)
 		}
 		st.mu.Lock()
-		if used > 0 {
-			st.contextUsed = used
+		if reported, _ := codexContextUsage(m.Params); reported != nil {
+			st.contextUsed = *reported
 		}
 		if maxCtx > 0 {
 			st.contextMax = maxCtx

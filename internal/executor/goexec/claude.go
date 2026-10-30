@@ -668,6 +668,8 @@ type ndLine struct {
 	// Non-empty on events produced inside a Task subagent. Those are internal
 	// to the subagent and must not pollute the main-chain stream.
 	ParentToolUseID string `json:"parent_tool_use_id"`
+	IsSidechain     bool   `json:"isSidechain"`
+	IsSidechainAlt  bool   `json:"is_sidechain"`
 	// stream_event payload (--include-partial-messages): the wrapped Anthropic
 	// SSE event. Only content_block_delta text/thinking deltas are consumed.
 	Event struct {
@@ -713,7 +715,7 @@ func (c *Claude) readStdout(s *session.Session, p *proc, stdout interface{ Read(
 			continue // non-JSON diagnostic line
 		}
 		p.touch()
-		if evt.ParentToolUseID != "" {
+		if evt.ParentToolUseID != "" || evt.IsSidechain || evt.IsSidechainAlt {
 			continue // Task-subagent internal event — keep it out of the main stream
 		}
 		reqID := p.currentReqID()
@@ -862,13 +864,34 @@ func (c *Claude) readStdout(s *session.Session, p *proc, stdout interface{ Read(
 			if usage, ok := evt.ModelUsage[p.currentModel()]; ok && usage.ContextWindow > 0 {
 				contextLimit = usage.ContextWindow
 			}
-			if contextLimit > 0 || contextUsed >= 0 {
-				s.SetContext(contextUsed, contextLimit)
-			}
 			if evt.SessionID != "" && evt.SessionID != s.ResumeID() {
 				s.SetResumeID(evt.SessionID)
 				c.sink.Emit(backend.NewSessionUUID(s.ID, evt.SessionID))
 			}
+			if contextLimit > 0 || contextUsed >= 0 {
+				s.SetContext(contextUsed, contextLimit)
+			}
+			contextSnap := s.Snapshot()
+			if contextSnap.ResumeID != "" && (evt.SessionID == "" || evt.SessionID == contextSnap.ResumeID) && evt.UUID != "" {
+				origin := "claude_result_aggregate"
+				var currentUsed *int
+				if inputUsage != nil {
+					value := inputUsage.InputTokens + inputUsage.CacheCreationInputTokens + inputUsage.CacheReadInputTokens
+					currentUsed = &value
+					origin = "claude_native_assistant_usage"
+				}
+				var limit *int
+				maxOrigin := "model_config"
+				if contextLimit > 0 {
+					value := contextLimit
+					limit = &value
+				}
+				if usage, ok := evt.ModelUsage[p.currentModel()]; ok && usage.ContextWindow > 0 {
+					maxOrigin = "claude_native_model_usage"
+				}
+				c.sink.Emit(backend.ContextTelemetry{SessionID: s.ID, Backend: "claude", NativeGeneration: contextSnap.ResumeID, SourceRevision: contextSnap.SourceRevision, EventID: contextEvidenceID("claude_result", contextSnap.ResumeID, evt.UUID), Origin: origin, MaxOrigin: maxOrigin, UsedTokens: currentUsed, MaxTokens: limit})
+			}
+
 			if p.taskLease != nil {
 				p.mu.Lock()
 				token, message, text := p.acceptedUUID, p.finalMessageID, p.finalAssistantText

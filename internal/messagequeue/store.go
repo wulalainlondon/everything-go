@@ -142,6 +142,10 @@ func Open(dataDir string) (*Store, error) {
 		return nil, err
 	}
 	s := &Store{db: db}
+	if err := s.installContextObservations(); err != nil {
+		db.Close()
+		return nil, err
+	}
 	if err := s.installStartPush(); err != nil {
 		db.Close()
 		return nil, err

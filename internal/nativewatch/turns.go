@@ -19,10 +19,13 @@ type TurnActivity struct {
 }
 
 type turnFile struct {
-	session        NativeSession
-	size, modified int64
-	initialized    bool
-	turnID, phase  string
+	session                             NativeSession
+	size, modified                      int64
+	initialized                         bool
+	turnID, phase                       string
+	contextInitialized, contextSkipping bool
+	contextOffset                       int64
+	contextTurn                         string
 }
 
 // TurnWatcher stats known transcripts only (no recursive scan or persistent
@@ -46,7 +49,7 @@ func (w *TurnWatcher) Track(s NativeSession) {
 	}
 }
 
-func (w *TurnWatcher) Run(ctx context.Context, emit func(TurnActivity)) {
+func (w *TurnWatcher) Run(ctx context.Context, emit func(TurnActivity), contextEmit ...func(ContextActivity)) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for {
@@ -54,12 +57,12 @@ func (w *TurnWatcher) Run(ctx context.Context, emit func(TurnActivity)) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			w.poll(emit)
+			w.poll(emit, contextEmit...)
 		}
 	}
 }
 
-func (w *TurnWatcher) poll(emit func(TurnActivity)) {
+func (w *TurnWatcher) poll(emit func(TurnActivity), contextEmit ...func(ContextActivity)) {
 	w.mu.Lock()
 	files := make([]*turnFile, 0, len(w.files))
 	for _, f := range w.files {
@@ -71,14 +74,19 @@ func (w *TurnWatcher) poll(emit func(TurnActivity)) {
 		if err != nil || !info.Mode().IsRegular() {
 			continue
 		}
-		if f.initialized && f.size == info.Size() && f.modified == info.ModTime().UnixNano() {
+		if f.initialized && f.size == info.Size() && f.modified == info.ModTime().UnixNano() && (len(contextEmit) == 0 || f.contextOffset >= info.Size()) {
 			continue
 		}
 		initial := !f.initialized
 		f.initialized, f.size, f.modified = true, info.Size(), info.ModTime().UnixNano()
 		// Inactive old files enter the stat cache without reading their history.
 		if initial && time.Since(info.ModTime()) > 24*time.Hour {
+			f.contextInitialized = true
+			f.contextOffset = info.Size()
 			continue
+		}
+		if len(contextEmit) > 0 {
+			w.pollContext(f, info.Size(), contextEmit[0])
 		}
 		turnID, phase := latestNativeTurn(f.session.Path, info.Size())
 		if turnID == "" || (turnID == f.turnID && phase == f.phase) {

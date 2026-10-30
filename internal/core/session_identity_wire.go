@@ -43,6 +43,9 @@ func scopeSessionValue(value any, authorityInstanceID, parentType string) bool {
 			}
 		}
 		for key, item := range typed {
+			if key == "context_observation" {
+				continue
+			} // Closed telemetry scope keeps its explicit authority + raw session identity.
 			if number, ok := item.(float64); ok && isLegacyTimestampField(key) {
 				canonicalKey := key + "_unix_ms"
 				if _, exists := typed[canonicalKey]; !exists {

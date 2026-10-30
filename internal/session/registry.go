@@ -280,6 +280,9 @@ func (s *Session) SetResumeID(id string) {
 		s.historicalResumeIDs = appendUniqueResumeID(s.historicalResumeIDs, s.resumeID, id)
 	}
 	if s.resumeID != id {
+		s.contextUsed = 0
+		s.contextMax = 0
+		s.contextUsedKnown = false
 		s.sourceRevision++
 	}
 	s.resumeID = id
@@ -295,6 +298,9 @@ func (s *Session) ClearResumeIDs() {
 		s.sourceRevision++
 	}
 	s.resumeID = ""
+	s.contextUsed = 0
+	s.contextMax = 0
+	s.contextUsedKnown = false
 	s.historicalResumeIDs = nil
 	s.mu.Unlock()
 }
@@ -928,4 +934,23 @@ func (r *Registry) List() []*Session {
 		out = append(out, s)
 	}
 	return out
+}
+
+// SetContextForGeneration cannot let a late provider callback populate a
+// replacement conversation's legacy fields.
+func (s *Session) SetContextForGeneration(thread string, revision uint64, used, max int, known bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.resumeID != thread || s.sourceRevision != revision {
+		return
+	}
+	s.contextUsedKnown = known
+	if known && used >= 0 {
+		s.contextUsed = used
+	}
+	if max >= 0 {
+		s.contextMax = max
+	} else if !known {
+		s.contextMax = 0
+	}
 }
