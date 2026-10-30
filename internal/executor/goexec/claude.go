@@ -61,6 +61,7 @@ type proc struct {
 	stopErr        error
 	reqID          string // request_id of the in-flight turn, stamped onto events
 	model          string
+	contextSource  *session.Snapshot
 
 	// Tool/todo presentation state, touched only by this proc's readStdout goroutine.
 	tools *toolNormalizer
@@ -72,9 +73,14 @@ type proc struct {
 	manualStopRequestID string
 }
 
-func (p *proc) beginTurn(reqID string, compact bool) {
+func (p *proc) beginTurn(reqID string, compact bool, source ...session.Snapshot) {
 	p.mu.Lock()
 	p.reqID = reqID
+	p.contextSource = nil
+	if len(source) > 0 {
+		captured := source[0]
+		p.contextSource = &captured
+	}
 	p.compactInProgress = compact
 	p.lastActivity = time.Now()
 	p.mu.Unlock()
@@ -107,8 +113,20 @@ func (p *proc) finishTurn() (reqID string, wasCompact bool) {
 	return reqID, wasCompact
 }
 
-func (p *proc) markCompact(reqID string) {
-	p.beginTurn(reqID, true)
+func (p *proc) markCompact(reqID string, source ...session.Snapshot) {
+	p.beginTurn(reqID, true, source...)
+}
+func (p *proc) contextSourceMatches(current session.Snapshot) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	source := p.contextSource
+	if source == nil || session.ConfigurationFrom(*source) != session.ConfigurationFrom(current) {
+		return false
+	}
+	if source.ResumeID == "" {
+		return current.SourceRevision == source.SourceRevision+1
+	}
+	return source.ResumeID == current.ResumeID && source.SourceRevision == current.SourceRevision
 }
 
 func (p *proc) idleFor() (string, time.Duration) {
@@ -242,7 +260,7 @@ func (c *Claude) Send(ctx context.Context, s *session.Session, reqID, content st
 		c.procs[s.ID] = p
 	}
 	isCompact := strings.TrimSpace(content) == "/compact"
-	p.beginTurn(reqID, isCompact)
+	p.beginTurn(reqID, isCompact, s.Snapshot())
 	if p.taskLease != nil {
 		p.taskLease.mu.Lock()
 		if p.taskLease.requestID == "" {
@@ -872,7 +890,7 @@ func (c *Claude) readStdout(s *session.Session, p *proc, stdout interface{ Read(
 				s.SetContext(contextUsed, contextLimit)
 			}
 			contextSnap := s.Snapshot()
-			if contextSnap.ResumeID != "" && (evt.SessionID == "" || evt.SessionID == contextSnap.ResumeID) && evt.UUID != "" {
+			if contextSnap.ResumeID != "" && (evt.SessionID == "" || evt.SessionID == contextSnap.ResumeID) && evt.UUID != "" && p.contextSourceMatches(contextSnap) {
 				origin := "claude_result_aggregate"
 				var currentUsed *int
 				if inputUsage != nil {
@@ -1139,7 +1157,7 @@ func (c *Claude) shouldAutoCompact(contextUsed, contextLimit int) bool {
 
 func (c *Claude) startAutoCompact(s *session.Session, p *proc) {
 	reqID := "compact_" + s.ID
-	p.markCompact(reqID)
+	p.markCompact(reqID, s.Snapshot())
 	c.sink.Emit(backend.NewSessionCommandStarted(s.ID, reqID, 0))
 	payload := userMessageJSON("/compact", nil, nil)
 	if _, err := p.stdin.Write(payload); err != nil {

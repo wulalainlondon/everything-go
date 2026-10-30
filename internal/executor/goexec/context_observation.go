@@ -109,7 +109,7 @@ func (c *Codex) contextUsage(s *session.Session, thread, turn string, params jso
 	}
 	st := c.state(s.ID)
 	st.mu.Lock()
-	live := st.currentTurnID == turn || st.observedTurnID == turn || st.compactActive && st.compactTurnID == turn
+	live := (st.currentTurnID == turn || st.observedTurnID == turn || st.compactActive && st.compactTurnID == turn) && st.contextUsageTurn == turn && st.contextUsageRevision == snap.SourceRevision
 	st.mu.Unlock()
 	if !live {
 		return

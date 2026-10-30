@@ -72,6 +72,7 @@ func TestContextClaudeRootUsageSourceAndUnsupportedCompaction(t *testing.T) {
 	s := session.NewRegistry().Create("claude", "Claude", t.TempDir(), "claude", "claude-sonnet-5-5", "", "")
 	s.SetResumeID("native-claude")
 	p := &proc{reqID: "r_usage", model: "claude-sonnet-5-5", tools: newToolNormalizer(sink, c)}
+	p.beginTurn("r_usage", false, s.Snapshot())
 	raw := `{"type":"assistant","isSidechain":true,"message":{"usage":{"input_tokens":999},"content":[]}}
 {"type":"assistant","message":{"usage":{"input_tokens":0,"cache_read_input_tokens":0},"content":[]}}
 {"type":"result","subtype":"success","uuid":"result-identity","session_id":"native-claude","usage":{"input_tokens":999},"modelUsage":{"claude-sonnet-5-5":{"contextWindow":1000000}}}` + "\n"
@@ -79,5 +80,38 @@ func TestContextClaudeRootUsageSourceAndUnsupportedCompaction(t *testing.T) {
 	events := contextEvents(sink)
 	if len(events) != 1 || events[0].UsedTokens == nil || *events[0].UsedTokens != 0 || events[0].Origin != "claude_native_assistant_usage" || events[0].MaxOrigin != "claude_native_model_usage" || events[0].Completed || events[0].CompletionState != "" {
 		t.Fatalf("Claude sidechain/usage/unsupported completion: %+v", events)
+	}
+}
+
+func TestContextSocketUsageCannotBorrowNewConfigurationRevision(t *testing.T) {
+	c, _, sink := observedCodexFixture(t)
+	c.sessionsRoot = t.TempDir()
+	s := c.threadToSession["root"]
+	s.SetResumeID("root")
+	c.dispatch(json.RawMessage(`{"method":"turn/started","params":{"threadId":"root","turn":{"id":"old"}}}`))
+	s.SetModel("new")
+	c.dispatch(json.RawMessage(`{"method":"thread/tokenUsage/updated","params":{"threadId":"root","turnId":"old","tokenUsage":{"last":{"totalTokens":20},"modelContextWindow":1000}}}`))
+	if len(contextEvents(sink)) != 0 {
+		t.Fatal("old socket cycle acquired new configuration")
+	}
+	c.dispatch(json.RawMessage(`{"method":"turn/started","params":{"threadId":"root","turn":{"id":"new"}}}`))
+	c.dispatch(json.RawMessage(`{"method":"thread/tokenUsage/updated","params":{"threadId":"root","turnId":"new","tokenUsage":{"last":{"totalTokens":0},"modelContextWindow":1000}}}`))
+	if e := contextEvents(sink); len(e) != 1 || e[0].SourceRevision != s.Snapshot().SourceRevision {
+		t.Fatal("new socket cycle failed to report")
+	}
+}
+func TestContextClaudeResultCannotBorrowNewConfiguration(t *testing.T) {
+	sink := &capSink{}
+	c := NewClaude(sink, "claude")
+	s := session.NewRegistry().Create("claude-cycle", "Claude", t.TempDir(), "claude", "old", "", "")
+	s.SetResumeID("native")
+	p := &proc{model: "old", tools: newToolNormalizer(sink, c)}
+	p.beginTurn("old", false, s.Snapshot())
+	s.SetModel("new")
+	raw := `{"type":"assistant","message":{"usage":{"input_tokens":10},"content":[]}}
+{"type":"result","subtype":"success","uuid":"old-result","session_id":"native"}` + "\n"
+	c.readStdout(s, p, strings.NewReader(raw))
+	if len(contextEvents(sink)) != 0 {
+		t.Fatal("old Claude cycle acquired new configuration")
 	}
 }

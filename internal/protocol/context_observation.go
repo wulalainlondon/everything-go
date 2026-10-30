@@ -8,6 +8,7 @@ type ContextObservation struct {
 	SessionID           string                  `json:"session_id"`
 	Backend             string                  `json:"backend"`
 	NativeGeneration    string                  `json:"native_generation"`
+	ConfigRevision      uint64                  `json:"config_revision"`
 	SourceRevision      uint64                  `json:"source_revision"`
 	Usage               ContextUsageObservation `json:"usage"`
 	Compactions         ContextCompactions      `json:"compactions"`

@@ -15,7 +15,7 @@ func contextScope(authority string, s session.Snapshot) messagequeue.ContextScop
 }
 func (h *Hub) contextObservation(s session.Snapshot) *protocol.ContextObservation {
 	now := time.Now().UnixMilli()
-	o := &protocol.ContextObservation{SchemaVersion: 1, AuthorityInstanceID: h.cfg.InstanceID, SessionID: s.ID, Backend: s.Backend, NativeGeneration: s.ResumeID, SourceRevision: s.SourceRevision, Usage: protocol.ContextUsageObservation{Status: "unknown"}, Compactions: protocol.ContextCompactions{Coverage: "unsupported", AsOfMS: now, Supported: s.Backend == "codex"}}
+	o := &protocol.ContextObservation{SchemaVersion: 1, AuthorityInstanceID: h.cfg.InstanceID, SessionID: s.ID, Backend: s.Backend, NativeGeneration: s.ResumeID, SourceRevision: s.SourceRevision, ConfigRevision: s.ConfigRevision, Usage: protocol.ContextUsageObservation{Status: "unknown"}, Compactions: protocol.ContextCompactions{Coverage: "unsupported", AsOfMS: now, Supported: s.Backend == "codex"}}
 	if o.Compactions.Supported {
 		o.Compactions.Coverage = "not_tracked"
 	}

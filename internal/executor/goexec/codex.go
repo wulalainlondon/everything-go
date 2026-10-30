@@ -77,6 +77,8 @@ type codexState struct {
 
 	threadID                            string
 	currentTurnID                       string
+	contextUsageTurn                    string
+	contextUsageRevision                uint64
 	startAdmission                      *codexStartAdmission
 	submissionEpoch                     uint64
 	nativeBoundary                      uint64
@@ -1373,7 +1375,9 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 		if !isRootThread {
 			return
 		}
+		contextSource := s.Snapshot()
 		st.mu.Lock()
+		st.contextUsageTurn, st.contextUsageRevision = p.Turn.ID, contextSource.SourceRevision
 		if st.compactActive {
 			st.compactTurnID = p.Turn.ID
 			st.mu.Unlock()

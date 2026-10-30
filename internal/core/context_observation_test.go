@@ -101,7 +101,11 @@ func TestContextNativeRootProducerLedgerMarshalAndRestart(t *testing.T) {
 		if envelope.Context.SessionID != s.ID || envelope.Context.AuthorityInstanceID != "i1" || envelope.SessionID == s.ID {
 			t.Fatalf("nested raw/outer scoped identity incorrect: %s", event)
 		}
-		stages = append(stages, map[string]any{"stage": label, "sessions_list": json.RawMessage(raw), "event": json.RawMessage(event)})
+		ack, e := marshalEvent(h.client.SessionConfigResult(s.ID, "fixture-current-config", true, "", s.Snapshot()), "i1")
+		if e != nil {
+			t.Fatal(e)
+		}
+		stages = append(stages, map[string]any{"stage": label, "sessions_list": json.RawMessage(raw), "event": json.RawMessage(event), "session_config_result": json.RawMessage(ack)})
 	}
 	waitContext(t, h, s, func(o *protocol.ContextObservation) bool { return o.Usage.Status == "stale" })
 	capture("native_timestamp_stale")
