@@ -54,6 +54,7 @@ func TestOverviewHTTPContractFixture(t *testing.T) {
 		if e = json.Unmarshal(body, &out); e != nil {
 			t.Fatal(e)
 		}
+		assertOverviewKnownArrays(t, out)
 		if out["authority_instance_id"] != h.cfg.InstanceID || out["schema_version"] != float64(1) {
 			t.Fatal("missing real authority envelope", path, out)
 		}
@@ -81,6 +82,7 @@ func TestOverviewHTTPContractFixture(t *testing.T) {
 		t.Fatal(e)
 	}
 	plan := messagequeue.WorkPlan{Path: path, SHA256: jarvisTextHash(string(body)), Revision: 9, Checklist: []string{"一", "二"}}
+	seedOverviewPlan(t, h, "s_overview_manager", "http-plan-source", plan)
 	call("project/annotation", map[string]any{"project_id": project["project_id"], "expected_revision": 0, "intent_id": "r_http_plan_annotation", "plan_ref": plan, "phase": "隔離驗收"}, 200)
 	assembled := []byte{}
 	offset := 0
@@ -140,6 +142,26 @@ func TestOverviewHTTPContractFixture(t *testing.T) {
 		}
 		if e = f.Close(); e != nil {
 			t.Fatal(e)
+		}
+	}
+}
+
+func assertOverviewKnownArrays(t *testing.T, value any) {
+	t.Helper()
+	switch v := value.(type) {
+	case map[string]any:
+		for key, item := range v {
+			switch key {
+			case "completed_milestones", "pins", "executions", "work_items", "source_refs", "sources", "links", "items":
+				if item == nil {
+					t.Errorf("known empty array %s encoded null", key)
+				}
+			}
+			assertOverviewKnownArrays(t, item)
+		}
+	case []any:
+		for _, item := range v {
+			assertOverviewKnownArrays(t, item)
 		}
 	}
 }

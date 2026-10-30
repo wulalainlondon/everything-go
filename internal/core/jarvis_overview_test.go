@@ -82,6 +82,7 @@ func TestOverviewPlanHashMilestonesAndDecisionDoNotExecute(t *testing.T) {
 		t.Fatal(e)
 	}
 	plan := messagequeue.WorkPlan{Path: path, SHA256: jarvisTextHash(string(raw)), Revision: 7, Checklist: []string{"one", "two"}}
+	seedOverviewPlan(t, h, "s_overview_manager", "original-plan-source", plan)
 	body := map[string]any{"project_id": p["project_id"], "intent_id": "r_overview_associate", "expected_revision": 0, "title": "真計畫", "phase": "規劃中", "next_step": "等待驗收", "plan_ref": plan}
 	receipt := call("project/annotation", body)
 	if receipt["phase"] != "applied" || receipt["operation"] != "overview/project/annotation" || receipt["input_hash"] == "" {
@@ -344,6 +345,7 @@ func TestOverviewUnassociatedCwdAttentionAndAnnotationPatch(t *testing.T) {
 		t.Fatal(e)
 	}
 	plan := messagequeue.WorkPlan{Path: path, SHA256: jarvisTextHash(string(raw)), Revision: 1, Checklist: []string{"a"}}
+	seedOverviewPlan(t, h, "s_overview_manager", "phase-plan-source", plan)
 	call("project/annotation", map[string]any{"project_id": p["project_id"], "intent_id": "r_overview_plan_original", "expected_revision": 0, "plan_ref": plan, "phase": "原階段"})
 	call("project/annotation", map[string]any{"project_id": p["project_id"], "intent_id": "r_overview_only_phase", "expected_revision": 1, "phase": "下一階段"})
 	detail := call("project/get", map[string]any{"project_id": p["project_id"]})["project"].(map[string]any)
@@ -539,6 +541,7 @@ func TestOverviewLargeProjectPagedDetailsAndExactPlanReceiver(t *testing.T) {
 		t.Fatal(e)
 	}
 	plan := messagequeue.WorkPlan{Path: path, SHA256: jarvisTextHash(string(body)), Revision: 11, Checklist: []string{"來源", "階段"}}
+	seedOverviewPlan(t, h, "s_overview_manager", "large-plan-source", plan)
 	call("project/annotation", map[string]any{"project_id": project["project_id"], "intent_id": "r_large_original_plan", "expected_revision": 0, "plan_ref": plan, "phase": "正在規劃"})
 	assembled := []byte{}
 	offset := 0
@@ -706,7 +709,7 @@ func TestOverviewWideLegalPlansFitFinalSnapshotAndDetailEnvelope(t *testing.T) {
 			t.Fatal(e)
 		}
 	}
-	call("project/annotation", map[string]any{"project_id": project["project_id"], "plan_ref": plan, "expected_revision": 0, "intent_id": "r_wide_plan_associate"})
+	call("project/annotation", map[string]any{"project_id": project["project_id"], "plan_ref": plan, "expected_revision": 0, "intent_id": "r_wide_plan_associate", "plan_source": map[string]any{"source_manager": "s_overview_manager", "source_item_id": "wide-0000"}})
 	cursor := ""
 	seen := 0
 	for {
@@ -748,6 +751,7 @@ func TestOverviewWideLegalPlansFitFinalSnapshotAndDetailEnvelope(t *testing.T) {
 		t.Fatal(e)
 	}
 	largePlan := messagequeue.WorkPlan{Path: largePath, SHA256: jarvisTextHash(string(largeRaw)), Revision: 2, Checklist: tooWide}
+	seedOverviewPlan(t, h, "s_overview_manager", "large-header-plan", largePlan)
 	refused := map[string]any{"project_id": project["project_id"], "expected_revision": 1, "intent_id": "r_too_wide_annotation", "plan_ref": largePlan}
 	for k, v := range scope {
 		refused[k] = v

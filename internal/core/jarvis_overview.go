@@ -43,6 +43,7 @@ type overviewRequest struct {
 	Phase            string                 `json:"phase,omitempty"`
 	NextStep         string                 `json:"next_step,omitempty"`
 	Plan             *messagequeue.WorkPlan `json:"plan_ref,omitempty"`
+	PlanSource       *overviewPlanSource    `json:"plan_source,omitempty"`
 	Completed        []overviewMilestone    `json:"completed_milestones,omitempty"`
 	ItemID           string                 `json:"item_id,omitempty"`
 	SourceManager    string                 `json:"source_manager,omitempty"`
@@ -72,12 +73,13 @@ type overviewAuthorization struct {
 	Links   []messagequeue.WorkLink `json:"links"`
 }
 type overviewAnnotation struct {
-	Title     string                 `json:"title"`
-	Phase     string                 `json:"phase"`
-	NextStep  string                 `json:"next_step"`
-	Plan      *messagequeue.WorkPlan `json:"plan_ref,omitempty"`
-	Completed []overviewMilestone    `json:"completed_milestones"`
-	Sources   []overviewNavigation   `json:"sources"`
+	Title      string                 `json:"title"`
+	Phase      string                 `json:"phase"`
+	NextStep   string                 `json:"next_step"`
+	Plan       *messagequeue.WorkPlan `json:"plan_ref,omitempty"`
+	PlanSource *overviewPlanSource    `json:"plan_source,omitempty"`
+	Completed  []overviewMilestone    `json:"completed_milestones"`
+	Sources    []overviewNavigation   `json:"sources"`
 }
 type overviewNavigation struct {
 	Authority    string `json:"authority_instance_id"`
@@ -435,6 +437,9 @@ func (h *Hub) overviewProjects(r *http.Request, device, principal string) ([]map
 			if json.Unmarshal(record.Payload, &a) != nil {
 				return nil, nil, errors.New("corrupt_metadata")
 			}
+			if a.Completed == nil {
+				a.Completed = []overviewMilestone{}
+			}
 			p["revision"] = record.Revision
 			allowed := true
 			for _, n := range a.Sources {
@@ -560,7 +565,7 @@ func (h *Hub) overviewEvidence(r *http.Request, device, principal string, m over
 	return true
 }
 func (h *Hub) overviewProgress(r *http.Request, device, principal string, a overviewAnnotation) map[string]any {
-	if h.verifyOverviewPlan(a.Plan) != nil {
+	if !h.overviewPlanSourceAllowed(r, device, principal, a) || h.verifyOverviewPlan(a.Plan) != nil {
 		return map[string]any{"state": "unverified"}
 	}
 	seen := map[string]bool{}
@@ -618,7 +623,8 @@ func (h *Hub) mutateOverviewProject(w http.ResponseWriter, r *http.Request, devi
 			break
 		}
 	}
-	oldPlanHash := jarvisHash(a.Plan)
+	oldPlanHash := jarvisHash([]any{a.Plan, a.PlanSource})
+	previousPlanHash := jarvisHash(a.Plan)
 	if in.Fields["title"] {
 		a.Title = in.Title
 	}
@@ -630,12 +636,35 @@ func (h *Hub) mutateOverviewProject(w http.ResponseWriter, r *http.Request, devi
 	}
 	if in.Fields["plan_ref"] {
 		a.Plan = in.Plan
-		if jarvisHash(a.Plan) != oldPlanHash {
-			a.Completed = nil
+	}
+	if in.Fields["plan_source"] && !in.Fields["plan_ref"] {
+		overviewError(w, "plan_source_requires_plan_ref", 400)
+		return
+	}
+	if in.Fields["plan_ref"] {
+		if a.Plan == nil {
+			a.PlanSource = nil
+		} else {
+			selected := in.PlanSource
+			if selected == nil && jarvisHash(in.Plan) == previousPlanHash && a.PlanSource != nil {
+				selected = a.PlanSource
+			}
+			var err error
+			a.PlanSource, err = h.selectOverviewPlanSource(projects, in.ProjectID, a.Plan, selected)
+			if err != nil {
+				overviewError(w, "exact_plan_source_required", 409)
+				return
+			}
+		}
+		if jarvisHash([]any{a.Plan, a.PlanSource}) != oldPlanHash {
+			a.Completed = []overviewMilestone{}
 		}
 	}
 	if in.Fields["completed_milestones"] {
 		a.Completed = in.Completed
+	}
+	if a.Completed == nil {
+		a.Completed = []overviewMilestone{}
 	}
 	for _, p := range projects {
 		if p["project_id"] == in.ProjectID {
@@ -855,17 +884,27 @@ func (h *Hub) managedOverviewAsset(a attachmentjournal.Record) (messagequeue.Ove
 	if th < 1 {
 		th = 1
 	}
-	thumb := image.NewNRGBA(image.Rect(0, 0, tw, th))
-	for y := 0; y < th; y++ {
-		for x := 0; x < tw; x++ {
-			thumb.Set(x, y, color.NRGBAModel.Convert(img.At(x*cfg.Width/tw, y*cfg.Height/th)))
+	for {
+		thumb := image.NewNRGBA(image.Rect(0, 0, tw, th))
+		for y := 0; y < th; y++ {
+			for x := 0; x < tw; x++ {
+				thumb.Set(x, y, color.NRGBAModel.Convert(img.At(x*cfg.Width/tw, y*cfg.Height/th)))
+			}
 		}
+		var b bytes.Buffer
+		if e = png.Encode(&b, thumb); e != nil {
+			return out, e
+		}
+		if b.Len() <= 512<<10 {
+			out.Thumbnail = b.Bytes()
+			break
+		}
+		if tw == 1 && th == 1 {
+			return out, errors.New("thumbnail_limit")
+		}
+		tw = max(1, tw/2)
+		th = max(1, th/2)
 	}
-	var b bytes.Buffer
-	if e = png.Encode(&b, thumb); e != nil || b.Len() > 512<<10 {
-		return out, errors.New("thumbnail_limit")
-	}
-	out.Thumbnail = b.Bytes()
 	return out, nil
 }
 func (h *Hub) mutateOverviewCollection(w http.ResponseWriter, r *http.Request, device string, in overviewRequest, principal, scopeHash string) {

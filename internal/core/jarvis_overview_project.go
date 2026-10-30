@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -189,29 +190,60 @@ func (h *Hub) readOverviewPlan(w http.ResponseWriter, r *http.Request, device st
 		overviewError(w, "source_unavailable", 503)
 		return
 	}
+	var originalAnnotation overviewAnnotation
+	if record, err := h.messageQueue.OverviewRecord(r.Context(), h.overviewStoreScope(principal), "project", in.ProjectID); err == nil {
+		if json.Unmarshal(record.Payload, &originalAnnotation) != nil {
+			overviewError(w, "corrupt_metadata", 503)
+			return
+		}
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		overviewError(w, "source_unavailable", 503)
+		return
+	}
 	var selected *messagequeue.WorkPlan
-	var navigation overviewNavigation
+	var origin *overviewPlanSource
 	for _, p := range projects {
 		if p["project_id"] != in.ProjectID {
 			continue
 		}
-		navigation = p["navigation"].(overviewNavigation)
-		if annotation, ok := p["annotation"].(overviewAnnotation); ok && annotation.Plan != nil && annotation.Plan.SHA256 == in.SHA256 && annotation.Plan.Revision == in.PlanRevision {
+		annotation := originalAnnotation
+		if annotation.Plan != nil && annotation.Plan.SHA256 == in.SHA256 && annotation.Plan.Revision == in.PlanRevision {
+			if in.PlanSource != nil && (annotation.PlanSource == nil || annotation.PlanSource.SourceManager != in.PlanSource.SourceManager || annotation.PlanSource.SourceItemID != in.PlanSource.SourceItemID) {
+				overviewError(w, "plan_source_mismatch", 409)
+				return
+			}
+			if !h.overviewPlanSourceAllowed(r, device, principal, annotation) {
+				overviewError(w, "plan_source_changed", 409)
+				return
+			}
 			selected = annotation.Plan
-		}
-		if selected == nil {
+			origin = annotation.PlanSource
+		} else {
+			matches := []overviewWorkItem{}
 			for _, item := range p["work_items"].([]overviewWorkItem) {
-				if item.Plan != nil && item.Plan.SHA256 == in.SHA256 && item.Plan.Revision == in.PlanRevision {
-					selected = item.Plan
-					if source, ok := h.registry.Get(item.SourceManager); ok {
-						navigation = h.overviewNavigation(source)
-					}
-					break
+				if item.Plan == nil || item.Plan.SHA256 != in.SHA256 || item.Plan.Revision != in.PlanRevision {
+					continue
+				}
+				if in.PlanSource != nil && (item.SourceManager != in.PlanSource.SourceManager || item.SourceItemID != in.PlanSource.SourceItemID) {
+					continue
+				}
+				matches = append(matches, item)
+			}
+			if len(matches) > 1 {
+				overviewError(w, "exact_plan_source_required", 409)
+				return
+			}
+			if len(matches) == 1 {
+				selected = matches[0].Plan
+				origin, e = h.selectOverviewPlanSource(projects, in.ProjectID, selected, &overviewPlanSource{SourceManager: matches[0].SourceManager, SourceItemID: matches[0].SourceItemID})
+				if e != nil {
+					overviewError(w, "plan_source_changed", 409)
+					return
 				}
 			}
 		}
 	}
-	if selected == nil {
+	if selected == nil || origin == nil || origin.Navigation == nil {
 		overviewError(w, "not_found", 404)
 		return
 	}
@@ -239,5 +271,5 @@ func (h *Hub) readOverviewPlan(w http.ResponseWriter, r *http.Request, device st
 	for end > in.Offset && !utf8.Valid(raw[in.Offset:end]) {
 		end--
 	}
-	jarvisWorkJSON(w, map[string]any{"sha256": selected.SHA256, "revision": selected.Revision, "bytes_base64": base64.StdEncoding.EncodeToString(raw[in.Offset:end]), "offset": in.Offset, "next_offset": end, "byte_length": end - in.Offset, "total_bytes": len(raw), "complete": end == len(raw), "truncated": end < len(raw), "fresh_until_ms": time.Now().Add(12 * time.Second).UnixMilli(), "source_navigation": navigation, "mime_type": "text/plain; charset=utf-8"})
+	jarvisWorkJSON(w, map[string]any{"sha256": selected.SHA256, "revision": selected.Revision, "bytes_base64": base64.StdEncoding.EncodeToString(raw[in.Offset:end]), "offset": in.Offset, "next_offset": end, "byte_length": end - in.Offset, "total_bytes": len(raw), "complete": end == len(raw), "truncated": end < len(raw), "fresh_until_ms": time.Now().Add(12 * time.Second).UnixMilli(), "source_navigation": *origin.Navigation, "source_item_id": origin.SourceItemID, "plan_source": origin, "mime_type": "text/plain; charset=utf-8"})
 }
