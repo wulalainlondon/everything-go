@@ -43,6 +43,9 @@ func (h *Hub) contextObservation(s session.Snapshot) *protocol.ContextObservatio
 		o.Compactions.TrackedSinceMS = &r.TrackedSince
 		o.Compactions.AsOfMS = r.AsOf
 	}
+	if r.InvalidatedAt > 0 {
+		o.Usage.Status = "invalidated"
+	}
 	if r.Usage != nil {
 		o.Usage = *r.Usage
 		o.Usage.ReportedAtMS = &r.UsageAt

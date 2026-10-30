@@ -88,7 +88,7 @@ func (s *Store) RecordContextObservation(c ContextScope, id string, usage *proto
 			next = "observed"
 		}
 		// Item aliases cannot manufacture the terminal of a managed operation.
-		if id == canonical && previous != "historical" {
+		if id == canonical && previous != "historical" && !(previous == "completed" && completionState == "historical") {
 			if previous == "failed" && completionState == "completed" {
 				return errors.New("failed compaction cannot become completed")
 			}

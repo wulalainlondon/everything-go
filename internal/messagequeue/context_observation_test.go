@@ -209,3 +209,27 @@ func TestContextHistoricalInvalidationDoesNotCountOrPromoteOnReplay(t *testing.T
 		t.Fatal("historical replay invented count or invalidated later usage")
 	}
 }
+
+func TestContextAlreadyCountedCompletionInitialReplayKeepsTerminal(t *testing.T) {
+	s, e := Open(t.TempDir())
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer s.Close()
+	scope := ContextScope{"authority", "restarted", "codex", "root", 1}
+	if e = s.RecordContextObservation(scope, "same-row", nil, "completed", nil, 1000, 100); e != nil {
+		t.Fatal(e)
+	}
+	used, max := 10, 100
+	report := int64(101)
+	if e = s.RecordContextObservation(scope, "newer-usage", &protocol.ContextUsageObservation{UsedTokens: &used, MaxTokens: &max, ReportedAtMS: &report}, "", nil, 1001); e != nil {
+		t.Fatal(e)
+	}
+	if e = s.RecordContextObservation(scope, "same-row", nil, "historical", nil, 1002, 100); e != nil {
+		t.Fatal(e)
+	}
+	r, _, _ := s.ContextObservation(scope)
+	if r.Completed != 1 || r.InvalidatedAt != 0 || r.UsageAt != 101 {
+		t.Fatal("restart initial history changed a counted terminal or fresher usage")
+	}
+}
