@@ -832,10 +832,11 @@ func (h *Hub) resumeQueuedMessages() {
 	}
 	for _, e := range entries {
 		var pending queuedPayload
-		if json.Unmarshal(e.Payload, &pending) == nil && pending.SteerOnly {
-			// Queued proves this supplement had not entered Steering before the
-			// restart. Do not replay it, open a new turn, or block later inputs.
-			_, _, _ = h.messageQueue.Transition(e.SessionID, e.RequestID, []messagequeue.State{messagequeue.Queued}, messagequeue.Failed, "原插入在服務重啟前尚未開始；未另開回合。", "", "")
+		if (json.Unmarshal(e.Payload, &pending) == nil && pending.SteerOnly) || strings.HasPrefix(e.RequestID, "ui_async_") {
+			// Legacy async replies lack SteerOnly but are still correlated question
+			// answers. Queued proves they had not started. Never restore either
+			// form as a new ordinary turn or leave it blocking later inputs.
+			_, _, _ = h.messageQueue.Transition(e.SessionID, e.RequestID, []messagequeue.State{messagequeue.Queued}, messagequeue.Failed, "原插入或問題回覆在服務重啟前尚未開始；未自動另開回合。", "", "")
 			continue
 		}
 		s, ok := h.registry.Get(e.SessionID)

@@ -144,3 +144,30 @@ func TestSteerOnlyRestoreDoesNotBlockNewInputOrReplay(t *testing.T) {
 		t.Fatal("restore blocked next input")
 	}
 }
+
+// Legacy persisted replies have no SteerOnly or expected native target. They
+// must not silently become a new ordinary input on upgrade/restart.
+func TestLegacyAsyncRestoreDoesNotReplayOrBlock(t *testing.T) {
+	h, fe := newTestHub(t)
+	s := h.registry.Create("s1", "legacy", t.TempDir(), backend.Codex, "", "", "thread")
+	defer s.CloseAndWait()
+	c := sharedReadClient(t, h, "owner")
+	raw := []byte(`{"content":"original question answer","owner_device":"owner"}`)
+	_, _, err := h.messageQueue.Enqueue(messagequeue.Entry{SessionID: s.ID, RequestID: "ui_async_original", Payload: raw})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.resumeQueuedMessages()
+	expectState(t, h, "ui_async_original", messagequeue.Failed)
+	ids := make(chan string, 1)
+	fe.onSend = func(s *session.Session, id, _ string) { ids <- id; fe.sink.Emit(protocol.NewDone(s.ID, id)) }
+	enqueueTestMessage(t, h, c, "followup")
+	select {
+	case id := <-ids:
+		if id != "followup" {
+			t.Fatal("replayed legacy answer", id)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("legacy reply blocked later input")
+	}
+}
