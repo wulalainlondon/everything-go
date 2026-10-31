@@ -14,6 +14,7 @@ import (
 )
 
 type codexFailureDetail struct {
+	PreDispatch     bool
 	Failure         recovery.Failure
 	Acceptance      recovery.Acceptance
 	IngressRejected bool
@@ -30,6 +31,9 @@ func codexSubmissionFailure(err error) *codexFailureDetail {
 			f.Category = recovery.Unknown
 		}
 		f.Source = correlation.Reason
+		if correlation.PreDispatch {
+			return &codexFailureDetail{Failure: f, Acceptance: recovery.Rejected, PreDispatch: true}
+		}
 		return &codexFailureDetail{Failure: f, Acceptance: recovery.AcceptanceUnknown}
 	}
 	d := &codexFailureDetail{Failure: recovery.ClassifyCodex(nil, err.Error()), Acceptance: recovery.AcceptanceUnknown}

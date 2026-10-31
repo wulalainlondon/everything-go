@@ -481,3 +481,20 @@ func automaticCanonicalJSON(raw json.RawMessage) (any, error) {
 	}
 	return value, nil
 }
+
+// Only metadata reads are retried; this helper runs before any dispatch claim or
+// input RPC. A changed transport or explicit provider block ends the check.
+func (c *Codex) providerSubjectBeforeDispatch(epoch uint64) (string, error) {
+	var subject string
+	var err error
+	for i := 0; i < 2; i++ {
+		if c.rpc.transportEpoch.Load() != epoch {
+			return "", recovery.ErrGuard
+		}
+		subject, err = c.automaticProviderSubject()
+		if err == nil || errors.Is(err, errAutomaticUsageBlocked) || c.rpc.transportEpoch.Load() != epoch {
+			return subject, err
+		}
+	}
+	return "", err
+}

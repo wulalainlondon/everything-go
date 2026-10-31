@@ -23,6 +23,7 @@ import (
 )
 
 type queuedPayload struct {
+	SteerOnly  bool   `json:"steer_only,omitempty"`
 	PipelineID string `json:"pipeline_id,omitempty"`
 
 	UnifiedBinding            *unifiedInputBinding       `json:"unified_binding,omitempty"`
@@ -84,6 +85,11 @@ func (h *Hub) enqueueChatMessageExpected(c *Client, cmd clientproto.Command, exp
 	return h.enqueueChatMessageExpectedInherited(c, cmd, expected, nil)
 }
 func (h *Hub) enqueueChatMessageExpectedInherited(c *Client, cmd clientproto.Command, expected *dispatchTargetExpectation, inherited *messagequeue.InheritedInput) bool {
+	return h.enqueueChatMessageExpectedInheritedMode(c, cmd, expected, inherited, false)
+}
+
+// Active-turn supplements never fall back to a new model turn after a terminal race.
+func (h *Hub) enqueueChatMessageExpectedInheritedMode(c *Client, cmd clientproto.Command, expected *dispatchTargetExpectation, inherited *messagequeue.InheritedInput, steerOnly bool) bool {
 	if cmd.VoiceContext && (len(cmd.Images) == 0 || !h.voicePhotoOwner(c, cmd.SessionID, cmd.VoiceID, cmd.ThreadID)) {
 		h.queueError(c, cmd, "voice_context_retired", "原通話或圖片來源已改變，草稿已保留，未改送其他對話")
 		return false
@@ -169,7 +175,7 @@ func (h *Hub) enqueueChatMessageExpectedInherited(c *Client, cmd clientproto.Com
 	if cmd.VisualPresentation != "" || role != nil {
 		userHash, effectiveHash = backend.PresentationHashes(backend.WithPartnerRole(backend.WithVisualPresentation(context.Background(), cmd.VisualPresentation), role), content)
 	}
-	intent, err := json.Marshal(queuedPayload{VoiceContext: cmd.VoiceContext, VoiceID: cmd.VoiceID, VoiceThread: cmd.ThreadID, PartnerRole: role, CallbackOnComplete: cmd.CallbackOnComplete, VisualUserHash: userHash, VisualEffectiveHash: effectiveHash, VisualPresentation: cmd.VisualPresentation, MessagePurpose: cmd.MessagePurpose, Origin: cmd.TaskOrigin, Content: content, Images: cmd.Images, Files: files, ExpectedTarget: expected})
+	intent, err := json.Marshal(queuedPayload{SteerOnly: steerOnly, VoiceContext: cmd.VoiceContext, VoiceID: cmd.VoiceID, VoiceThread: cmd.ThreadID, PartnerRole: role, CallbackOnComplete: cmd.CallbackOnComplete, VisualUserHash: userHash, VisualEffectiveHash: effectiveHash, VisualPresentation: cmd.VisualPresentation, MessagePurpose: cmd.MessagePurpose, Origin: cmd.TaskOrigin, Content: content, Images: cmd.Images, Files: files, ExpectedTarget: expected})
 	if err != nil {
 		h.queueError(c, cmd, "invalid_message", err.Error())
 		return false
@@ -179,7 +185,7 @@ func (h *Hub) enqueueChatMessageExpectedInherited(c *Client, cmd clientproto.Com
 	if c.pipelineAdmission != nil {
 		pipelineID = c.pipelineAdmission.ID
 	}
-	payload, err := json.Marshal(queuedPayload{PipelineID: pipelineID, VoiceContext: cmd.VoiceContext, VoiceID: cmd.VoiceID, VoiceThread: cmd.ThreadID, PartnerRole: role, CallbackOnComplete: cmd.CallbackOnComplete, VisualUserHash: userHash, VisualEffectiveHash: effectiveHash, VisualPresentation: cmd.VisualPresentation, MessagePurpose: cmd.MessagePurpose, OwnerDevice: owner, CallbackBinding: callbackBinding(c), Origin: cmd.TaskOrigin, Content: content, Images: cmd.Images, Files: files, Configuration: &config, ExpectedTarget: expected})
+	payload, err := json.Marshal(queuedPayload{SteerOnly: steerOnly, PipelineID: pipelineID, VoiceContext: cmd.VoiceContext, VoiceID: cmd.VoiceID, VoiceThread: cmd.ThreadID, PartnerRole: role, CallbackOnComplete: cmd.CallbackOnComplete, VisualUserHash: userHash, VisualEffectiveHash: effectiveHash, VisualPresentation: cmd.VisualPresentation, MessagePurpose: cmd.MessagePurpose, OwnerDevice: owner, CallbackBinding: callbackBinding(c), Origin: cmd.TaskOrigin, Content: content, Images: cmd.Images, Files: files, Configuration: &config, ExpectedTarget: expected})
 	if err != nil {
 		h.queueError(c, cmd, "invalid_message", err.Error())
 		return false
@@ -389,6 +395,17 @@ func (h *Hub) runQueuedMessage(s *session.Session, requestID string) {
 }
 
 func (h *Hub) queuedSubmissionReady(s *session.Session, requestID string) bool {
+	if h.messageQueue == nil {
+		return false
+	}
+	entry, found, lookupErr := h.messageQueue.Get(s.ID, requestID)
+	if lookupErr != nil || !found || entry.State != messagequeue.Queued {
+		return false
+	}
+	var intended queuedPayload
+	if json.Unmarshal(entry.Payload, &intended) == nil && intended.SteerOnly {
+		return false
+	}
 	if !h.controls.MobileMayWrite(s.ID) {
 		return true // The normal start path records the existing ownership refusal.
 	}
@@ -469,7 +486,11 @@ func (h *Hub) messageQueueSnapshot(sessionID string) (protocol.MessageQueueSnaps
 	for i := range event.Items {
 		for _, r := range event.Recovery {
 			if r.RequestID == event.Items[i].RequestID && (r.State == "retry_wait" || r.State == "paused_budget" || r.State == "paused_uncertain" || r.State == "waiting_user" || r.State == "reconciling") {
-				event.Items[i].State = "queued"
+				if r.State == "retry_wait" {
+					event.Items[i].State = "queued"
+				} else if event.Items[i].State != "completed" && event.Items[i].State != "cancelled" && event.Items[i].State != "failed" {
+					event.Items[i].State = "uncertain"
+				}
 				event.Items[i].Message = recoveryUserMessage(r)
 			}
 		}
@@ -736,6 +757,9 @@ func (h *Hub) promoteQueuedMessage(c *Client, cmd clientproto.Command) {
 			message = steerErr.Error()
 			if decodeErr != nil || errors.Is(steerErr, backend.ErrNoActiveTurn) || errors.Is(steerErr, backend.ErrUnsupportedSteer) || errors.Is(steerErr, backend.ErrSteerRejected) {
 				next, status, remove = messagequeue.Queued, "retained", false
+				if payload.SteerOnly && decodeErr == nil {
+					next, status, remove = messagequeue.Failed, "rejected", true
+				}
 			} else {
 				next, status = messagequeue.Uncertain, "uncertain"
 				message = "Steering result could not be confirmed; automatic resend is paused. Check the current reply before cancelling this item."
@@ -807,6 +831,13 @@ func (h *Hub) resumeQueuedMessages() {
 		return
 	}
 	for _, e := range entries {
+		var pending queuedPayload
+		if json.Unmarshal(e.Payload, &pending) == nil && pending.SteerOnly {
+			// Queued proves this supplement had not entered Steering before the
+			// restart. Do not replay it, open a new turn, or block later inputs.
+			_, _, _ = h.messageQueue.Transition(e.SessionID, e.RequestID, []messagequeue.State{messagequeue.Queued}, messagequeue.Failed, "原插入在服務重啟前尚未開始；未另開回合。", "", "")
+			continue
+		}
 		s, ok := h.registry.Get(e.SessionID)
 		if !ok {
 			_, _, _ = h.messageQueue.Transition(e.SessionID, e.RequestID, []messagequeue.State{messagequeue.Queued}, messagequeue.Failed, "Session is no longer available", "", "")
@@ -861,4 +892,14 @@ func (h *Hub) updateQueuedWaitReason(sessionID, requestID, message string) {
 		h.broadcastRuntime(view)
 		h.notifyRuntimeStatus(view)
 	}
+}
+
+// Runtime observation is distinct from Session actor ownership. The adapter still
+// verifies the exact native thread/turn/config/transport and strict ACK.
+func (h *Hub) sessionHasActiveTurn(s *session.Session) bool {
+	if s.IsStreaming() {
+		return true
+	}
+	views := h.runtimes.Snapshot("", []string{s.ID})
+	return len(views) == 1 && runtimePhaseActive(views[0].Phase)
 }

@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -1080,12 +1081,27 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 				if h.rejectToolMaintenanceWrite(c, admission) || h.rejectPMCommand(c, admission) {
 					return
 				}
-				if !h.enqueueChatMessage(c, cmd) {
+				s, found := h.registry.Get(sid)
+				active := found && h.sessionHasActiveTurn(s)
+				var expected *dispatchTargetExpectation
+				if active {
+					expected = &dispatchTargetExpectation{ThreadID: s.ResumeID(), Revision: s.SettingsSnapshot().ConfigRevision}
+				}
+				steerOnly := active
+				// Duplicate answers retain the original immutable queue intent even if
+				// the first submission has since become the active worker.
+				if old, exists, lookupErr := h.messageQueue.Get(sid, cmd.RequestID); lookupErr == nil && exists {
+					var original queuedPayload
+					if json.Unmarshal(old.Payload, &original) == nil {
+						expected, steerOnly = original.ExpectedTarget, original.SteerOnly
+					}
+				}
+				if !h.enqueueChatMessageExpectedInheritedMode(c, cmd, expected, nil, steerOnly) {
 					return
 				}
 				// Promotion uses the same persisted entry and expected-turn guard;
 				// rejection leaves it in FIFO rather than silently starting a turn.
-				if s, found := h.registry.Get(sid); found && s.IsStreaming() {
+				if active {
 					admission.Kind = "promote_queued_message"
 					if !h.rejectPMCommand(c, admission) {
 						h.promoteQueuedMessage(c, cmd)

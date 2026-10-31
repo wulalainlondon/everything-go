@@ -2555,6 +2555,10 @@ func (c *Codex) runTurn(s *session.Session, st *codexState, threadID string, inp
 					st.turnFailure.IngressRejected = false
 				}
 				st.turnErrorCode = st.turnFailure.Failure.ErrorCode()
+				var preflight *codexAcceptanceError
+				if errors.As(err, &preflight) && preflight.PreDispatch && st.turnFailure.Acceptance == recovery.Rejected {
+					st.turnErrorCode = "provider_preflight_unavailable"
+				}
 				st.finishTurnLocked("turn/start failed: " + err.Error())
 			}
 			st.mu.Unlock()
@@ -2579,7 +2583,7 @@ func (c *Codex) runTurn(s *session.Session, st *codexState, threadID string, inp
 		if acceptanceUncertain {
 			break
 		}
-		if auto != nil && retryDetail != nil && !retryStopped {
+		if auto != nil && retryDetail != nil && !retryStopped && !(retryDetail.PreDispatch && retryDetail.Acceptance == recovery.Rejected) {
 			again, e := c.automaticTryAgain(s, st, retryDetail)
 			if e == nil && again {
 				var resetErr error
@@ -2650,6 +2654,9 @@ func (c *Codex) runTurn(s *session.Session, st *codexState, threadID string, inp
 			NativeWillRetry: detail.NativeWillRetry,
 		})
 		turnErr = detail.Failure.PublicMessage(turnErr)
+		if code == "provider_preflight_unavailable" && detail.Acceptance == recovery.Rejected {
+			turnErr = "模型帳戶或使用資格暫時無法核對；本次尚未送入模型。"
+		}
 		c.releaseActiveThreads(s)
 		if detail.Acceptance == recovery.AcceptanceUnknown {
 			reason := detail.Failure.Source
@@ -3204,9 +3211,9 @@ func (c *Codex) startTurn(threadID string, input []map[string]any, snap session.
 		if e := automatic.VerifyInputs(); e != nil {
 			return &codexAcceptanceError{Reason: "native_recovery_input_lease_changed"}
 		}
-		subject, e := c.automaticProviderSubject()
+		subject, e := c.providerSubjectBeforeDispatch(epoch)
 		if e != nil {
-			return &codexAcceptanceError{Reason: "native_provider_subject_unavailable"}
+			return &codexAcceptanceError{Reason: "native_provider_subject_unavailable", PreDispatch: true, Failure: recovery.Failure{Category: recovery.ConfigurationError, Source: "native_provider_subject_unavailable"}}
 		}
 		if e = automatic.BindProvider(subject); e != nil {
 			return &codexAcceptanceError{Reason: "native_provider_subject_changed"}

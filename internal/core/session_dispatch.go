@@ -262,7 +262,7 @@ func (h *Hub) submitLocalSessionDispatch(ctx context.Context, r sessiondispatch.
 	// Do not start an overlapping actor turn or claim an external writer merely
 	// because the actor appears idle. Durable dispatch waits for its terminal.
 	runtime := h.runtimes.Snapshot("", []string{s.ID})
-	if !s.IsStreaming() && len(runtime) == 1 && runtimePhaseActive(runtime[0].Phase) {
+	if r.Mode != "steer" && !s.IsStreaming() && len(runtime) == 1 && runtimePhaseActive(runtime[0].Phase) {
 		r.State = "pending"
 		r.Error = "target_native_turn_active_waiting"
 		_ = h.dispatches.Put(ctx, r)
@@ -296,7 +296,7 @@ func (h *Hub) submitLocalSessionDispatch(ctx context.Context, r sessiondispatch.
 		return r
 	}
 	inherited := &messagequeue.InheritedInput{Revision: version, Hash: hash, OriginalHash: original, Binding: binding, Content: reserved.Content}
-	if !h.enqueueChatMessageExpectedInherited(client, cmd, expected, inherited) {
+	if !h.enqueueChatMessageExpectedInheritedMode(client, cmd, expected, inherited, r.Mode == "steer") {
 		r.State = "rejected"
 		r.Error = "dispatch_enqueue_rejected"
 		_ = h.dispatches.Put(ctx, r)
@@ -304,7 +304,7 @@ func (h *Hub) submitLocalSessionDispatch(ctx context.Context, r sessiondispatch.
 	}
 	r.State = "queued"
 	_ = h.dispatches.Put(ctx, r)
-	if r.Mode == "steer" && s.IsStreaming() {
+	if r.Mode == "steer" {
 		h.promoteQueuedMessage(client, clientproto.Command{Kind: "promote_queued_message", SessionID: r.SessionID, RequestID: r.RequestID})
 	}
 	return r

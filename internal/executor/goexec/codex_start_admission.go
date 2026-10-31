@@ -15,6 +15,8 @@ import (
 type codexAcceptanceError struct {
 	Reason  string
 	Failure recovery.Failure
+	// True only for local checks before BeforeDispatch and turn/start.
+	PreDispatch bool
 }
 
 func (e *codexAcceptanceError) Error() string { return e.Reason }
