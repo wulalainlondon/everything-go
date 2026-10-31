@@ -20,40 +20,43 @@ import (
 var voiceIdentifier = regexp.MustCompile(`^[A-Za-z0-9_-]{8,100}$`)
 
 type clientVoiceCall struct {
-	systemVolumeCapable   bool
-	systemVolumeSequence  uint64
-	systemMediaReceipts   map[string]*systemMediaReceipt
-	voiceAudioCapable     bool
-	voiceAudioSequence    uint64
-	voiceAudioReceipts    map[string]*voiceAudioReceipt
-	callbackPolicy        string
-	callbackReport        string
-	callbackReporting     bool
-	callbackExpected      string
-	callbackSpeechVersion int
-	callbackSpoken        string
-	callbackSpeechSettled bool
-	externalMusicCapable  bool
-	externalMusicPlatform string
-	musicProvider         string
-	externalMusic         *externalMusicCall
-	mediaObserveCapable   bool
-	mediaDeviceModel      string
-	mediaGeneration       string
-	mediaIPC              *voicemediaipc.Channel
-	mediaCapable          bool
-	media                 *voiceMediaSession
-	handoffCapable        bool
-	handoffPeer           string
-	handoffAccount        string
-	handoffTarget         string
-	handoffID             string
-	session               *session.Session
-	voiceID, requestID    string
-	cancel                context.CancelFunc
-	stopping              bool
-	kind                  string
-	line                  *linevoice.Call
+	systemVolumeCapable         bool
+	systemVolumeSequence        uint64
+	systemMediaReceipts         map[string]*systemMediaReceipt
+	voiceAudioCapable           bool
+	voiceAudioSequence          uint64
+	voiceAudioReceipts          map[string]*voiceAudioReceipt
+	callbackPolicy              string
+	callbackReport              string
+	callbackReporting           bool
+	callbackExpected            string
+	callbackSpeechVersion       int
+	callbackSpoken              string
+	callbackSpeechSettled       bool
+	externalMusicCapable        bool
+	externalMusicPlatform       string
+	platformNativeMusicProvider string
+	mediaSessionCapable         bool
+	callMedia                   *callMediaSession
+	musicProvider               string
+	externalMusic               *externalMusicCall
+	mediaObserveCapable         bool
+	mediaDeviceModel            string
+	mediaGeneration             string
+	mediaIPC                    *voicemediaipc.Channel
+	mediaCapable                bool
+	media                       *voiceMediaSession
+	handoffCapable              bool
+	handoffPeer                 string
+	handoffAccount              string
+	handoffTarget               string
+	handoffID                   string
+	session                     *session.Session
+	voiceID, requestID          string
+	cancel                      context.CancelFunc
+	stopping                    bool
+	kind                        string
+	line                        *linevoice.Call
 }
 
 func voiceEvent(cmd clientproto.Command, state, message string) protocol.RealtimeVoiceEvent {
@@ -129,6 +132,7 @@ func (h *Hub) handleVoiceStart(c *Client, cmd clientproto.Command) {
 			call.musicProvider = cmd.VoiceMusicProvider
 		}
 	}
+	configureMediaSession(call, cmd.VoiceMediaSessionCapable)
 	call.mediaDeviceModel = cmd.VoiceDeviceModel
 	nonce := make([]byte, 16)
 	if _, err := rand.Read(nonce); err != nil {

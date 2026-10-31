@@ -163,11 +163,23 @@ func (h *Hub) ExecuteVoiceMedia(ctx context.Context, caller backend.SessionContr
 // local_user_socket authority is the private per-call OS-user channel, never a
 // fabricated SessionControlCaller. Both transports share the same scope checks.
 func (h *Hub) executeVoiceMedia(ctx context.Context, parent *session.Session, voiceID, requestID, operationID, transport string, expectedCall *clientVoiceCall, method string, input backend.VoiceMediaRequest) (any, error) {
+	if input.Operation != "" {
+		return nil, &backend.VoiceMediaNotDispatchedError{Cause: errors.New("media_original_operation_requires_durable_store")}
+	}
+	if (method == "voice_volume" || method == "media_volume") && (input.Source != "" || input.ExpectedRevision != nil || input.AdoptCurrent || input.ExpectedMediaID != "" || input.OriginalCommandID != "") {
+		return nil, &backend.VoiceMediaNotDispatchedError{Cause: errors.New("voice_media_arguments_invalid")}
+	}
 	if method == "media_volume" {
 		return h.executeSystemMediaVolume(ctx, parent, voiceID, requestID, operationID, transport, expectedCall, input)
 	}
 	if method == "voice_volume" {
 		return h.executeVoiceVolume(ctx, parent, voiceID, requestID, operationID, transport, expectedCall, input)
+	}
+	if value, handled, err := h.executeCallMediaSession(ctx, parent, voiceID, requestID, operationID, transport, expectedCall, method, input); handled {
+		return value, err
+	}
+	if input.Operation != "" || input.Source != "" || input.ExpectedRevision != nil || input.AdoptCurrent || input.ExpectedMediaID != "" || input.OriginalCommandID != "" {
+		return nil, &backend.VoiceMediaNotDispatchedError{Cause: errors.New("media_session_not_supported")}
 	}
 	if method == "play_music" || method == "music_control" {
 		return h.executeExternalMusic(ctx, parent, voiceID, requestID, operationID, transport, expectedCall, method, input)
@@ -346,12 +358,23 @@ func (h *Hub) executeVoiceMedia(ctx context.Context, parent *session.Session, vo
 	return mediaResult(m, receipt), nil
 }
 func (h *Hub) handleVoiceMediaState(c *Client, cmd clientproto.Command) {
+	if cmd.MediaSessionState != nil {
+		h.handleCallMediaState(c, cmd)
+		return
+	}
 	if cmd.SystemMediaAudio != nil {
 		h.handleSystemMediaState(c, cmd)
 		return
 	}
 	if cmd.VoiceAudio != nil {
 		h.handleVoiceAudioState(c, cmd)
+		return
+	}
+	h.voiceMu.Lock()
+	sessionCall := h.voiceClients[c]
+	newSession := sessionCall != nil && sessionCall.mediaSessionCapable
+	h.voiceMu.Unlock()
+	if newSession {
 		return
 	}
 	if cmd.ExternalMusic != nil {

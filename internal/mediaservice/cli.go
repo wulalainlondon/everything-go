@@ -16,6 +16,10 @@ func RunCLI(args []string, out, stderr io.Writer) int {
 	manifest := f.String("manifest", DefaultManifest(), "Installed media service manifest")
 	id := f.String("id", "", "Unique vop_ intent or query ID")
 	method := f.String("method", "status", "play_youtube, play_music, control, music_control, voice_volume, media_volume or status")
+	source := f.String("source", "", "Exact youtube or native_music source")
+	revision := f.Uint64("expected-revision", 0, "Observed native media-session revision")
+	adopt := f.Bool("adopt-current", false, "Explicit user consent to pause the fresh identified foreign item")
+	expected := f.String("expected-media-id", "", "Exact fresh foreign item ID; requires explicit adoption")
 	operation := f.String("operation", "", "Original operation for status")
 	url := f.String("url", "", "Verified HTTPS video or selected Music service song URL")
 	title := f.String("title", "", "Track label")
@@ -35,12 +39,16 @@ func RunCLI(args []string, out, stderr io.Writer) int {
 		return failure(errors.New("origin_context_unavailable"))
 	}
 	q := Request{ID: *id, Thread: thread, Method: *method, Operation: *operation}
+	q.Input.Source, q.Input.AdoptCurrent, q.Input.ExpectedMediaID = *source, *adopt, *expected
 	q.Input.URL = *url
 	q.Input.Title = *title
 	q.Input.Action = *action
 	q.Input.Query = *query
 	q.Input.Artist = *artist
 	f.Visit(func(v *flag.Flag) {
+		if v.Name == "expected-revision" {
+			q.Input.ExpectedRevision = revision
+		}
 		if v.Name == "delta" {
 			q.Input.Delta = delta
 		}

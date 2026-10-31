@@ -19,20 +19,38 @@ func (c *Codex) applyVoiceMediaTools(s *session.Session, params map[string]any) 
 	if !ok || !p.VoiceMediaEnabled() || s == nil || strings.HasPrefix(s.ID, "s_dg_") {
 		return
 	}
-	fields := map[string]any{"url": map[string]any{"type": "string", "maxLength": 2048, "description": "A real YouTube video URL found through web search or supplied by the user. Never invent a video ID; do not use a search-results URL."}, "title": map[string]any{"type": "string", "maxLength": 200}, "action": map[string]any{"type": "string", "enum": []string{"pause", "resume", "stop", "volume"}}, "volume": map[string]any{"type": "integer", "minimum": 0, "maximum": 100}}
-	fields["intent"] = map[string]any{"type": "string", "pattern": "^vop_[A-Za-z0-9_-]{8,100}$", "description": "Original intent ID. Preserve it across retries; never switch transports to retry an uncertain effect."}
+	fields := map[string]any{
+		"url":   map[string]any{"type": "string", "maxLength": 2048, "description": "Real user-supplied or verified HTTPS YouTube video, canonical YouTube Music recording, or native Apple Music song URL. Never invent a song ID or resolve by dispatching a search."},
+		"title": map[string]any{"type": "string", "maxLength": 200}, "artist": map[string]any{"type": "string", "maxLength": 200},
+		"action":            map[string]any{"type": "string", "enum": []string{"pause", "resume", "stop", "next", "previous", "seek", "volume"}},
+		"source":            map[string]any{"type": "string", "enum": []string{"youtube", "native_music"}},
+		"position_ms":       map[string]any{"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+		"volume":            map[string]any{"type": "integer", "minimum": 0, "maximum": 100},
+		"expected_revision": map[string]any{"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+		"adopt_current":     map[string]any{"type": "boolean", "description": "Only true after the user explicitly consents to pause this exact fresh identified foreign Music item. Never infer consent."},
+		"expected_media_id": map[string]any{"type": "string", "maxLength": 200},
+		"intent":            map[string]any{"type": "string", "pattern": "^vop_[A-Za-z0-9_-]{8,100}$", "description": "Original intent. Do not mint a retry intent after uncertainty."},
+		"operation":         map[string]any{"type": "string", "pattern": "^vop_[A-Za-z0-9_-]{8,100}$", "description": "Exact original operation to observe without rerouting or replaying it."},
+	}
 	defs := []struct {
 		name, description string
 		props, required   []string
 	}{
-		{"play_youtube", "Play user-requested YouTube music in the visible official player alongside this exact active voice call. First find a real video URL using web search if needed. queued is not playing: playback_confirmed=true requires a fresh device PLAYING report. For autoplay_blocked ask the user to tap Play once; do not blindly resend or claim it is audible. Stops/pause on background or voice end.", []string{"url", "title", "volume"}, []string{"url"}},
-		{"control", "Control music in the current voice call: pause, resume, stop or volume0-100. Changes music only, never the AI voice or another device. Observed status is authoritative; a queued instruction is not playback proof.", []string{"action", "volume"}, []string{"action"}},
-		{"status", "Read the exact active voice endpoint's current YouTube playback state. playback_confirmed means a fresh device PLAYING observation, not proof the human heard it. Stale observations are unverified. If the user hears no music, inspect audio_check and audio; player_muted and system media volume/mute are separate from PLAYING. enabled_output_unverified is not proof of human audibility. No playback effect.", nil, nil}}
+		{"play_youtube", "User-requested official visible YouTube playback on this exact call. A capable native coordinator performs the source switch once. Queued is not playing or audible. Foreign Music requires explicit adoption; never auto-pause it.", []string{"url", "title", "expected_revision", "adopt_current", "expected_media_id"}, []string{"url"}},
+		{"play_music", "User-requested native Music on this exact call: Apple Music on iOS, official YouTube Music on Android. Supply a verified exact song URL. Permission/subscription/foreground refusals are not playback. Never search or buy through dispatch.", []string{"url", "title", "artist", "expected_revision", "adopt_current", "expected_media_id"}, []string{"url"}},
+		{"control", "Control the explicit source on this exact call. seek uses position_ms; volume applies only to the current YouTube coordinator, never native Music or assistant/system gain. Receipt causality and local snapshots are separate.", []string{"action", "source", "position_ms", "volume", "expected_revision", "adopt_current", "expected_media_id"}, []string{"action"}},
+		{"music_control", "Control native Music on this exact call: pause/resume/stop/next/previous/seek. Availability depends on the native binding; no native Music gain setter.", []string{"action", "position_ms", "expected_revision", "adopt_current", "expected_media_id"}, []string{"action"}},
+		{"status", "Read-only current session observation, or the exact original operation with operation. Never replays playback, changes provider, or treats a local snapshot as completion of a remote command. Fresh playing is not proof of human audibility.", []string{"source", "operation"}, nil},
+	}
+
 	tools := []map[string]any{}
 	for _, d := range defs {
 		props := map[string]any{}
 		for _, name := range d.props {
 			props[name] = fields[name]
+		}
+		if d.name == "music_control" {
+			props["action"] = map[string]any{"type": "string", "enum": []string{"pause", "resume", "stop", "next", "previous", "seek"}}
 		}
 		if d.name != "status" {
 			props["intent"] = fields["intent"]
@@ -44,7 +62,7 @@ func (c *Codex) applyVoiceMediaTools(s *session.Session, params map[string]any) 
 		tools = append(tools, map[string]any{"type": "function", "name": d.name, "description": d.description, "inputSchema": map[string]any{"type": "object", "additionalProperties": false, "properties": props, "required": required}})
 	}
 	existing, _ := params["dynamicTools"].([]map[string]any)
-	params["dynamicTools"] = append(existing, map[string]any{"type": "namespace", "name": "bridge_media", "description": "User-requested YouTube playback on the exact active voice device, with observed player-state receipts. Uses the official visible player; never extracts audio.", "tools": tools})
+	params["dynamicTools"] = append(existing, map[string]any{"type": "namespace", "name": "bridge_media", "description": "Same-call native Music and official visible YouTube session control. Native coordinator owns source effects; original bound endpoint and receipts only. Never extracts audio or changes grants.", "tools": tools})
 }
 func (c *Codex) handleVoiceMediaTool(id any, method string, raw json.RawMessage) bool {
 	if method != "item/tool/call" {

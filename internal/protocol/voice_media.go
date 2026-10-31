@@ -1,24 +1,30 @@
 package protocol
 
+import (
+	"encoding/json"
+	"errors"
+)
+
 // Ephemeral owner-only command. Never replayed into history or offline queues.
 type VoiceMediaCommand struct {
-	SystemMediaVolume *int   `json:"system_media_volume,omitempty"`
-	SystemMediaDelta  *int   `json:"system_media_delta,omitempty"`
-	AssistantVolume   *int   `json:"assistant_volume,omitempty"`
-	AssistantDelta    *int   `json:"assistant_delta,omitempty"`
-	Provider          string `json:"provider,omitempty"`
-	Query             string `json:"query,omitempty"`
-	URI               string `json:"uri,omitempty"`
-	ExpectedID        string `json:"expected_id,omitempty"`
-	ExpectedTitle     string `json:"expected_title,omitempty"`
-	ExpectedArtist    string `json:"expected_artist,omitempty"`
-	PositionMS        *int64 `json:"position_ms,omitempty"`
-	CommandID         string `json:"command_id"`
-	Sequence          uint64 `json:"sequence"`
-	Action            string `json:"action"`
-	VideoID           string `json:"video_id,omitempty"`
-	Title             string `json:"title,omitempty"`
-	Volume            int    `json:"volume"`
+	MediaSession      *MediaSessionCommand `json:"media_session,omitempty"`
+	SystemMediaVolume *int                 `json:"system_media_volume,omitempty"`
+	SystemMediaDelta  *int                 `json:"system_media_delta,omitempty"`
+	AssistantVolume   *int                 `json:"assistant_volume,omitempty"`
+	AssistantDelta    *int                 `json:"assistant_delta,omitempty"`
+	Provider          string               `json:"provider,omitempty"`
+	Query             string               `json:"query,omitempty"`
+	URI               string               `json:"uri,omitempty"`
+	ExpectedID        string               `json:"expected_id,omitempty"`
+	ExpectedTitle     string               `json:"expected_title,omitempty"`
+	ExpectedArtist    string               `json:"expected_artist,omitempty"`
+	PositionMS        *int64               `json:"position_ms,omitempty"`
+	CommandID         string               `json:"command_id"`
+	Sequence          uint64               `json:"sequence"`
+	Action            string               `json:"action"`
+	VideoID           string               `json:"video_id,omitempty"`
+	Title             string               `json:"title,omitempty"`
+	Volume            int                  `json:"volume"`
 }
 
 // MediaAudioInfo separates player/system gain observations from human audibility.
@@ -91,4 +97,69 @@ type SystemMediaAudioState struct {
 	MediaMax      int    `json:"mediaMax"`
 	AssistantGain int    `json:"assistantGain"`
 	ObservedAt    int64  `json:"observedAtMs"`
+}
+
+// MediaSessionCommand is one coordinator admission, never a Go pause/play chain.
+// Its operationId is the exact outer command_id, not the parent's tool/vop intent.
+type MediaSessionCommand struct {
+	OperationID      string  `json:"operationId"`
+	Target           string  `json:"target"`
+	Action           string  `json:"action"`
+	URI              string  `json:"uri,omitempty"`
+	MediaID          string  `json:"mediaId,omitempty"`
+	Title            string  `json:"title,omitempty"`
+	Artist           string  `json:"artist,omitempty"`
+	PositionMS       *int64  `json:"positionMs,omitempty"`
+	Volume           *int    `json:"volume,omitempty"`
+	ExpectedRevision *uint64 `json:"expectedRevision,omitempty"`
+	AdoptCurrent     bool    `json:"adoptCurrent,omitempty"`
+	ExpectedMediaID  string  `json:"expectedMediaId,omitempty"`
+}
+
+// Receipt causality and local snapshots are independent. Device monotonic age
+// is composed with Go receive age; no device wall clock is trusted.
+type MediaSessionState struct {
+	Volume            *int     `json:"volume,omitempty"`
+	Kind              string   `json:"kind"`
+	OperationID       string   `json:"operationId"`
+	Revision          uint64   `json:"revision"`
+	Version           uint64   `json:"version"`
+	ActiveSource      string   `json:"activeSource"`
+	ReservedSource    string   `json:"reservedSource"`
+	NativeProvider    string   `json:"nativeProvider"`
+	Phase             string   `json:"phase"`
+	Stage             string   `json:"stage"`
+	Dispatched        bool     `json:"dispatched"`
+	ActionConfirmed   bool     `json:"actionConfirmed"`
+	PlaybackConfirmed bool     `json:"playbackConfirmed"`
+	MayBePlaying      bool     `json:"mayBePlaying"`
+	Error             string   `json:"error"`
+	Title             string   `json:"title"`
+	Artist            string   `json:"artist"`
+	MediaID           string   `json:"mediaId"`
+	BindingID         string   `json:"bindingId"`
+	SupportedActions  []string `json:"supportedActions"`
+	PositionMS        *int64   `json:"positionMs,omitempty"`
+	DurationMS        *int64   `json:"durationMs,omitempty"`
+	ObservationAgeMS  int64    `json:"observationAgeMs"`
+}
+
+// Missing/null source counters and age are unknown, never a synthetic fresh zero.
+func (x *MediaSessionState) UnmarshalJSON(raw []byte) error {
+	type plain MediaSessionState
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return err
+	}
+	for _, key := range []string{"revision", "version", "observationAgeMs"} {
+		if len(fields[key]) == 0 || string(fields[key]) == "null" {
+			return errors.New("media_session_observation_fields_required")
+		}
+	}
+	var v plain
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return err
+	}
+	*x = MediaSessionState(v)
+	return nil
 }

@@ -127,17 +127,29 @@ func RunCLI(args []string, out, stderr io.Writer) int {
 	thread := flags.String("thread", "", "Exact native thread")
 	voice := flags.String("voice", "", "Exact current voice")
 	id := flags.String("id", "", "Unique vop_ intent ID; reuse only for the same intent")
-	method := flags.String("method", "status", "play_youtube, control or status")
+	method := flags.String("method", "status", "play_youtube, play_music, control, music_control or status")
 	url := flags.String("url", "", "Actual HTTPS YouTube URL")
+	artist := flags.String("artist", "", "Exact expected artist")
+	source := flags.String("source", "", "youtube or native_music")
+	position := flags.Int64("position-ms", -1, "Native seek position")
+	revision := flags.Uint64("expected-revision", 0, "Observed media-session revision")
+	adopt := flags.Bool("adopt-current", false, "Explicit user consent to pause exact foreign item")
+	expected := flags.String("expected-media-id", "", "Exact fresh foreign item ID")
 	title := flags.String("title", "", "Track label")
 	action := flags.String("action", "", "pause, resume, stop or volume")
 	volume := flags.Int("volume", -1, "Music volume0-100")
 	if flags.Parse(args) != nil || flags.NArg() != 0 {
 		return 2
 	}
-	req := Request{ID: *id, Thread: *thread, Voice: *voice, Method: *method, Input: backend.VoiceMediaRequest{URL: *url, Title: *title, Action: *action}}
+	req := Request{ID: *id, Thread: *thread, Voice: *voice, Method: *method, Input: backend.VoiceMediaRequest{URL: *url, Title: *title, Artist: *artist, Source: *source, AdoptCurrent: *adopt, ExpectedMediaID: *expected, Action: *action}}
 	providedVolume := false
 	flags.Visit(func(f *flag.Flag) {
+		if f.Name == "position-ms" {
+			req.Input.PositionMS = position
+		}
+		if f.Name == "expected-revision" {
+			req.Input.ExpectedRevision = revision
+		}
 		if f.Name == "volume" {
 			providedVolume = true
 		}

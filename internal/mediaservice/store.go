@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"everything-go/internal/backend"
+	"everything-go/internal/protocol"
 	"os"
 	"path/filepath"
 	"sync"
@@ -114,7 +115,7 @@ func decorate(r backend.VoiceMediaResult, id string, accepted, dispatched bool) 
 
 // Persist before invoking the handler. A missing result always remains unknown;
 // neither retries nor a process restart invoke the effect a second time.
-func (s *Store) Execute(ctx context.Context, o backend.MediaOrigin, q Request, run func() (backend.VoiceMediaResult, error)) (Result, error) {
+func (s *Store) Execute(ctx context.Context, o backend.MediaOrigin, q Request, run func() (backend.VoiceMediaResult, error), observeOriginal ...func(backend.VoiceMediaResult) (backend.VoiceMediaResult, error)) (Result, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if o.ThreadID == "" || o.Generation == "" || o.SessionID == "" || q.Thread != o.ThreadID {
@@ -162,7 +163,13 @@ func (s *Store) Execute(ctx context.Context, o backend.MediaOrigin, q Request, r
 			return historical(old), nil
 		}
 		// Never let a completed receipt refresh itself from some newer command.
-		fresh, e := run()
+		var fresh backend.VoiceMediaResult
+		var e error
+		if len(observeOriginal) != 0 {
+			fresh, e = observeOriginal[0](old.VoiceMediaResult)
+		} else {
+			fresh, e = run()
+		}
 		if e != nil {
 			if e.Error() == "media_voice_expired" {
 				old.State = "voice_ended"
@@ -238,6 +245,15 @@ func historical(r Result) Result {
 		endpoint := *r.Endpoint
 		endpoint.Verification = "historical_receipt"
 		r.Endpoint = &endpoint
+	}
+	// Nested reports retain provenance, never historical confirmation flags.
+	for _, dst := range []**protocol.MediaSessionState{&r.MediaSession, &r.MediaSessionReceipt} {
+		if *dst != nil {
+			copy := **dst
+			copy.ActionConfirmed, copy.PlaybackConfirmed = false, false
+			copy.ObservationAgeMS = -1
+			*dst = &copy
+		}
 	}
 	r.Historical = true
 	r.Observed = false

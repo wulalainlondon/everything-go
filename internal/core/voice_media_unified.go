@@ -118,7 +118,12 @@ func (h *Hub) ExecuteScopedVoiceMedia(ctx context.Context, caller backend.Sessio
 	if h.unifiedMedia == nil || caller.Parent == nil || caller.ToolCallID == "" || caller.TurnID != origin.TurnID || caller.Parent.ID != origin.SessionID || caller.Parent.ResumeID() != origin.ThreadID || !mediaservice.IntentID.MatchString(intent) {
 		return nil, errors.New("media_origin_invalid")
 	}
-	return h.executeMediaWithOrigin(ctx, h.unifiedMedia, origin, mediaservice.Request{ID: intent, Thread: origin.ThreadID, Method: method, Input: input}, "native_tool")
+	operation := input.Operation
+	input.Operation = ""
+	if operation != "" && (method != "status" || !mediaservice.IntentID.MatchString(operation)) {
+		return nil, errors.New("media_operation_invalid")
+	}
+	return h.executeMediaWithOrigin(ctx, h.unifiedMedia, origin, mediaservice.Request{ID: intent, Thread: origin.ThreadID, Method: method, Operation: operation, Input: input}, "native_tool")
 }
 func (h *Hub) executeMediaWithOrigin(ctx context.Context, u *unifiedVoiceMedia, origin backend.MediaOrigin, q mediaservice.Request, transport string) (mediaservice.Result, error) {
 	s, ok := h.registry.Get(origin.SessionID)
@@ -144,14 +149,7 @@ func (h *Hub) executeMediaWithOrigin(ctx context.Context, u *unifiedVoiceMedia, 
 		if call == nil {
 			return backend.VoiceMediaResult{}, errors.New("media_voice_expired")
 		}
-		if q.Method == "status" && q.Operation != "" {
-			if result, ok := h.systemVolumeReceipt(call, q.Operation); ok {
-				return result, nil
-			}
-			if result, ok := h.voiceVolumeReceipt(call, q.Operation); ok {
-				return result, nil
-			}
-		}
+
 		value, e := h.executeVoiceMedia(ctx, s, origin.VoiceID, call.requestID, q.ID, transport, call, q.Method, q.Input)
 		if e != nil {
 			result, _ := value.(backend.VoiceMediaResult)
@@ -162,6 +160,25 @@ func (h *Hub) executeMediaWithOrigin(ctx context.Context, u *unifiedVoiceMedia, 
 			return result, errors.New("media_result_invalid")
 		}
 		return result, nil
+	}, func(old backend.VoiceMediaResult) (backend.VoiceMediaResult, error) {
+		if call == nil {
+			return backend.VoiceMediaResult{}, errors.New("media_voice_expired")
+		}
+		if old.Provider == "call_media_session" {
+			input := backend.VoiceMediaRequest{OriginalCommandID: old.CommandID}
+			value, err := h.executeVoiceMedia(ctx, s, origin.VoiceID, call.requestID, q.ID, transport, call, "status", input)
+			result, _ := value.(backend.VoiceMediaResult)
+			return result, err
+		}
+		// Legacy histories are immutable too: do not ask whichever provider
+		// happens to be current. Only exact volume receipt lookup is causal.
+		if result, ok := h.systemVolumeReceipt(call, q.Operation); ok && result.CommandID == old.CommandID {
+			return result, nil
+		}
+		if result, ok := h.voiceVolumeReceipt(call, q.Operation); ok && result.CommandID == old.CommandID {
+			return result, nil
+		}
+		return h.observeOriginalLegacyMedia(ctx, call, old)
 	})
 }
 

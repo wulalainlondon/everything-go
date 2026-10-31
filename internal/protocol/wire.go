@@ -140,6 +140,8 @@ type Inbound struct {
 	VoiceExternalMusicCapable bool                   `json:"voice_external_music_capable,omitempty"`
 	VoiceMusicProvider        string                 `json:"voice_music_provider,omitempty"`
 	ExternalMusic             *ExternalMusicState    `json:"external_music,omitempty"`
+	VoiceMediaSessionCapable  bool                   `json:"voice_media_session_capable,omitempty"`
+	MediaSessionState         *MediaSessionState     `json:"media_session_state,omitempty"`
 	VoiceMediaCapable         bool                   `json:"voice_media_capable,omitempty"`
 	VoiceContext              bool                   `json:"voice_context,omitempty"`
 	VoiceSystemVolumeCapable  bool                   `json:"voice_system_volume_capable,omitempty"`
