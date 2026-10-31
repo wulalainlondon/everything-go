@@ -93,3 +93,27 @@ func TestObservedNativeSteerNeedsExactLiveScopeBeforeRPC(t *testing.T) {
 		})
 	}
 }
+
+func TestColdFileObservedNativeTurnSteersWithoutClaimingLoadedWorker(t *testing.T) {
+	c, s, st, w, _ := livenessFixture(t)
+	st.turnActive = false
+	st.currentTurnID = ""
+	st.threadID = ""
+	delete(c.threadToSession, "root")
+	c.ObserveNativeLifecycle(s, "cold-turn", "running")
+	w.reply = func(method string, raw json.RawMessage) (any, error) {
+		var p map[string]any
+		_ = json.Unmarshal(raw, &p)
+		if method != "turn/steer" || p["threadId"] != "root" || p["expectedTurnId"] != "cold-turn" {
+			t.Fatalf("unexpected cold RPC %s %s", method, raw)
+		}
+		return map[string]any{"turnId": "cold-turn"}, nil
+	}
+	r, err := c.steerActiveTurn(s, "cold-supplement", "continue", nil, nil)
+	if err != nil || !r.StrictACK || r.TurnID != "cold-turn" || r.RequestID != "codex_external_cold-turn" {
+		t.Fatal(r, err)
+	}
+	if st.threadID != "" || st.turnActive || st.reqID != "request-1" || c.threadToSession["root"] != nil {
+		t.Fatal("cold steer claimed loaded worker")
+	}
+}

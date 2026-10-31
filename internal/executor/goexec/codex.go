@@ -2434,9 +2434,15 @@ func (c *Codex) steerActiveTurn(s *session.Session, clientUserMessageID, content
 	threadID := st.threadID
 	turnID := st.currentTurnID
 	activeRequestID := st.reqID
+	observedLoadedThreadID := st.threadID
 	observed := !st.turnActive && !st.compactActive && !st.stopping && !st.turnStartPending &&
-		st.observedTurnID != "" && st.observedRequestID != "" && st.threadID == source.ResumeID
+		st.observedTurnID != "" && st.observedRequestID != "" && source.ResumeID != "" &&
+		(st.threadID == "" || st.threadID == source.ResumeID)
 	if observed {
+		// File observation after restart deliberately does not claim a loaded
+		// worker. Use only the original session thread locally for this explicit
+		// expected-turn RPC; never bind state, resume a thread, or start a turn.
+		threadID = source.ResumeID
 		active = true
 		turnID, activeRequestID = st.observedTurnID, st.observedRequestID
 	}
@@ -2477,7 +2483,7 @@ func (c *Codex) steerActiveTurn(s *session.Session, clientUserMessageID, content
 	current := st.turnActive && !st.turnStartPending && !st.stopping && st.threadID == threadID && st.currentTurnID == turnID && st.reqID == activeRequestID
 	if observed {
 		current = !st.turnActive && !st.compactActive && !st.stopping && !st.turnStartPending &&
-			st.threadID == threadID && st.observedTurnID == turnID && st.observedRequestID == activeRequestID
+			st.threadID == observedLoadedThreadID && st.observedTurnID == turnID && st.observedRequestID == activeRequestID
 	}
 	current = current && c.rpc.transportEpoch.Load() == epoch
 	st.mu.Unlock()
