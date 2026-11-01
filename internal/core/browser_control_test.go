@@ -145,3 +145,34 @@ func TestBrowserClaimRecoveryDoesNotPersistDOMOrFillValues(t *testing.T) {
 		t.Fatal("foreign claim disclosed")
 	}
 }
+
+func TestIndependentBrowserCurrentStatusNativeStates(t *testing.T) {
+	for _, state := range []string{"ready", "loading", "closed", "user_takeover"} {
+		t.Run(state, func(t *testing.T) {
+			h, c, r := browserFixture(t)
+			id := "bop_native_status_" + state
+			st := h.browserControl
+			st.operations[r.caller.Parent.ResumeID()+"|"+id] = &browserOperation{thread: r.caller.Parent.ResumeID(), device: c.deviceID, binding: "native-view-binding", pending: true, done: make(chan struct{}), method: "status", stages: []string{"effect"}, admitted: time.Now()}
+			browserReply(h, c, r.caller.Parent.ID, "browser_result", id, map[string]any{"result": map[string]any{"state": state, "view": "exact-view", "document": "exact-document"}})
+			op := st.operations[r.caller.Parent.ResumeID()+"|"+id]
+			if op.pending {
+				t.Fatalf("real native status %s discarded; current ready/view/document unavailable", state)
+			}
+			var got map[string]any
+			if json.Unmarshal(op.state, &got) != nil || got["state"] != "observed" || got["current"].(map[string]any)["state"] != state {
+				t.Fatal(string(op.state))
+			}
+		})
+	}
+}
+func TestIndependentBrowserCapabilityObservedPositive(t *testing.T) {
+	h, c, r := browserFixture(t)
+	id := "bop_capability_positive"
+	h.browserControl.operations[r.caller.Parent.ResumeID()+"|"+id] = &browserOperation{thread: r.caller.Parent.ResumeID(), device: c.deviceID, binding: "native-view-binding", pending: true, done: make(chan struct{}), method: "capabilities", stages: []string{"effect"}}
+	browserReply(h, c, r.caller.Parent.ID, "browser_result", id, map[string]any{"result": map[string]any{"state": "observed", "supported": true}})
+	if h.browserControl.operations[r.caller.Parent.ResumeID()+"|"+id].pending {
+		t.Fatal("positive receipt rejected")
+	}
+}
+
+var _ = browsercontrol.Request{}
