@@ -135,7 +135,11 @@ func (s *NativeSource) Observe(scope NativeScope, raw []byte) error {
 		s.revision++
 		return err
 	}
-	h := sha256.Sum256(raw)
+	// Live JSON-RPC and persisted native history serialize the same public
+	// event differently. De-duplicate the strict decoded facts, not formatting
+	// or ignored provider fields; conflicting decoded facts still quarantine.
+	normalized, _ := json.Marshal(e)
+	h := sha256.Sum256(normalized)
 	if old, ok := s.events[e.ID]; ok {
 		if old == h {
 			return nil
@@ -171,9 +175,41 @@ func (s *NativeSource) Observe(scope NativeScope, raw []byte) error {
 // generation, subscribe, resume or arbitrary client-selected path is allowed.
 type NativeRPC interface {
 	Scope() NativeScope
-	ReadThread(context.Context, string) (json.RawMessage, error)
-	ListTurns(context.Context, string) (json.RawMessage, error)
+	ReadThread(context.Context, NativeReadProof, string) (json.RawMessage, error)
+	ListTurns(context.Context, NativeReadProof, string) (json.RawMessage, error)
 }
+
+// NativeReadProof cannot be reconstructed from client JSON: its source pointer
+// is private. The original owner must validate Scope at its writer barrier and
+// Acquire this registry proof only until bytes are written, never over a reply.
+type NativeReadProof struct {
+	Scope                   NativeScope
+	Revision                uint64
+	source                  *NativeSource
+	publicChild, publicTurn string
+}
+
+func (p NativeReadProof) Acquire() (func(), error) { return p.AcquireFor("", "") }
+func (p NativeReadProof) AcquireFor(thread, turn string) (func(), error) {
+	if p.source == nil || !p.source.mu.TryLock() {
+		return nil, ErrNativeChanged
+	}
+	s := p.source
+	if s.scope != p.Scope || s.revision != p.Revision || s.failed || !p.Scope.valid() {
+		s.mu.Unlock()
+		return nil, ErrNativeChanged
+	}
+	if thread != "" && thread != p.Scope.RootThread && s.actors[thread] == nil {
+		s.mu.Unlock()
+		return nil, ErrNativeSource
+	}
+	if turn != "" && (p.publicChild != thread || p.publicTurn != turn) {
+		s.mu.Unlock()
+		return nil, ErrNativeSource
+	}
+	return s.mu.Unlock, nil
+}
+
 type NativeRound struct {
 	ID, Status             string
 	RootChainTurn          *string
@@ -224,7 +260,8 @@ func (s *NativeSource) Probe(ctx context.Context, rpc NativeRPC) (out NativeProb
 	if failed || !scope.valid() || rpc == nil || rpc.Scope() != scope {
 		return out, ErrNativeSource
 	}
-	raw, err := rpc.ReadThread(ctx, scope.RootThread)
+	proof := NativeReadProof{Scope: scope, Revision: rev, source: s}
+	raw, err := rpc.ReadThread(ctx, proof, scope.RootThread)
 	if err != nil {
 		return out, ErrNativeSource
 	}
@@ -241,7 +278,7 @@ func (s *NativeSource) Probe(ctx context.Context, rpc NativeRPC) (out NativeProb
 		if ctx.Err() != nil || rpc.Scope() != scope {
 			return out, ErrNativeChanged
 		}
-		raw, err = rpc.ReadThread(ctx, id)
+		raw, err = rpc.ReadThread(ctx, proof, id)
 		if err != nil {
 			return out, ErrNativeSource
 		}
@@ -249,7 +286,7 @@ func (s *NativeSource) Probe(ctx context.Context, rpc NativeRPC) (out NativeProb
 		if e != nil || child.Parent == nil || *child.Parent != scope.RootThread || child.Session != root.Session {
 			return out, ErrNativeSource
 		}
-		raw, err = rpc.ListTurns(ctx, id)
+		raw, err = rpc.ListTurns(ctx, proof, id)
 		if err != nil {
 			return out, ErrNativeSource
 		}

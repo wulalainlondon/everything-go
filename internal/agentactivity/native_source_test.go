@@ -27,8 +27,16 @@ func nativeFixtureRPC() *nativeTestRPC {
 	return &nativeTestRPC{scope: nativeTestScope, root: `{"thread":{"id":"root-thread","sessionId":"native-tree","turns":[]}}`, child: `{"thread":{"id":"child-thread","parentThreadId":"root-thread","sessionId":"native-tree","turns":[]}}`, turns: `{"data":[{"id":"real-native-turn","rootTurnId":"parent-turn","status":"completed","items":[],"itemsView":"notLoaded","startedAt":1,"completedAt":2}],"nextCursor":null}`}
 }
 func (r *nativeTestRPC) Scope() NativeScope { return r.scope }
-func (r *nativeTestRPC) ReadThread(_ context.Context, id string) (json.RawMessage, error) {
+func (r *nativeTestRPC) ReadThread(_ context.Context, proof NativeReadProof, id string) (json.RawMessage, error) {
+	if r.scope != proof.Scope {
+		return nil, ErrNativeChanged
+	}
+	release, e := proof.AcquireFor(id, "")
+	if e != nil {
+		return nil, e
+	}
 	r.reads = append(r.reads, id)
+	release()
 	if r.after != nil {
 		r.after(id)
 	}
@@ -43,8 +51,16 @@ func (r *nativeTestRPC) ReadThread(_ context.Context, id string) (json.RawMessag
 	}
 	return []byte(r.child), nil
 }
-func (r *nativeTestRPC) ListTurns(_ context.Context, id string) (json.RawMessage, error) {
+func (r *nativeTestRPC) ListTurns(_ context.Context, proof NativeReadProof, id string) (json.RawMessage, error) {
+	if r.scope != proof.Scope {
+		return nil, ErrNativeChanged
+	}
+	release, e := proof.AcquireFor(id, "")
+	if e != nil {
+		return nil, e
+	}
 	r.reads = append(r.reads, id+":turns")
+	release()
 	if r.after != nil {
 		r.after(id + ":turns")
 	}
@@ -255,5 +271,21 @@ func TestNativeRolloutConversionRequiresExactPublicNativeItem(t *testing.T) {
 		if _, e := DecodeRolloutActivity([]byte(r), nativeTestScope.RootThread); e == nil {
 			t.Fatal("foreign ambiguous persisted source accepted")
 		}
+	}
+}
+
+func TestNativeActivityReplayUsesStableDecodedFactsAcrossSerialization(t *testing.T) {
+	s := nativeSource(t)
+	replay := `{"item":{"agentPath":"/root/worker","agentThreadId":"child-thread","kind":"started","id":"activity1","type":"subAgentActivity","model":null},"turnId":"parent-turn","threadId":"root-thread","completedAtMs":1000,"ignoredProviderField":"not retained"}`
+	if e := s.Observe(nativeTestScope, []byte(replay)); e != nil {
+		t.Fatal("live/history equivalent event falsely conflicted", e)
+	}
+	p, e := s.Probe(context.Background(), nativeFixtureRPC())
+	if e != nil || p.SourceRevision != 1 || len(p.Actors[0].Activities) != 1 {
+		t.Fatal("replay created another source event", e)
+	}
+	changed := strings.Replace(replay, `"completedAtMs":1000`, `"completedAtMs":1001`, 1)
+	if e = s.Observe(nativeTestScope, []byte(changed)); e == nil {
+		t.Fatal("conflicting decoded evidence accepted")
 	}
 }

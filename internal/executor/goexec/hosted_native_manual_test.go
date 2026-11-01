@@ -143,19 +143,41 @@ func (r *manualHostedRPC) Scope() agentactivity.NativeScope {
 	}
 	return r.scope
 }
-func (r *manualHostedRPC) ReadThread(ctx context.Context, id string) (json.RawMessage, error) {
-	return r.read(ctx, "thread/read", map[string]any{"threadId": id, "includeTurns": false})
+func (r *manualHostedRPC) ReadThread(ctx context.Context, proof agentactivity.NativeReadProof, id string) (json.RawMessage, error) {
+	return r.read(ctx, "thread/read", map[string]any{"threadId": id, "includeTurns": false}, proof)
 }
-func (r *manualHostedRPC) ListTurns(ctx context.Context, id string) (json.RawMessage, error) {
-	return r.read(ctx, "thread/turns/list", map[string]any{"threadId": id, "limit": 16, "itemsView": "notLoaded", "sortDirection": "desc"})
+func (r *manualHostedRPC) ListTurns(ctx context.Context, proof agentactivity.NativeReadProof, id string) (json.RawMessage, error) {
+	return r.read(ctx, "thread/turns/list", map[string]any{"threadId": id, "limit": 16, "itemsView": "notLoaded", "sortDirection": "desc"}, proof)
 }
-func (r *manualHostedRPC) read(ctx context.Context, method string, params any) (json.RawMessage, error) {
+func (r *manualHostedRPC) read(ctx context.Context, method string, params any, proofs ...agentactivity.NativeReadProof) (json.RawMessage, error) {
 	if r.Scope() != r.scope {
 		return nil, agentactivity.ErrNativeChanged
 	}
 	r.id++
 	b, _ := json.Marshal(map[string]any{"id": r.id, "method": method, "params": params})
-	if e := r.conn.Write(ctx, websocket.MessageText, b); e != nil {
+	var release func()
+	if len(proofs) > 0 {
+		proof := proofs[0]
+		if len(proofs) != 1 || proof.Scope != r.Scope() {
+			return nil, agentactivity.ErrNativeChanged
+		}
+		m, ok := params.(map[string]any)
+		if !ok {
+			return nil, agentactivity.ErrNativeSource
+		}
+		id, _ := m["threadId"].(string)
+		turn, _ := m["turnId"].(string)
+		var e error
+		release, e = proof.AcquireFor(id, turn)
+		if e != nil {
+			return nil, e
+		}
+	}
+	writeErr := r.conn.Write(ctx, websocket.MessageText, b)
+	if release != nil {
+		release()
+	}
+	if e := writeErr; e != nil {
 		return nil, e
 	}
 	for i := 0; i < 32; i++ {

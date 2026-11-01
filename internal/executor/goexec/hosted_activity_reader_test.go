@@ -130,10 +130,10 @@ func TestHostedSourceEpochChangesInvalidateCapture(t *testing.T) {
 type hostedScopeFixtureRPC struct{ scope agentactivity.NativeScope }
 
 func (r hostedScopeFixtureRPC) Scope() agentactivity.NativeScope { return r.scope }
-func (r hostedScopeFixtureRPC) ReadThread(_ context.Context, id string) (json.RawMessage, error) {
+func (r hostedScopeFixtureRPC) ReadThread(_ context.Context, _ agentactivity.NativeReadProof, id string) (json.RawMessage, error) {
 	return json.RawMessage(fmt.Sprintf(`{"thread":{"id":%q,"sessionId":"tree","turns":[]}}`, id)), nil
 }
-func (r hostedScopeFixtureRPC) ListTurns(context.Context, string) (json.RawMessage, error) {
+func (r hostedScopeFixtureRPC) ListTurns(context.Context, agentactivity.NativeReadProof, string) (json.RawMessage, error) {
 	return nil, agentactivity.ErrNativeSource
 }
 

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"everything-go/internal/agentactivity"
 	"everything-go/internal/session"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -67,12 +69,89 @@ func (r hostedActivityRPC) Scope() agentactivity.NativeScope {
 	}
 	return agentactivity.NativeScope{Authority: s.Authority, Session: s.SessionID, RootThread: s.RootActorID, Epoch: s.Epoch}
 }
-func (r hostedActivityRPC) ListTurns(ctx context.Context, id string) (json.RawMessage, error) {
-	if ctx.Err() != nil || !r.c.rpc.hasWriter() {
+func (r hostedActivityRPC) ReadThread(ctx context.Context, p agentactivity.NativeReadProof, id string) (json.RawMessage, error) {
+	return r.readAtProof(ctx, p, "thread/read", map[string]any{"threadId": id, "includeTurns": false})
+}
+func (r hostedActivityRPC) ListTurns(ctx context.Context, p agentactivity.NativeReadProof, id string) (json.RawMessage, error) {
+	return r.readAtProof(ctx, p, "thread/turns/list", map[string]any{"threadId": id, "limit": 16, "itemsView": "notLoaded", "sortDirection": "desc"})
+}
+
+// Scope is never sampled again as a substitute for the proof which authorized
+// this read. The original transport, registry and session identity are fenced
+// through bytes. All local locks are nonblocking and released before waiting
+// for a response. In particular, no Scope()/hasWriter() runs under rpc.wmu.
+func (r hostedActivityRPC) readAtProof(ctx context.Context, p agentactivity.NativeReadProof, method string, params any) (json.RawMessage, error) {
+	m, ok := params.(map[string]any)
+	if !ok {
 		return nil, agentactivity.ErrNativeSource
 	}
-	epoch := r.c.rpc.transportEpoch.Load()
-	// A metadata failure retires only this read. It must not enter the original
-	// model recovery scheduler or interrupt healthy work on the shared provider.
-	return r.c.rpc.requestAtEpochContext(ctx, "thread/turns/list", map[string]any{"threadId": id, "limit": 16, "itemsView": "notLoaded", "sortDirection": "desc"}, time.Second, &epoch)
+	id, _ := m["threadId"].(string)
+	turn, _ := m["turnId"].(string)
+	if id == "" {
+		return nil, agentactivity.ErrNativeSource
+	}
+	switch method {
+	case "thread/read":
+	case "thread/turns/list":
+		if id == p.Scope.RootThread {
+			return nil, agentactivity.ErrNativeSource
+		}
+	case "thread/items/list":
+		if turn == "" {
+			return nil, agentactivity.ErrNativeSource
+		}
+	default:
+		return nil, agentactivity.ErrNativeSource
+	}
+	parts := strings.Split(p.Scope.Epoch, ":")
+	if len(parts) != 3 || p.Scope.Authority != r.authority || p.Scope.Session != r.s.ID || r.c.rpc == nil {
+		return nil, agentactivity.ErrNativeChanged
+	}
+	epoch, e := strconv.ParseUint(parts[1], 10, 64)
+	if e != nil {
+		return nil, agentactivity.ErrNativeChanged
+	}
+	config, e := strconv.ParseUint(parts[2], 10, 64)
+	if e != nil {
+		return nil, agentactivity.ErrNativeChanged
+	}
+	guard := func() (release func(), err error) {
+		var releases []func()
+		releaseAll := func() {
+			for i := len(releases) - 1; i >= 0; i-- {
+				releases[i]()
+			}
+		}
+		ok := false
+		defer func() {
+			if !ok {
+				releaseAll()
+			}
+		}()
+		if !r.c.startMu.TryLock() {
+			return nil, agentactivity.ErrNativeChanged
+		}
+		releases = append(releases, r.c.startMu.Unlock)
+		if r.c.appServerMode != "daemon" || !r.c.mu.TryLock() {
+			return nil, agentactivity.ErrNativeChanged
+		}
+		releases = append(releases, r.c.mu.Unlock)
+		if r.c.metadataObserverBoot != parts[0] || parts[0] == "" {
+			return nil, agentactivity.ErrNativeChanged
+		}
+		unlock, e := r.s.AcquireNativeObservation(p.Scope.RootThread, config, "codex")
+		if e != nil {
+			return nil, agentactivity.ErrNativeChanged
+		}
+		releases = append(releases, unlock)
+		unlock, e = p.AcquireFor(id, turn)
+		if e != nil {
+			return nil, e
+		}
+		releases = append(releases, unlock)
+		ok = true
+		return releaseAll, nil
+	}
+	// Timeout/cancel retires only this correlation, never model recovery.
+	return r.c.rpc.requestAtEpochGuarded(ctx, method, params, time.Second, &epoch, guard)
 }
