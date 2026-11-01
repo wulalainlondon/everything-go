@@ -27,6 +27,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"everything-go/internal/agentactivity"
 	"everything-go/internal/agentvisibility"
 	"everything-go/internal/backend"
 	"everything-go/internal/executor"
@@ -74,7 +75,9 @@ type codexState struct {
 	automaticIsContinuation bool
 	automaticInput          []map[string]any
 
-	visibility agentvisibility.Channel
+	visibility          agentvisibility.Channel
+	hostedActivity      *agentactivity.NativeSource
+	hostedActivityScope agentactivity.NativeScope
 
 	mu       sync.Mutex
 	ensureMu sync.Mutex
@@ -1305,6 +1308,9 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 	// replayed completed item must not be discarded by retired-turn filtering.
 	if m.Method == "item/completed" {
 		c.observeAsyncItem(s, p.ThreadID, m.Params)
+		if p.Item.Type == "subAgentActivity" {
+			c.observeHostedNativeItem(s, m.Params)
+		}
 	}
 	st := c.state(s.ID)
 	st.mu.Lock()
