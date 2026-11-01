@@ -289,7 +289,7 @@ func (h *Hub) enqueueEventAssignment(ctx context.Context, a automation.EventAssi
 	}
 	config := session.ConfigurationFrom(s.SettingsSnapshot())
 	generation, _, _ := h.automation.JarvisAssignmentGeneration(ctx, a.ID)
-	payload, err := json.Marshal(queuedPayload{OwnerCredentialGeneration: generation, MessagePurpose: "instruction", OwnerDevice: a.OwnerDevice, Content: a.Content, Configuration: &config, ExpectedTarget: &dispatchTargetExpectation{ThreadID: a.ThreadID, Revision: a.ConfigRevision}, ExternalEventIDs: a.EventIDs, ExternalPeer: assignmentPeer(a), ExternalReviewOnly: strings.HasPrefix(a.OwnerDevice, "relay:")})
+	payload, err := json.Marshal(queuedPayload{RoleEpoch: h.SessionRoleEpoch(s), OwnerCredentialGeneration: generation, MessagePurpose: "instruction", OwnerDevice: a.OwnerDevice, Content: a.Content, Configuration: &config, ExpectedTarget: &dispatchTargetExpectation{ThreadID: a.ThreadID, Revision: a.ConfigRevision}, ExternalEventIDs: a.EventIDs, ExternalPeer: assignmentPeer(a), ExternalReviewOnly: strings.HasPrefix(a.OwnerDevice, "relay:")})
 	if err != nil {
 		return err
 	}

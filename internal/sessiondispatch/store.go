@@ -11,20 +11,28 @@ import (
 	_ "modernc.org/sqlite"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 	"unicode/utf8"
 )
 
 type Grant struct {
-	Enabled   bool     `json:"enabled"`
-	Local     bool     `json:"local"`
-	Instances []string `json:"instances"`
-	Sessions  []string `json:"sessions"`
-	Steer     bool     `json:"steer"`
-	Revision  uint64   `json:"revision"`
+	RoleEpoch    uint64   `json:"role_epoch,omitempty"`
+	RoleSessions []string `json:"role_sessions,omitempty"`
+	Enabled      bool     `json:"enabled"`
+	Local        bool     `json:"local"`
+	Instances    []string `json:"instances"`
+	Sessions     []string `json:"sessions"`
+	Steer        bool     `json:"steer"`
+	Revision     uint64   `json:"revision"`
 }
 
 func (g Grant) AllowsInstance(local, instance string) bool {
+	for _, id := range g.RoleSessions {
+		if len(id) > len(instance) && id[:len(instance)+1] == instance+":" {
+			return true
+		}
+	}
 	if !g.Enabled {
 		return false
 	}
@@ -40,6 +48,11 @@ func (g Grant) AllowsInstance(local, instance string) bool {
 }
 
 func (g Grant) Allows(local, instance, session string) bool {
+	for _, id := range g.RoleSessions {
+		if id == instance+":"+session {
+			return true
+		}
+	}
 	if !g.Enabled {
 		return false
 	}
@@ -64,6 +77,7 @@ func (g Grant) Allows(local, instance, session string) bool {
 }
 
 type Record struct {
+	RoleEpoch                uint64 `json:"role_epoch,omitempty"`
 	ParentExecutionRequestID string `json:"parent_execution_request_id,omitempty"`
 	ParentConfigRevision     uint64 `json:"parent_config_revision"`
 	ParentConfigKnown        bool   `json:"parent_config_known,omitempty"`
@@ -93,7 +107,17 @@ type Record struct {
 	UpdatedAt                int64  `json:"updated_at"`
 	TerminalAt               int64  `json:"terminal_at,omitempty"`
 }
-type Store struct{ db *sql.DB }
+type Store struct {
+	db        *sql.DB
+	roleMu    sync.RWMutex
+	roleGrant func(context.Context, string, Grant) Grant
+}
+
+func (s *Store) SetRoleGrantResolver(f func(context.Context, string, Grant) Grant) {
+	s.roleMu.Lock()
+	s.roleGrant = f
+	s.roleMu.Unlock()
+}
 
 func (s *Store) SealResult(ctx context.Context, session, request, text string) error {
 	if len(text) > 256*1024 {
@@ -141,10 +165,23 @@ func Open(dir string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-	return &Store{db}, nil
+	return &Store{db: db}, nil
 }
 func (s *Store) Close() error { return s.db.Close() }
 func (s *Store) Grant(ctx context.Context, parent string) (Grant, error) {
+	g, e := s.BaseGrant(ctx, parent)
+	if e != nil {
+		return g, e
+	}
+	s.roleMu.RLock()
+	f := s.roleGrant
+	s.roleMu.RUnlock()
+	if f != nil {
+		g = f(ctx, parent, g)
+	}
+	return g, nil
+}
+func (s *Store) BaseGrant(ctx context.Context, parent string) (Grant, error) {
 	var raw string
 	g := Grant{Instances: []string{}, Sessions: []string{}}
 	e := s.db.QueryRowContext(ctx, `SELECT payload FROM controller_grants WHERE parent_id=?`, parent).Scan(&raw)
@@ -155,6 +192,8 @@ func (s *Store) Grant(ctx context.Context, parent string) (Grant, error) {
 		return g, e
 	}
 	e = json.Unmarshal([]byte(raw), &g)
+	g.RoleEpoch = 0
+	g.RoleSessions = nil
 	if g.Instances == nil {
 		g.Instances = []string{}
 	}
@@ -164,6 +203,8 @@ func (s *Store) Grant(ctx context.Context, parent string) (Grant, error) {
 	return g, e
 }
 func (s *Store) SetGrant(ctx context.Context, parent string, g Grant, expected uint64) (Grant, error) {
+	g.RoleEpoch = 0
+	g.RoleSessions = nil
 	tx, e := s.db.BeginTx(ctx, nil)
 	if e != nil {
 		return Grant{}, e

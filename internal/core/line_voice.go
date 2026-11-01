@@ -161,6 +161,8 @@ func (h *Hub) handleLineVoiceStart(c *Client, cmd clientproto.Command) {
 	if parent == nil {
 		parent = context.Background()
 	}
+	finishTransition := h.beginJarvisVoiceTransition(s.ID)
+	defer finishTransition()
 	ctx, cancel := context.WithCancel(parent)
 	call := &clientVoiceCall{session: s, voiceID: cmd.VoiceID, requestID: cmd.RequestID, cancel: cancel, kind: "line"}
 	h.voiceMu.Lock()

@@ -115,6 +115,7 @@ func (h *Hub) unifiedReply(ctx context.Context, c taskapi.VerifiedContext, manag
 		binding.ControllerParent = r.Parent.SessionID
 		binding.GrantTarget = r.Target.SessionID
 		binding.GrantRevision = g.Revision
+		binding.RoleEpoch = h.jarvisRoleDispatchEpoch(ctx, r.Parent.SessionID, r.Target.Authority, r.Target.SessionID)
 	}
 	binding.Uploads = uploadBindings
 	binding.InputFiles = in.Files
@@ -194,7 +195,7 @@ func (h *Hub) unifiedReply(ctx context.Context, c taskapi.VerifiedContext, manag
 	if in.Direction == "worker_to_parent" {
 		purpose = "result_return"
 	}
-	p := queuedPayload{Content: preparedContent, Images: preparedImages, Files: preparedFiles, MessagePurpose: purpose, ExpectedTarget: &dispatchTargetExpectation{target.ThreadID, target.Revision}, Configuration: &config, OwnerDevice: strings.TrimPrefix(c.StableScopeID, "device:")}
+	p := queuedPayload{RoleEpoch: h.SessionRoleEpoch(targetSession), Content: preparedContent, Images: preparedImages, Files: preparedFiles, MessagePurpose: purpose, ExpectedTarget: &dispatchTargetExpectation{target.ThreadID, target.Revision}, Configuration: &config, OwnerDevice: strings.TrimPrefix(c.StableScopeID, "device:")}
 	p.UnifiedBinding = &binding
 	payload, _ := json.Marshal(p)
 	queueCheck := m.Revalidate

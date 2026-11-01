@@ -216,6 +216,16 @@ func (v nativeAPIVerifier) Verify(ctx context.Context, _ taskapi.Invocation) (ta
 }
 
 func (h *Hub) ExecuteTask(ctx context.Context, c backend.TaskCaller, raw []byte) taskapi.Response {
+	epoch := uint64(0)
+	if c.Session != nil {
+		if entry, found, e := h.messageQueue.GetContext(ctx, c.Session.ID, c.RequestID); e == nil && found {
+			var admission queuedPayload
+			if json.Unmarshal(entry.Payload, &admission) == nil {
+				epoch = admission.RoleEpoch
+			}
+		}
+	}
+	ctx = backend.WithRoleEpoch(ctx, epoch)
 	verifier := nativeAPIVerifier(func(checkCtx context.Context) (taskapi.VerifiedContext, error) {
 		s, ok := h.registry.Get(c.Session.ID)
 		if !ok || s != c.Session || c.Validate == nil || !c.Validate() || s.ActiveQueuedID() != c.RequestID || s.ResumeID() != c.ThreadID || s.State() == session.Closed || s.Snapshot().Hidden || !h.controls.MobileMayWrite(s.ID) {
@@ -804,8 +814,8 @@ func (h *Hub) Mutate(ctx context.Context, c taskapi.AuthorizedCommand) (any, err
 			record.RequestID = "r_" + id
 			record.NativeID = record.SessionID + "/" + record.RequestID
 			record.TaskID = apiID(h.cfg.InstanceID, "ordinary", record.NativeID)
-			payload := queuedPayload{Content: in.Instruction, MessagePurpose: "instruction", OwnerDevice: strings.TrimPrefix(c.Caller.StableScopeID, "device:"), ExpectedTarget: &dispatchTargetExpectation{in.Existing.ResumeID, in.Existing.ConfigRevision}}
 			target, _ := h.registry.Get(record.SessionID)
+			payload := queuedPayload{RoleEpoch: h.SessionRoleEpoch(target), Content: in.Instruction, MessagePurpose: "instruction", OwnerDevice: strings.TrimPrefix(c.Caller.StableScopeID, "device:"), ExpectedTarget: &dispatchTargetExpectation{in.Existing.ResumeID, in.Existing.ConfigRevision}}
 			config := session.ConfigurationFrom(target.SettingsSnapshot())
 			payload.Configuration = &config
 			raw, _ := json.Marshal(payload)
@@ -826,7 +836,7 @@ func (h *Hub) Mutate(ctx context.Context, c taskapi.AuthorizedCommand) (any, err
 			record.RequestID = "scjob_scd_" + id
 			record.NativeID = "scd_" + id
 			record.TaskID = apiID(h.cfg.InstanceID, "controller", record.NativeID)
-			r := sessiondispatch.Record{ID: record.NativeID, ParentID: c.Caller.SourceSessionID, ParentThreadID: c.Caller.SourceResumeID, ParentConfigRevision: c.Caller.SourceConfigRevision, ParentConfigKnown: c.Caller.SourceConfigKnown, ParentExecutionRequestID: c.Caller.SourceRequestID, OriginRequestID: c.Caller.SourceRequestID, ToolCallID: c.Caller.ToolCallID, TurnID: c.Caller.NativeTurnID, InstanceID: h.cfg.InstanceID, SessionID: record.SessionID, ThreadID: in.Existing.ResumeID, ConfigRevision: in.Existing.ConfigRevision, RequestID: record.RequestID, Content: in.Instruction, Mode: "queue", IntentHash: c.IntentHash}
+			r := sessiondispatch.Record{RoleEpoch: h.jarvisRoleDispatchEpoch(ctx, c.Caller.SourceSessionID, h.cfg.InstanceID, record.SessionID), ID: record.NativeID, ParentID: c.Caller.SourceSessionID, ParentThreadID: c.Caller.SourceResumeID, ParentConfigRevision: c.Caller.SourceConfigRevision, ParentConfigKnown: c.Caller.SourceConfigKnown, ParentExecutionRequestID: c.Caller.SourceRequestID, OriginRequestID: c.Caller.SourceRequestID, ToolCallID: c.Caller.ToolCallID, TurnID: c.Caller.NativeTurnID, InstanceID: h.cfg.InstanceID, SessionID: record.SessionID, ThreadID: in.Existing.ResumeID, ConfigRevision: in.Existing.ConfigRevision, RequestID: record.RequestID, Content: in.Instruction, Mode: "queue", IntentHash: c.IntentHash}
 			stored, created, err := h.dispatches.CreateAPI(ctx, c, record, r)
 			if err != nil {
 				return nil, err
@@ -883,7 +893,7 @@ func (h *Hub) Mutate(ctx context.Context, c taskapi.AuthorizedCommand) (any, err
 	if c.Request.Operation == "append" {
 		target, _ := h.registry.Get(record.SessionID)
 		configuration := session.ConfigurationFrom(target.SettingsSnapshot())
-		payload, _ := json.Marshal(queuedPayload{Content: in.Content, MessagePurpose: "instruction", Configuration: &configuration, ExpectedTarget: &dispatchTargetExpectation{target.ResumeID(), target.SettingsSnapshot().ConfigRevision}})
+		payload, _ := json.Marshal(queuedPayload{RoleEpoch: h.SessionRoleEpoch(target), Content: in.Content, MessagePurpose: "instruction", Configuration: &configuration, ExpectedTarget: &dispatchTargetExpectation{target.ResumeID(), target.SettingsSnapshot().ConfigRevision}})
 		var stored taskapi.IntentRecord
 		created := false
 		if c.Locator.Path == "delegation" {
@@ -1270,3 +1280,5 @@ func (h *Hub) existingTargetCreationAvailable() bool {
 	_, ok := h.exec.(backend.ExistingTaskScopeEnforcer)
 	return ok
 }
+
+func targetForRole(h *Hub, id string) *session.Session { s, _ := h.registry.Get(id); return s }

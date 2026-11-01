@@ -7,6 +7,7 @@ import (
 
 // Caller is derived from the app-server tool invocation, never from model arguments.
 type SessionControlCaller struct {
+	RoleEpoch                              uint64
 	Parent                                 *session.Session
 	RequestID, TurnID, ToolCallID, VoiceID string
 }

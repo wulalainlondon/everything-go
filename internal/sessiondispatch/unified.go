@@ -98,7 +98,7 @@ func (s *Store) UnifiedMutate(ctx context.Context, target string, eligible map[s
 		}
 		if m.RoleSession != "" {
 			var revision uint64
-			if e = tx.QueryRowContext(ctx, "SELECT revision FROM controller_grants WHERE parent_id=?", m.RoleSession).Scan(&revision); e != nil {
+			if e = tx.QueryRowContext(ctx, "SELECT revision FROM controller_grants WHERE parent_id=?", m.RoleSession).Scan(&revision); e != nil && !(errors.Is(e, sql.ErrNoRows) && m.RoleRevision == 0) {
 				return e
 			}
 			if revision != m.RoleRevision {
@@ -107,7 +107,7 @@ func (s *Store) UnifiedMutate(ctx context.Context, target string, eligible map[s
 		}
 		for parent, expected := range m.GrantRevisions {
 			var revision uint64
-			if e := tx.QueryRowContext(ctx, "SELECT revision FROM controller_grants WHERE parent_id=?", parent).Scan(&revision); e != nil {
+			if e := tx.QueryRowContext(ctx, "SELECT revision FROM controller_grants WHERE parent_id=?", parent).Scan(&revision); e != nil && !(errors.Is(e, sql.ErrNoRows) && expected == 0) {
 				return e
 			}
 			if revision != expected {
@@ -178,7 +178,7 @@ func (s *Store) UnifiedMutate(ctx context.Context, target string, eligible map[s
 		}
 		for parent, expected := range m.GrantRevisions {
 			var revision uint64
-			if e := tx.QueryRowContext(ctx, "SELECT revision FROM controller_grants WHERE parent_id=?", parent).Scan(&revision); e != nil {
+			if e := tx.QueryRowContext(ctx, "SELECT revision FROM controller_grants WHERE parent_id=?", parent).Scan(&revision); e != nil && !(errors.Is(e, sql.ErrNoRows) && expected == 0) {
 				return e
 			}
 			if revision != expected {

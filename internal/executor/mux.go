@@ -416,3 +416,10 @@ func (m *Mux) SupportsContextReset(s *session.Session) bool {
 	_, ok := m.pick(s).(backend.ContextResetExecutor)
 	return ok
 }
+
+func (m *Mux) MaintainResident(ctx context.Context, s *session.Session, thread string, epoch uint64, current func() bool) (backend.ResidentObservation, error) {
+	if p, ok := m.pick(s).(backend.ResidentExecutor); ok {
+		return p.MaintainResident(ctx, s, thread, epoch, current)
+	}
+	return backend.ResidentObservation{State: "limited", Reason: "provider_residency_unsupported", Thread: thread, ToolState: "unavailable"}, nil
+}

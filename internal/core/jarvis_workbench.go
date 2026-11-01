@@ -170,6 +170,9 @@ func (h *Hub) jarvisOperations() []string {
 			ops = append(ops, "work_start_push_v1")
 		}
 	}
+	if h.jarvisRoles != nil && h.partners != nil {
+		ops = append(ops, "jarvis_role_v1", "jarvis_residency_v1", "jarvis_role_audio_lease_v1")
+	}
 	return ops
 }
 func (h *Hub) ServeJarvisAPI(w http.ResponseWriter, r *http.Request) {
@@ -185,6 +188,10 @@ func (h *Hub) ServeJarvisAPI(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/api/jarvis/v1/")
 	if path == "capabilities" && r.Method == http.MethodGet {
 		_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": 1, "capability": "jarvis_workbench_v1", "authority_instance_id": h.cfg.InstanceID, "supported_operations": h.jarvisOperations(), "max_human_instruction_characters": 32000, "max_request_bytes": jarvisMaxBytes, "max_work_refs": 30})
+		return
+	}
+	if strings.HasPrefix(path, "role/") {
+		h.serveJarvisRole(w, r, device, path)
 		return
 	}
 	if path == "task-api" {

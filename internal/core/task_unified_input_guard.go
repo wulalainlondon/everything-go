@@ -13,6 +13,7 @@ import (
 )
 
 type unifiedInputBinding struct {
+	RoleEpoch        uint64                 `json:"role_epoch,omitempty"`
 	InitialTarget    bool                   `json:"initial_target,omitempty"`
 	GrantTarget      string                 `json:"grant_target,omitempty"`
 	InputFiles       []intakeFile           `json:"input_files"`
@@ -44,6 +45,12 @@ func (h *Hub) unifiedPrincipalCurrent(principal string, generation uint64) bool 
 	return false
 }
 func (h *Hub) unifiedBindingSourcesCurrent(b unifiedInputBinding) error {
+	if b.RoleEpoch > 0 {
+		a := h.currentJarvisRole()
+		if a == nil || a.Epoch != b.RoleEpoch || a.Target.Session != b.ControllerParent {
+			return unifiedError("permission")
+		}
+	}
 	if !h.unifiedPrincipalCurrent(b.Principal, b.Generation) {
 		return unifiedError("caller_unbound")
 	}
@@ -166,6 +173,7 @@ func (h *Hub) makeUnifiedInputBinding(ctx context.Context, c taskapi.VerifiedCon
 			return nil, unifiedError("permission")
 		}
 		b.GrantRevision = g.Revision
+		b.RoleEpoch = h.jarvisRoleDispatchEpoch(ctx, controllerParent, target.Authority, target.SessionID)
 	}
 	if e := h.unifiedBindingCurrent(ctx, b); e != nil {
 		return nil, e

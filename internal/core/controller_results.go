@@ -48,7 +48,7 @@ func (h *Hub) resultScope(ctx context.Context, b taskapi.VerifiedContext, m cr.I
 	if e != nil {
 		return cr.Scope{}, e
 	}
-	if !g.Enabled {
+	if !g.Enabled && !h.jarvisRoleHasOriginalResults(ctx, m.Session, m.Thread, m.Revision) {
 		return cr.Scope{}, unifiedError("permission")
 	}
 	s, ok := h.registry.Get(m.Session)
@@ -72,7 +72,7 @@ func (h *Hub) resultDisclosure(ctx context.Context, scope cr.Scope) error {
 	if e != nil {
 		return e
 	}
-	if !g.Enabled {
+	if !g.Enabled && !h.jarvisRoleHasOriginalResults(ctx, scope.Parent.Session, scope.Parent.Thread, scope.Parent.Revision) {
 		return unifiedError("permission")
 	}
 	if g.Revision != scope.GrantRevision {
@@ -90,7 +90,7 @@ func (h *Hub) resultDisclosure(ctx context.Context, scope cr.Scope) error {
 		if r.ParentThreadID != scope.Parent.Thread || !r.ParentConfigKnown || r.ParentConfigRevision != scope.Parent.Revision {
 			continue
 		}
-		if !g.Allows(h.cfg.InstanceID, r.InstanceID, r.SessionID) {
+		if !g.Allows(h.cfg.InstanceID, r.InstanceID, r.SessionID) && !h.jarvisRoleOriginalReceiptReadable(r) {
 			return unifiedError("permission")
 		}
 		if r.InstanceID == h.cfg.InstanceID {

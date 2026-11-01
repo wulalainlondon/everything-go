@@ -74,6 +74,7 @@ func (c *Codex) sessionControlCaller(s *session.Session, turnID, callID string) 
 	st.mu.Lock()
 	owned := st.turnActive && !st.turnStartPending && st.currentTurnID == turnID && st.reqID != ""
 	request := st.reqID
+	roleEpoch := st.roleEpoch
 	observed := !st.turnActive && !st.compactActive && st.observedTurnID == turnID && st.observedRequestID != ""
 	if observed {
 		request = st.observedRequestID
@@ -85,6 +86,7 @@ func (c *Codex) sessionControlCaller(s *session.Session, turnID, callID string) 
 	voice := c.voiceCalls[thread]
 	if voice != nil && voice.sessionID == s.ID {
 		voiceID = voice.voiceID
+		roleEpoch = voice.roleEpoch
 	}
 	c.voiceMu.Unlock()
 	// External CLI/file observations cannot become operator authorization. Only the exact active voice binding qualifies.
@@ -94,7 +96,7 @@ func (c *Codex) sessionControlCaller(s *session.Session, turnID, callID string) 
 	if thread == "" || thread != s.ResumeID() {
 		return backend.SessionControlCaller{}, errors.New("controller_thread_changed")
 	}
-	return backend.SessionControlCaller{Parent: s, RequestID: request, TurnID: turnID, ToolCallID: callID, VoiceID: voiceID}, nil
+	return backend.SessionControlCaller{RoleEpoch: roleEpoch, Parent: s, RequestID: request, TurnID: turnID, ToolCallID: callID, VoiceID: voiceID}, nil
 }
 func (c *Codex) handleSessionControlServerRequest(id any, method string, raw json.RawMessage) bool {
 	if c.handleTaskCallbackTool(id, method, raw) {
@@ -117,8 +119,16 @@ func (c *Codex) handleSessionControlServerRequest(id any, method string, raw jso
 		return false
 	}
 	s := c.sessionForCodexParams(codexParams(raw))
+	observedTransport := c.rpc.transportEpoch.Load()
 	go func() {
 		caller, e := c.sessionControlCaller(s, call.TurnID, call.CallID)
+		if e == nil && caller.RoleEpoch > 0 && c.rpc.transportEpoch.Load() == observedTransport {
+			st := c.state(s.ID)
+			st.mu.Lock()
+			st.residentToolsEpoch = caller.RoleEpoch
+			st.residentToolsTransport = observedTransport
+			st.mu.Unlock()
+		}
 		var result any
 		if e == nil {
 			var input backend.SessionControlRequest

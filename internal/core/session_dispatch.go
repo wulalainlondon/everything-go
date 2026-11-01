@@ -47,17 +47,19 @@ func (h *Hub) controllerCaller(c backend.SessionControlCaller) error {
 	return errors.New("controller_voice_expired")
 }
 func (h *Hub) ControlSession(ctx context.Context, c backend.SessionControlCaller, input backend.SessionControlRequest) (any, error) {
+	ctx = backend.WithRoleEpoch(ctx, c.RoleEpoch)
 	if input.Action == "voice_transfer" || input.Action == "get_voice_transfer" {
 		return h.requestVoiceTransfer(ctx, c, input)
 	}
 	if e := h.controllerCaller(c); e != nil {
 		return nil, e
 	}
-	g, e := h.dispatches.Grant(ctx, c.Parent.ID)
+	g, e := h.controllerGrantForCaller(ctx, c)
+
 	if e != nil {
 		return nil, e
 	}
-	if !g.Enabled {
+	if !g.Enabled && input.Action != "list_dispatches" && input.Action != "read_dispatch_result" {
 		return nil, errors.New("controller_not_enabled_open_session_info")
 	}
 	if input.InstanceID == "" {
@@ -123,7 +125,7 @@ func (h *Hub) ControlSession(ctx context.Context, c backend.SessionControlCaller
 		if input.Mode != "queue" && input.Mode != "steer" {
 			return nil, errors.New("dispatch_mode_invalid")
 		}
-		if input.Mode == "steer" && !g.Steer {
+		if input.Mode == "steer" && !g.Steer && !(g.RoleEpoch > 0 && input.InstanceID == h.cfg.InstanceID) {
 			return nil, errors.New("controller_steer_not_granted")
 		}
 		if strings.TrimSpace(input.Content) == "" || len(input.Content) > 32000 || input.SessionID == "" || input.ExpectedThreadID == "" {
@@ -148,7 +150,7 @@ func (h *Hub) ControlSession(ctx context.Context, c backend.SessionControlCaller
 				return previous, true, nil
 			}
 			id := "scd_" + randomID()
-			r := sessiondispatch.Record{ID: id, ParentID: c.Parent.ID, ParentThreadID: c.Parent.ResumeID(), ParentConfigRevision: c.Parent.SettingsSnapshot().ConfigRevision, ParentConfigKnown: true, ParentExecutionRequestID: c.RequestID, OriginRequestID: c.RequestID, TurnID: c.TurnID, ToolCallID: c.ToolCallID, VoiceID: c.VoiceID, InstanceID: input.InstanceID, SessionID: input.SessionID, ThreadID: input.ExpectedThreadID, ConfigRevision: input.ExpectedConfigRevision, RequestID: "scjob_" + id, Mode: input.Mode, Content: input.Content, IntentHash: digest, State: "prepared", DeliveryState: "pending"}
+			r := sessiondispatch.Record{RoleEpoch: h.jarvisRoleDispatchEpoch(ctx, c.Parent.ID, input.InstanceID, input.SessionID), ID: id, ParentID: c.Parent.ID, ParentThreadID: c.Parent.ResumeID(), ParentConfigRevision: c.Parent.SettingsSnapshot().ConfigRevision, ParentConfigKnown: true, ParentExecutionRequestID: c.RequestID, OriginRequestID: c.RequestID, TurnID: c.TurnID, ToolCallID: c.ToolCallID, VoiceID: c.VoiceID, InstanceID: input.InstanceID, SessionID: input.SessionID, ThreadID: input.ExpectedThreadID, ConfigRevision: input.ExpectedConfigRevision, RequestID: "scjob_" + id, Mode: input.Mode, Content: input.Content, IntentHash: digest, State: "prepared", DeliveryState: "pending"}
 			if _, e := h.dispatches.Create(ctx, r); e != nil {
 				return r, false, e
 			}
@@ -236,6 +238,12 @@ func (h *Hub) submitLocalSessionDispatch(ctx context.Context, r sessiondispatch.
 	defer h.dispatchMu.Unlock()
 	if _, found, err := h.messageQueue.Get(r.SessionID, r.RequestID); err == nil && found {
 		return h.refreshSessionDispatch(ctx, r)
+	}
+	if !h.jarvisRoleDispatchCurrent(r) {
+		r.State = "rejected"
+		r.Error = "jarvis_role_epoch_retired"
+		_ = h.dispatches.Put(ctx, r)
+		return r
 	}
 	s, ok := h.registry.Get(r.SessionID)
 	if !ok || !h.controllerInScope(s) || s.Snapshot().Hidden || s.State() == session.Closed {
@@ -391,6 +399,7 @@ func (h *Hub) StartSessionDispatchScheduler(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
+				h.reconcileJarvisResidency(ctx)
 				h.reconcileSessionDispatches(ctx)
 				h.reconcileJarvisStartNotices(ctx)
 			}
@@ -416,7 +425,7 @@ func (h *Hub) reconcileSessionDispatches(ctx context.Context) {
 			continue
 		}
 		if r.State == "prepared" || r.State == "pending" {
-			if !g.Allows(h.cfg.InstanceID, r.InstanceID, r.SessionID) {
+			if !h.jarvisRoleDispatchCurrent(r) || !g.Allows(h.cfg.InstanceID, r.InstanceID, r.SessionID) {
 				r.State = "rejected"
 				r.Error = "controller_grant_revoked"
 				_ = h.dispatches.Put(ctx, r)

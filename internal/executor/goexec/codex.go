@@ -64,6 +64,10 @@ var (
 )
 
 type codexState struct {
+	residentToolsEpoch      uint64
+	residentToolsTransport  uint64
+	residentRoleEpoch       uint64
+	roleEpoch               uint64
 	automatic               recovery.AutomaticController
 	automaticAttempt        string
 	automaticOrdinal        int
@@ -2358,6 +2362,7 @@ func (c *Codex) Send(ctx context.Context, s *session.Session, reqID, content str
 
 	st.mu.Lock()
 	st.reqID = reqID
+	st.roleEpoch = backend.RoleEpoch(ctx)
 	st.automatic = recovery.Automatic(ctx)
 	st.automaticAttempt = ""
 	st.automaticAcceptanceUncertain = false

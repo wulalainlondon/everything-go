@@ -157,6 +157,9 @@ func (h *Hub) ExecuteVoiceMedia(ctx context.Context, caller backend.SessionContr
 	if caller.Parent == nil || caller.ToolCallID == "" || caller.VoiceID == "" {
 		return nil, errors.New("voice_media_active_voice_required")
 	}
+	if e := h.jarvisExternalAdmission(caller, caller.VoiceID != ""); e != nil {
+		return nil, e
+	}
 	return h.executeVoiceMedia(ctx, caller.Parent, caller.VoiceID, caller.RequestID, caller.ToolCallID, "native_tool", nil, method, input)
 }
 

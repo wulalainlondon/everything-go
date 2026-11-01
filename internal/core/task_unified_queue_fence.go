@@ -8,6 +8,7 @@ import (
 type unifiedQueueIdentityFence struct {
 	Identity    jarvisTarget
 	MayBeUnborn bool
+	RoleEpoch   uint64
 }
 
 // Capture exact original source/target tuples before yielding to an owner writer.
@@ -25,7 +26,7 @@ func (h *Hub) unifiedQueueFences(ctx context.Context, q unifiedQueue, rows []tas
 		if !ok || !d.ParentConfigKnown {
 			return unifiedError("scope_changed")
 		}
-		out = append(out, unifiedQueueIdentityFence{jarvisTarget{h.cfg.InstanceID, d.ParentID, d.ParentThreadID, d.ParentConfigRevision}, false}, unifiedQueueIdentityFence{jarvisTarget{h.cfg.InstanceID, d.SessionID, d.ThreadID, d.ConfigRevision}, false})
+		out = append(out, unifiedQueueIdentityFence{jarvisTarget{h.cfg.InstanceID, d.ParentID, d.ParentThreadID, d.ParentConfigRevision}, false, d.RoleEpoch}, unifiedQueueIdentityFence{jarvisTarget{h.cfg.InstanceID, d.SessionID, d.ThreadID, d.ConfigRevision}, false, 0})
 		g, e := h.dispatches.Grant(ctx, d.ParentID)
 		if e != nil {
 			return e
@@ -48,12 +49,12 @@ func (h *Hub) unifiedQueueFences(ctx context.Context, q unifiedQueue, rows []tas
 		if !bound {
 			return unifiedError("scope_changed")
 		}
-		out = append(out, unifiedQueueIdentityFence{jarvisTarget{h.cfg.InstanceID, d.ParentSessionID, thread, rev}, false})
+		out = append(out, unifiedQueueIdentityFence{jarvisTarget{h.cfg.InstanceID, d.ParentSessionID, thread, rev}, false, 0})
 		thread, rev, _, e = h.delegations.ExecutionBinding(ctx, id)
 		if e != nil {
 			return e
 		}
-		out = append(out, unifiedQueueIdentityFence{jarvisTarget{h.cfg.InstanceID, d.ChildSessionID, thread, rev}, q.Kind == "delegation_waiting"})
+		out = append(out, unifiedQueueIdentityFence{jarvisTarget{h.cfg.InstanceID, d.ChildSessionID, thread, rev}, q.Kind == "delegation_waiting", 0})
 		return nil
 	}
 	for _, r := range rows {
@@ -95,6 +96,12 @@ func (h *Hub) unifiedQueueFences(ctx context.Context, q unifiedQueue, rows []tas
 }
 func (h *Hub) checkUnifiedQueueIdentities(fences []unifiedQueueIdentityFence) error {
 	for _, f := range fences {
+		if f.RoleEpoch > 0 {
+			a := h.currentJarvisRole()
+			if a == nil || a.Epoch != f.RoleEpoch || a.Target.Session != f.Identity.SessionID {
+				return unifiedError("permission")
+			}
+		}
 		if _, ok := h.registry.Get(f.Identity.SessionID); !ok && f.MayBeUnborn {
 			continue
 		}

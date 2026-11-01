@@ -248,7 +248,7 @@ func (h *Hub) mutateIntake(ctx context.Context, c taskapi.AuthorizedCommand) (an
 	}
 	metadata, _ := json.Marshal(apiMetadata{Request: c.Request, Caller: c.Caller, Transport: c.Caller.Transport, Intake: &intakeMetadata{Source: source, Goal: in.Goal, Configuration: config}})
 	record := taskapi.IntentRecord{ReceiptID: "tr_" + randomID(), NativeID: s.ID + "/" + in.RequestID, SessionID: s.ID, RequestID: in.RequestID, TaskID: apiID(h.cfg.InstanceID, "ordinary", s.ID+"/"+in.RequestID), Metadata: metadata}
-	payload, _ := json.Marshal(queuedPayload{FormalIntake: true, Content: content, Images: images, Files: resolved, MessagePurpose: "instruction", OwnerDevice: strings.TrimPrefix(c.Caller.StableScopeID, "device:"), Configuration: &config, ExpectedTarget: &dispatchTargetExpectation{ThreadID: thread, Revision: in.Target.Revision}})
+	payload, _ := json.Marshal(queuedPayload{RoleEpoch: h.SessionRoleEpoch(s), FormalIntake: true, Content: content, Images: images, Files: resolved, MessagePurpose: "instruction", OwnerDevice: strings.TrimPrefix(c.Caller.StableScopeID, "device:"), Configuration: &config, ExpectedTarget: &dispatchTargetExpectation{ThreadID: thread, Revision: in.Target.Revision}})
 	names := []string{}
 	for _, f := range files {
 		names = append(names, f.Name)

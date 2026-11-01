@@ -103,6 +103,8 @@ func (h *Hub) handleVoiceStart(c *Client, cmd clientproto.Command) {
 		c.enqueueEvent(voiceEvent(cmd, "error", "此 Bridge 不支援雙向語音"))
 		return
 	}
+	finishTransition := h.beginJarvisVoiceTransition(s.ID)
+	defer finishTransition()
 	if !h.consumeVoicePermit(c, s, cmd) {
 		c.enqueueEvent(voiceEvent(cmd, "error", "通話準備已失效，請從原對話重新開始"))
 		return

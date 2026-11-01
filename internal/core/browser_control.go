@@ -242,6 +242,9 @@ func (h *Hub) executeBrowserControl(ctx context.Context, resolver browserControl
 	if caller.Parent == nil || caller.Parent.ResumeID() != q.Thread || h.controllerCaller(caller) != nil {
 		return browsercontrol.Result{}, errors.New("browser_source_retired")
 	}
+	if e := h.jarvisExternalAdmission(caller, h.controllerCaller(caller) == nil); e != nil {
+		return browsercontrol.Result{}, e
+	}
 	p, err := q.Arguments()
 	if err != nil {
 		return browsercontrol.Result{}, err
@@ -337,7 +340,7 @@ func (h *Hub) executeBrowserControl(ctx context.Context, resolver browserControl
 	op.admitted = time.Now()
 	op.revalidate = func() bool {
 		fresh, e := resolver.ResolveBrowserControlCaller(q.Thread, q.ID, q.Fingerprint())
-		return e == nil && fresh.Parent == caller.Parent && fresh.RequestID == caller.RequestID && fresh.VoiceID == caller.VoiceID && fresh.TurnID == caller.TurnID && h.controllerCaller(fresh) == nil
+		return e == nil && fresh.Parent == caller.Parent && fresh.RequestID == caller.RequestID && fresh.VoiceID == caller.VoiceID && fresh.TurnID == caller.TurnID && h.controllerCaller(fresh) == nil && h.jarvisExternalAdmission(fresh, true) == nil
 	}
 	// A crash can lose the reply, never authorize replay. Store only identity/hash, no website content or fill values.
 	if err := h.claimBrowserOperation(q, binding); err != nil {

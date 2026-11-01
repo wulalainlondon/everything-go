@@ -17,6 +17,7 @@ import (
 )
 
 type codexVoiceCall struct {
+	roleEpoch                    uint64
 	callbackSpeech               bool
 	mediaGeneration              string
 	voiceID, threadID, sessionID string
@@ -152,7 +153,11 @@ func (c *Codex) StartRealtimeVoice(ctx context.Context, s *session.Session, inpu
 	if err := ctx.Err(); err != nil {
 		return backend.RealtimeVoiceAnswer{}, err
 	}
-	call := &codexVoiceCall{callbackSpeech: input.SpeakerInstructions != "", mediaGeneration: input.MediaGeneration, voiceID: input.VoiceID, threadID: id, sessionID: s.ID, answer: make(chan backend.RealtimeVoiceAnswer, 1), failure: make(chan error, 1), closed: make(chan struct{}), callback: input.OnEvent}
+	roleEpoch := uint64(0)
+	if p, ok := c.controlProvider.(backend.SessionRoleProvider); ok {
+		roleEpoch = p.SessionRoleEpoch(s)
+	}
+	call := &codexVoiceCall{roleEpoch: roleEpoch, callbackSpeech: input.SpeakerInstructions != "", mediaGeneration: input.MediaGeneration, voiceID: input.VoiceID, threadID: id, sessionID: s.ID, answer: make(chan backend.RealtimeVoiceAnswer, 1), failure: make(chan error, 1), closed: make(chan struct{}), callback: input.OnEvent}
 	c.voiceMu.Lock()
 	if c.voiceCalls == nil {
 		c.voiceCalls = map[string]*codexVoiceCall{}

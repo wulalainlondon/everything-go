@@ -17,6 +17,9 @@ func (h *Hub) contextBlockers(s *session.Session) []string {
 	if !h.eventSessionAllowed(s) || h.workspaceReservedSession(s.ID) {
 		out = append(out, "source_write_scope_unavailable")
 	}
+	if h.jarvisRoles != nil && h.jarvisRoles.AudioBusy(s.ID) {
+		out = append(out, "speech_or_release_unsettled")
+	}
 	if s.State() != session.Idle || s.QueueLen() != 0 || s.ActiveQueuedID() != "" {
 		out = append(out, "session_not_idle")
 	}
@@ -92,6 +95,10 @@ func (h *Hub) contextBlockers(s *session.Session) []string {
 }
 
 func (h *Hub) serveContext(w http.ResponseWriter, r *http.Request, device, path string) {
+	if path == "context/commit" || path == "context/prepare" {
+		h.jarvisRoleMu.Lock()
+		defer h.jarvisRoleMu.Unlock()
+	}
 	if r.Method != http.MethodPost || h.messageQueue == nil {
 		http.Error(w, "context reset unavailable", 503)
 		return
@@ -368,6 +375,9 @@ func (h *Hub) serveContext(w http.ResponseWriter, r *http.Request, device, path 
 	// authorization across either those waits or the provider idle RPC.
 	effectContext := backend.WithContextResetGuard(r.Context(), func() bool {
 		now := s.Snapshot()
+		if h.jarvisRoles != nil && h.jarvisRoles.AudioBusy(s.ID) {
+			return false
+		}
 		if !h.workScopeCurrent(r, device, in.jarvisWorkScope, s) || now.SourceRevision != v.SourceRevision || now.ResumeID != v.ThreadID || now.ConfigRevision != v.ConfigRevision || !s.ContextResetReserved() || h.toolRepairRunning.Load() || !h.controls.MobileMayWrite(s.ID) {
 			return false
 		}
@@ -410,6 +420,14 @@ func (h *Hub) serveContext(w http.ResponseWriter, r *http.Request, device, path 
 			}
 		}
 	}
+	if h.jarvisRoles != nil {
+		if e = h.jarvisRoles.MigrateWitness(s.ID, v.ThreadID, "", s.SettingsSnapshot().ConfigRevision, s.SettingsSnapshot().SourceRevision); e != nil {
+			v, _ = h.messageQueue.ContextResetPhase(context.Background(), scope, v.IntentID, "reset_issued", "unknown", "role_binding_migration_pending")
+			_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": 1, "reset": v})
+			return
+		}
+	}
+	h.emitJarvisRoleChanged()
 	phase := "completed"
 	if v.Mode == "handoff" {
 		phase = "awaiting_seed"

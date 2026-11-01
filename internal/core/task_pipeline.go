@@ -98,7 +98,7 @@ func (h *Hub) executePipeline(ctx context.Context, caller taskapi.BoundCaller, r
 	worker := h.unifiedBoundedWorker(bound)
 	role := "native_agent"
 	if h.dispatches != nil && bound.SourceSessionID != "" {
-		if g, err := h.dispatches.Grant(ctx, bound.SourceSessionID); err == nil && g.Enabled && g.Local {
+		if g, err := h.dispatches.Grant(ctx, bound.SourceSessionID); err == nil && g.Enabled && (g.Local || g.RoleEpoch > 0) {
 			role = "native_dispatcher"
 		}
 	}

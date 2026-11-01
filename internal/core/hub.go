@@ -35,6 +35,7 @@ import (
 	"everything-go/internal/governance"
 	"everything-go/internal/handoff"
 	"everything-go/internal/inbox"
+	"everything-go/internal/jarvisrole"
 	"everything-go/internal/linebridge"
 	"everything-go/internal/media"
 	"everything-go/internal/messagequeue"
@@ -103,6 +104,13 @@ type Hub struct {
 	workspaceMCPURL         string
 	workspaceMCP            *http.Server
 	partners                *partners.Store
+	jarvisRoles             *jarvisrole.Store
+	jarvisRoleMu            sync.Mutex
+	jarvisVoiceTransitions  map[string]int
+	jarvisResidentMu        sync.Mutex
+	jarvisResident          jarvisResidentStatus
+	jarvisResidentNext      int64
+	jarvisResidentRunning   bool
 	transfers               *voicetransfer.Store
 	interactionScheduler    atomic.Bool
 	interactionWake         chan struct{}
@@ -283,6 +291,11 @@ func NewHub(reg *session.Registry, cfg Config, pairing *governance.Pairing, port
 	} else {
 		log.Printf("[partners] storage unavailable: %v", err)
 	}
+	if store, err := jarvisrole.Open(cfg.DataDir, cfg.InstanceID); err == nil {
+		h.jarvisRoles = store
+	} else {
+		log.Printf("[jarvis-role] unavailable: %v", err)
+	}
 	if cfg.WorkspaceEnabled {
 		if store, err := workspace.Open(cfg.DataDir, cfg.InstanceID); err == nil {
 			h.workspace = store
@@ -337,6 +350,7 @@ func NewHub(reg *session.Registry, cfg Config, pairing *governance.Pairing, port
 		log.Printf("[session-dispatch] unavailable")
 	} else {
 		h.dispatches = store
+		h.dispatches.SetRoleGrantResolver(h.deriveJarvisGrant)
 	}
 	if cfg.DataDir != "" {
 		if inventory, err := deviceinventory.Open(cfg.DataDir); err != nil {
@@ -374,6 +388,9 @@ func NewHub(reg *session.Registry, cfg Config, pairing *governance.Pairing, port
 // as its Sink, so the Hub is built first).
 func (h *Hub) SetExecutor(e executor.Executor) {
 	h.exec = e
+	if h.dispatches != nil {
+		h.dispatches.SetRoleGrantResolver(h.deriveJarvisGrant)
+	}
 	if h.messageQueue != nil {
 		if requests, err := h.messageQueue.ActiveWorkspaceRequests(); err == nil {
 			for _, r := range requests {
@@ -866,6 +883,16 @@ func (h *Hub) Emit(event any) {
 					h.search.ProtectNativeSession(observed.ClaudeUUID)
 				}
 				_ = h.workspace.PinInitialThread(context.Background(), observed.SessionID, observed.ClaudeUUID)
+			}
+		}
+		if observed, ok := event.(protocol.SessionUUID); ok && h.jarvisRoles != nil {
+			if current, found := h.registry.Get(observed.SessionID); found && current.ResumeID() == observed.ClaudeUUID {
+				_, a := h.jarvisRoles.Snapshot()
+				if a != nil && a.Target.Session == current.ID && a.Target.Thread == "" {
+					if e := h.jarvisRoles.MigrateWitness(current.ID, "", observed.ClaudeUUID, current.SettingsSnapshot().ConfigRevision, current.SettingsSnapshot().SourceRevision); e == nil {
+						h.emitJarvisRoleChanged()
+					}
+				}
 			}
 		}
 		if observed, ok := event.(protocol.SessionUUID); ok && h.partners != nil {

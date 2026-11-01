@@ -76,7 +76,7 @@ func (h *Hub) unifiedDisclosureFence(ctx context.Context, c taskapi.VerifiedCont
 			if e != nil {
 				return e
 			}
-			if g.Revision != r.ControllerGrantRevision || !g.Allows(h.cfg.InstanceID, d.InstanceID, d.SessionID) {
+			if g.Revision != r.ControllerGrantRevision || !g.Allows(h.cfg.InstanceID, d.InstanceID, d.SessionID) && !h.jarvisRoleOriginalReceiptReadable(d) {
 				return unifiedError("permission")
 			}
 		case "delegation":

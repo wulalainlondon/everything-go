@@ -118,6 +118,9 @@ func (h *Hub) ExecuteScopedVoiceMedia(ctx context.Context, caller backend.Sessio
 	if h.unifiedMedia == nil || caller.Parent == nil || caller.ToolCallID == "" || caller.TurnID != origin.TurnID || caller.Parent.ID != origin.SessionID || caller.Parent.ResumeID() != origin.ThreadID || !mediaservice.IntentID.MatchString(intent) {
 		return nil, errors.New("media_origin_invalid")
 	}
+	if e := h.jarvisExternalAdmission(caller, caller.VoiceID != "" && caller.VoiceID == origin.VoiceID); e != nil {
+		return nil, e
+	}
 	operation := input.Operation
 	input.Operation = ""
 	if operation != "" && (method != "status" || !mediaservice.IntentID.MatchString(operation)) {

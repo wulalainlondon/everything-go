@@ -442,3 +442,15 @@ func (s *Store) ResetThreadCAS(sessionID, old string, revision uint64) error {
 	s.state = next
 	return nil
 }
+
+// WithProfileCAS holds the presentation revision stable across a human role
+// commit. The callback must not call back into this profile store.
+func (s *Store) WithProfileCAS(sessionID string, revision uint64, commit func(Profile) error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, ok := s.state.Profiles[sessionID]
+	if !ok || p.Revision != revision {
+		return errors.New("profile_revision_conflict")
+	}
+	return commit(p)
+}

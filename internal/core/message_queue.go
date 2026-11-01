@@ -23,6 +23,7 @@ import (
 )
 
 type queuedPayload struct {
+	RoleEpoch  uint64 `json:"role_epoch,omitempty"`
 	SteerOnly  bool   `json:"steer_only,omitempty"`
 	PipelineID string `json:"pipeline_id,omitempty"`
 
@@ -185,7 +186,7 @@ func (h *Hub) enqueueChatMessageExpectedInheritedMode(c *Client, cmd clientproto
 	if c.pipelineAdmission != nil {
 		pipelineID = c.pipelineAdmission.ID
 	}
-	payload, err := json.Marshal(queuedPayload{SteerOnly: steerOnly, PipelineID: pipelineID, VoiceContext: cmd.VoiceContext, VoiceID: cmd.VoiceID, VoiceThread: cmd.ThreadID, PartnerRole: role, CallbackOnComplete: cmd.CallbackOnComplete, VisualUserHash: userHash, VisualEffectiveHash: effectiveHash, VisualPresentation: cmd.VisualPresentation, MessagePurpose: cmd.MessagePurpose, OwnerDevice: owner, CallbackBinding: callbackBinding(c), Origin: cmd.TaskOrigin, Content: content, Images: cmd.Images, Files: files, Configuration: &config, ExpectedTarget: expected})
+	payload, err := json.Marshal(queuedPayload{RoleEpoch: h.SessionRoleEpoch(s), SteerOnly: steerOnly, PipelineID: pipelineID, VoiceContext: cmd.VoiceContext, VoiceID: cmd.VoiceID, VoiceThread: cmd.ThreadID, PartnerRole: role, CallbackOnComplete: cmd.CallbackOnComplete, VisualUserHash: userHash, VisualEffectiveHash: effectiveHash, VisualPresentation: cmd.VisualPresentation, MessagePurpose: cmd.MessagePurpose, OwnerDevice: owner, CallbackBinding: callbackBinding(c), Origin: cmd.TaskOrigin, Content: content, Images: cmd.Images, Files: files, Configuration: &config, ExpectedTarget: expected})
 	if err != nil {
 		h.queueError(c, cmd, "invalid_message", err.Error())
 		return false
@@ -337,6 +338,7 @@ func (h *Hub) runQueuedMessage(s *session.Session, requestID string) {
 		return
 	}
 	sendContext := backend.WithPartnerRole(backend.WithVisualPresentation(context.Background(), payload.VisualPresentation), payload.PartnerRole)
+	sendContext = backend.WithRoleEpoch(sendContext, payload.RoleEpoch)
 	if payload.WorkspaceTask != nil {
 		if _, target, err := h.validateWorkspaceNative(context.Background(), payload.WorkspaceTask.RoomID, payload.WorkspaceTask.TaskID); err != nil || target != s {
 			h.Emit(backend.NewError(s.ID, requestID, "room_authorization_changed", "Room authority changed at Send"))
@@ -368,6 +370,7 @@ func (h *Hub) runQueuedMessage(s *session.Session, requestID string) {
 		h.Emit(backend.NewError(s.ID, requestID, "unified_source_changed", err.Error()))
 		return
 	}
+	sendContext = h.withJarvisDispatchGuard(sendContext, s.ID, requestID)
 	if err = h.exec.Send(sendContext, s, requestID, payload.Content, payload.Images, payload.Files); err != nil {
 		if errors.Is(err, backend.ErrNativeSubmissionBusy) {
 			h.deferUnsubmittedQueuedMessage(s, requestID)

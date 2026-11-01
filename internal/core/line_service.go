@@ -95,6 +95,9 @@ func (h *Hub) ExecuteLineTool(ctx context.Context, caller backend.SessionControl
 	if h.workspaceReservedSession(caller.Parent.ID) || h.workspaceManagedRequest(caller.Parent.ID, caller.RequestID) {
 		return nil, linebridge.Fail("line_caller_not_owned")
 	}
+	if e := h.jarvisExternalAdmission(caller, h.LineSubjectAllowed("session:"+caller.Parent.ID)); e != nil {
+		return nil, e
+	}
 	registered, ok := h.registry.Get(caller.Parent.ID)
 	if !ok || registered != caller.Parent || strings.HasPrefix(registered.ID, "s_dg_") || !h.controls.MobileMayWrite(registered.ID) {
 		return nil, linebridge.Fail("line_caller_not_owned")

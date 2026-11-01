@@ -734,7 +734,7 @@ func (h *Hub) resolveUnified(ctx context.Context, c taskapi.VerifiedContext, man
 			return out, unifiedError("permission")
 		}
 		g, e := h.dispatches.Grant(ctx, d.ParentID)
-		if e != nil || !g.Allows(h.cfg.InstanceID, d.InstanceID, d.SessionID) {
+		if e != nil || !g.Allows(h.cfg.InstanceID, d.InstanceID, d.SessionID) && !h.jarvisRoleOriginalReceiptReadable(d) {
 			return out, unifiedError("permission")
 		}
 		out.ControllerGrantRevision = g.Revision
@@ -743,7 +743,7 @@ func (h *Hub) resolveUnified(ctx context.Context, c taskapi.VerifiedContext, man
 		out.State = d.State
 		out.ReplyHash = d.IntentHash
 		out.Delivery = d.DeliveryState
-		out.CanEdit = manager == d.ParentID
+		out.CanEdit = manager == d.ParentID && g.Allows(h.cfg.InstanceID, d.InstanceID, d.SessionID)
 	case "delegation":
 		if h.delegations == nil {
 			return out, unifiedError("unsupported")
