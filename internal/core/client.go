@@ -167,6 +167,7 @@ type Client struct {
 	supportsSessionReadSync atomic.Bool
 	readIdentity            atomic.Pointer[pairedReadIdentity]
 	supportsCollaborationV2 atomic.Bool
+	activity                activityClient
 
 	// rtc holds the answering peer connection negotiated over this client's
 	// signaling channel, if any. Set on webrtc_offer; consulted by webrtc_ice

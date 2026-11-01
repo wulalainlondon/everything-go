@@ -240,6 +240,9 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		}
 		if !c.enrollmentOnly && !c.inventoryProbe && !cmd.ConnectionProbe {
 			helloInput.Capabilities = append(helloInput.Capabilities, "context_observation_v1")
+			if h.pairedTaskDevice(c) != "" {
+				helloInput.Capabilities = append(helloInput.Capabilities, "agent_activity_v2")
+			}
 		}
 		c.enqueueEvent(h.client.HelloAck(helloInput))
 		if c.inventoryProbe || cmd.ConnectionProbe {
@@ -382,6 +385,8 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 
 	case "request_internal_agent_observation":
 		go h.handleInternalAgentObservation(ctx, c, cmd.SessionID, cmd.RequestID)
+	case "request_agent_activity":
+		go h.handleActivity(ctx, c, cmd.SessionID, cmd.RequestID, cmd.AgentActivity)
 
 	case "request_plugin_metadata_status":
 		if h.pairedTaskDevice(c) != "" {

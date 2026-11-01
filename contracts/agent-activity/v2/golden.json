@@ -1,0 +1,140 @@
+{
+  "scope": "ENGINEERING_FIXTURES_ONLY",
+  "snapshot": {
+    "type": "agent_activity_snapshot",
+    "schema": "agent-activity.v2",
+    "request_id": "act_fixture",
+    "authority": "authority",
+    "session_id": "original",
+    "root_thread_id": "root",
+    "source_epoch": "boot:1:1",
+    "config_revision": 1,
+    "snapshot_token": "token",
+    "revision": 1,
+    "native_source_revision": 1,
+    "query_fingerprint": "fingerprint",
+    "observed_at": "2026-11-02T00:00:00Z",
+    "availability": "live",
+    "coverage": "partial_selected_root_native_activity",
+    "inventory_complete": false,
+    "aggregate_observed_actors": 1,
+    "offset": 0,
+    "next_offset": null,
+    "origins": [
+      {
+        "turn_id": "parent",
+        "request_id": "r_original",
+        "actor_ids": [
+          "actor"
+        ]
+      }
+    ],
+    "waits": [
+      {
+        "id": "wait",
+        "parent_turn_id": "parent",
+        "state": "blocking"
+      }
+    ],
+    "recovery": "captured_prefix_partial_inventory",
+    "recovery_stats": {
+      "scanned_bytes": 100,
+      "records": 1,
+      "oversized_records": 0,
+      "malformed_records": 0,
+      "rejected_native_records": 0,
+      "partial_tail_bytes": 0
+    },
+    "capabilities": [
+      "direct_native_actors"
+    ],
+    "actors": [
+      {
+        "id": "actor",
+        "thread_id": "native-child",
+        "path": "/root/reviewer",
+        "activities": [
+          {
+            "id": "creation",
+            "parent_turn_id": "parent",
+            "kind": "started",
+            "at_ms": 1000,
+            "creation_model": "model-original",
+            "creation_effort": null
+          }
+        ],
+        "rounds": [
+          {
+            "id": "real-round",
+            "status": "completed",
+            "root_chain_turn_id": "parent",
+            "parent_association": "native_root_chain",
+            "started_at": 1,
+            "completed_at": 2
+          }
+        ],
+        "rounds_truncated": true
+      }
+    ],
+    "parent_views": [],
+    "aggregate_activities": 1,
+    "aggregate_origins": 1,
+    "aggregate_waits": 1,
+    "aggregate_parent_views": 0,
+    "aggregate_parent_activity_ids": 0
+  },
+  "report": {
+    "type": "agent_activity_report",
+    "schema": "agent-activity.v2",
+    "request_id": "act_report",
+    "authority": "authority",
+    "session_id": "original",
+    "root_thread_id": "root",
+    "source_epoch": "boot:1:1",
+    "config_revision": 1,
+    "source_revision": 1,
+    "snapshot_token": "token",
+    "actor_id": "actor",
+    "turn_id": "real-round",
+    "item_id": "public-item",
+    "text": "Engineering fixture public text; PASS is not a QA verdict.",
+    "availability": "available",
+    "canonical_qa": "unverified",
+    "origin": "native_public_final",
+    "observed_at": "2026-11-02T00:00:00Z"
+  },
+  "error": {
+    "type": "error",
+    "command_type": "request_agent_activity",
+    "request_id": "act_failure",
+    "session_id": "original",
+    "code": "activity_snapshot_expired",
+    "message": "activity_snapshot_expired"
+  },
+  "timeline": {
+    "type": "agent_activity_timeline",
+    "schema": "agent-activity.v2",
+    "request_id": "act_timeline",
+    "authority": "authority",
+    "session_id": "original",
+    "root_thread_id": "root",
+    "source_epoch": "boot:1:1",
+    "config_revision": 1,
+    "native_source_revision": 1,
+    "snapshot_token": "token",
+    "actor_id": "actor",
+    "offset": 0,
+    "next_offset": null,
+    "total_observed": 1,
+    "events": [
+      {
+        "id": "creation",
+        "parent_turn_id": "parent",
+        "kind": "started",
+        "at_ms": 1000,
+        "creation_model": "model-original",
+        "creation_effort": null
+      }
+    ]
+  }
+}

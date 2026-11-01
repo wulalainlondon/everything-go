@@ -27,6 +27,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"everything-go/internal/agentactivity"
 	"everything-go/internal/agentvisibility"
 	"everything-go/internal/backend"
 	"everything-go/internal/executor"
@@ -64,6 +65,7 @@ var (
 )
 
 type codexState struct {
+	hostedViewRevision      uint64
 	residentToolsEpoch      uint64
 	residentToolsTransport  uint64
 	residentRoleEpoch       uint64
@@ -74,7 +76,12 @@ type codexState struct {
 	automaticIsContinuation bool
 	automaticInput          []map[string]any
 
-	visibility agentvisibility.Channel
+	visibility          agentvisibility.Channel
+	hostedActivity      *agentactivity.NativeSource
+	hostedActivityScope agentactivity.NativeScope
+	hostedRecovery      *hostedRecovery
+	hostedWaits         agentactivity.WaitJournal
+	hostedBoundaries    hostedBoundaries
 
 	mu       sync.Mutex
 	ensureMu sync.Mutex
@@ -1303,8 +1310,15 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 	}
 	// Async annotations are independent of the generating turn's lifetime. A
 	// replayed completed item must not be discarded by retired-turn filtering.
+	c.observeHostedBoundary(s, m.Method, m.Params)
+	if m.Method == "item/started" || m.Method == "item/completed" {
+		c.observeHostedWait(s, m.Method, m.Params)
+	}
 	if m.Method == "item/completed" {
 		c.observeAsyncItem(s, p.ThreadID, m.Params)
+		if p.Item.Type == "subAgentActivity" {
+			c.observeHostedNativeItem(s, m.Params)
+		}
 	}
 	st := c.state(s.ID)
 	st.mu.Lock()

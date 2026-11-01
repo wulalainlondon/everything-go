@@ -1,0 +1,911 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "bridge-agent-activity-v2",
+  "$defs": {
+    "ParentView": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "turn_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "boundary_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "activity_ids": {
+          "type": "array",
+          "maxItems": 1024,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        },
+        "coverage": {
+          "type": "string",
+          "const": "partial_observed_before_native_parent_terminal"
+        },
+        "actor_ids": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        }
+      },
+      "required": [
+        "turn_id",
+        "boundary_id",
+        "activity_ids",
+        "coverage",
+        "actor_ids"
+      ]
+    },
+    "RecoveryStats": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "scanned_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "records": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "oversized_records": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "malformed_records": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "rejected_native_records": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "partial_tail_bytes": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "scanned_bytes",
+        "records",
+        "oversized_records",
+        "malformed_records",
+        "rejected_native_records",
+        "partial_tail_bytes"
+      ]
+    },
+    "Query": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "view": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "enum": [
+            "snapshot",
+            "page",
+            "report",
+            "timeline"
+          ]
+        },
+        "snapshot_token": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 63
+        },
+        "actor_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "turn_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "activity_offset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1024
+        }
+      },
+      "required": [
+        "view"
+      ]
+    },
+    "Origin": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "turn_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "request_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "actor_ids": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        }
+      },
+      "required": [
+        "turn_id",
+        "request_id",
+        "actor_ids"
+      ]
+    },
+    "Activity": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "parent_turn_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "kind": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "enum": [
+            "started",
+            "interacted",
+            "interrupted",
+            "completed"
+          ]
+        },
+        "at_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "creation_model": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "creation_effort": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 256
+        }
+      },
+      "required": [
+        "id",
+        "parent_turn_id",
+        "kind",
+        "at_ms",
+        "creation_model",
+        "creation_effort"
+      ]
+    },
+    "Round": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "status": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "enum": [
+            "inProgress",
+            "completed",
+            "failed",
+            "interrupted"
+          ]
+        },
+        "root_chain_turn_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "parent_association": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "enum": [
+            "native_root_chain",
+            "unresolved"
+          ]
+        },
+        "started_at": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "completed_at": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        }
+      },
+      "required": [
+        "id",
+        "status",
+        "root_chain_turn_id",
+        "parent_association",
+        "started_at",
+        "completed_at"
+      ]
+    },
+    "Actor": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "thread_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "activities": {
+          "type": "array",
+          "maxItems": 1024,
+          "items": {
+            "$ref": "#/$defs/Activity"
+          }
+        },
+        "rounds": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "$ref": "#/$defs/Round"
+          }
+        },
+        "rounds_truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "thread_id",
+        "path",
+        "activities",
+        "rounds",
+        "rounds_truncated"
+      ]
+    },
+    "Wait": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "parent_turn_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "state": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "enum": [
+            "blocking",
+            "exited",
+            "unknown"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "parent_turn_id",
+        "state"
+      ]
+    },
+    "Snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "const": "agent_activity_snapshot"
+        },
+        "schema": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "const": "agent-activity.v2"
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "authority": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "root_thread_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "source_epoch": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "config_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "snapshot_token": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "query_fingerprint": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "observed_at": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "availability": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "enum": [
+            "live",
+            "unsupported",
+            "unknownstale"
+          ]
+        },
+        "coverage": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "const": "partial_selected_root_native_activity"
+        },
+        "inventory_complete": {
+          "type": "boolean",
+          "const": false
+        },
+        "aggregate_observed_actors": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 16
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 63
+        },
+        "next_offset": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 63
+        },
+        "actors": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "$ref": "#/$defs/Actor"
+          }
+        },
+        "origins": {
+          "type": "array",
+          "maxItems": 1024,
+          "items": {
+            "$ref": "#/$defs/Origin"
+          }
+        },
+        "waits": {
+          "type": "array",
+          "maxItems": 128,
+          "items": {
+            "$ref": "#/$defs/Wait"
+          }
+        },
+        "recovery": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "capabilities": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        },
+        "recovery_stats": {
+          "$ref": "#/$defs/RecoveryStats"
+        },
+        "native_source_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "parent_views": {
+          "type": "array",
+          "maxItems": 128,
+          "items": {
+            "$ref": "#/$defs/ParentView"
+          }
+        },
+        "aggregate_activities": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1024
+        },
+        "aggregate_origins": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1024
+        },
+        "aggregate_waits": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 128
+        },
+        "aggregate_parent_views": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 128
+        },
+        "aggregate_parent_activity_ids": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1024
+        }
+      },
+      "required": [
+        "type",
+        "schema",
+        "request_id",
+        "authority",
+        "session_id",
+        "root_thread_id",
+        "source_epoch",
+        "config_revision",
+        "snapshot_token",
+        "revision",
+        "query_fingerprint",
+        "observed_at",
+        "availability",
+        "coverage",
+        "inventory_complete",
+        "aggregate_observed_actors",
+        "offset",
+        "next_offset",
+        "actors",
+        "origins",
+        "waits",
+        "recovery",
+        "capabilities",
+        "recovery_stats",
+        "native_source_revision",
+        "parent_views",
+        "aggregate_activities",
+        "aggregate_origins",
+        "aggregate_waits",
+        "aggregate_parent_views",
+        "aggregate_parent_activity_ids"
+      ]
+    },
+    "Report": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "const": "agent_activity_report"
+        },
+        "schema": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "const": "agent-activity.v2"
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "authority": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "snapshot_token": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "actor_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "turn_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "item_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "text": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 0,
+          "maxLength": 16384
+        },
+        "availability": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "enum": [
+            "available",
+            "unavailable"
+          ]
+        },
+        "canonical_qa": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "const": "unverified"
+        },
+        "root_thread_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "source_epoch": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "config_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "source_revision": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "origin": {
+          "type": "string",
+          "const": "native_public_final"
+        },
+        "observed_at": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        }
+      },
+      "required": [
+        "type",
+        "schema",
+        "request_id",
+        "authority",
+        "session_id",
+        "snapshot_token",
+        "actor_id",
+        "turn_id",
+        "item_id",
+        "text",
+        "availability",
+        "canonical_qa",
+        "root_thread_id",
+        "source_epoch",
+        "config_revision",
+        "source_revision",
+        "origin",
+        "observed_at"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "availability": {
+                "const": "available"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "item_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "text": {
+                "type": "string"
+              },
+              "source_revision": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "item_id": {
+                "type": "null"
+              },
+              "text": {
+                "type": "null"
+              },
+              "source_revision": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "ActivityError": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "const": "error"
+        },
+        "command_type": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "const": "request_agent_activity"
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 80
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "code": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        }
+      },
+      "required": [
+        "type",
+        "command_type",
+        "request_id",
+        "session_id",
+        "code",
+        "message"
+      ]
+    },
+    "Timeline": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "const": "agent_activity_timeline"
+        },
+        "schema": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "const": "agent-activity.v2"
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "authority": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "root_thread_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "source_epoch": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "config_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "native_source_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "snapshot_token": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "actor_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1024
+        },
+        "next_offset": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1024
+        },
+        "total_observed": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1024
+        },
+        "events": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "$ref": "#/$defs/Activity"
+          }
+        },
+        "previous_offset": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1024
+        }
+      },
+      "required": [
+        "type",
+        "schema",
+        "request_id",
+        "authority",
+        "session_id",
+        "root_thread_id",
+        "source_epoch",
+        "config_revision",
+        "native_source_revision",
+        "snapshot_token",
+        "actor_id",
+        "offset",
+        "next_offset",
+        "total_observed",
+        "events",
+        "previous_offset"
+      ]
+    }
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/Snapshot"
+    },
+    {
+      "$ref": "#/$defs/Report"
+    },
+    {
+      "$ref": "#/$defs/ActivityError"
+    },
+    {
+      "$ref": "#/$defs/Timeline"
+    }
+  ]
+}

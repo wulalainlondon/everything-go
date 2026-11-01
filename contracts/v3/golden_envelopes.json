@@ -2,6 +2,15 @@
   "protocol_version": 3,
   "events": [
     {
+      "type": "agent_activity_report"
+    },
+    {
+      "type": "agent_activity_snapshot"
+    },
+    {
+      "type": "agent_activity_timeline"
+    },
+    {
       "type": "agent_tree"
     },
     {
@@ -608,6 +617,9 @@
     },
     {
       "type": "rename_session"
+    },
+    {
+      "type": "request_agent_activity"
     },
     {
       "type": "request_attachment_replay"
