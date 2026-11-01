@@ -54,7 +54,13 @@ func (h *Hub) jarvisRoleExcluded(id string) bool {
 	return false
 }
 func (h *Hub) jarvisRoleEligible(s *session.Session) bool {
-	if s == nil || !h.controllerInScope(s) || s.State() == session.Closed || s.Snapshot().Hidden || strings.HasPrefix(s.ID, "s_dg_") || strings.HasPrefix(s.ID, "pm_") || !h.controls.MobileMayWrite(s.ID) || h.workspaceReservedSession(s.ID) || h.jarvisRoleExcluded(s.ID) {
+	return h.jarvisOrdinaryAudioSourceEligible(s) && h.controllerInScope(s) && !h.jarvisRoleExcluded(s.ID)
+}
+
+// An observation lease preserves original ordinary voice/STT access. Bundle
+// resource exclusions and controller root scope do not revoke that base access.
+func (h *Hub) jarvisOrdinaryAudioSourceEligible(s *session.Session) bool {
+	if s == nil || s.State() == session.Closed || s.Snapshot().Hidden || strings.HasPrefix(s.ID, "s_dg_") || strings.HasPrefix(s.ID, "pm_") || !h.controls.MobileMayWrite(s.ID) || h.workspaceReservedSession(s.ID) {
 		return false
 	}
 	if s.Backend() != backend.Codex && s.Backend() != backend.Claude {

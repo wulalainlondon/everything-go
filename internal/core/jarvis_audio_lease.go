@@ -48,7 +48,7 @@ func (h *Hub) serveJarvisAudioLease(w http.ResponseWriter, r *http.Request, devi
 	defer h.jarvisRoleMu.Unlock()
 	if in.Phase == "acquired" {
 		s, ok := h.registry.Get(in.Target.Session)
-		if !ok || !h.jarvisRoleEligible(s) || h.contextAdmissionBlocked(s) || in.Target.Authority != h.cfg.InstanceID || s.ResumeID() != in.Target.Thread || s.SettingsSnapshot().ConfigRevision != in.Target.Revision || len(in.SpeechID) < 8 || len(in.SpeechID) > 128 {
+		if !ok || !h.jarvisOrdinaryAudioSourceEligible(s) || h.contextAdmissionBlocked(s) || in.Target.Authority != h.cfg.InstanceID || s.ResumeID() != in.Target.Thread || s.SettingsSnapshot().ConfigRevision != in.Target.Revision || len(in.SpeechID) < 8 || len(in.SpeechID) > 128 {
 			fail(409, "audio_lease_source_changed")
 			return
 		}
@@ -57,7 +57,11 @@ func (h *Hub) serveJarvisAudioLease(w http.ResponseWriter, r *http.Request, devi
 		fail(403, "pairing_changed")
 		return
 	}
-	v, e := h.jarvisRoles.SetAudioLease(actor, jarvisrole.AudioLease{ID: in.ID, Target: in.Target, Epoch: in.Epoch, Phase: in.Phase, SpeechID: in.SpeechID}, in.Expected, jarvisHash(in))
+	epoch := uint64(0)
+	if a := h.currentJarvisRole(); a != nil && a.Target.Session == in.Target.Session {
+		epoch = a.Epoch
+	}
+	v, e := h.jarvisRoles.SetAudioLease(actor, jarvisrole.AudioLease{ID: in.ID, Target: in.Target, Epoch: in.Epoch, Phase: in.Phase, SpeechID: in.SpeechID}, in.Expected, jarvisHash(in), epoch)
 	if e != nil {
 		fail(409, e.Error())
 		return

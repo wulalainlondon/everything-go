@@ -36,7 +36,7 @@ func (s *Store) AudioBusy(session string) bool {
 	}
 	return false
 }
-func (s *Store) SetAudioLease(actor string, v AudioLease, expected uint64, hash string) (AudioLease, error) {
+func (s *Store) SetAudioLease(actor string, v AudioLease, expected uint64, hash string, admittedEpoch ...uint64) (AudioLease, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	old, exists := s.state.AudioLeases[v.ID]
@@ -56,6 +56,11 @@ func (s *Store) SetAudioLease(actor string, v AudioLease, expected uint64, hash 
 		expectedEpoch := uint64(0)
 		if a := s.state.Assignment; a != nil && a.Target.Session == v.Target.Session {
 			expectedEpoch = a.Epoch
+		}
+		// Optional host witness accounts for a stored assignment suspended by
+		// current source/pairing/operator policy. Ordinary audio remains epoch0.
+		if len(admittedEpoch) > 0 {
+			expectedEpoch = admittedEpoch[0]
 		}
 		if v.Phase != "acquired" || v.Epoch != expectedEpoch {
 			return v, errors.New("audio_lease_role_changed")

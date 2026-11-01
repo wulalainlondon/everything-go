@@ -552,3 +552,31 @@ func TestJarvisAudioOriginalLeaseNarrowRecoveryAfterSourceRetired(t *testing.T) 
 		t.Fatal("release restored new authority or retained old busy lease")
 	}
 }
+
+func TestJarvisRoleResourceExclusionPreservesOrdinaryAudioLease(t *testing.T) {
+	for _, kind := range []string{"excluded", "outside_controller_root", "suspended_assignment"} {
+		t.Run(kind, func(t *testing.T) {
+			h, call, s, p := roleFixture(t)
+			if kind == "suspended_assignment" {
+				if w := call("POST", "role/assign", roleAssignInput(h, s, p, "r_role_assign_original", 0), "phone"); w.Code != 200 {
+					t.Fatal(w.Code, w.Body.String())
+				}
+			}
+			if kind == "outside_controller_root" {
+				h.cfg.RootDir = t.TempDir()
+			} else if e := os.WriteFile(filepath.Join(h.cfg.DataDir, "jarvis-role-policy.json"), []byte(`{"excluded_sessions":["s_role_source_original"]}`), 0600); e != nil {
+				t.Fatal(e)
+			}
+			if h.jarvisRoleEligible(s) || h.currentJarvisRole() != nil {
+				t.Fatal("bundle resource exclusion did not apply")
+			}
+			body := map[string]any{"authority_instance_id": h.cfg.InstanceID, "lease_id": "r_base_audio_lease_original", "speech_id": "speech-base-original", "target": jarvisrole.Target{h.cfg.InstanceID, s.ID, s.ResumeID(), s.SettingsSnapshot().ConfigRevision}, "expected_role_epoch": 0, "phase": "acquired", "expected_lease_revision": 0}
+			if w := call("POST", "role/audio-lease", body, "phone"); w.Code != 200 {
+				t.Fatal("role policy revoked base ordinary voice", w.Code, w.Body.String())
+			}
+			if h.SessionRoleEpoch(s) != 0 || h.currentJarvisRole() != nil {
+				t.Fatal("ordinary lease restored suspended role")
+			}
+		})
+	}
+}
