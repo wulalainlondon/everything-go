@@ -23,6 +23,7 @@ import (
 // All fields are optional; only `Type` is always present. New command fields can
 // be appended without breaking older ones.
 type Inbound struct {
+	AgentActivity   json.RawMessage                    `json:"agent_activity,omitempty"`
 	Workspace       *workspace.Command                 `json:"workspace,omitempty"`
 	Partner         *partners.Request                  `json:"partner,omitempty"`
 	ToolEnvironment *toolenv.Request                   `json:"tool_environment,omitempty"`

@@ -3,6 +3,7 @@
 package clientproto
 
 import (
+	"encoding/json"
 	"everything-go/internal/backend"
 	"everything-go/internal/coordination"
 	"everything-go/internal/eventinbox"
@@ -23,7 +24,8 @@ func NewAppV1() AppV1 { return AppV1{} }
 
 // Command is the protocol-neutral shape the core router consumes.
 type Command struct {
-	Workspace *workspace.Command
+	AgentActivity json.RawMessage
+	Workspace     *workspace.Command
 	// Internal admission hint; never populated by the wire adapter.
 	AutoVoicePhoto  bool
 	Partner         *partners.Request
@@ -217,6 +219,7 @@ type Command struct {
 
 func (AppV1) ParseCommand(in protocol.Inbound) Command {
 	return Command{
+		AgentActivity:   in.AgentActivity,
 		Workspace:       in.Workspace,
 		Partner:         in.Partner,
 		ToolEnvironment: in.ToolEnvironment,

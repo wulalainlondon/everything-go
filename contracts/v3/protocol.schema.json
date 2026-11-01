@@ -114,6 +114,9 @@
     },
     "event_types": {
       "const": [
+        "agent_activity_report",
+        "agent_activity_snapshot",
+        "agent_activity_timeline",
         "agent_tree",
         "artifact_created",
         "artifact_updated",
@@ -320,6 +323,7 @@
         "reclaim_from_desktop",
         "reconcile_queue_receipts",
         "rename_session",
+        "request_agent_activity",
         "request_attachment_replay",
         "request_backend_catalog",
         "request_goals_snapshot",

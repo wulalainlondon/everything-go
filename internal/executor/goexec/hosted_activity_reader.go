@@ -30,6 +30,10 @@ func (c *Codex) ObserveHostedActivity(ctx context.Context, s *session.Session, a
 	if st.hostedActivity == nil || st.hostedActivityScope != scope {
 		st.hostedActivity = agentactivity.NewNativeSource(scope)
 		st.hostedActivityScope = scope
+		st.hostedRecovery = nil
+		st.hostedWaits = agentactivity.WaitJournal{}
+		st.hostedBoundaries = hostedBoundaries{}
+		st.hostedViewRevision++
 	}
 	source := st.hostedActivity
 	st.mu.Unlock()
@@ -53,7 +57,14 @@ func (c *Codex) observeHostedNativeItem(s *session.Session, raw json.RawMessage)
 	if rpc.Scope() != scope {
 		return
 	}
-	_ = source.Observe(scope, raw) // Invalid shapes never enter the source.
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.hostedActivityScope == scope && st.hostedActivity == source {
+		if source.Observe(scope, raw) == nil {
+			st.hostedBoundaries.activity(raw, scope.RootThread)
+			st.hostedViewRevision++
+		}
+	}
 }
 
 type hostedActivityRPC struct{ codexVisibilityRPC }
