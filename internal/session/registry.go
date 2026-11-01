@@ -26,13 +26,15 @@ import (
 // All mutable fields are private; callers go through the methods below so the
 // mutex is always held and reads see a consistent view.
 type Session struct {
-	mu                 sync.Mutex
-	configUpdating     bool
-	contextResetID     string
-	configRevision     uint64
-	sourceRevision     uint64
-	contextNotBeforeMS int64
-	futureConfig       *Configuration
+	mu                   sync.Mutex
+	configUpdating       bool
+	contextResetID       string
+	configRevision       uint64
+	sourceRevision       uint64
+	contextNotBeforeMS   int64
+	futureConfig         *Configuration
+	runtimeDefaultEffort *runtimeDefaultEffort
+	defaultEffortSerial  uint64
 
 	// ID and CreatedAt are set once at construction and never change, so they
 	// are exported and safe to read concurrently without the lock.
@@ -172,6 +174,7 @@ func (s *Session) SetName(name string) {
 // SetEffort stores the reasoning effort applied on the next claude spawn.
 func (s *Session) SetEffort(effort string) {
 	s.mu.Lock()
+	s.invalidateDefaultEffortLocked()
 	if s.effort != effort {
 		s.advanceSourceRevisionLocked()
 	}
@@ -183,6 +186,7 @@ func (s *Session) SetEffort(effort string) {
 // default, so it cannot use ApplyConfig's omit-empty semantics.
 func (s *Session) SetModel(model string) {
 	s.mu.Lock()
+	s.invalidateDefaultEffortLocked()
 	if s.model != model {
 		s.advanceSourceRevisionLocked()
 	}
@@ -278,6 +282,8 @@ func (s *Session) ApplyConfig(backend, model, sandbox string) {
 // when a turn establishes or clears one).
 func (s *Session) SetResumeID(id string) {
 	s.mu.Lock()
+	firstDefault := s.runtimeDefaultEffort
+	first := s.resumeID == "" && id != "" && firstDefault != nil && firstDefault.source == s.sourceRevision && firstDefault.thread == ""
 	if id != "" && s.resumeID != "" && s.resumeID != id {
 		s.historicalResumeIDs = appendUniqueResumeID(s.historicalResumeIDs, s.resumeID, id)
 	}
@@ -292,6 +298,13 @@ func (s *Session) SetResumeID(id string) {
 		}
 	}
 	s.resumeID = id
+	if first {
+		// Only the first physical thread may carry this exact default through
+		// the original SessionUUID pin. Replacements/reset never inherit it.
+		copy := *firstDefault
+		copy.source, copy.thread = s.sourceRevision, id
+		s.runtimeDefaultEffort = &copy
+	}
 	s.mu.Unlock()
 }
 
@@ -964,6 +977,7 @@ func (s *Session) SetContextForGeneration(thread string, revision uint64, used, 
 // Caller holds s.mu. Keep source report eligibility across configuration,
 // generation and Go restart; observer time must not re-authorize old native rows.
 func (s *Session) advanceSourceRevisionLocked() {
+	s.invalidateDefaultEffortLocked()
 	s.sourceRevision++
 	s.contextNotBeforeMS = max(time.Now().UnixMilli(), s.contextNotBeforeMS+1)
 }

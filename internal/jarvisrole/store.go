@@ -60,13 +60,50 @@ type savedOperation struct {
 	Actor string `json:"actor"`
 }
 type state struct {
-	AudioLeases map[string]AudioLease     `json:"audio_leases"`
-	Version     int                       `json:"version"`
-	Authority   string                    `json:"authority"`
-	Revision    uint64                    `json:"revision"`
-	Assignment  *savedAssignment          `json:"assignment"`
-	Operations  map[string]savedOperation `json:"operations"`
+	WitnessMigrations []WitnessMigration        `json:"witness_migrations,omitempty"`
+	AudioLeases       map[string]AudioLease     `json:"audio_leases"`
+	Version           int                       `json:"version"`
+	Authority         string                    `json:"authority"`
+	Revision          uint64                    `json:"revision"`
+	Assignment        *savedAssignment          `json:"assignment"`
+	Operations        map[string]savedOperation `json:"operations"`
 }
+
+// WitnessMigration records only a proven default-effort normalization. The
+// role epoch, native/config identity, original grants and effect intents stay
+// unchanged; this is not an assign operation or a generic source adoption API.
+type WitnessMigration struct {
+	Session  string `json:"session_id"`
+	Thread   string `json:"thread_id"`
+	Config   uint64 `json:"config_revision"`
+	Before   uint64 `json:"source_revision_before"`
+	After    uint64 `json:"source_revision_after"`
+	Epoch    uint64 `json:"role_epoch"`
+	Revision uint64 `json:"assignment_revision"`
+	Reason   string `json:"reason"`
+	At       int64  `json:"at"`
+}
+
+func (s *Store) MigrateDefaultEffort(session, thread string, config, before, after, epoch, revision uint64, reason string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	a := s.state.Assignment
+	if a == nil || !a.Enabled || a.Target.Session != session || a.Target.Thread != thread || a.Target.Revision != config || a.SourceRevision != before || a.Epoch != epoch || a.Revision != revision || after <= before || after != before+1 || (reason != "provider_default_effort_observed" && reason != "normal_default_effort_restored") {
+		return errors.New("role_default_effort_witness_retired")
+	}
+	n := s.state
+	n.Revision++
+	v := *a
+	v.SourceRevision, v.Revision = after, n.Revision
+	n.Assignment = &v
+	n.WitnessMigrations = append(append([]WitnessMigration(nil), s.state.WitnessMigrations...), WitnessMigration{session, thread, config, before, after, epoch, n.Revision, reason, time.Now().UnixMilli()})
+	if e := s.persist(n); e != nil {
+		return e
+	}
+	s.state = n
+	return nil
+}
+
 type Store struct {
 	authority string
 	mu        sync.Mutex

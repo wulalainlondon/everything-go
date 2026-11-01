@@ -346,11 +346,23 @@ func (s *Session) EndTurn() {
 // next queued turn can begin. Close/duplicate terminal races cannot double
 // close turnDone because ownership is detached under the Session lock.
 func (s *Session) PrepareEndTurn() func() {
+	release, _ := s.PrepareEndTurnWithDefaultEffort()
+	return release
+}
+
+// Only the Hub's correlated normal terminal consumes this host-only receipt.
+// Other release/uncertainty paths preserve their existing fail-closed behavior.
+func (s *Session) PrepareEndTurnWithDefaultEffort() (func(), *DefaultEffortTransition) {
 	s.mu.Lock()
+	var transition *DefaultEffortTransition
 	if s.state == Streaming || s.state == Stopping {
 		s.state = Idle
 		if s.futureConfig != nil {
+			before, observed := s.snapshotLocked(), s.restorableDefaultEffortLocked()
 			s.applyConfigurationLocked(*s.futureConfig)
+			if observed != nil && s.sourceRevision == before.SourceRevision+1 {
+				transition = s.defaultEffortTransitionLocked(before, "normal_default_effort_restored", observed.epoch)
+			}
 		}
 	}
 	done := s.turnDone
@@ -364,7 +376,7 @@ func (s *Session) PrepareEndTurn() func() {
 				close(done)
 			}
 		})
-	}
+	}, transition
 }
 
 // MarkStopping records that a stop was requested for the in-flight turn. Purely

@@ -203,3 +203,42 @@ func TestControllerPinnedNativeResumeAndStartNeverFork(t *testing.T) {
 		})
 	}
 }
+
+type defaultEffortRoleProvider struct{ controllerTestProvider }
+
+func (defaultEffortRoleProvider) SessionRoleEpoch(*session.Session) uint64 { return 1 }
+func TestCodexDefaultEffortObservationUsesOriginalHostEpochReceipt(t *testing.T) {
+	sink := &capSink{}
+	c := NewCodex(sink, "codex")
+	c.controlProvider = defaultEffortRoleProvider{}
+	s := session.NewRegistry().Create("original-default", "Original", t.TempDir(), backend.Codex, "gpt-6.1-sol", "read-only", "")
+	c.applyThreadRuntimeMetadata(s, json.RawMessage(`{"thread":{"model":"gpt-6.1-sol","reasoningEffort":"high"}}`))
+	if s.Snapshot().SourceRevision != 1 || s.Snapshot().Effort != "high" {
+		t.Fatal(s.Snapshot())
+	}
+	if sink.count(func(event any) bool {
+		v, ok := event.(backend.ProviderDefaultEffortObserved)
+		return ok && v.Transition != nil && v.Transition.Source() == s.ID && v.Transition.RoleEpoch() == 1
+	}) != 1 {
+		t.Fatal("missing original host-only proof")
+	}
+	// A provider model replacement remains a real source fence, not an effort
+	// normalization, even if the same host role provider is installed.
+	c.applyThreadRuntimeMetadata(s, json.RawMessage(`{"thread":{"model":"different","reasoningEffort":"low"}}`))
+	if sink.count(func(event any) bool { _, ok := event.(backend.ProviderDefaultEffortObserved); return ok }) != 1 {
+		t.Fatal("arbitrary metadata emitted role proof")
+	}
+}
+
+func TestCodexDefaultEffortCannotRefreshAnOriginalZeroEpoch(t *testing.T) {
+	sink := &capSink{}
+	c := NewCodex(sink, "codex")
+	c.controlProvider = defaultEffortRoleProvider{}
+	s := session.NewRegistry().Create("original-zero", "Original", t.TempDir(), backend.Codex, "gpt-6.1-sol", "read-only", "")
+	// The provider now sees a role, but this initialization belonged to an
+	// already-admitted ordinary turn. Its explicit zero cannot become epoch1.
+	c.applyThreadRuntimeMetadataWithEpoch(s, json.RawMessage(`{"reasoningEffort":"high"}`), 0)
+	if sink.count(func(event any) bool { _, ok := event.(backend.ProviderDefaultEffortObserved); return ok }) != 0 {
+		t.Fatal("old zero epoch refreshed from current role")
+	}
+}

@@ -2294,7 +2294,9 @@ func (c *Codex) Send(ctx context.Context, s *session.Session, reqID, content str
 	} else if controllerBoundRequest(reqID) {
 		_, threadErr = c.resumeExactControllerThread(s)
 	} else {
-		threadErr = c.ensureThread(s, st)
+		// Admission's original epoch (including zero) cannot be refreshed from
+		// a later assignment while provider initialization is in flight.
+		threadErr = c.ensureThread(s, st, backend.RoleEpoch(ctx))
 	}
 	if err := threadErr; err != nil {
 		if !errors.Is(err, backend.ErrThreadActiveWriter) {
@@ -3420,7 +3422,15 @@ func codexUsageValues(u codexTokenUsage) (int, int) {
 }
 
 // ensureThread starts or resumes the codex thread for this session.
-func (c *Codex) ensureThread(s *session.Session, st *codexState) error {
+func (c *Codex) ensureThread(s *session.Session, st *codexState, originalRoleEpoch ...uint64) error {
+	epoch := uint64(0)
+	if len(originalRoleEpoch) > 0 {
+		epoch = originalRoleEpoch[0]
+	} else if p, ok := c.controlProvider.(backend.SessionRoleProvider); ok {
+		// Non-turn host claim/residency operations capture before their first
+		// provider effect, never after a delayed initialization response.
+		epoch = p.SessionRoleEpoch(s)
+	}
 	if c.taskProvider != nil {
 		scope, err := c.taskProvider.TaskWorkerScope(s)
 		if err != nil {
@@ -3633,7 +3643,7 @@ func (c *Codex) ensureThread(s *session.Session, st *codexState) error {
 	c.threadToSession[threadID] = s
 	c.mu.Unlock()
 	if !preserveContext {
-		c.applyThreadRuntimeMetadata(s, threadMetadataRaw)
+		c.applyThreadRuntimeMetadataWithEpoch(s, threadMetadataRaw, epoch)
 	}
 	// Retained task/owner profiles are immutable. Thread defaults are not the
 	// admitted turn configuration and must not disable its scoped toolset.
@@ -4357,18 +4367,23 @@ func decodeThreadRuntimeMetadata(raw json.RawMessage) (model, effort *string) {
 }
 
 func (c *Codex) applyThreadRuntimeMetadata(s *session.Session, raw json.RawMessage) {
-	model, effort := decodeThreadRuntimeMetadata(raw)
-	snap := s.Snapshot()
-	var changedModel, changedEffort *string
-	if model != nil && strings.TrimSpace(*model) != "" && snap.Model != *model {
-		value := *model
-		s.ApplyConfig("", value, "")
-		changedModel = &value
+	epoch := uint64(0)
+	if p, ok := c.controlProvider.(backend.SessionRoleProvider); ok {
+		epoch = p.SessionRoleEpoch(s)
 	}
-	if effort != nil && strings.TrimSpace(*effort) != "" && snap.Effort != *effort {
-		value := *effort
-		s.SetEffort(value)
-		changedEffort = &value
+	c.applyThreadRuntimeMetadataWithEpoch(s, raw, epoch)
+}
+func (c *Codex) applyThreadRuntimeMetadataWithEpoch(s *session.Session, raw json.RawMessage, epoch uint64) {
+	model, effort := decodeThreadRuntimeMetadata(raw)
+	if model != nil && strings.TrimSpace(*model) == "" {
+		model = nil
+	}
+	if effort != nil && strings.TrimSpace(*effort) == "" {
+		effort = nil
+	}
+	changedModel, changedEffort, transition := s.ApplyProviderRuntimeMetadata(model, effort, epoch)
+	if transition != nil {
+		c.sink.Emit(backend.ProviderDefaultEffortObserved{Transition: transition})
 	}
 	if changedModel != nil || changedEffort != nil {
 		c.sink.Emit(backend.NewSessionRuntimeMetadata(s.ID, changedModel, changedEffort))

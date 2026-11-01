@@ -79,6 +79,7 @@ func (s *Session) SetFutureConfiguration(c Configuration, expected *uint64) (Sna
 		return before, errors.New("next_message_cannot_change_backend_or_permissions")
 	}
 	c.Revision = before.ConfigRevision + 1
+	s.invalidateDefaultEffortLocked()
 	s.futureConfig = &c
 	return c.applySnapshot(before), nil
 }
@@ -86,6 +87,7 @@ func (s *Session) SetFutureConfiguration(c Configuration, expected *uint64) (Sna
 func (s *Session) RestoreFutureConfiguration(before Snapshot) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.invalidateDefaultEffortLocked()
 	c := ConfigurationFrom(before)
 	s.futureConfig = &c
 }

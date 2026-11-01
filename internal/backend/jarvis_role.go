@@ -8,6 +8,12 @@ import (
 // Role epoch is supplied by the host and captured at the ORIGINAL native turn
 // or voice start. A model cannot supply or refresh its own authority witness.
 type SessionRoleProvider interface{ SessionRoleEpoch(*session.Session) uint64 }
+
+// ProviderDefaultEffortObserved is internal host evidence. It is never decoded
+// from a client message and the Session-owned receipt has no public constructor.
+type ProviderDefaultEffortObserved struct {
+	Transition *session.DefaultEffortTransition
+}
 type ResidentObservation struct {
 	State      string `json:"state"`
 	Thread     string `json:"thread_id"`

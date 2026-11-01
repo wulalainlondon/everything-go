@@ -664,6 +664,10 @@ func (h *Hub) connectedDeviceIDs(exclude string) []string {
 // event for replay on the next reconnect (the offline-recovery path). Safe for
 // concurrent use.
 func (h *Hub) Emit(event any) {
+	if observed, ok := event.(backend.ProviderDefaultEffortObserved); ok {
+		h.migrateJarvisDefaultEffort(observed.Transition)
+		return
+	}
 	if evidence, ok := event.(backend.ContextTelemetry); ok {
 		h.observeContextTelemetry(evidence)
 		return
@@ -845,7 +849,7 @@ func (h *Hub) Emit(event any) {
 		// entry, but an observer must never release a different actor's work.
 		if !observedTerminal {
 			if s, ok := h.registry.Get(terminalView.SessionID); ok {
-				releaseTurn = s.PrepareEndTurn()
+				releaseTurn = h.prepareJarvisEndTurn(s)
 			}
 		}
 	}
@@ -886,14 +890,7 @@ func (h *Hub) Emit(event any) {
 			}
 		}
 		if observed, ok := event.(protocol.SessionUUID); ok && h.jarvisRoles != nil {
-			if current, found := h.registry.Get(observed.SessionID); found && current.ResumeID() == observed.ClaudeUUID {
-				_, a := h.jarvisRoles.Snapshot()
-				if a != nil && a.Target.Session == current.ID && a.Target.Thread == "" {
-					if e := h.jarvisRoles.MigrateWitness(current.ID, "", observed.ClaudeUUID, current.SettingsSnapshot().ConfigRevision, current.SettingsSnapshot().SourceRevision); e == nil {
-						h.emitJarvisRoleChanged()
-					}
-				}
-			}
+			h.migrateJarvisInitialThread(observed.SessionID, observed.ClaudeUUID)
 		}
 		if observed, ok := event.(protocol.SessionUUID); ok && h.partners != nil {
 			if current, found := h.registry.Get(observed.SessionID); found && current.ResumeID() == observed.ClaudeUUID {
