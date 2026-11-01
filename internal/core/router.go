@@ -88,6 +88,8 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		}
 	}
 	switch cmd.Kind {
+	case "browser_bind", "browser_result", "browser_ready":
+		h.handleBrowserControl(c, cmd)
 	case "workspace_request":
 		h.handleWorkspace(c, cmd)
 	case "partner_profile_request":
@@ -181,6 +183,9 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 			}
 			if _, ok := h.exec.(backend.ToolEnvironmentExecutor); ok {
 				helloInput.Capabilities = append(helloInput.Capabilities, "tool_environment_v1")
+				if h.browserControl != nil {
+					helloInput.Capabilities = append(helloInput.Capabilities, "frontend_browser_control_v1")
+				}
 			}
 			helloInput.RootDir = h.cfg.RootDir
 			helloInput.DataDir = h.cfg.DataDir

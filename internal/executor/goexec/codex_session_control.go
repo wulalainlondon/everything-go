@@ -14,6 +14,12 @@ import (
 
 func (c *Codex) SetSessionControlProvider(p backend.SessionControlProvider) { c.controlProvider = p }
 func (c *Codex) applySessionControlThreadTools(s *session.Session, params map[string]any) {
+	if p, ok := c.controlProvider.(backend.BrowserControlInstructions); ok && s != nil && !strings.HasPrefix(s.ID, "s_dg_") {
+		if instruction := p.BrowserControlInstructions(); instruction != "" {
+			existing, _ := params["developerInstructions"].(string)
+			params["developerInstructions"] = existing + "\n" + instruction
+		}
+	}
 	c.applyTaskCallbackThreadTools(s, params)
 	c.applyLineServiceTools(s, params)
 	c.applyVoiceMediaTools(s, params)

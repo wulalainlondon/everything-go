@@ -28,6 +28,7 @@ import (
 
 	"everything-go/internal/automation"
 	"everything-go/internal/backend"
+	"everything-go/internal/browsercontrol"
 	"everything-go/internal/core"
 	"everything-go/internal/delegation"
 	"everything-go/internal/deviceinventory"
@@ -56,6 +57,12 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 2 && os.Args[1] == "browser-control-instance" {
+		os.Exit(browsercontrol.RunCLIWithManifest(os.Args[3:], os.Args[2], os.Stdout, os.Stderr))
+	}
+	if len(os.Args) > 1 && os.Args[1] == "browser-control" {
+		os.Exit(browsercontrol.RunCLI(os.Args[2:], os.Stdout, os.Stderr))
+	}
 	if len(os.Args) > 2 && os.Args[1] == "voice-control-instance" {
 		os.Exit(voicecontrol.RunCLIWithManifest(os.Args[3:], os.Args[2], os.Stdout, os.Stderr))
 	}
@@ -78,6 +85,7 @@ func main() {
 	pairingWindow := flag.Duration("pairing-window", 0, "Explicit short pairing window for a loopback-only local acceptance instance")
 	listenHost := flag.String("listen-host", "", "IP to bind (empty = all interfaces; use 127.0.0.1 for isolated local acceptance)")
 	port := flag.Int("port", 8767, "WebSocket listen port (Python prod uses 8766)")
+	browserControlDir := flag.String("browser-control-dir", "", "private browser-control entry directory for an isolated instance")
 	voiceControlDir := flag.String("voice-control-dir", "", "private voice-control entry directory for a dedicated Bridge instance (default = existing global entry)")
 	mediaControl := flag.Bool("media-control", false, "Enable fixed local media control after provider origin verification")
 	execName := flag.String("executor", "go", "AI executor: go | python")
@@ -228,6 +236,7 @@ func main() {
 	}
 	cfg := core.Config{
 		VoiceControlDir:                  *voiceControlDir,
+		BrowserControlDir:                *browserControlDir,
 		WorkspaceEnabled:                 *workspaceEnabled,
 		WorkspaceOverviewDisabled:        *workspaceOverviewDisabled,
 		WorkspaceOverviewCompactDisabled: *workspaceOverviewCompactDisabled,
@@ -338,6 +347,13 @@ func main() {
 		codex.SetSessionControlProvider(hub)
 		codex.SetDataDir(*dataDir)
 		_, voiceEntry, _ := voicecontrol.Paths(*voiceControlDir)
+		_, browserEntry, browserPathErr := browsercontrol.Paths(*browserControlDir)
+		if browserPathErr != nil {
+			log.Fatalf("browser entry: %v", browserPathErr)
+		}
+		if err := codex.SetBrowserControlEntry(browserEntry); err != nil {
+			log.Fatalf("browser entry: %v", err)
+		}
 		if err := codex.SetVoiceControlEntry(voiceEntry); err != nil {
 			log.Fatal(err)
 		}
@@ -361,6 +377,11 @@ func main() {
 			}
 			defer closeLine()
 		}
+		closeBrowser, err := hub.StartBrowserControl(codex)
+		if err != nil {
+			log.Fatalf("initialize browser control: %v", err)
+		}
+		defer closeBrowser()
 		closeVoiceControl, err := hub.StartVoiceControl(codex)
 		if err != nil {
 			log.Fatalf("initialize voice control: %v", err)

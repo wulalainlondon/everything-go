@@ -35,6 +35,15 @@
       "type": "backend_registry_updated"
     },
     {
+      "type": "browser_binding"
+    },
+    {
+      "type": "browser_command"
+    },
+    {
+      "type": "browser_commit"
+    },
+    {
       "type": "claim_ack"
     },
     {
@@ -428,6 +437,15 @@
     },
     {
       "type": "browse_dir"
+    },
+    {
+      "type": "browser_bind"
+    },
+    {
+      "type": "browser_ready"
+    },
+    {
+      "type": "browser_result"
     },
     {
       "type": "cancel_queued_message"

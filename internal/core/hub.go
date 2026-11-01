@@ -62,6 +62,7 @@ import (
 // app can label the bridge and respect its filesystem jail.
 type Config struct {
 	VoiceControlDir                  string
+	BrowserControlDir                string
 	WorkspaceEnabled                 bool
 	WorkspaceOverviewDisabled        bool
 	WorkspaceOverviewCompactDisabled bool
@@ -111,6 +112,7 @@ type Hub struct {
 	callbacks          *callbacks.Store
 	historySequence    atomic.Uint64
 	unifiedMedia       *unifiedVoiceMedia
+	browserControl     *browserControlState
 	nativeCapture      atomic.Pointer[NativeResponseCapture]
 	continuityCompatMu sync.Mutex
 

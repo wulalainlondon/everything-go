@@ -190,6 +190,7 @@ type Codex struct {
 	mediaOrigins          mediaOriginState
 	lineOrigins           lineOriginState
 	voiceControlOrigins   voiceOriginState
+	browserControlOrigins browserOriginState
 	metadataObserverBoot  string
 
 	taskProvider           backend.TaskAPIProvider
@@ -1353,6 +1354,7 @@ func (c *Codex) dispatch(raw json.RawMessage) {
 	if isRootThread {
 		c.observeMediaNative(s, m.Method, m.Params)
 		c.observeLineNative(s, m.Method, m.Params)
+		c.observeBrowserControlNative(s, m.Method, m.Params)
 		c.observeVoiceControlNative(s, m.Method, m.Params)
 	}
 
