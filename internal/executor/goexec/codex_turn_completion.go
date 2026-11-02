@@ -82,16 +82,19 @@ func (c *Codex) confirmOwnedTurnSubmission(st *codexState, threadID, requestID s
 }
 
 func (c *Codex) confirmOwnedTurnSubmissionLive(st *codexState, threadID, requestID string, turn codexTurnResponse, onLive func(), onAccepted ...func()) error {
+	originalSource := c.sessionForThread(threadID)
 	st.mu.Lock()
 	var pending []json.RawMessage
 	var terminal codexTurnTerminal
 	settle, confirmed := false, false
+	acceptedEpoch := st.submissionEpoch
+	acceptedSession := st.sessionID
 	defer func() {
 		st.mu.Unlock()
 		if !confirmed {
 			return
 		}
-		c.recordLifecycle(lifecycle.Event{Kind: "native_turn_accepted", Owner: "bridge_submitted_turn", Request: requestID, Turn: turn.ID, Reason: "exact_turn_start_response"})
+		c.recordLifecycle(lifecycle.Event{Kind: "native_turn_accepted", Owner: "bridge_submitted_turn", Session: acceptedSession, Thread: threadID, Epoch: acceptedEpoch, Request: requestID, Turn: turn.ID, Reason: "exact_turn_start_response"})
 		// Publish the immutable ACK fact outside state/history locks. Hub admission
 		// may hold its canonical queue mutex while revalidating native callers.
 		// A later cancel is late acceptance, not grounds to erase this past fact.
@@ -174,6 +177,16 @@ func (c *Codex) confirmOwnedTurnSubmissionLive(st *codexState, threadID, request
 		terminal = codexTurnTerminal{ID: turn.ID, Status: turn.Status, Message: turn.Error.Message,
 			ErrorCode: codexErrorCode(turn.Error.Info, turn.Error.Message), Failure: recovery.ClassifyCodex(turn.Error.Info, turn.Error.Message)}
 		exists = true
+	}
+	st.toolSourceRoleEpoch = st.roleEpoch
+	if st.startAdmission != nil {
+		originalSource = st.startAdmission.Source
+	}
+	st.toolSourceKnown = originalSource != nil && originalSource.ID == st.sessionID
+	if st.toolSourceKnown {
+		snapshot := originalSource.Snapshot()
+		st.toolSourceRevision = snapshot.SourceRevision
+		st.toolSourceConfigRevision = snapshot.ConfigRevision
 	}
 	settle, confirmed = exists, true
 	return nil

@@ -9,6 +9,7 @@ import (
 	"everything-go/internal/liveactivity"
 	"everything-go/internal/protocol"
 	"everything-go/internal/runtimejournal"
+	"everything-go/internal/session"
 	"everything-go/internal/workitems"
 )
 
@@ -28,21 +29,42 @@ func runtimeEvent(view runtimejournal.View) protocol.SessionRuntime {
 
 // Runtime progress is not proof that this process owns the tool caller.
 // Readiness is re-derived from the current provider, never persisted as a grant.
+type toolReadinessView struct {
+	signature string
+	revision  uint64
+}
+
 func (h *Hub) runtimeEvent(view runtimejournal.View) protocol.SessionRuntime {
+	// Serialize sampling with revision assignment. An old sample cannot be
+	// published with a newer readiness revision after a concurrent source change.
+	h.toolReadinessMu.Lock()
+	defer h.toolReadinessMu.Unlock()
 	out := runtimeEvent(view)
-	if view.Phase != "running" && view.Phase != "waiting" && view.Phase != "stopping" {
-		return out
-	}
-	s, ok := h.registry.Get(view.SessionID)
-	if !ok {
-		return out
-	}
-	if router, ok := h.exec.(historyRouter); ok {
-		if provider, found := router.ProviderFor(s); found {
-			if readiness, ok := provider.(interface{ RuntimeToolReadiness(string, string) string }); ok {
-				out.ToolReadiness = readiness.RuntimeToolReadiness(view.SessionID, view.ActiveRequestID)
+	if view.Phase == "running" || view.Phase == "waiting" || view.Phase == "stopping" {
+		if s, ok := h.registry.Get(view.SessionID); ok {
+			if router, ok := h.exec.(historyRouter); ok {
+				if provider, found := router.ProviderFor(s); found {
+					if readiness, ok := provider.(interface {
+						RuntimeToolReadiness(*session.Session, string) string
+					}); ok {
+						out.ToolReadiness = readiness.RuntimeToolReadiness(s, view.ActiveRequestID)
+					}
+				}
 			}
 		}
+	}
+	if h.toolReadinessViews == nil {
+		h.toolReadinessViews = make(map[string]toolReadinessView)
+	}
+	prior, exists := h.toolReadinessViews[view.SessionID]
+	if out.ToolReadiness != "" || exists {
+		signature := view.ReadEpoch + "\x00" + view.ActiveRequestID + "\x00" + view.Phase + "\x00" + out.ToolReadiness
+		if signature != prior.signature {
+			prior.signature = signature
+			prior.revision++
+			h.toolReadinessViews[view.SessionID] = prior
+		}
+		out.ToolReadinessRevision = prior.revision
 	}
 	return out
 }

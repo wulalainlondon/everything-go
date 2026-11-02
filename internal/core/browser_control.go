@@ -394,23 +394,24 @@ func (h *Hub) claimBrowserOperation(q browsercontrol.Request, b browserBinding) 
 	}
 	// The claim must survive creation/rename loss as well as file-data loss.
 	// It precedes every effect; failure keeps this original intent quarantined.
-	d, err := os.Open(dir)
-	if err != nil {
-		return errors.New("browser_claim_unavailable")
-	}
-	defer d.Close()
-	if err = d.Sync(); err != nil {
-		return errors.New("browser_claim_unavailable")
-	}
-	parent, err := os.Open(filepath.Dir(dir))
-	if err != nil {
-		return errors.New("browser_claim_unavailable")
-	}
-	defer parent.Close()
-	if err = parent.Sync(); err != nil {
-		return errors.New("browser_claim_unavailable")
+	for _, path := range []string{dir, filepath.Dir(dir)} {
+		if err := h.syncBrowserClaimDirectory(path); err != nil {
+			return errors.New("browser_claim_unavailable")
+		}
 	}
 	return nil
+}
+
+func (h *Hub) syncBrowserClaimDirectory(path string) error {
+	if h.browserClaimSync != nil {
+		return h.browserClaimSync(path)
+	}
+	d, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
 }
 
 func (h *Hub) BrowserControlInstructions() string {

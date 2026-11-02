@@ -176,3 +176,47 @@ func TestIndependentBrowserCapabilityObservedPositive(t *testing.T) {
 }
 
 var _ = browsercontrol.Request{}
+
+func TestBrowserDirectorySyncFailureNeverEnqueuesAndOriginalClaimCannotReplay(t *testing.T) {
+	for _, failAt := range []int{1, 2} {
+		t.Run(formatUint(uint64(failAt)), func(t *testing.T) {
+			h, client, resolver := browserFixture(t)
+			for len(client.send) > 0 {
+				<-client.send
+			}
+			count := 0
+			h.browserClaimSync = func(string) error {
+				count++
+				if count == failAt {
+					return errors.New("own_fixture_directory_sync_failure")
+				}
+				return nil
+			}
+			q := browsercontrol.Request{ID: "bop_sync_failure_original", Thread: resolver.caller.Parent.ResumeID(), Method: "open", Params: []byte(`{"url":"https://example.com"}`)}
+			if _, err := h.executeBrowserControl(context.Background(), resolver, q); err == nil {
+				t.Fatal("directory-sync refusal ignored")
+			}
+			if count != failAt {
+				t.Fatal("wrong durability branch", count)
+			}
+			if len(client.send) != 0 || len(h.browserControl.operations) != 0 {
+				t.Fatal("effect enqueued before durable claim")
+			}
+			h.browserClaimSync = nil
+			if _, err := h.executeBrowserControl(context.Background(), resolver, q); err == nil {
+				t.Fatal("duplicate mutation did not remain refused")
+			}
+			query := browsercontrol.Request{ID: "bop_sync_original_query", Thread: q.Thread, Method: "status", Params: []byte(`{"operation":"bop_sync_failure_original"}`)}
+			if _, err := h.executeBrowserControl(context.Background(), resolver, query); err != nil {
+				t.Fatal("original readonly receipt unavailable", err)
+			}
+			if len(client.send) != 0 {
+				t.Fatal("original claim replayed after sync failure")
+			}
+			q.Params = []byte(`{"url":"https://example.com/changed"}`)
+			if _, err := h.executeBrowserControl(context.Background(), resolver, q); err == nil {
+				t.Fatal("substitution accepted")
+			}
+		})
+	}
+}

@@ -17,15 +17,16 @@ import (
 )
 
 type codexVoiceCall struct {
-	roleEpoch                    uint64
-	callbackSpeech               bool
-	mediaGeneration              string
-	voiceID, threadID, sessionID string
-	answer                       chan backend.RealtimeVoiceAnswer
-	failure                      chan error
-	closed                       chan struct{}
-	once                         sync.Once
-	callback                     func(backend.RealtimeVoiceEvent)
+	sourceRevision, configRevision, transportEpoch uint64
+	roleEpoch                                      uint64
+	callbackSpeech                                 bool
+	mediaGeneration                                string
+	voiceID, threadID, sessionID                   string
+	answer                                         chan backend.RealtimeVoiceAnswer
+	failure                                        chan error
+	closed                                         chan struct{}
+	once                                           sync.Once
+	callback                                       func(backend.RealtimeVoiceEvent)
 }
 
 // Exact restoration plus owning-session permission synchronization. No fork,
@@ -157,7 +158,8 @@ func (c *Codex) StartRealtimeVoice(ctx context.Context, s *session.Session, inpu
 	if p, ok := c.controlProvider.(backend.SessionRoleProvider); ok {
 		roleEpoch = p.SessionRoleEpoch(s)
 	}
-	call := &codexVoiceCall{roleEpoch: roleEpoch, callbackSpeech: input.SpeakerInstructions != "", mediaGeneration: input.MediaGeneration, voiceID: input.VoiceID, threadID: id, sessionID: s.ID, answer: make(chan backend.RealtimeVoiceAnswer, 1), failure: make(chan error, 1), closed: make(chan struct{}), callback: input.OnEvent}
+	snapshot := s.Snapshot()
+	call := &codexVoiceCall{sourceRevision: snapshot.SourceRevision, configRevision: snapshot.ConfigRevision, transportEpoch: c.rpc.transportEpoch.Load(), roleEpoch: roleEpoch, callbackSpeech: input.SpeakerInstructions != "", mediaGeneration: input.MediaGeneration, voiceID: input.VoiceID, threadID: id, sessionID: s.ID, answer: make(chan backend.RealtimeVoiceAnswer, 1), failure: make(chan error, 1), closed: make(chan struct{}), callback: input.OnEvent}
 	c.voiceMu.Lock()
 	if c.voiceCalls == nil {
 		c.voiceCalls = map[string]*codexVoiceCall{}

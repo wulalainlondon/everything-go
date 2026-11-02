@@ -66,16 +66,21 @@ var (
 )
 
 type codexState struct {
-	hostedViewRevision      uint64
-	residentToolsEpoch      uint64
-	residentToolsTransport  uint64
-	residentRoleEpoch       uint64
-	roleEpoch               uint64
-	automatic               recovery.AutomaticController
-	automaticAttempt        string
-	automaticOrdinal        int
-	automaticIsContinuation bool
-	automaticInput          []map[string]any
+	sessionID                string
+	toolSourceRoleEpoch      uint64
+	toolSourceRevision       uint64
+	toolSourceConfigRevision uint64
+	toolSourceKnown          bool
+	hostedViewRevision       uint64
+	residentToolsEpoch       uint64
+	residentToolsTransport   uint64
+	residentRoleEpoch        uint64
+	roleEpoch                uint64
+	automatic                recovery.AutomaticController
+	automaticAttempt         string
+	automaticOrdinal         int
+	automaticIsContinuation  bool
+	automaticInput           []map[string]any
 
 	visibility          agentvisibility.Channel
 	hostedActivity      *agentactivity.NativeSource
@@ -227,6 +232,8 @@ type Codex struct {
 
 	startMu               sync.Mutex
 	proc                  *exec.Cmd
+	procIdentity          lifecycle.ProcessIdentity
+	procEpoch             uint64
 	stdin                 io.WriteCloser
 	procDone              chan struct{}
 	remoteConn            *websocket.Conn
@@ -440,6 +447,7 @@ func (c *Codex) state(id string) *codexState {
 	st := c.states[id]
 	if st == nil {
 		st = newCodexState()
+		st.sessionID = id
 		c.states[id] = st
 	}
 	return st
@@ -543,17 +551,24 @@ func (c *Codex) startServerLocked() error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
+	identity := lifecycle.ObserveProcess(cmd.Process.Pid)
+	var childEpoch uint64
+	c.recordLifecycle(lifecycle.Event{Kind: "process_started", Owner: "bridge_stdio_child", PID: cmd.Process.Pid, ParentPID: os.Getpid(), Process: &identity, Reason: "bridge_spawn_before_provider_initialization"})
 	authFingerprint := "shared-daemon"
 	if c.appServerMode != "daemon" && c.appSandbox == nil {
 		var err error
 		authFingerprint, err = codexAuthFingerprint(c.authPath)
 		if err != nil {
-			_ = cmd.Process.Kill()
+			c.killOwnedProcess(cmd, identity, childEpoch, "credentials_unavailable")
+			_ = cmd.Wait()
+			code, signal := processExitEvidence(cmd.ProcessState)
+			c.recordLifecycle(lifecycle.Event{Kind: "process_exited", Owner: "bridge_stdio_child", PID: cmd.Process.Pid, Process: &identity, Epoch: childEpoch, ExitCode: code, Signal: signal, Reason: "owned_wait_after_credentials_failure"})
 			return fmt.Errorf("read Codex credentials: %w", err)
 		}
 	}
 	done := make(chan struct{})
 	c.proc = cmd
+	c.procIdentity = identity
 	c.stdin = stdinPipe
 	c.procDone = done
 	c.serverAuthFingerprint = authFingerprint
@@ -561,14 +576,19 @@ func (c *Codex) startServerLocked() error {
 	// Write raw to the pipe (line-delimited JSON, one syscall per line, serialized
 	// by the plumber's write mutex) so no flush step can be skipped.
 	c.rpc.setWriter(stdinPipe)
-	c.recordLifecycle(lifecycle.Event{Kind: "process_started", Owner: "bridge_stdio_child", PID: cmd.Process.Pid, ParentPID: os.Getpid(), Reason: "bridge_started_child"})
+	childEpoch = c.rpc.transportEpoch.Load()
+	c.procEpoch = childEpoch
+	c.recordLifecycle(lifecycle.Event{Kind: "transport_connected", Owner: "bridge_stdio_child", PID: cmd.Process.Pid, ParentPID: os.Getpid(), Process: &identity, Epoch: childEpoch, Reason: "owned_stdio_writer_ready"})
 
-	go c.readLoop(stdoutPipe)
+	go func(originalEpoch uint64, originalIdentity lifecycle.ProcessIdentity) {
+		defer c.recordLifecycle(lifecycle.Event{Kind: "transport_disconnected", Owner: "bridge_stdio_child", Process: &originalIdentity, Epoch: originalEpoch, Reason: "owned_stdout_closed_not_exit_proof"})
+		c.readLoop(stdoutPipe)
+	}(childEpoch, identity)
 	go drainStderr("codex", stderrPipe)
-	go func(started *exec.Cmd, exited chan struct{}) {
+	go func(started *exec.Cmd, exited chan struct{}, originalIdentity lifecycle.ProcessIdentity, originalEpoch uint64) {
 		_ = started.Wait()
 		code, signal := processExitEvidence(started.ProcessState)
-		c.recordLifecycle(lifecycle.Event{Kind: "process_exited", Owner: "bridge_stdio_child", PID: started.Process.Pid, ParentPID: os.Getpid(), ExitCode: code, Signal: signal, Reason: "child_exit_observed_initiator_unconfirmed"})
+		c.recordLifecycle(lifecycle.Event{Kind: "process_exited", Owner: "bridge_stdio_child", PID: started.Process.Pid, ParentPID: os.Getpid(), Process: &originalIdentity, Epoch: originalEpoch, ExitCode: code, Signal: signal, Reason: "child_exit_observed_initiator_unconfirmed"})
 		c.rpc.failAll(errProcDead)
 		c.invalidateLiveThreads()
 		close(exited)
@@ -580,7 +600,7 @@ func (c *Codex) startServerLocked() error {
 			c.rpc.setWriter(nil)
 		}
 		c.startMu.Unlock()
-	}(cmd, done)
+	}(cmd, done, identity, childEpoch)
 
 	if err := c.initializeRPC(); err != nil {
 		return err
@@ -680,7 +700,8 @@ func (c *Codex) startRemoteServerLocked(codexHome string) error {
 	c.authReloadDeferred = false
 	c.rpc.setWriter(websocketRPCWriter{conn: conn})
 	c.toolEnvironment.epoch.Add(1)
-	go c.readRemoteLoop(readCtx, conn, done)
+	connectionEpoch := c.rpc.transportEpoch.Load()
+	go c.readRemoteLoop(readCtx, conn, done, connectionEpoch)
 	if err := c.initializeRPC(); err != nil {
 		cancelRead()
 		_ = conn.Close(websocket.StatusInternalError, "initialize failed")
@@ -700,11 +721,11 @@ func (c *Codex) startRemoteServerLocked(codexHome string) error {
 		return err
 	}
 	log.Printf("[codex] connected shared daemon socket=%s", socketPath)
-	c.recordLifecycle(lifecycle.Event{Kind: "transport_connected", Owner: "provider_connection", Reason: "authenticated_provider_client_connected"})
+	c.recordLifecycle(lifecycle.Event{Kind: "transport_connected", Owner: "provider_connection", Epoch: connectionEpoch, Reason: "authenticated_provider_client_connected"})
 	return nil
 }
 
-func (c *Codex) readRemoteLoop(ctx context.Context, conn *websocket.Conn, done chan struct{}) {
+func (c *Codex) readRemoteLoop(ctx context.Context, conn *websocket.Conn, done chan struct{}, connectionEpoch uint64) {
 	var readErr error
 	defer func() {
 		failure := error(errProcDead)
@@ -717,7 +738,7 @@ func (c *Codex) readRemoteLoop(ctx context.Context, conn *websocket.Conn, done c
 		if unexpected {
 			reason = "unexpected_transport_close_not_process_exit_proof"
 		}
-		c.recordLifecycle(lifecycle.Event{Kind: "transport_disconnected", Owner: "provider_connection", Reason: reason})
+		c.recordLifecycle(lifecycle.Event{Kind: "transport_disconnected", Owner: "provider_connection", Epoch: connectionEpoch, Reason: reason})
 		c.rpc.failAll(failure)
 		c.failVoiceCalls()
 		if unexpected {
@@ -953,7 +974,7 @@ func (c *Codex) stopServerLocked() error {
 	}
 
 	done := c.procDone
-	c.recordLifecycle(lifecycle.Event{Kind: "process_stop_requested", Owner: "bridge_stdio_child", PID: cmd.Process.Pid, ParentPID: os.Getpid(), Reason: "bridge_closing_owned_child_stdin"})
+	c.recordLifecycle(lifecycle.Event{Kind: "process_stop_requested", Owner: "bridge_stdio_child", PID: cmd.Process.Pid, ParentPID: os.Getpid(), Process: &c.procIdentity, Epoch: c.procEpoch, Reason: "bridge_closing_owned_child_stdin"})
 	if c.stdin != nil {
 		_ = c.stdin.Close()
 	}
@@ -961,7 +982,7 @@ func (c *Codex) stopServerLocked() error {
 		select {
 		case <-done:
 		case <-time.After(3 * time.Second):
-			_ = cmd.Process.Kill()
+			c.killOwnedProcess(cmd, c.procIdentity, c.procEpoch, "owned_child_stop_timeout")
 			select {
 			case <-done:
 			case <-time.After(2 * time.Second):
@@ -969,7 +990,7 @@ func (c *Codex) stopServerLocked() error {
 			}
 		}
 	} else {
-		_ = cmd.Process.Kill()
+		c.killOwnedProcess(cmd, c.procIdentity, c.procEpoch, "owned_child_stop_timeout")
 	}
 	if c.proc == cmd {
 		c.proc = nil

@@ -5,7 +5,7 @@ Never signals observed processes. PID/start/exe/parent/group are fenced before
 and after kqueue registration. A connection close is not a process exit. The
 kernel wait status never identifies who initiated a foreign process's exit.
 """
-import argparse, datetime, json, os, select, subprocess, time
+import argparse, datetime, json, os, select, stat, subprocess, time
 from contextlib import closing
 from pathlib import Path
 
@@ -15,8 +15,14 @@ from pathlib import Path
 EXIT_STATUS = 0x04000000
 EXIT_DETAIL = 0x02000000
 
-def processes():
-    raw = subprocess.check_output(['ps','-axo','pid=,ppid=,pgid=,lstart=,comm='],env={**os.environ,'LC_ALL':'C'},text=True)
+def remaining(deadline):
+    value=deadline-time.monotonic()
+    if value<=0:raise TimeoutError('original_witness_deadline_exceeded')
+    return value
+
+def processes(deadline=None):
+    timeout=min(3,remaining(deadline)) if deadline is not None else 3
+    raw = subprocess.check_output(['ps','-axo','pid=,ppid=,pgid=,lstart=,comm='],env={**os.environ,'LC_ALL':'C'},text=True,timeout=timeout)
     rows = {}
     for row in raw.splitlines():
         p = row.strip().split(None,8)
@@ -34,9 +40,10 @@ def publish(path, value):
     try: os.fsync(fd)
     finally: os.close(fd)
 
-def register(queue, expected):
-    before=processes();admitted={};refusals={}
+def register(queue, expected, deadline=None):
+    before=processes(deadline);admitted={};refusals={}
     for key, identity in expected.items():
+        if deadline is not None:remaining(deadline)
         pid=int(key)
         if before.get(pid)!=identity:
             refusals[key]='original_identity_not_current';continue
@@ -45,7 +52,7 @@ def register(queue, expected):
                                          fflags=select.KQ_NOTE_EXIT|EXIT_STATUS|EXIT_DETAIL)],0,0)
         except OSError as e:
             refusals[key]='kernel_registration_refused_'+str(e.errno);continue
-        if processes().get(pid)!=identity:
+        if processes(deadline).get(pid)!=identity:
             try: queue.control([select.kevent(pid,filter=select.KQ_FILTER_PROC,flags=select.KQ_EV_DELETE)],0,0)
             except OSError: pass
             refusals[key]='identity_changed_during_registration';continue
@@ -68,17 +75,28 @@ def exit_event(event):
     return result
 
 def watch(plan, output, ready, duration, stop):
-    expected=json.loads(Path(plan).read_text())['protected']
+    deadline=time.monotonic()+duration
+    info=Path(plan).lstat()
+    if not stat.S_ISREG(info.st_mode) or not 0<info.st_size<=1024*1024:raise RuntimeError('bounded_regular_plan_required')
+    fd=os.open(plan,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    with os.fdopen(fd,'rb') as f:
+        opened=os.fstat(f.fileno())
+        if (opened.st_dev,opened.st_ino)!=(info.st_dev,info.st_ino):raise RuntimeError('original_plan_changed')
+        raw=f.read(1024*1024+1)
+    if len(raw)>1024*1024:raise RuntimeError('plan_byte_bound_exceeded')
+    remaining(deadline)
+    expected=json.loads(raw)['protected']
     if not expected or len(expected)>128: raise RuntimeError('bounded_original_protected_set_required')
     if Path(output).exists() or Path(ready).exists(): raise RuntimeError('original_witness_output_already_exists_no_replay')
     with closing(select.kqueue()) as queue:
-        admitted,refusals=register(queue,expected)
+        try:admitted,refusals=register(queue,expected,deadline)
+        except (OSError,subprocess.TimeoutExpired,TimeoutError):
+            admitted,refusals={},{'initialization':'incomplete_or_deadline_exceeded_no_exit_inference'}
         record={'state':'observing' if not refusals else 'registration_incomplete','originalPlan':str(plan),
                 'startedAt':datetime.datetime.now(datetime.timezone.utc).isoformat(),'observerPID':os.getpid(),
                 'registered':admitted,'refusals':refusals,'events':[],'signalsSent':False}
         publish(output,record);publish(ready,{'ready':not refusals,'output':str(output),'observerPID':os.getpid()})
         if refusals: return
-        deadline=time.monotonic()+duration
         while time.monotonic()<deadline and not Path(stop).exists():
             for event in queue.control(None,128,min(1,max(0,deadline-time.monotonic()))):
                 if str(event.ident) in admitted: record['events'].append(exit_event(event))

@@ -1,4 +1,5 @@
-import importlib.util, select, subprocess, sys, unittest
+import importlib.util, select, subprocess, sys, unittest, tempfile, json, time
+from unittest.mock import patch
 from contextlib import closing
 from pathlib import Path
 
@@ -30,5 +31,18 @@ class WitnessTests(unittest.TestCase):
         finally:
             if child.poll() is None:child.kill()
             child.wait()
+
+class WitnessBoundsTests(unittest.TestCase):
+    def test_registration_deadline_and_ps_timeout_are_fail_closed(self):
+        with self.assertRaises(TimeoutError):w.remaining(time.monotonic()-1)
+        with patch.object(w.subprocess,'check_output',side_effect=subprocess.TimeoutExpired('own-ps',.01)) as observed:
+            with self.assertRaises(subprocess.TimeoutExpired):w.processes(time.monotonic()+1)
+            self.assertLessEqual(observed.call_args.kwargs['timeout'],1)
+    def test_oversize_plan_refuses_before_registration(self):
+        with tempfile.TemporaryDirectory() as d:
+            p=Path(d)/'plan.json';p.write_bytes(b'x'*(1024*1024+1))
+            with patch.object(w,'register') as registered:
+                with self.assertRaises(RuntimeError):w.watch(p,Path(d)/'out',Path(d)/'ready',1,Path(d)/'stop')
+                registered.assert_not_called()
 
 if __name__=='__main__':unittest.main()

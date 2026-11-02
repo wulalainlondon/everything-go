@@ -99,3 +99,24 @@ func TestRuntimeLockRejectsSymlink(t *testing.T) {
 		t.Fatal("followed substituted lock")
 	}
 }
+
+func TestDirectoryAnchorSurvivesMarkerRemovalAndCanonicalAlias(t *testing.T) {
+	dir := t.TempDir()
+	release, err := Acquire(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	if err = os.Remove(dir + "/.go-service-owner.lock"); err != nil {
+		t.Fatal(err)
+	}
+	if next, err := Acquire(dir + "/."); err == nil {
+		next()
+		t.Fatal("removed marker admitted another writer")
+	}
+	other, err := Acquire(t.TempDir())
+	if err != nil {
+		t.Fatal("independent directory blocked", err)
+	}
+	other()
+}

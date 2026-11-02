@@ -121,6 +121,7 @@ type Hub struct {
 	historySequence    atomic.Uint64
 	unifiedMedia       *unifiedVoiceMedia
 	browserControl     *browserControlState
+	browserClaimSync   func(string) error // nil in production; own-fixture durability fault point
 	nativeCapture      atomic.Pointer[NativeResponseCapture]
 	continuityCompatMu sync.Mutex
 
@@ -170,6 +171,8 @@ type Hub struct {
 	attachments         *attachmentjournal.Store
 	controls            *governance.SessionControlStore
 	runtimes            *runtimejournal.Store
+	toolReadinessMu     sync.Mutex
+	toolReadinessViews  map[string]toolReadinessView
 	widgetMu            sync.Mutex
 	widgetSigner        *widgetaccess.Signer
 	recoveredRuntimes   []runtimejournal.View
