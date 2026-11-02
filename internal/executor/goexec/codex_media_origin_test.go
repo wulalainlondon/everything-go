@@ -4,8 +4,38 @@ import (
 	"encoding/json"
 	"everything-go/internal/backend"
 	"everything-go/internal/session"
+	"path/filepath"
+	"strconv"
 	"testing"
 )
+
+func TestMediaOriginDedicatedEntryRequiresExactConfiguredPath(t *testing.T) {
+	c := NewCodex(&caplessSink{}, "codex")
+	entry := filepath.Join(t.TempDir(), "dedicated instance", "bridge-media")
+	if err := c.SetMediaControlEntry(entry); err != nil {
+		t.Fatal(err)
+	}
+	s := session.NewRegistry().Create("f", "f", t.TempDir(), backend.Codex, "", "", "native")
+	mediaHandoff(c, s, "voice-A", "generation-A", "play", "h1")
+	mediaUser(c, s, "turn-A", "play")
+	for _, tc := range []struct {
+		path, id string
+		want     bool
+	}{
+		{"/fixture/primary/bridge-media", "vop_wrong_service_entry", false},
+		{entry, "vop_dedicated_service_entry", true},
+	} {
+		cmd := strconv.Quote(tc.path) + " --id " + tc.id + " --method status"
+		mediaNativeItem(c, s, "turn-A", map[string]any{"type": "commandExecution", "source": "unifiedExecStartup", "command": cmd, "commandActions": []any{map[string]string{"type": "unknown", "command": cmd}}})
+		o, err := c.ResolveMediaOrigin("native", tc.id)
+		if (err == nil) != tc.want || tc.want && (o.VoiceID != "voice-A" || o.Generation != "generation-A") {
+			t.Fatal(tc, o, err)
+		}
+	}
+	if err := c.SetMediaControlEntry("/another/bridge-media"); err == nil {
+		t.Fatal("entry changed after provider origin admission")
+	}
+}
 
 func mediaNativeItem(c *Codex, s *session.Session, turn string, item any) {
 	b, _ := json.Marshal(map[string]any{"threadId": s.ResumeID(), "turnId": turn, "item": item})

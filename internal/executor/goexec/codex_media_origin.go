@@ -31,6 +31,22 @@ type mediaPendingInput struct {
 	origin backend.MediaOrigin
 }
 
+// SetMediaControlEntry is operator startup configuration, never model input.
+// Provider-observed commands must still match the exact configured entry.
+func (c *Codex) SetMediaControlEntry(launcher string) error {
+	if !filepath.IsAbs(launcher) || filepath.Clean(launcher) != launcher {
+		return errors.New("media_control_entry_invalid")
+	}
+	m := &c.mediaOrigins
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.handoffs)+len(m.turns)+len(m.commands)+len(m.pending)+len(m.pendingCommands) != 0 {
+		return errors.New("media_control_entry_already_active")
+	}
+	m.launcher = launcher
+	return nil
+}
+
 func mediaInputHash(input, transcript string) [32]byte {
 	b, _ := json.Marshal([]string{input, transcript})
 	return sha256.Sum256(b)

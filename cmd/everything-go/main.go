@@ -89,6 +89,7 @@ func main() {
 	browserControlDir := flag.String("browser-control-dir", "", "private browser-control entry directory for an isolated instance")
 	voiceControlDir := flag.String("voice-control-dir", "", "private voice-control entry directory for a dedicated Bridge instance (default = existing global entry)")
 	mediaControl := flag.Bool("media-control", false, "Enable fixed local media control after provider origin verification")
+	mediaControlDir := flag.String("media-control-dir", "", "private media-control entry directory for a dedicated Bridge instance (default = existing global entry)")
 	execName := flag.String("executor", "go", "AI executor: go | python")
 	claudeBin := flag.String("claude-bin", "claude", "path to the claude CLI binary")
 	codexBin := flag.String("codex-bin", "codex", "path to the codex CLI binary")
@@ -122,6 +123,10 @@ func main() {
 	mode := flag.String("mode", "bridge", "run mode: bridge | index | devices (read-only local device inventory)")
 	indexPathsStdin := flag.Bool("index-paths-stdin", false, "index only newline-delimited transcript paths read from stdin")
 	flag.Parse()
+	mediaManifest, mediaEntry, mediaPathErr := mediaservice.Paths(*mediaControlDir)
+	if mediaPathErr != nil {
+		log.Fatal(mediaPathErr)
+	}
 	if _, _, err := voicecontrol.Paths(*voiceControlDir); err != nil {
 		log.Fatal(err)
 	}
@@ -241,6 +246,7 @@ func main() {
 		log.Fatalf("load instance id: %v", err)
 	}
 	cfg := core.Config{
+		MediaControlDir:                  *mediaControlDir,
 		VoiceControlDir:                  *voiceControlDir,
 		BrowserControlDir:                *browserControlDir,
 		WorkspaceEnabled:                 *workspaceEnabled,
@@ -352,6 +358,9 @@ func main() {
 		codex.SetDelegationProvider(hub)
 		codex.SetSessionControlProvider(hub)
 		codex.SetDataDir(*dataDir)
+		if err := codex.SetMediaControlEntry(mediaEntry); err != nil {
+			log.Fatal(err)
+		}
 		_, voiceEntry, _ := voicecontrol.Paths(*voiceControlDir)
 		_, browserEntry, browserPathErr := browsercontrol.Paths(*browserControlDir)
 		if browserPathErr != nil {
@@ -394,7 +403,7 @@ func main() {
 		}
 		defer closeVoiceControl()
 		if *mediaControl {
-			closeMedia, err := hub.StartUnifiedVoiceMedia(codex, mediaservice.DefaultManifest())
+			closeMedia, err := hub.StartUnifiedVoiceMedia(codex, mediaManifest)
 			if err != nil {
 				log.Fatalf("initialize media control: %v", err)
 			}

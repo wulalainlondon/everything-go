@@ -7,6 +7,9 @@ import (
 	"everything-go/internal/clientproto"
 	"everything-go/internal/mediaservice"
 	"everything-go/internal/protocol"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -14,6 +17,63 @@ type fixtureMediaOrigin struct{ o backend.MediaOrigin }
 
 func (f fixtureMediaOrigin) ResolveMediaOrigin(string, string) (backend.MediaOrigin, error) {
 	return f.o, nil
+}
+
+func TestDedicatedUnifiedMediaPreservesPrimaryEntry(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	global := filepath.Join(home, ".local", "bin", "bridge-media")
+	if err := os.MkdirAll(filepath.Dir(global), 0700); err != nil {
+		t.Fatal(err)
+	}
+	const sentinel = "primary service must remain unchanged"
+	if err := os.WriteFile(global, []byte(sentinel), 0700); err != nil {
+		t.Fatal(err)
+	}
+	h, _, _, _ := controllerFixture(t)
+	h.cfg.DataDir = t.TempDir()
+	h.cfg.InstanceID = "dedicated-media-fixture"
+	h.cfg.MediaControlDir = filepath.Join(home, "dedicated", "media-control")
+	manifest, launcher, err := mediaservice.Paths(h.cfg.MediaControlDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeMedia, err := h.StartUnifiedVoiceMedia(fixtureMediaOrigin{}, manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(closeMedia)
+	old, err := os.ReadFile(global)
+	if err != nil || string(old) != sentinel {
+		t.Fatalf("primary entry overwritten: %q %v", old, err)
+	}
+	script, err := os.ReadFile(launcher)
+	if err != nil || !strings.Contains(string(script), " media --manifest "+shellArgument(manifest)) {
+		t.Fatalf("wrong dedicated entry: %q %v", script, err)
+	}
+	if !strings.Contains(h.unifiedMedia.instructions(), shellArgument(launcher)) {
+		t.Fatal("call instructions do not advertise dedicated entry")
+	}
+	for path, mode := range map[string]os.FileMode{launcher: 0700, manifest: 0600, h.cfg.MediaControlDir: 0700} {
+		st, err := os.Stat(path)
+		if err != nil || st.Mode().Perm() != mode {
+			t.Fatalf("private path mode: %s %v", path, err)
+		}
+	}
+}
+
+func TestDedicatedUnifiedMediaRejectsPrimaryManifest(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	h, _, _, _ := controllerFixture(t)
+	h.cfg.DataDir = t.TempDir()
+	h.cfg.MediaControlDir = filepath.Join(home, "dedicated")
+	if _, err := h.StartUnifiedVoiceMedia(fixtureMediaOrigin{}, mediaservice.DefaultManifest()); err == nil {
+		t.Fatal("dedicated service accepted primary manifest")
+	}
+	if _, err := os.Stat(mediaservice.DefaultManifest()); !os.IsNotExist(err) {
+		t.Fatal("primary manifest touched", err)
+	}
 }
 func TestUnifiedMediaExactGenerationAndOriginalEventBinding(t *testing.T) {
 	h, _, caller, _ := controllerFixture(t)

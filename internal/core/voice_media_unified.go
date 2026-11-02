@@ -27,12 +27,16 @@ func (h *Hub) StartUnifiedVoiceMedia(resolver backend.MediaOriginResolver, manif
 	if e != nil {
 		return nil, e
 	}
-	home, e := os.UserHomeDir()
+	expectedManifest, launcher, e := mediaservice.Paths(h.cfg.MediaControlDir)
 	if e != nil {
 		store.Close()
 		return nil, e
 	}
-	u := &unifiedVoiceMedia{store: store, resolver: resolver, launcher: filepath.Join(home, ".local", "bin", "bridge-media")}
+	if h.cfg.MediaControlDir != "" && manifest != expectedManifest {
+		store.Close()
+		return nil, errors.New("media_configuration_invalid")
+	}
+	u := &unifiedVoiceMedia{store: store, resolver: resolver, launcher: launcher}
 	server, e := mediaservice.OpenServer(h.cfg.DataDir, h.cfg.InstanceID, manifest, func(ctx context.Context, q mediaservice.Request) (mediaservice.Result, error) {
 		return h.executeUnifiedMedia(ctx, u, q)
 	})

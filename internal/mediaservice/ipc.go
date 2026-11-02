@@ -44,6 +44,21 @@ func DefaultManifest() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".everything-go-runtime", "media-control", "current.json")
 }
+
+// Paths isolates a dedicated Bridge without replacing the primary service entry.
+func Paths(directory string) (manifest, launcher string, err error) {
+	if directory == "" {
+		home, e := os.UserHomeDir()
+		if e != nil {
+			return "", "", e
+		}
+		return DefaultManifest(), filepath.Join(home, ".local", "bin", "bridge-media"), nil
+	}
+	if !filepath.IsAbs(directory) || filepath.Clean(directory) != directory {
+		return "", "", errors.New("media_control_directory_invalid")
+	}
+	return filepath.Join(directory, "current.json"), filepath.Join(directory, "bridge-media"), nil
+}
 func privateDir(path string) error {
 	if e := os.MkdirAll(path, 0700); e != nil {
 		return e
