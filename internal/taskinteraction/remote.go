@@ -3,12 +3,14 @@ package taskinteraction
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 )
 
 func (s *Store) InstallRemote() error {
 	_, e := s.db.Exec(`CREATE TABLE IF NOT EXISTS relay_receipts(id TEXT PRIMARY KEY,version INTEGER NOT NULL);
- CREATE TABLE IF NOT EXISTS interaction_outbox(scope TEXT NOT NULL,key TEXT NOT NULL,hash TEXT NOT NULL,question TEXT NOT NULL,state TEXT NOT NULL,PRIMARY KEY(scope,key));`)
+ CREATE TABLE IF NOT EXISTS interaction_outbox(scope TEXT NOT NULL,key TEXT NOT NULL,hash TEXT NOT NULL,question TEXT NOT NULL,state TEXT NOT NULL,PRIMARY KEY(scope,key));
+ CREATE TABLE IF NOT EXISTS interaction_outcomes(scope TEXT NOT NULL,key TEXT NOT NULL,question TEXT NOT NULL,data BLOB NOT NULL,PRIMARY KEY(scope,key));`)
 	return e
 }
 func (s *Store) Import(ctx context.Context, remote Record) (Record, error) {
@@ -110,4 +112,51 @@ func (s *Store) ReserveRemoteOnce(ctx context.Context, scope, key, hash, id stri
 		return false, errors.New("idempotency_conflict")
 	}
 	return n == 1, tx.Commit()
+}
+
+// RemoteFailure retains only the safe classification of the ORIGINAL attempt.
+// A later receipt failure cannot turn an earlier unknown mutation into rejection.
+type RemoteFailure struct {
+	State  string `json:"state"`
+	Status int    `json:"http_status,omitempty"`
+	Code   string `json:"error_code,omitempty"`
+}
+
+func (s *Store) SaveRemoteFailure(ctx context.Context, scope, key, id string, f RemoteFailure) error {
+	raw, e := json.Marshal(f)
+	if e != nil {
+		return e
+	}
+	tx, e := s.db.BeginTx(ctx, nil)
+	if e != nil {
+		return e
+	}
+	defer tx.Rollback()
+	result, e := tx.ExecContext(ctx, `INSERT OR IGNORE INTO interaction_outcomes(scope,key,question,data) SELECT scope,key,question,? FROM interaction_outbox WHERE scope=? AND key=? AND question=?`, raw, scope, key, id)
+	if e != nil {
+		return e
+	}
+	n, e := result.RowsAffected()
+	if e != nil {
+		return e
+	}
+	if n == 1 && f.State == "rejected" {
+		if _, e = tx.ExecContext(ctx, "UPDATE interaction_outbox SET state='rejected' WHERE scope=? AND key=? AND question=? AND state='unknown'", scope, key, id); e != nil {
+			return e
+		}
+	}
+	return tx.Commit()
+}
+func (s *Store) RemoteFailure(ctx context.Context, scope, key, id string) (RemoteFailure, bool, error) {
+	var raw []byte
+	e := s.db.QueryRowContext(ctx, "SELECT data FROM interaction_outcomes WHERE scope=? AND key=? AND question=?", scope, key, id).Scan(&raw)
+	if e == sql.ErrNoRows {
+		return RemoteFailure{}, false, nil
+	}
+	if e != nil {
+		return RemoteFailure{}, false, e
+	}
+	var f RemoteFailure
+	e = json.Unmarshal(raw, &f)
+	return f, e == nil, e
 }

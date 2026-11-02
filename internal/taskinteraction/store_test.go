@@ -233,3 +233,69 @@ func TestUnifiedContextInteractionGuardIsNotRotatingPage(t *testing.T) {
 		t.Fatal("foreign interaction scope", unsettled, e)
 	}
 }
+
+func TestRemoteFailureRetainsOriginalClassificationAcrossRestart(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	s, e := Open(dir)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if fresh, e := s.ReserveRemoteOnce(ctx, "parent", "original", "hash", "question"); e != nil || !fresh {
+		t.Fatal(fresh, e)
+	}
+	original := RemoteFailure{State: "unknown", Code: "controller_remote_unreachable"}
+	if e = s.SaveRemoteFailure(ctx, "parent", "original", "question", original); e != nil {
+		t.Fatal(e)
+	}
+	s.Close()
+	s, e = Open(dir)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer s.Close()
+	if e = s.SaveRemoteFailure(ctx, "parent", "original", "question", RemoteFailure{State: "rejected", Status: 409, Code: "native_human_question_use_original_reply"}); e != nil {
+		t.Fatal(e)
+	}
+	got, found, e := s.RemoteFailure(ctx, "parent", "original", "question")
+	if e != nil || !found || got != original {
+		t.Fatal(got, found, e)
+	}
+	if _, found, e := s.RemoteFailure(ctx, "parent", "original", "foreign"); e != nil || found {
+		t.Fatal("foreign receipt", found, e)
+	}
+	if fresh, e := s.ReserveRemoteOnce(ctx, "parent", "original", "hash", "question"); e != nil || fresh {
+		t.Fatal("original mutation replayed", fresh, e)
+	}
+}
+
+func TestRemoteDefinitiveRejectionDurableStateAndOutcome(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	s, e := Open(dir)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e = s.ReserveRemoteOnce(ctx, "parent", "rejected", "hash", "question"); e != nil {
+		t.Fatal(e)
+	}
+	want := RemoteFailure{State: "rejected", Status: 409, Code: "native_human_question_use_original_reply"}
+	if e = s.SaveRemoteFailure(ctx, "parent", "rejected", "question", want); e != nil {
+		t.Fatal(e)
+	}
+	s.Close()
+	s, e = Open(dir)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer s.Close()
+	if state, found, e := s.RemoteCommand(ctx, "parent", "rejected"); e != nil || !found || state != "rejected" {
+		t.Fatal(state, found, e)
+	}
+	if actual, found, e := s.RemoteFailure(ctx, "parent", "rejected", "question"); e != nil || !found || actual != want {
+		t.Fatal(actual, found, e)
+	}
+	if fresh, e := s.ReserveRemoteOnce(ctx, "parent", "rejected", "hash", "question"); e != nil || fresh {
+		t.Fatal("rejection replayed", fresh, e)
+	}
+}

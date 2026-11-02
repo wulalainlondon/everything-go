@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	ic "everything-go/contracts/task-api/interactions-v5"
+	base "everything-go/contracts/task-api/v1"
 	"everything-go/internal/session"
 	"everything-go/internal/taskapi"
 	ti "everything-go/internal/taskinteraction"
@@ -79,6 +81,9 @@ func (h *Hub) remoteInteractionCommand(ctx context.Context, c taskapi.VerifiedCo
 	if e := h.validateRemoteInteraction(ctx, q); e != nil {
 		return nil, e
 	}
+	if in.Action == "answer" && q.NativeQuestion != "" {
+		return nil, errors.New("native_human_question_use_original_reply")
+	}
 	actor := "parent_agent"
 	if c.BindingKind == "paired_human" {
 		actor = "human"
@@ -91,6 +96,11 @@ func (h *Hub) remoteInteractionCommand(ctx context.Context, c taskapi.VerifiedCo
 	if e != nil {
 		return nil, e
 	}
+	if outcome, found, err := h.interactions.RemoteFailure(ctx, scope, req.IdempotencyKey, q.ID); err != nil {
+		return nil, err
+	} else if found && outcome.State == "rejected" {
+		return interactionSubmissionView(q.ID, req.IdempotencyKey, h.cfg.InstanceID, outcome), nil
+	}
 	action := in.Action
 	// A persisted unknown request is only queried. Never resend an answer after
 	// transport loss, even when a current read still says pending.
@@ -101,7 +111,15 @@ func (h *Hub) remoteInteractionCommand(ctx context.Context, c taskapi.VerifiedCo
 	var result interactionPeerResult
 	e = h.controllerRemoteRequest(ctx, q.Binding.Authority, "interaction", controllerEnvelope{ParentID: q.Binding.Parent, Interaction: payload}, &result)
 	if e != nil {
-		return map[string]any{"interaction_id": q.ID, "answer_submission": "unknown", "original_key": req.IdempotencyKey, "next_action": "query same receipt; do not mint a replacement key"}, nil
+		outcome := classifyInteractionRemoteFailure(e, fresh)
+		if fresh {
+			if err := h.interactions.SaveRemoteFailure(ctx, scope, req.IdempotencyKey, q.ID, outcome); err != nil {
+				return nil, err
+			}
+		}
+		view := interactionSubmissionView(q.ID, req.IdempotencyKey, h.cfg.InstanceID, outcome)
+		h.addInteractionOriginalOutcome(ctx, view, scope, req.IdempotencyKey, q.ID)
+		return view, nil
 	}
 	if result.Record.ID != q.ID {
 		return nil, errors.New("interaction_remote_binding_mismatch")
@@ -114,6 +132,8 @@ func (h *Hub) remoteInteractionCommand(ctx context.Context, c taskapi.VerifiedCo
 		_ = h.interactions.RemoteComplete(ctx, scope, req.IdempotencyKey)
 	}
 	view := interactionView(r, false)
+	h.addInteractionOriginalOutcome(ctx, view, scope, req.IdempotencyKey, q.ID)
+	addInteractionReceiptRoute(view, q.ID, req.IdempotencyKey, h.cfg.InstanceID)
 	view["answer_submission"] = "unknown"
 	if result.CommandFound {
 		view["answer_submission"] = "accepted"
@@ -227,6 +247,9 @@ func (h *Hub) serveInteractionPeer(w http.ResponseWriter, r *http.Request, origi
 		result = interactionPeerResult{Record: q, Accepted: true, CommandFound: found}
 		h.publishInteraction(q)
 	}
+	// Full provider payloads (including authorization questions) stay on the
+	// original child connection; replica/receipt reads never relay them.
+	result.Record.NativePayload = nil
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(result)
 }
@@ -235,6 +258,11 @@ func (h *Hub) remoteInteractionReceipt(ctx context.Context, c taskapi.VerifiedCo
 	if e := h.validateRemoteInteraction(ctx, q); e != nil {
 		return nil, e
 	}
+	if outcome, found, err := h.interactions.RemoteFailure(ctx, c.StableScopeID, key, q.ID); err != nil {
+		return nil, err
+	} else if found && outcome.State == "rejected" {
+		return interactionSubmissionView(q.ID, key, h.cfg.InstanceID, outcome), nil
+	}
 	actor := "parent_agent"
 	if c.BindingKind == "paired_human" {
 		actor = "human"
@@ -242,7 +270,9 @@ func (h *Hub) remoteInteractionReceipt(ctx context.Context, c taskapi.VerifiedCo
 	var result interactionPeerResult
 	e := h.controllerRemoteRequest(ctx, q.Binding.Authority, "interaction", controllerEnvelope{ParentID: q.Binding.Parent, Interaction: &interactionPeerPayload{Action: "receipt", ID: q.ID, ParentThread: q.Binding.ParentThread, Key: key, Actor: actor, ActorID: c.StableScopeID}}, &result)
 	if e != nil {
-		return map[string]any{"interaction_id": q.ID, "answer_submission": "unknown", "original_key": key}, nil
+		view := interactionSubmissionView(q.ID, key, h.cfg.InstanceID, classifyInteractionRemoteFailure(e, false))
+		h.addInteractionOriginalOutcome(ctx, view, c.StableScopeID, key, q.ID)
+		return view, nil
 	}
 	if result.Record.ID != q.ID {
 		return nil, errors.New("interaction_remote_binding_mismatch")
@@ -252,9 +282,77 @@ func (h *Hub) remoteInteractionReceipt(ctx context.Context, c taskapi.VerifiedCo
 		return nil, e
 	}
 	view := interactionView(updated, false)
+	h.addInteractionOriginalOutcome(ctx, view, c.StableScopeID, key, q.ID)
+	addInteractionReceiptRoute(view, q.ID, key, h.cfg.InstanceID)
+	view["answer_submission"] = "unknown"
+	if result.CommandFound {
+		view["answer_submission"] = "accepted"
+	}
 	view["command_found"] = result.CommandFound
 	if result.CommandFound {
 		_ = h.interactions.RemoteComplete(ctx, c.StableScopeID, key)
 	}
 	return view, nil
+}
+
+// Only fixed service error codes are displayed. Arbitrary remote text can
+// contain private data and must never enter receipts or model-visible output.
+func safeInteractionRemoteCode(code string) string {
+	switch code {
+	case "cross_instance_interactions_unsupported", "invalid_interaction_envelope", "interaction_remote_binding_mismatch", "interaction_remote_conflict", "interaction_actor_invalid", "interaction_original_key_required", "native_human_question_use_original_reply", "interaction_child_desktop_owned", "unsupported_interaction_action", "interaction_receipt_mismatch", "interaction_child_changed", "interaction_relation_changed", "interaction_parent_changed", "interaction_grant_revoked", "interaction_revision_changed", "human_answer_required", "answer_already_reserved", "idempotency_conflict", "controller_remote_not_authorized_or_unsupported":
+		return code
+	default:
+		return "remote_error_redacted"
+	}
+}
+func classifyInteractionRemoteFailure(err error, originalAttempt bool) ti.RemoteFailure {
+	f := ti.RemoteFailure{State: "unknown", Code: "controller_remote_unreachable"}
+	var remote controllerRemoteFailure
+	if !errors.As(err, &remote) {
+		return f
+	}
+	f.Status, f.Code = remote.Status, safeInteractionRemoteCode(remote.Message)
+	if !originalAttempt {
+		return f
+	}
+	// 408/429/5xx and unrecognized 409s remain uncertain. A known conflict
+	// involving an existing command is not proof of non-execution either.
+	preEffect := remote.Status == http.StatusUnauthorized || remote.Status == http.StatusForbidden || remote.Status == http.StatusNotFound || remote.Status == http.StatusMethodNotAllowed
+	switch remote.Message {
+	case "cross_instance_interactions_unsupported", "invalid_interaction_envelope", "interaction_remote_binding_mismatch", "interaction_actor_invalid", "interaction_original_key_required", "native_human_question_use_original_reply", "interaction_child_desktop_owned", "unsupported_interaction_action", "interaction_child_changed", "interaction_relation_changed", "interaction_parent_changed", "interaction_grant_revoked", "human_answer_required":
+		preEffect = preEffect || remote.Status == http.StatusConflict || remote.Status == http.StatusBadRequest
+	}
+	if preEffect {
+		f.State = "rejected"
+	}
+	return f
+}
+func addInteractionReceiptRoute(view map[string]any, id, key, authority string) {
+	view["original_key"] = key
+	view["receipt_via_existing_task_tool"] = map[string]any{
+		"tool": "task_get", "api_version": base.Version, "operation": "get",
+		"input": map[string]any{"original_receipt": taskapi.Locator{Authority: authority, Path: "controller", Operation: "append", TaskID: "ti5:" + id, Key: key}},
+	}
+	view["receipt_via_interactions"] = map[string]any{"api_version": ic.Version, "operation": "interactions", "input": map[string]any{"action": "receipt", "interaction_id": id, "original_key": key}}
+	view["next_action"] = "Query the original receipt with this exact key; do not repeat the mutation or mint a replacement key."
+}
+func interactionSubmissionView(id, key, authority string, f ti.RemoteFailure) map[string]any {
+	view := map[string]any{"interaction_id": id, "answer_submission": f.State, "acceptance": "unknown"}
+	if f.State == "rejected" {
+		view["acceptance"] = "known_none"
+	}
+	if f.Status != 0 {
+		view["http_status"] = f.Status
+	}
+	if f.Code != "" {
+		view["error_code"] = f.Code
+	}
+	addInteractionReceiptRoute(view, id, key, authority)
+	return view
+}
+
+func (h *Hub) addInteractionOriginalOutcome(ctx context.Context, view map[string]any, scope, key, id string) {
+	if f, found, e := h.interactions.RemoteFailure(ctx, scope, key, id); e == nil && found {
+		view["original_attempt"] = f
+	}
 }

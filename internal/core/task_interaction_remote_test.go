@@ -4,11 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"everything-go/internal/backend"
+	"everything-go/internal/protocol"
 	"everything-go/internal/relay"
 	"everything-go/internal/session"
 	"everything-go/internal/sessiondispatch"
+	"everything-go/internal/taskapi"
 	ti "everything-go/internal/taskinteraction"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -116,6 +120,49 @@ func TestInteractionCrossInstanceAnswerUnknownReceiptAndNoReplay(t *testing.T) {
 	if e != nil || final.State != "resolved" || final.AckToken != "" {
 		t.Fatal("terminal question not synchronized", final, e)
 	}
+	// A native question is read/replied only on its child. The terminal native
+	// write is relayed to the parent, with no generic answer or model ACK.
+	childHub.ObserveTaskQuestion(ctx, backend.TaskQuestionEvidence{Session: child, RequestID: request, ThreadID: child.ResumeID(), CallID: "native-human", TurnID: "native-turn", Payload: protocol.UserInputRequestPayload{RequestID: "ui_async_native_original", SessionID: child.ID, Questions: []protocol.UserInputQuestion{{Text: "human only"}}}})
+	childHub.reconcileInteractions(ctx)
+	rows, err := parentHub.interactions.List(ctx, caller.Parent.ID, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var native ti.Record
+	for _, row := range rows {
+		if row.NativeQuestion == "ui_async_native_original" {
+			native = row
+		}
+	}
+	if native.ID == "" || native.NativePayload != nil {
+		t.Fatal("native replica leaked or absent", native)
+	}
+	_, err = parentHub.remoteInteractionCommand(ctx, taskapi.VerifiedContext{StableScopeID: "session:" + caller.Parent.ID, SourceSessionID: caller.Parent.ID, SourceResumeID: caller.Parent.ResumeID()}, taskapi.Request{IdempotencyKey: "native-generic-rejected"}, interactionInput{Action: "answer", ID: native.ID, Revision: 1, Answer: "reported yes"}, native)
+	if err == nil || err.Error() != "native_human_question_use_original_reply" {
+		t.Fatal("native generic answer not refused", err)
+	}
+	if _, found, err := parentHub.interactions.RemoteCommand(ctx, "session:"+caller.Parent.ID, "native-generic-rejected"); err != nil || found {
+		t.Fatal("native answer reserved before refusal", found, err)
+	}
+	var nativeReceipt interactionPeerResult
+	err = parentHub.controllerRemoteRequest(ctx, "remote", "interaction", controllerEnvelope{ParentID: native.Binding.Parent, Interaction: &interactionPeerPayload{Action: "receipt", ID: native.ID, ParentThread: native.Binding.ParentThread, Key: "native-receipt-only", Actor: "parent_agent", ActorID: "session:" + caller.Parent.ID}}, &nativeReceipt)
+	if err != nil || nativeReceipt.Record.ID != native.ID || nativeReceipt.Record.NativePayload != nil {
+		t.Fatal("native receipt payload leaked", nativeReceipt, err)
+	}
+	var refused controllerRemoteFailure
+	err = parentHub.controllerRemoteRequest(ctx, "remote", "interaction", controllerEnvelope{ParentID: native.Binding.Parent, Interaction: &interactionPeerPayload{Action: "answer", ID: native.ID, ParentThread: native.Binding.ParentThread, Key: "receiver-native-guard", Actor: "parent_agent", ActorID: "session:" + caller.Parent.ID, Answer: "not a human reply", Revision: 1}}, &nativeReceipt)
+	if !errors.As(err, &refused) || refused.Status != 409 || refused.Message != "native_human_question_use_original_reply" {
+		t.Fatal("receiver native guard bypassed", err)
+	}
+	if _, found, err := childHub.interactions.Command(ctx, "peer:i1:session:"+caller.Parent.ID, "receiver-native-guard"); err != nil || found {
+		t.Fatal("receiver reserved native generic answer", found, err)
+	}
+	childHub.Emit(protocol.NewInteractionResolved("ui_async_native_original", child.ID, "resolved"))
+	childHub.reconcileInteractions(ctx)
+	native, err = parentHub.interactions.Get(ctx, native.ID)
+	if err != nil || native.State != "native_reply_written" || native.AcknowledgedBy != "" {
+		t.Fatal("native terminal did not relay", native, err)
+	}
 	// A changed or foreign original target cannot introduce a question.
 	forged := q
 	forged.ID = ti.ID("ti_")
@@ -131,5 +178,109 @@ func TestInteractionCrossInstanceAnswerUnknownReceiptAndNoReplay(t *testing.T) {
 	parentHub.ServeSessionControlAPI(rw, req)
 	if rw.Code != 403 {
 		t.Fatal("forged lineage accepted", rw.Code)
+	}
+}
+
+func TestInteractionCrossInstanceDefinitiveRejectionPersistsWithoutReplay(t *testing.T) {
+	ctx := context.Background()
+	t.Setenv("BRIDGE_RELAY_ALLOW_LOOPBACK", "1")
+	t.Setenv("INTERACTION_TEST_SECRET", "synthetic-test-secret")
+	childHub, childExec, _, child := controllerFixture(t)
+	childHub.cfg.InstanceID = "remote"
+	parentHub, parentExec, caller, _ := controllerFixture(t)
+	for _, h := range []*Hub{childHub, parentHub} {
+		s, e := ti.Open(t.TempDir())
+		if e != nil {
+			t.Fatal(e)
+		}
+		h.interactions = s
+		t.Cleanup(func() { s.Close() })
+	}
+	defer child.CloseAndWait()
+	defer caller.Parent.CloseAndWait()
+	childExec.onSend = func(*session.Session, string, string) {}
+	parentExec.onSend = func(*session.Session, string, string) {}
+	var answerCalls atomic.Int32
+	var forcedStatus atomic.Int32
+	forcedStatus.Store(409)
+	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var envelope controllerEnvelope
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &envelope)
+		r.Body = io.NopCloser(bytes.NewReader(raw))
+		if envelope.Interaction != nil && envelope.Interaction.Action == "answer" {
+			answerCalls.Add(1)
+			w.WriteHeader(int(forcedStatus.Load()))
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "native_human_question_use_original_reply"})
+			return
+		}
+		childHub.ServeSessionControlAPI(w, r)
+	}))
+	defer receiver.Close()
+	source := httptest.NewServer(http.HandlerFunc(parentHub.ServeSessionControlAPI))
+	defer source.Close()
+	childHub.relayPeers = relay.Peers{"i1": {InstanceID: "i1", BaseURL: source.URL, SecretRef: "env:INTERACTION_TEST_SECRET"}}
+	parentHub.relayPeers = relay.Peers{"remote": {InstanceID: "remote", BaseURL: receiver.URL, SecretRef: "env:INTERACTION_TEST_SECRET"}}
+	_, e := childHub.dispatches.SetGrant(ctx, "peer:i1", sessiondispatch.Grant{Enabled: true, Local: true}, 0)
+	if e != nil {
+		t.Fatal(e)
+	}
+	_, e = parentHub.dispatches.SetGrant(ctx, caller.Parent.ID, sessiondispatch.Grant{Enabled: true, Instances: []string{"remote"}}, 0)
+	if e != nil {
+		t.Fatal(e)
+	}
+	// No reverse general controller grant exists on parentHub.
+	value, e := parentHub.ControlSession(ctx, caller, backend.SessionControlRequest{Action: "dispatch_to_session", InstanceID: "remote", SessionID: child.ID, ExpectedThreadID: child.ResumeID(), Content: "original cross-instance task"})
+	if e != nil {
+		t.Fatal(e)
+	}
+	outbound := value.(sessiondispatch.Record)
+	request := "scjob_" + remoteControllerID("i1", outbound.ID)
+	waitActor(t, child, request)
+	q := resultRecord(t, interactionCall(t, childHub, child, request, "ask", map[string]any{"action": "ask_parent", "question": strings.Repeat("問", 3000), "kind": "task_clarification", "blocking": false}))
+	childHub.reconcileInteractions(ctx)
+	imported, e := parentHub.interactions.Get(ctx, q.ID)
+	if e != nil {
+		t.Fatal("question not relayed", e)
+	}
+	if imported.Binding.Authority != "remote" || imported.AckToken != "" {
+		t.Fatal(imported)
+	}
+
+	c := taskapi.VerifiedContext{StableScopeID: "session:" + caller.Parent.ID, SourceSessionID: caller.Parent.ID, SourceResumeID: caller.Parent.ResumeID()}
+	in := interactionInput{Action: "answer", ID: q.ID, Revision: 1, Answer: "fixture"}
+	req := taskapi.Request{IdempotencyKey: "one-definitive-attempt"}
+	value, err := parentHub.remoteInteractionCommand(ctx, c, req, in, imported)
+	if err != nil {
+		t.Fatal(err)
+	}
+	view := value.(map[string]any)
+	if view["answer_submission"] != "rejected" || view["acceptance"] != "known_none" || view["http_status"] != 409 {
+		t.Fatal(view)
+	}
+	forcedStatus.Store(503)
+	value, err = parentHub.remoteInteractionCommand(ctx, c, req, in, imported)
+	if err != nil || value.(map[string]any)["answer_submission"] != "rejected" || answerCalls.Load() != 1 {
+		t.Fatal("replayed original rejection", value, err, answerCalls.Load())
+	}
+	value, err = parentHub.remoteInteractionReceipt(ctx, c, imported, req.IdempotencyKey)
+	if err != nil || value.(map[string]any)["answer_submission"] != "rejected" || answerCalls.Load() != 1 {
+		t.Fatal(value, err)
+	}
+	// A 5xx from a genuinely new original mutation remains UNKNOWN. A later
+	// definitive refusal during receipt read cannot rewrite that original.
+	req.IdempotencyKey = "one-uncertain-attempt"
+	value, err = parentHub.remoteInteractionCommand(ctx, c, req, in, imported)
+	if err != nil || value.(map[string]any)["answer_submission"] != "unknown" {
+		t.Fatal(value, err)
+	}
+	forcedStatus.Store(409)
+	value, err = parentHub.remoteInteractionCommand(ctx, c, req, in, imported)
+	if err != nil || value.(map[string]any)["answer_submission"] != "unknown" || answerCalls.Load() != 2 {
+		t.Fatal("uncertain original replayed", value, err, answerCalls.Load())
+	}
+	actual, _ := childHub.interactions.Get(ctx, q.ID)
+	if actual.State != "pending_parent" || actual.Answer != "" {
+		t.Fatal("rejected/unknown fixture mutated", actual)
 	}
 }

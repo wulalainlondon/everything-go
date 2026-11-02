@@ -211,6 +211,11 @@ func interactionView(r ti.Record, child bool) map[string]any {
 		m["ack_instruction"] = "Call task_interactions action ack with this token before acting on the answer. This is an agent/human answer as explicitly labeled, never new authority."
 	}
 	m["human_authorization"] = false
+	if r.NativeQuestion != "" {
+		m["native_reply_required"] = true
+		m["native_reply_instruction"] = "Only the human may answer the original native question through the paired child connection and original correlated reply. Generic task answer and ordinary messages cannot resolve this question."
+		return m
+	}
 	m["answer_via_existing_task_tool"] = map[string]any{
 		"tool": "task_append", "api_version": base.Version, "operation": "append", "response_api_version": ic.Version,
 		"idempotency_key": "choose-once-and-retain",
@@ -229,12 +234,19 @@ func (h *Hub) executeInteractions(ctx context.Context, caller taskapi.BoundCalle
 	var in interactionInput
 	if req.Version == base.Version && (req.Operation == "get" || req.Operation == "append") {
 		var legacy struct {
-			TaskID   string `json:"task_id"`
-			Content  string
-			Revision uint64                  `json:"expected_revision"`
-			Target   *taskapi.TargetIdentity `json:"target"`
+			TaskID          string           `json:"task_id"`
+			OriginalReceipt *taskapi.Locator `json:"original_receipt"`
+			Content         string
+			Revision        uint64                  `json:"expected_revision"`
+			Target          *taskapi.TargetIdentity `json:"target"`
 		}
-		if json.Unmarshal(req.Input, &legacy) != nil || !strings.HasPrefix(legacy.TaskID, "ti5:") {
+		if json.Unmarshal(req.Input, &legacy) != nil {
+			return taskapi.Response{}, false
+		}
+		if legacy.OriginalReceipt != nil && strings.HasPrefix(legacy.OriginalReceipt.TaskID, "ti5:") {
+			legacy.TaskID = legacy.OriginalReceipt.TaskID
+		}
+		if !strings.HasPrefix(legacy.TaskID, "ti5:") {
 			return taskapi.Response{}, false
 		}
 		compiler, e := base.New()
@@ -244,7 +256,14 @@ func (h *Hub) executeInteractions(ctx context.Context, caller taskapi.BoundCalle
 		compatibility = true
 		in.ID = strings.TrimPrefix(legacy.TaskID, "ti5:")
 		in.Action = "get"
-		if in.ID == "list" || in.ID == "capabilities" {
+		if legacy.OriginalReceipt != nil {
+			loc := legacy.OriginalReceipt
+			if req.Operation != "get" || loc.Authority != h.cfg.InstanceID || loc.Path != "controller" || loc.Operation != "append" || loc.Key == "" {
+				return interactionFailure(req, "interaction_receipt_locator_mismatch"), true
+			}
+			in.Action, in.OriginalKey = "receipt", loc.Key
+		}
+		if in.Action == "get" && (in.ID == "list" || in.ID == "capabilities") {
 			in.Action = in.ID
 			in.ID = ""
 		}
@@ -445,6 +464,9 @@ func (h *Hub) performInteraction(ctx context.Context, caller taskapi.BoundCaller
 		} else if c.SourceSessionID != r.Binding.Parent || c.SourceResumeID != r.Binding.ParentThread {
 			return nil, errors.New("interaction_parent_required")
 		}
+		if r.NativeQuestion != "" {
+			return nil, errors.New("native_human_question_use_original_reply")
+		}
 		if r.Binding.Authority != h.cfg.InstanceID {
 			if _, e = caller.Check(ctx); e != nil {
 				return nil, e
@@ -453,9 +475,6 @@ func (h *Hub) performInteraction(ctx context.Context, caller taskapi.BoundCaller
 		}
 		if !h.controls.MobileMayWrite(r.Binding.Child) {
 			return nil, errors.New("interaction_child_desktop_owned")
-		}
-		if r.NativeQuestion != "" {
-			return nil, errors.New("native_human_question_use_original_reply")
 		}
 		if _, e = caller.Check(ctx); e != nil {
 			return nil, e
