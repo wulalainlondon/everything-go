@@ -23,15 +23,16 @@ var mediaSessionError = regexp.MustCompile(`^[a-z0-9_]{0,128}$`)
 var mediaSessionCommandID = regexp.MustCompile(`^vm_[a-f0-9]{64}$`)
 
 type callMediaReceipt struct {
-	fingerprint string
-	command     protocol.VoiceMediaCommand
-	result      backend.VoiceMediaResult
-	causal      *protocol.MediaSessionState
-	observation *protocol.MediaSessionState // read-only original-status response, never causal
-	receivedAt  int64
-	settled     chan struct{}
-	observed    chan struct{}
-	closed      bool
+	fingerprint   string
+	command       protocol.VoiceMediaCommand
+	result        backend.VoiceMediaResult
+	causal        *protocol.MediaSessionState
+	observation   *protocol.MediaSessionState // read-only original-status response, never causal
+	observeIssued bool                        // set before original-status enqueue; never inferred from native content
+	receivedAt    int64
+	settled       chan struct{}
+	observed      chan struct{}
+	closed        bool
 }
 type callMediaSession struct {
 	sequence   uint64
@@ -70,6 +71,12 @@ func callMediaResult(m *callMediaSession, r *callMediaReceipt) backend.VoiceMedi
 	out.ActionConfirmed = false
 	out.PlaybackConfirmed = false
 	out.AudioCheck = "unknown"
+	if r.causal == nil && r.observeIssued && r.command.MediaSession.Action != "observe" {
+		// Once a read is issued, an older native's observe-stage terminal can
+		// be indistinguishable from its read response. Preserve uncertainty;
+		// do not fabricate an original failure, success, or completion.
+		out.State, out.ErrorCode = "unknown", "media_outcome_unknown"
+	}
 	if r.causal != nil {
 		age, fresh := sessionSampleAge(r.causal, r.receivedAt)
 		out.ObservationAgeMS = &age
@@ -284,6 +291,7 @@ func (h *Hub) executeCallMediaSession(ctx context.Context, parent *session.Sessi
 			r.observed = make(chan struct{})
 		}
 		wait := r.observed
+		r.observeIssued = true
 		cmd := r.command
 		copy := *cmd.MediaSession
 		copy.Action = "observe"
@@ -414,6 +422,16 @@ func absMediaPosition(n int64) int64 {
 	}
 	return n
 }
+
+// Older Android can terminate discovery before dispatch while retaining its
+// initial observe stage. Only this first pending, pre-read refusal is causal.
+// Once any original-status read was issued, the same wire shape is ambiguous.
+func legacyPreReadMediaRefusal(r *callMediaReceipt, x *protocol.MediaSessionState) bool {
+	return !r.observeIssued && !r.closed && r.causal == nil &&
+		x.Stage == "observe" && (x.Phase == "error" || x.Phase == "unknown") && x.Error != "" &&
+		!x.Dispatched && !x.ActionConfirmed && !x.PlaybackConfirmed && x.ObservationAgeMS == -1
+}
+
 func (h *Hub) handleCallMediaState(c *Client, cmd clientproto.Command) {
 	x := cmd.MediaSessionState
 	if !validCallMediaState(x) || !mediaSessionCommandID.MatchString(cmd.MediaCommandID) {
@@ -439,10 +457,10 @@ func (h *Hub) handleCallMediaState(c *Client, cmd clientproto.Command) {
 			return
 		}
 		// Native statusOriginal retains the original outer command ID/sequence.
-		// Its observe-stage receipt describes current state, not a new outcome
-		// of that original mutation. Older natives may retain Dispatched; stage
-		// and the original action still keep that report out of the effect path.
-		if x.Stage == "observe" && r.command.MediaSession.Action != "observe" {
+		// Except for a strictly identified pre-read legacy refusal, its observe
+		// stage describes current state, not a new mutation outcome. Older
+		// natives may retain Dispatched; that still cannot confirm an effect.
+		if x.Stage == "observe" && r.command.MediaSession.Action != "observe" && !legacyPreReadMediaRefusal(r, x) {
 			if x.ActionConfirmed || r.observation != nil && (x.Version <= r.observation.Version || x.Revision < r.observation.Revision) ||
 				r.causal != nil && (x.Version <= r.causal.Version || x.Revision < r.causal.Revision) {
 				return
@@ -453,7 +471,8 @@ func (h *Hub) handleCallMediaState(c *Client, cmd clientproto.Command) {
 				r.observed = nil
 			}
 		} else {
-			if !sessionCausalMatches(r, x) || r.causal != nil && (x.Version <= r.causal.Version || x.Revision < r.causal.Revision) {
+			if !sessionCausalMatches(r, x) || r.causal != nil && (x.Version <= r.causal.Version || x.Revision < r.causal.Revision) ||
+				r.observation != nil && (x.Version <= r.observation.Version || x.Revision < r.observation.Revision) {
 				return
 			}
 			r.causal = cloneMediaSession(x)
