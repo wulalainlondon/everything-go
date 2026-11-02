@@ -15,6 +15,7 @@ func TestExternalMusicUsesOriginalCallAndRequiresMatchedTrack(t *testing.T) {
 	var owner *Client
 	for c, call := range h.voiceClients {
 		owner = c
+		c.clientSurface = "android"
 		call.mediaCapable = true
 		call.externalMusicCapable = true
 	}
@@ -74,7 +75,8 @@ func TestExternalMusicUsesOriginalCallAndRequiresMatchedTrack(t *testing.T) {
 func TestExternalMusicRejectsUnsupportedOriginsTargetsAndPlayerVolume(t *testing.T) {
 	for _, input := range []backend.VoiceMediaRequest{{URL: "https://music.youtube.com.evil/watch?v=M7lc1UVf-VE"}, {URL: "https://music.youtube.com/watch?v=M7lc1UVf-VE&x=1"}, {URL: "https://music.youtube.com/watch?v=M7lc1UVf-VE", Query: "both"}, {Query: "query", Volume: func() *int { v := 100; return &v }()}} {
 		h, _, caller, _ := controllerFixture(t)
-		for _, call := range h.voiceClients {
+		for owner, call := range h.voiceClients {
+			owner.clientSurface = "android"
 			call.mediaCapable = true
 			call.externalMusicCapable = true
 		}
@@ -110,6 +112,7 @@ func TestExternalMusicTerminalFailureSurvivesObservation(t *testing.T) {
 	var owner *Client
 	for c, call := range h.voiceClients {
 		owner = c
+		c.clientSurface = "android"
 		call.mediaCapable = true
 		call.externalMusicCapable = true
 	}

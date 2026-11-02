@@ -14,6 +14,7 @@ func TestMusicLaunchUserActionDoesNotSettleAsPlaybackOrBlockOriginalConfirmation
 	var owner *Client
 	for c, call := range h.voiceClients {
 		owner = c
+		c.clientSurface = "android"
 		call.mediaCapable = true
 		call.externalMusicCapable = true
 	}

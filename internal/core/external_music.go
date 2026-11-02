@@ -140,16 +140,19 @@ func (h *Hub) executeExternalMusic(ctx context.Context, parent *session.Session,
 		h.voiceMu.Unlock()
 		return refuse("external_music_not_supported")
 	}
+	platform := h.mediaEndpoint(owner).Platform
+	if platform != "android" && platform != "ios" {
+		h.voiceMu.Unlock()
+		return refuse("external_music_not_supported")
+	}
 	provider := "ytmusic_android"
-	if h.mediaEndpoint(owner).Platform == "ios" {
-		provider = "ytmusic_ios"
-		if call.musicProvider == "apple_music_ios" {
-			provider = "apple_music_ios"
-			if action == "play_query" || (action == "seek" && *command.PositionMS > 86400000) {
-				h.voiceMu.Unlock()
-				return refuse("external_music_action_unsupported")
-			}
-		} else if method == "music_control" || (method == "play_music" && action != "play_uri") {
+	if platform == "ios" {
+		if call.musicProvider != "apple_music_ios" {
+			h.voiceMu.Unlock()
+			return refuse("music_provider_retired")
+		}
+		provider = "apple_music_ios"
+		if action == "play_query" || (action == "seek" && *command.PositionMS > 86400000) {
 			h.voiceMu.Unlock()
 			return refuse("external_music_action_unsupported")
 		}
@@ -167,11 +170,6 @@ func (h *Hub) executeExternalMusic(ctx context.Context, parent *session.Session,
 		call.externalMusic = &externalMusicCall{receipts: map[string]*externalMusicReceipt{}}
 	}
 	m := call.externalMusic
-	if method == "status" && m.current == nil && provider == "ytmusic_ios" {
-		out := backend.VoiceMediaResult{Provider: provider, Endpoint: h.mediaEndpoint(owner), State: "unverified", AudioCheck: "external_media_output_unverified", ErrorCode: "external_player_unobservable"}
-		h.voiceMu.Unlock()
-		return out, nil
-	}
 	if method == "status" && m.current != nil {
 		r := m.current
 		if m.observation == nil {
@@ -283,20 +281,6 @@ func validExternalMusic(x *protocol.ExternalMusicState) bool {
 				return false
 			}
 		}
-	case "ytmusic_ios":
-		// Public iOS handoff acknowledges opening only. It cannot attest another
-		// app's now-playing state, track identity, position or successful playback.
-		if x.PackageName != "com.google.ios.youtubemusic" || x.State != "unknown" || x.ActionConfirmed || x.PlaybackConfirmed || x.TrackMatched || x.Title != "" || x.Artist != "" || x.MediaID != "" || x.PositionMS != 0 || x.ObservationAgeMS != -1 {
-			return false
-		}
-		for _, action := range x.SupportedActions {
-			if action != "play_uri" && action != "observe" {
-				return false
-			}
-		}
-		if x.HandoffOpened && x.Error != "external_playback_unverified" {
-			return false
-		}
 	default:
 		return false
 	}
@@ -329,28 +313,6 @@ func (h *Hub) handleExternalMusicState(c *Client, cmd clientproto.Command) {
 		return
 	}
 	if x.Provider == "apple_music_ios" && r.command.Action == "play_uri" && x.TrackMatched && x.MediaID != r.command.ExpectedID {
-		return
-	}
-	if x.Provider == "ytmusic_ios" {
-		// The receipt is a handoff acknowledgement, never a fresh player sample.
-		if !r.closed {
-			r.result.HandoffOpened = x.HandoffOpened
-			r.result.ErrorCode = x.Error
-			r.result.NeedsUserAction = x.Error == "foreground_required" || x.Error == "official_app_unavailable"
-		}
-		r.result.State = "unverified"
-		r.result.Observed = false
-		r.result.ExternalMusic = nil
-		r.result.ActionConfirmed = false
-		r.result.PlaybackConfirmed = false
-		if m.observation != nil {
-			close(m.observation)
-			m.observation = nil
-		}
-		if !r.closed && (x.HandoffOpened || x.Error != "") {
-			r.closed = true
-			close(r.settled)
-		}
 		return
 	}
 	// Observing the old song cannot erase an already settled dispatch failure.

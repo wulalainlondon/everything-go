@@ -103,7 +103,7 @@ func (h *Hub) jarvisServiceReadiness(a *jarvisrole.Assignment) []map[string]any 
 					} else if call.kind != "line" {
 						media["state"] = "bound"
 						media["reason"] = "actual_call_capability_observed_playback_and_audio_separate"
-						media["capabilities"] = map[string]bool{"visible_player": call.mediaCapable, "native_music": call.externalMusicCapable, "media_session": call.mediaSessionCapable, "voice_volume": call.voiceAudioCapable, "system_media_volume": call.systemVolumeCapable}
+						media["capabilities"] = map[string]bool{"visible_player": false, "native_music": call.externalMusicCapable, "media_session": call.mediaSessionCapable, "voice_volume": call.voiceAudioCapable, "system_media_volume": call.systemVolumeCapable}
 						media["platform"] = call.externalMusicPlatform
 						media["native_permission_state"] = "unknown_until_original_native_effect_or_observation"
 					}

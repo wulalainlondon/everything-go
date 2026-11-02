@@ -188,6 +188,7 @@ func TestMusicConfirmationLegacyLabelCannotChangeExpectedTitleOrID(t *testing.T)
 	var c *Client
 	for owner, call := range h.voiceClients {
 		c = owner
+		owner.clientSurface = "android"
 		call.mediaCapable = true
 		call.externalMusicCapable = true
 	}
@@ -267,7 +268,7 @@ func TestMusicConfirmationObservationOrderingForeignAndRetiredReceipt(t *testing
 	}
 	h.voiceMu.Unlock()
 	caller.ToolCallID = "switch-youtube"
-	next, _ := runSession(t, h, c, call, caller, "play_youtube", backend.VoiceMediaRequest{URL: "https://youtu.be/M7lc1UVf-VE"}, 6)
+	next, _ := runSession(t, h, c, call, caller, "play_music", backend.VoiceMediaRequest{URL: "https://music.apple.com/us/song/987654321"}, 6)
 	old := confirmationObservation(cmd, 7)
 	old.ActiveSource = "youtube"
 	old.MediaID = next.MediaSession.MediaID

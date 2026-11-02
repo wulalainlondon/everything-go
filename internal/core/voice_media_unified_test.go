@@ -81,9 +81,12 @@ func TestUnifiedMediaExactGenerationAndOriginalEventBinding(t *testing.T) {
 	var call *clientVoiceCall
 	for c, v := range h.voiceClients {
 		owner = c
+		c.clientSurface = "android"
 		call = v
 	}
 	call.mediaCapable = true
+	call.externalMusicCapable = true
+	call.musicProvider = "ytmusic_android"
 	call.mediaGeneration = "gen-A"
 	store, e := mediaservice.Open(t.TempDir())
 	if e != nil {
@@ -92,7 +95,7 @@ func TestUnifiedMediaExactGenerationAndOriginalEventBinding(t *testing.T) {
 	defer store.Close()
 	o := backend.MediaOrigin{SessionID: caller.Parent.ID, ThreadID: caller.Parent.ResumeID(), TurnID: "turn-A", VoiceID: caller.VoiceID, Generation: "gen-A", RequestID: "native-handoff"}
 	u := &unifiedVoiceMedia{store: store, resolver: fixtureMediaOrigin{o}}
-	q := mediaservice.Request{ID: "vop_unified_effect", Thread: o.ThreadID, Method: "play_youtube", Input: backend.VoiceMediaRequest{URL: "https://youtu.be/M7lc1UVf-VE"}}
+	q := mediaservice.Request{ID: "vop_unified_effect", Thread: o.ThreadID, Method: "play_music", Input: backend.VoiceMediaRequest{URL: "https://music.youtube.com/watch?v=M7lc1UVf-VE"}}
 	done := make(chan mediaservice.Result, 1)
 	go func() {
 		r, e := h.executeUnifiedMedia(context.Background(), u, q)
@@ -108,7 +111,7 @@ func TestUnifiedMediaExactGenerationAndOriginalEventBinding(t *testing.T) {
 	var command protocol.VoiceMediaCommand
 	b, _ := json.Marshal(event["media"])
 	json.Unmarshal(b, &command)
-	h.handleVoiceMediaState(owner, clientproto.Command{SessionID: o.SessionID, ThreadID: o.ThreadID, VoiceID: o.VoiceID, MediaCommandID: command.CommandID, MediaSequence: command.Sequence, MediaVideoID: command.VideoID, MediaState: "playing"})
+	h.handleVoiceMediaState(owner, clientproto.Command{SessionID: o.SessionID, ThreadID: o.ThreadID, VoiceID: o.VoiceID, MediaCommandID: command.CommandID, MediaSequence: command.Sequence, ExternalMusic: &protocol.ExternalMusicState{Provider: "ytmusic_android", PackageName: "com.google.android.apps.youtube.music", BindingID: "own", State: "playing", TrackMatched: true, ActionConfirmed: true, PlaybackConfirmed: true, MediaID: command.ExpectedID, OperationID: command.CommandID, ObservationAgeMS: 0}})
 	r := <-done
 	if !r.PlaybackConfirmed || r.Dispatched == nil || !*r.Dispatched || r.OperationID != q.ID {
 		t.Fatal(r)
@@ -146,7 +149,9 @@ func TestUnifiedMediaUnavailablePlayerPersistsDefinitiveRefusal(t *testing.T) {
 	var owner *Client
 	for c, call := range h.voiceClients {
 		owner = c
-		call.mediaCapable = false
+		c.clientSurface = "android"
+		call.mediaCapable = true
+		call.externalMusicCapable = false
 		call.mediaGeneration = "gen-A"
 	}
 	store, err := mediaservice.Open(t.TempDir())
@@ -156,9 +161,9 @@ func TestUnifiedMediaUnavailablePlayerPersistsDefinitiveRefusal(t *testing.T) {
 	defer store.Close()
 	o := backend.MediaOrigin{SessionID: caller.Parent.ID, ThreadID: caller.Parent.ResumeID(), TurnID: "turn-A", VoiceID: caller.VoiceID, Generation: "gen-A"}
 	u := &unifiedVoiceMedia{store: store}
-	q := mediaservice.Request{ID: "vop_unavailable_player", Thread: o.ThreadID, Method: "play_youtube", Input: backend.VoiceMediaRequest{URL: "https://youtu.be/M7lc1UVf-VE"}}
+	q := mediaservice.Request{ID: "vop_unavailable_player", Thread: o.ThreadID, Method: "play_music", Input: backend.VoiceMediaRequest{URL: "https://music.youtube.com/watch?v=M7lc1UVf-VE"}}
 	r, err := h.executeMediaWithOrigin(context.Background(), u, o, q, "local_user_socket")
-	if err != nil || r.State != "failed" || r.ErrorCode != "voice_media_player_not_ready" || r.Dispatched == nil || *r.Dispatched || r.PlaybackConfirmed || r.Endpoint == nil {
+	if err != nil || r.State != "failed" || r.ErrorCode != "external_music_not_supported" || r.Dispatched == nil || *r.Dispatched || r.PlaybackConfirmed {
 		t.Fatalf("refusal lost: %+v, %v", r, err)
 	}
 	// A later capable endpoint must never execute this refused intent.
@@ -166,12 +171,12 @@ func TestUnifiedMediaUnavailablePlayerPersistsDefinitiveRefusal(t *testing.T) {
 		call.mediaCapable = true
 	}
 	r, err = h.executeMediaWithOrigin(context.Background(), u, o, q, "native_tool")
-	if err != nil || r.State != "failed" || r.ErrorCode != "voice_media_player_not_ready" || r.Dispatched == nil || *r.Dispatched {
+	if err != nil || r.State != "failed" || r.ErrorCode != "external_music_not_supported" || r.Dispatched == nil || *r.Dispatched {
 		t.Fatalf("duplicate refusal lost: %+v, %v", r, err)
 	}
 	q.Method, q.Operation, q.ID, q.Input = "status", q.ID, "vop_unavailable_status", backend.VoiceMediaRequest{}
 	r, err = h.executeMediaWithOrigin(context.Background(), u, o, q, "local_user_socket")
-	if err != nil || r.State != "failed" || r.ErrorCode != "voice_media_player_not_ready" || r.CommandID != "" {
+	if err != nil || r.State != "failed" || r.ErrorCode != "external_music_not_supported" || r.CommandID != "" {
 		t.Fatalf("status refusal lost: %+v, %v", r, err)
 	}
 	select {

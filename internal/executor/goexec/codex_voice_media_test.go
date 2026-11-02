@@ -27,7 +27,7 @@ func TestVoiceMediaCatalogIsStrictAndDoesNotAcceptCallerIdentityArguments(t *tes
 		t.Fatal(groups)
 	}
 	tools := groups[0]["tools"].([]map[string]any)
-	if len(tools) != 5 {
+	if len(tools) != 4 {
 		t.Fatal(tools)
 	}
 	for _, tool := range tools {
@@ -70,7 +70,7 @@ func TestVoiceMediaInstalledNativeCatalogAcceptance(t *testing.T) {
 	if id == "" {
 		t.Fatal("missing fixture native thread")
 	}
-	t.Logf("NATIVE_SCHEMA_ACCEPTED thread=%s namespace=bridge_media tools=5 model_turn=false playback=false", id)
+	t.Logf("NATIVE_SCHEMA_ACCEPTED thread=%s namespace=bridge_media tools=4 model_turn=false playback=false", id)
 }
 
 func TestVoiceMediaInstructionsUseExistingToolsWithoutPermissionOverrides(t *testing.T) {

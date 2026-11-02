@@ -110,7 +110,7 @@ func TestMediaSessionReceiptCannotBeCompletedBySnapshotOrForeignStart(t *testing
 	h, c, call, caller := sessionMediaFixture(t)
 	done := make(chan any, 1)
 	go func() {
-		v, e := h.ExecuteVoiceMedia(context.Background(), caller, "play_youtube", backend.VoiceMediaRequest{URL: "https://youtu.be/M7lc1UVf-VE"})
+		v, e := h.ExecuteVoiceMedia(context.Background(), caller, "play_music", backend.VoiceMediaRequest{URL: "https://music.apple.com/us/song/123456789"})
 		if e != nil {
 			done <- e
 		} else {
@@ -174,7 +174,7 @@ func TestMediaSessionSingleSwitchFixedAppleAndOriginalOperationObserve(t *testin
 		sessionFeedback(h, c, call, cmd, sessionState(cmd, version))
 		return cmd, <-done
 	}
-	yt, first := play("vop_original_youtube", "play_youtube", "https://youtu.be/M7lc1UVf-VE", 1)
+	yt, first := play("vop_original_youtube", "play_music", "https://music.apple.com/us/song/987654321", 1)
 	apple, second := play("vop_original_apple", "play_music", "https://music.apple.com/us/song/123456789", 2)
 	if first.CommandID == second.CommandID || apple.MediaSession.Target != "native_music" || apple.MediaSession.MediaID != "123456789" || call.platformNativeMusicProvider != "apple_music_ios" || call.musicProvider != "youtube" {
 		t.Fatal(first, second, apple)
@@ -194,7 +194,7 @@ func TestMediaSessionSingleSwitchFixedAppleAndOriginalOperationObserve(t *testin
 		done <- r
 	}()
 	observe := nextSessionCommand(t, c)
-	if observe.CommandID != yt.CommandID || observe.Sequence != yt.Sequence || observe.MediaSession.Target != "youtube" || observe.MediaSession.Action != "observe" {
+	if observe.CommandID != yt.CommandID || observe.Sequence != yt.Sequence || observe.MediaSession.Target != "native_music" || observe.MediaSession.Action != "observe" {
 		t.Fatal("queried new provider", observe)
 	}
 	x := sessionState(yt, 3)
@@ -211,7 +211,7 @@ func TestMediaSessionSingleSwitchFixedAppleAndOriginalOperationObserve(t *testin
 		t.Fatal(r)
 	}
 	// Cross-transport retry remains a historical receipt, never another start.
-	dup, e := h.executeMediaWithOrigin(context.Background(), u, origin, mediaservice.Request{ID: "vop_original_youtube", Thread: origin.ThreadID, Method: "play_youtube", Input: backend.VoiceMediaRequest{URL: "https://youtu.be/M7lc1UVf-VE"}}, "local_user_socket")
+	dup, e := h.executeMediaWithOrigin(context.Background(), u, origin, mediaservice.Request{ID: "vop_original_youtube", Thread: origin.ThreadID, Method: "play_music", Input: backend.VoiceMediaRequest{URL: "https://music.apple.com/us/song/987654321"}}, "local_user_socket")
 	if e != nil || dup.PlaybackConfirmed || dup.MediaSessionReceipt.ActionConfirmed {
 		t.Fatal(dup, e)
 	}
@@ -223,25 +223,19 @@ func TestMediaSessionSingleSwitchFixedAppleAndOriginalOperationObserve(t *testin
 }
 func TestMediaSessionSourceGainAdoptionSeekAndCausalValidation(t *testing.T) {
 	h, c, call, caller := sessionMediaFixture(t)
-	_, r := runSession(t, h, c, call, caller, "play_youtube", backend.VoiceMediaRequest{URL: "https://youtu.be/M7lc1UVf-VE"}, 1)
+	_, r := runSession(t, h, c, call, caller, "play_music", backend.VoiceMediaRequest{URL: "https://music.apple.com/us/song/123456789"}, 1)
 	if !r.ActionConfirmed {
 		t.Fatal(r)
 	}
 	volume := 45
-	caller.ToolCallID = "gain"
-	cmd, r := runSession(t, h, c, call, caller, "control", backend.VoiceMediaRequest{Action: "volume", Source: "youtube", Volume: &volume}, 2)
-	if cmd.MediaSession.Volume == nil || cmd.Volume != 0 || !r.ActionConfirmed {
-		t.Fatal(cmd, r)
-	}
-	wrong := sessionState(cmd, 3)
-	wrong.Volume = new(int)
-	if sessionCausalMatches(&callMediaReceipt{command: cmd}, wrong) {
-		t.Fatal("wrong gain confirmed")
+	caller.ToolCallID = "retired-gain"
+	if _, err := h.ExecuteVoiceMedia(context.Background(), caller, "control", backend.VoiceMediaRequest{Action: "volume", Source: "youtube", Volume: &volume}); err == nil {
+		t.Fatal("retired gain admitted")
 	}
 	p := int64(4000)
 	revision := uint64(2)
 	caller.ToolCallID = "seek"
-	cmd, r = runSession(t, h, c, call, caller, "control", backend.VoiceMediaRequest{Action: "seek", Source: "youtube", PositionMS: &p, ExpectedRevision: &revision}, 3)
+	cmd, r := runSession(t, h, c, call, caller, "control", backend.VoiceMediaRequest{Action: "seek", Source: "native_music", PositionMS: &p, ExpectedRevision: &revision}, 3)
 	if cmd.MediaSession.ExpectedRevision == nil || *cmd.MediaSession.PositionMS != p || !r.ActionConfirmed {
 		t.Fatal(cmd, r)
 	}
@@ -264,7 +258,7 @@ func TestMediaSessionSourceGainAdoptionSeekAndCausalValidation(t *testing.T) {
 }
 func TestMediaSessionSnapshotOrderingAgingAndReceiptIsolation(t *testing.T) {
 	h, c, call, caller := sessionMediaFixture(t)
-	cmd, _ := runSession(t, h, c, call, caller, "play_youtube", backend.VoiceMediaRequest{URL: "https://youtu.be/M7lc1UVf-VE"}, 5)
+	cmd, _ := runSession(t, h, c, call, caller, "play_music", backend.VoiceMediaRequest{URL: "https://music.apple.com/us/song/123456789"}, 5)
 	x := sessionState(cmd, 6)
 	x.Kind = "snapshot"
 	x.OperationID = "local_exact"
@@ -295,7 +289,7 @@ func TestMediaSessionSnapshotOrderingAgingAndReceiptIsolation(t *testing.T) {
 func TestMediaSessionObserveDoesNotReplayOriginalGain(t *testing.T) {
 	// Causal matching of an observation is never permission to execute the original action.
 	h, c, call, caller := sessionMediaFixture(t)
-	_, _ = runSession(t, h, c, call, caller, "play_youtube", backend.VoiceMediaRequest{URL: "https://youtu.be/M7lc1UVf-VE"}, 1)
+	_, _ = runSession(t, h, c, call, caller, "play_music", backend.VoiceMediaRequest{URL: "https://music.apple.com/us/song/123456789"}, 1)
 	caller.ToolCallID = "status"
 	cmd, r := runSession(t, h, c, call, caller, "status", backend.VoiceMediaRequest{}, 2)
 	if cmd.MediaSession.Action != "observe" || r.ActionConfirmed || !r.Observed {
@@ -308,7 +302,7 @@ func TestMediaSessionConcurrentSameIntentQueuesOnce(t *testing.T) {
 	done := make(chan any, 12)
 	for i := 0; i < 12; i++ {
 		go func() {
-			v, e := h.ExecuteVoiceMedia(context.Background(), caller, "play_youtube", backend.VoiceMediaRequest{URL: "https://youtu.be/M7lc1UVf-VE"})
+			v, e := h.ExecuteVoiceMedia(context.Background(), caller, "play_music", backend.VoiceMediaRequest{URL: "https://music.apple.com/us/song/123456789"})
 			if e != nil {
 				done <- e
 			} else {
@@ -357,7 +351,7 @@ func TestMediaSessionUnknownCausalAndCallEndedDoNotConfirm(t *testing.T) {
 	}
 	caller.ToolCallID = "second"
 	go func() {
-		v, e := h.ExecuteVoiceMedia(context.Background(), caller, "play_youtube", backend.VoiceMediaRequest{URL: "https://youtu.be/M7lc1UVf-VE"})
+		v, e := h.ExecuteVoiceMedia(context.Background(), caller, "play_music", backend.VoiceMediaRequest{URL: "https://music.apple.com/us/song/123456789"})
 		if e != nil {
 			done <- e
 		} else {

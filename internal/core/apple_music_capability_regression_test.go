@@ -45,10 +45,13 @@ func TestAppleMusic153AuthenticatedHelloAndNoEnrollmentLeak(t *testing.T) {
 					}
 				}
 			}
-			for _, capability := range []string{"codex_voice_apple_music_ios_v1", "codex_voice_external_music_ios_v1"} {
+			for _, capability := range []string{"codex_voice_apple_music_ios_v1"} {
 				if caps[capability] != paired {
 					t.Fatalf("paired=%v capability=%s advertised=%v", paired, capability, caps[capability])
 				}
+			}
+			if caps["codex_voice_external_music_ios_v1"] {
+				t.Fatal("retired iOS handoff advertised")
 			}
 			if paired && !caps["history_continuity_v1"] {
 				t.Fatal("151 history continuity capability lost")

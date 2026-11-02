@@ -20,11 +20,11 @@ func (c *Codex) applyVoiceMediaTools(s *session.Session, params map[string]any) 
 		return
 	}
 	fields := map[string]any{
-		"url":   map[string]any{"type": "string", "maxLength": 2048, "description": "Real user-supplied or verified HTTPS YouTube video, canonical YouTube Music recording, or native Apple Music song URL. Never invent a song ID or resolve by dispatching a search."},
-		"title": map[string]any{"type": "string", "maxLength": 200, "description": "For native Music, exact song title only, never an artist-title display label. YouTube retains title label semantics."}, "artist": map[string]any{"type": "string", "maxLength": 200, "description": "Exact native Music artist. Never guess a localized alias."},
+		"url":   map[string]any{"type": "string", "maxLength": 2048, "description": "Verified canonical Android YouTube Music recording or native iOS Apple Music song URL. Never invent a song ID or resolve by dispatching a search."},
+		"title": map[string]any{"type": "string", "maxLength": 200, "description": "Native Music exact song title only, never an artist-title display label."}, "artist": map[string]any{"type": "string", "maxLength": 200, "description": "Exact native Music artist. Never guess a localized alias."},
 		"display_label":     map[string]any{"type": "string", "maxLength": 200, "description": "Display only. Never a native title, artist, item ID or matching expectation."},
-		"action":            map[string]any{"type": "string", "enum": []string{"pause", "resume", "stop", "next", "previous", "seek", "volume"}},
-		"source":            map[string]any{"type": "string", "enum": []string{"youtube", "native_music"}},
+		"action":            map[string]any{"type": "string", "enum": []string{"pause", "resume", "stop", "next", "previous", "seek"}},
+		"source":            map[string]any{"type": "string", "enum": []string{"native_music"}},
 		"position_ms":       map[string]any{"type": "integer", "minimum": 0, "maximum": 9007199254740991},
 		"volume":            map[string]any{"type": "integer", "minimum": 0, "maximum": 100},
 		"expected_revision": map[string]any{"type": "integer", "minimum": 0, "maximum": 9007199254740991},
@@ -37,9 +37,8 @@ func (c *Codex) applyVoiceMediaTools(s *session.Session, params map[string]any) 
 		name, description string
 		props, required   []string
 	}{
-		{"play_youtube", "User-requested official visible YouTube playback on this exact call. A capable native coordinator performs the source switch once. Queued is not playing or audible. Foreign Music requires explicit adoption; never auto-pause it.", []string{"url", "title", "display_label", "expected_revision", "adopt_current", "expected_media_id"}, []string{"url"}},
 		{"play_music", "User-requested native Music on this exact call: Apple Music on iOS, official YouTube Music on Android. Supply a verified exact song URL, exact song title (without artist prefix) and verified artist separately; display_label is presentation only. Permission/subscription/foreground refusals are not playback. Never search or buy through dispatch.", []string{"url", "title", "artist", "display_label", "expected_revision", "adopt_current", "expected_media_id"}, []string{"url"}},
-		{"control", "Control the explicit source on this exact call. seek uses position_ms; volume applies only to the current YouTube coordinator, never native Music or assistant/system gain. Receipt causality and local snapshots are separate.", []string{"action", "source", "position_ms", "volume", "expected_revision", "adopt_current", "expected_media_id"}, []string{"action"}},
+		{"control", "Control only native Music on this exact call. seek uses position_ms. Native Music has no gain setter; original causal receipts and local snapshots are separate.", []string{"action", "source", "position_ms", "expected_revision", "adopt_current", "expected_media_id"}, []string{"action"}},
 		{"music_control", "Control native Music on this exact call: pause/resume/stop/next/previous/seek. Availability depends on the native binding; no native Music gain setter.", []string{"action", "position_ms", "expected_revision", "adopt_current", "expected_media_id"}, []string{"action"}},
 		{"status", "Read-only current session observation, or the exact original operation with operation. Never replays playback, changes provider, or treats a local snapshot as completion of a remote command. Fresh playing is not proof of human audibility.", []string{"source", "operation"}, nil},
 	}
@@ -63,7 +62,7 @@ func (c *Codex) applyVoiceMediaTools(s *session.Session, params map[string]any) 
 		tools = append(tools, map[string]any{"type": "function", "name": d.name, "description": d.description, "inputSchema": map[string]any{"type": "object", "additionalProperties": false, "properties": props, "required": required}})
 	}
 	existing, _ := params["dynamicTools"].([]map[string]any)
-	params["dynamicTools"] = append(existing, map[string]any{"type": "namespace", "name": "bridge_media", "description": "Same-call native Music and official visible YouTube session control. Native coordinator owns source effects; original bound endpoint and receipts only. Never extracts audio or changes grants.", "tools": tools})
+	params["dynamicTools"] = append(existing, map[string]any{"type": "namespace", "name": "bridge_media", "description": "Same-call Android YouTube Music and iOS Apple Music control only. Native coordinator owns source effects; original bound endpoint and receipts only. Never extracts audio or changes grants.", "tools": tools})
 }
 func (c *Codex) handleVoiceMediaTool(id any, method string, raw json.RawMessage) bool {
 	if method != "item/tool/call" {

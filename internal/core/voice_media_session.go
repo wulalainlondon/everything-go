@@ -176,7 +176,7 @@ func (h *Hub) executeCallMediaSession(ctx context.Context, parent *session.Sessi
 	if input.AdoptCurrent && input.ExpectedMediaID == "" || !input.AdoptCurrent && input.ExpectedMediaID != "" {
 		return refuse("media_session_explicit_adoption_required")
 	}
-	if input.Source != "" && input.Source != "youtube" && input.Source != "native_music" {
+	if input.Source != "" && input.Source != "native_music" {
 		return refuse("media_session_source_invalid")
 	}
 	if call.callMedia == nil {
@@ -186,27 +186,16 @@ func (h *Hub) executeCallMediaSession(ctx context.Context, parent *session.Sessi
 	target, action := input.Source, input.Action
 	id, uri := "", ""
 	switch method {
-	case "play_youtube", "play_music":
+	case "play_music":
 		if action != "" || input.PositionMS != nil {
 			return refuse("media_session_arguments_invalid")
 		}
 		action = "play"
-		wanted := "youtube"
-		if method == "play_music" {
-			wanted = "native_music"
-		}
-		if target != "" && target != wanted {
+		if target != "" && target != "native_music" {
 			return refuse("media_session_source_invalid")
 		}
-		target = wanted
-		if target == "youtube" {
-			var err error
-			id, err = youtubeID(input.URL)
-			if err != nil {
-				return refuse(err.Error())
-			}
-			uri = "https://www.youtube.com/watch?v=" + id
-		} else if call.platformNativeMusicProvider == "apple_music_ios" {
+		target = "native_music"
+		if call.platformNativeMusicProvider == "apple_music_ios" {
 			id = appleMusicSongID(input.URL)
 			if id == "" {
 				return refuse("external_music_uri_invalid")
@@ -239,10 +228,10 @@ func (h *Hub) executeCallMediaSession(ctx context.Context, parent *session.Sessi
 				target = m.snapshot.ReservedSource
 			}
 		}
-		if target != "youtube" && target != "native_music" {
+		if target != "native_music" {
 			return refuse("media_session_source_required")
 		}
-		if !slices.Contains([]string{"pause", "resume", "stop", "next", "previous", "seek", "volume"}, action) {
+		if !slices.Contains([]string{"pause", "resume", "stop", "next", "previous", "seek"}, action) {
 			return refuse("media_session_action_invalid")
 		}
 		if (action == "seek") != (input.PositionMS != nil) {
@@ -266,15 +255,10 @@ func (h *Hub) executeCallMediaSession(ctx context.Context, parent *session.Sessi
 		return refuse("voice_media_tool_unknown")
 	}
 	if input.Volume != nil {
-		if action != "volume" || target != "youtube" || *input.Volume < 0 || *input.Volume > 100 {
-			return refuse("media_session_gain_unsupported")
-		}
+		return refuse("media_session_gain_unsupported")
 	}
-	if action == "volume" {
-		_, fresh := sessionSampleAge(m.snapshot, m.snapshotAt)
-		if input.Volume == nil || target != "youtube" || !fresh || m.snapshot.ActiveSource != "youtube" {
-			return refuse("media_session_youtube_gain_not_current")
-		}
+	if target != "native_music" {
+		return refuse("youtube_playback_retired")
 	}
 	if method != "status" && input.Operation != "" {
 		return refuse("media_session_arguments_invalid")
@@ -286,6 +270,9 @@ func (h *Hub) executeCallMediaSession(ctx context.Context, parent *session.Sessi
 		r := m.byCommand[input.OriginalCommandID]
 		if r == nil {
 			return refuse("media_session_original_receipt_unavailable")
+		}
+		if r.command.MediaSession == nil || r.command.MediaSession.Target != "native_music" {
+			return refuse("youtube_playback_retired")
 		}
 		if r.observed == nil {
 			r.observed = make(chan struct{})
@@ -359,7 +346,7 @@ func validCallMediaState(x *protocol.MediaSessionState) bool {
 		return false
 	}
 	for _, source := range []string{x.ActiveSource, x.ReservedSource} {
-		if !slices.Contains([]string{"none", "youtube", "native_music"}, source) {
+		if !slices.Contains([]string{"none", "native_music"}, source) {
 			return false
 		}
 	}
@@ -373,7 +360,7 @@ func validCallMediaState(x *protocol.MediaSessionState) bool {
 		return false
 	}
 	for _, a := range x.SupportedActions {
-		if !slices.Contains([]string{"play", "pause", "resume", "stop", "next", "previous", "seek", "observe", "cancel", "volume"}, a) {
+		if !slices.Contains([]string{"play", "pause", "resume", "stop", "next", "previous", "seek", "observe", "cancel"}, a) {
 			return false
 		}
 	}
@@ -410,8 +397,6 @@ func sessionCausalMatches(r *callMediaReceipt, x *protocol.MediaSessionState) bo
 		return x.ActiveSource == cmd.Target && x.PositionMS != nil && cmd.PositionMS != nil && absMediaPosition(*x.PositionMS-*cmd.PositionMS) <= 3000
 	case "next", "previous":
 		return x.ActiveSource == "native_music" && x.MediaID != "" && x.BindingID != ""
-	case "volume":
-		return x.ActiveSource == "youtube" && x.Volume != nil && cmd.Volume != nil && *x.Volume == *cmd.Volume
 	default:
 		return false
 	}

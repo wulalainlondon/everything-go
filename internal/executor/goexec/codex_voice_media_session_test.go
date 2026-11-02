@@ -17,10 +17,13 @@ func TestMediaSessionCatalogAdvertisesSourcesWithoutCallerOrAdoptionDefaults(t *
 	for _, v := range tools {
 		by[v["name"].(string)] = v
 	}
-	for _, name := range []string{"play_youtube", "play_music", "control", "music_control", "status"} {
+	for _, name := range []string{"play_music", "control", "music_control", "status"} {
 		if by[name] == nil {
 			t.Fatal("missing source capability", name)
 		}
+	}
+	if by["play_youtube"] != nil {
+		t.Fatal("retired source advertised")
 	}
 	props := by["control"]["inputSchema"].(map[string]any)["properties"].(map[string]any)
 	for _, name := range []string{"source", "position_ms", "expected_revision", "adopt_current", "expected_media_id"} {
