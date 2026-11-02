@@ -1900,20 +1900,21 @@ func NewPermissionResult(requestID, sessionID, action, decision, message string)
 // MessageQueueSnapshot is authoritative for one Session. Revision survives
 // reconnect/restart; attachment bodies stay on the server.
 type MessageQueueItem struct {
-	PayloadHash      string   `json:"payload_hash,omitempty"`
-	FullContent      string   `json:"full_content,omitempty"`
-	ContentTruncated bool     `json:"content_truncated,omitempty"`
-	RequestID        string   `json:"request_id"`
-	State            string   `json:"state"`
-	Content          string   `json:"content"`
-	Sequence         int64    `json:"sequence"`
-	ImageCount       int      `json:"image_count"`
-	FileNames        []string `json:"file_names"`
-	CreatedAt        int64    `json:"created_at"`
-	UpdatedAt        int64    `json:"updated_at"`
-	Message          string   `json:"message,omitempty"`
-	ActiveRequestID  string   `json:"active_request_id,omitempty"`
-	TurnID           string   `json:"turn_id,omitempty"`
+	CorrelatedQuestionReply bool     `json:"correlated_question_reply,omitempty"`
+	PayloadHash             string   `json:"payload_hash,omitempty"`
+	FullContent             string   `json:"full_content,omitempty"`
+	ContentTruncated        bool     `json:"content_truncated,omitempty"`
+	RequestID               string   `json:"request_id"`
+	State                   string   `json:"state"`
+	Content                 string   `json:"content"`
+	Sequence                int64    `json:"sequence"`
+	ImageCount              int      `json:"image_count"`
+	FileNames               []string `json:"file_names"`
+	CreatedAt               int64    `json:"created_at"`
+	UpdatedAt               int64    `json:"updated_at"`
+	Message                 string   `json:"message,omitempty"`
+	ActiveRequestID         string   `json:"active_request_id,omitempty"`
+	TurnID                  string   `json:"turn_id,omitempty"`
 }
 type QueueReceiptEvidence struct {
 	RequestID      string `json:"request_id"`

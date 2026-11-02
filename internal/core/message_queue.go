@@ -483,8 +483,11 @@ func (h *Hub) messageQueueSnapshot(sessionID string) (protocol.MessageQueueSnaps
 	if p, ok := h.exec.(interface{ RuntimeDiagnostics() map[string]any }); ok {
 		event.Diagnostics = p.RuntimeDiagnostics()
 	}
+	// Reserved ui_async identities already denote original correlated replies in
+	// restart recovery. This display hint does not parse an incomplete preview,
+	// restore a payload, prove native consumption, or authorize a new turn.
 	for _, e := range snapshot.Items {
-		event.Items = append(event.Items, protocol.MessageQueueItem{PayloadHash: e.PayloadHash, RequestID: e.RequestID, State: string(e.State), Content: e.Content, Sequence: e.Sequence, ImageCount: e.ImageCount, FileNames: e.FileNames, CreatedAt: e.CreatedAt, UpdatedAt: e.UpdatedAt, Message: e.Message, ActiveRequestID: e.ActiveRequestID, TurnID: e.TurnID})
+		event.Items = append(event.Items, protocol.MessageQueueItem{CorrelatedQuestionReply: strings.HasPrefix(e.RequestID, "ui_async_"), PayloadHash: e.PayloadHash, RequestID: e.RequestID, State: string(e.State), Content: e.Content, Sequence: e.Sequence, ImageCount: e.ImageCount, FileNames: e.FileNames, CreatedAt: e.CreatedAt, UpdatedAt: e.UpdatedAt, Message: e.Message, ActiveRequestID: e.ActiveRequestID, TurnID: e.TurnID})
 	}
 	for i := range event.Items {
 		for _, r := range event.Recovery {
@@ -534,7 +537,7 @@ func (h *Hub) sendMessageQueue(c *Client, cmd clientproto.Command) {
 			h.queueError(c, cmd, "queue_unavailable", "Queued message content is unavailable")
 			return
 		}
-		detail := protocol.MessageQueueItem{RequestID: entry.RequestID, State: string(entry.State), Content: entry.Content,
+		detail := protocol.MessageQueueItem{CorrelatedQuestionReply: strings.HasPrefix(entry.RequestID, "ui_async_"), RequestID: entry.RequestID, State: string(entry.State), Content: entry.Content,
 			FullContent: payload.Content, ImageCount: entry.ImageCount, FileNames: entry.FileNames, CreatedAt: entry.CreatedAt, UpdatedAt: entry.UpdatedAt}
 		if len(detail.FullContent) > 1024*1024 {
 			detail.FullContent = detail.FullContent[:1024*1024]
