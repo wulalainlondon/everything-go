@@ -213,9 +213,11 @@ type Hub struct {
 	// watching remains a fallback for turns written by an external CLI.
 	transcriptChanged func(string)
 
-	steerMu               sync.Mutex
-	interactionSnapshotMu sync.Mutex
-	steerResults          map[string]protocol.SteerResult // session_id/request_id -> terminal acknowledgement
+	steerMu                 sync.Mutex
+	interactionSnapshotMu   sync.Mutex
+	interactionProjectionMu sync.Mutex
+	asyncBatchAdmissionMu   sync.Mutex
+	steerResults            map[string]protocol.SteerResult // session_id/request_id -> terminal acknowledgement
 
 	storm *stormGuards // dedupe/throttle/semaphore for heavy handlers
 
@@ -668,6 +670,42 @@ func (h *Hub) connectedDeviceIDs(exclude string) []string {
 // event for replay on the next reconnect (the offline-recovery path). Safe for
 // concurrent use.
 func (h *Hub) Emit(event any) {
+	if consumed, ok := event.(backend.NativeAsyncBatchConsumed); ok {
+		if h.messageQueue != nil {
+			if err := h.messageQueue.ConsumeQuestionBatch(consumed.SessionID, consumed.ThreadID, consumed.ContentHash); err != nil {
+				log.Printf("[question-batch] canonical receipt persistence unavailable session=%s", consumed.SessionID)
+			}
+		}
+		return
+	}
+	switch e := event.(type) {
+	case protocol.UserInputRequestEvent:
+		h.interactionProjectionMu.Lock()
+		if revision, err := h.questionClock(); err == nil {
+			e.UserInputRequestPayload = h.projectQuestion(e.UserInputRequestPayload)
+			e.Revision = revision
+			e.Generation = h.cfg.InstanceID
+			event = e
+		} else if e.Kind == "request_user_input_async" {
+			h.interactionProjectionMu.Unlock()
+			log.Printf("[question-batch] question projection clock unavailable session=%s", e.SessionID)
+			return
+		}
+		h.interactionProjectionMu.Unlock()
+	case protocol.InteractionResolved:
+		h.interactionProjectionMu.Lock()
+		if revision, err := h.questionClock(); err == nil {
+			e.Revision = revision
+			e.Generation = h.cfg.InstanceID
+			event = e
+		} else if e.QuestionRevision != "" {
+			h.interactionProjectionMu.Unlock()
+			log.Printf("[question-batch] terminal projection clock unavailable session=%s", e.SessionID)
+			return
+		}
+		h.interactionProjectionMu.Unlock()
+	}
+
 	if observed, ok := event.(backend.ProviderDefaultEffortObserved); ok {
 		h.migrateJarvisDefaultEffort(observed.Transition)
 		return

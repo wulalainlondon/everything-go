@@ -163,9 +163,12 @@ func (c *Codex) resolveAsyncReplies(s *session.Session, thread, text string) {
 		delete(c.interactions, id)
 		c.interMu.Unlock()
 		if exists {
-			c.sink.Emit(backend.NewInteractionResolved(id, ci.payload.SessionID, "resolved"))
+			e := backend.NewInteractionResolved(id, ci.payload.SessionID, "resolved")
+			e.QuestionRevision = ci.payload.QuestionRevision
+			c.sink.Emit(e)
 		}
 	}
+	c.sink.Emit(backend.NativeAsyncBatchConsumed{SessionID: s.ID, ThreadID: thread, ContentHash: backend.AsyncContentHash(strings.TrimSpace(text))})
 	if c.dataDir == "" || !changed || readErr != nil {
 		return
 	}
@@ -282,10 +285,14 @@ func (c *Codex) applyAsyncItem(s *session.Session, thread string, item nativeAsy
 			IsBlocking: &blocking, Status: "pending", Questions: []backend.UserInputQuestion{{
 				QuestionID: qid, Text: question.Title, Type: "question", FreeForm: true, Options: options,
 			}}}
+		config := session.ConfigurationFrom(s.Snapshot())
+		payload.NativeThreadID = thread
+		payload.ConfigRevision = config.Revision
+		payload.QuestionRevision = backend.AsyncQuestionRevisionForConfiguration(payload, thread, config)
 		c.interMu.Lock()
 		_, exists := c.interactions[id]
 		if !exists {
-			c.interactions[id] = codexInteraction{payload: payload, nativeThread: thread}
+			c.interactions[id] = codexInteraction{payload: payload, nativeThread: thread, nativeConfig: &config}
 		}
 		c.interMu.Unlock()
 		if !exists {

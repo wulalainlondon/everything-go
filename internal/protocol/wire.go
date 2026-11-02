@@ -23,6 +23,7 @@ import (
 // All fields are optional; only `Type` is always present. New command fields can
 // be appended without breaking older ones.
 type Inbound struct {
+	BatchAuthority  string                             `json:"authority_instance_id,omitempty"`
 	AgentActivity   json.RawMessage                    `json:"agent_activity,omitempty"`
 	Workspace       *workspace.Command                 `json:"workspace,omitempty"`
 	Partner         *partners.Request                  `json:"partner,omitempty"`
@@ -172,8 +173,10 @@ type Inbound struct {
 	// user_input_response: the app's answer to an AskUserQuestion interaction.
 	// Answers is keyed by question_id. Cancelled is a pointer to distinguish
 	// "not sent" from an explicit false.
-	Answers   map[string]any `json:"answers"`
-	Cancelled *bool          `json:"cancelled"`
+	Selected               []AsyncBatchSelection `json:"selected,omitempty"`
+	ExpectedNativeThreadID string                `json:"expected_native_thread_id,omitempty"`
+	Answers                map[string]any        `json:"answers"`
+	Cancelled              *bool                 `json:"cancelled"`
 
 	// message attachments: images (base64, no data-URL prefix) and files. The
 	// app puts them on the `message` frame alongside content.
@@ -1771,18 +1774,23 @@ type UserInputQuestion struct {
 // UserInputRequestPayload is the interaction body shared by the
 // user_input_request event and the pending_interactions_list entries.
 type UserInputRequestPayload struct {
-	RequestID       string              `json:"request_id"`
-	SessionID       string              `json:"session_id"`
-	Source          string              `json:"source"`
-	Kind            string              `json:"kind"`
-	Header          string              `json:"header"`
-	ToolUseID       string              `json:"tool_use_id,omitempty"`
-	RequestingAgent string              `json:"requesting_agent,omitempty"`
-	Questions       []UserInputQuestion `json:"questions"`
-	CreatedAt       int64               `json:"created_at"`
-	ExpiresAt       int64               `json:"expires_at,omitempty"`
-	IsBlocking      *bool               `json:"is_blocking,omitempty"`
-	Status          string              `json:"status"`
+	QuestionRevision string              `json:"question_revision,omitempty"`
+	NativeThreadID   string              `json:"native_thread_id,omitempty"`
+	ConfigRevision   uint64              `json:"config_revision"`
+	Revision         uint64              `json:"snapshot_revision,omitempty"`
+	Generation       string              `json:"snapshot_generation,omitempty"`
+	RequestID        string              `json:"request_id"`
+	SessionID        string              `json:"session_id"`
+	Source           string              `json:"source"`
+	Kind             string              `json:"kind"`
+	Header           string              `json:"header"`
+	ToolUseID        string              `json:"tool_use_id,omitempty"`
+	RequestingAgent  string              `json:"requesting_agent,omitempty"`
+	Questions        []UserInputQuestion `json:"questions"`
+	CreatedAt        int64               `json:"created_at"`
+	ExpiresAt        int64               `json:"expires_at,omitempty"`
+	IsBlocking       *bool               `json:"is_blocking,omitempty"`
+	Status           string              `json:"status"`
 }
 
 // UserInputRequestEvent is the payload plus a type discriminant (embedding
@@ -1797,10 +1805,13 @@ func NewUserInputRequest(p UserInputRequestPayload) UserInputRequestEvent {
 }
 
 type PendingInteractionsList struct {
-	ScopeSessionID string                    `json:"scope_session_id,omitempty"`
-	SnapshotAll    bool                      `json:"snapshot_all,omitempty"`
-	Type           string                    `json:"type"`
-	Interactions   []UserInputRequestPayload `json:"interactions"`
+	SnapshotRevision uint64                    `json:"snapshot_revision"`
+	Generation       string                    `json:"snapshot_generation"`
+	Admitted         []AsyncAdmission          `json:"admitted"`
+	ScopeSessionID   string                    `json:"scope_session_id,omitempty"`
+	SnapshotAll      bool                      `json:"snapshot_all,omitempty"`
+	Type             string                    `json:"type"`
+	Interactions     []UserInputRequestPayload `json:"interactions"`
 }
 
 func NewPendingInteractionsList(items []UserInputRequestPayload) PendingInteractionsList {
@@ -1811,10 +1822,13 @@ func NewPendingInteractionsList(items []UserInputRequestPayload) PendingInteract
 }
 
 type InteractionResolved struct {
-	Type      string `json:"type"`
-	RequestID string `json:"request_id"`
-	SessionID string `json:"session_id,omitempty"`
-	Status    string `json:"status,omitempty"`
+	Revision         uint64 `json:"snapshot_revision,omitempty"`
+	Generation       string `json:"snapshot_generation,omitempty"`
+	QuestionRevision string `json:"question_revision,omitempty"`
+	Type             string `json:"type"`
+	RequestID        string `json:"request_id"`
+	SessionID        string `json:"session_id,omitempty"`
+	Status           string `json:"status,omitempty"`
 }
 
 func NewInteractionResolved(requestID, sessionID, status string) InteractionResolved {

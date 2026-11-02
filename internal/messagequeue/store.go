@@ -45,6 +45,8 @@ type APIAdmission struct {
 }
 
 type Entry struct {
+	QuestionBatch *QuestionBatchAdmission
+
 	ControllerResult *ControllerResultAdmission
 
 	Pipeline *taskpipeline.Admission
@@ -114,6 +116,10 @@ func Open(dataDir string) (*Store, error) {
  CREATE TABLE IF NOT EXISTS task_native_acceptance (session_id TEXT NOT NULL, request_id TEXT NOT NULL, thread_id TEXT NOT NULL, turn_id TEXT NOT NULL, PRIMARY KEY(session_id,request_id));
  CREATE TABLE IF NOT EXISTS task_native_steer_proofs (session_id TEXT NOT NULL, request_id TEXT NOT NULL, payload_hash TEXT NOT NULL, active_request_id TEXT NOT NULL, turn_id TEXT NOT NULL, strict_ack_version INTEGER NOT NULL, PRIMARY KEY(session_id,request_id));
  CREATE TABLE IF NOT EXISTS queue_rejections (session_id TEXT NOT NULL, request_id TEXT NOT NULL, reason TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(session_id,request_id));`); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err = installQuestionBatches(db); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -286,6 +292,9 @@ func (s *Store) Enqueue(e Entry) (Entry, bool, error) {
 			return previous, false, ErrConflict
 		}
 		return previous, false, nil
+	}
+	if err := admitQuestionBatchTx(tx, e); err != nil {
+		return Entry{}, false, err
 	}
 	if err := controllerResultAdmitTx(tx, e, hashText); err != nil {
 		return Entry{}, false, err

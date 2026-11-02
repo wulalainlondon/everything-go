@@ -81,6 +81,7 @@ type codexState struct {
 	automaticOrdinal         int
 	automaticIsContinuation  bool
 	automaticInput           []map[string]any
+	asyncBatch               *backend.AsyncBatchBinding
 
 	visibility          agentvisibility.Channel
 	hostedActivity      *agentactivity.NativeSource
@@ -302,6 +303,7 @@ type codexInteraction struct {
 	reqID        string
 	mcpParams    json.RawMessage
 	nativeThread string
+	nativeConfig *session.Configuration
 	submitting   bool
 }
 
@@ -2309,7 +2311,7 @@ func codexJSON(v any) string {
 // --- Executor interface ----------------------------------------------------
 
 func (c *Codex) Send(ctx context.Context, s *session.Session, reqID, content string, images []backend.ImageAttachment, files []backend.FileAttachment) error {
-	asyncThread, asyncErr := c.validateAsyncReply(s, reqID, content)
+	asyncThread, asyncErr := c.validateAsyncInput(ctx, s, reqID, content)
 	if asyncErr != nil {
 		return asyncErr
 	}
@@ -2417,6 +2419,7 @@ func (c *Codex) Send(ctx context.Context, s *session.Session, reqID, content str
 	st.automaticAttempt = ""
 	st.automaticAcceptanceUncertain = false
 	st.startAdmission = admission
+	st.asyncBatch = backend.AsyncBatchFrom(ctx)
 	st.stopping = false
 	st.turnErr = ""
 	st.turnErrorCode = ""
@@ -2457,6 +2460,9 @@ func (c *Codex) Send(ctx context.Context, s *session.Session, reqID, content str
 	if backend.HasTaskInputGuard(ctx) {
 		guards = append(guards, func() error { return backend.CheckTaskInputGuard(ctx) })
 	}
+	if backend.AsyncBatchFrom(ctx) != nil {
+		guards = append(guards, func() error { _, e := c.validateAsyncInput(ctx, s, reqID, content); return e })
+	}
 	go c.runTurn(s, st, threadID, input, done, sandboxOverride, guards...)
 	return nil
 }
@@ -2470,7 +2476,7 @@ func (c *Codex) Steer(ctx context.Context, s *session.Session, clientUserMessage
 	if err := c.validateAppSandbox(s, override); err != nil {
 		return backend.SteerResult{}, err
 	}
-	if _, err := c.validateAsyncReply(s, clientUserMessageID, content); err != nil {
+	if _, err := c.validateAsyncInput(ctx, s, clientUserMessageID, content); err != nil {
 		return backend.SteerResult{}, fmt.Errorf("%w: %v", backend.ErrSteerRejected, err)
 	}
 	if err := validateCodexInlineFiles(files); err != nil {
@@ -2479,10 +2485,19 @@ func (c *Codex) Steer(ctx context.Context, s *session.Session, clientUserMessage
 	if err := c.ensureServer(); err != nil {
 		return backend.SteerResult{}, fmt.Errorf("%w: %v", backend.ErrSteerRejected, err)
 	}
-	return c.steerActiveTurn(s, clientUserMessageID, backend.PresentationContent(ctx, content), images, files)
+	return c.steerActiveTurnReserved(s, clientUserMessageID, backend.PresentationContent(ctx, content), images, files, func() (func(), error) { return c.reserveAsyncInput(ctx, s, clientUserMessageID, content) }, func() error {
+		if e := backend.CheckTaskInputGuard(ctx); e != nil {
+			return e
+		}
+		_, e := c.validateAsyncInput(ctx, s, clientUserMessageID, content)
+		return e
+	})
 }
 
-func (c *Codex) steerActiveTurn(s *session.Session, clientUserMessageID, content string, images []backend.ImageAttachment, files []backend.FileAttachment) (backend.SteerResult, error) {
+func (c *Codex) steerActiveTurn(s *session.Session, clientUserMessageID, content string, images []backend.ImageAttachment, files []backend.FileAttachment, guards ...func() error) (backend.SteerResult, error) {
+	return c.steerActiveTurnReserved(s, clientUserMessageID, content, images, files, nil, guards...)
+}
+func (c *Codex) steerActiveTurnReserved(s *session.Session, clientUserMessageID, content string, images []backend.ImageAttachment, files []backend.FileAttachment, lease func() (func(), error), guards ...func() error) (backend.SteerResult, error) {
 	st := c.state(s.ID)
 	source := s.Snapshot()
 	config := session.ConfigurationFrom(source)
@@ -2519,7 +2534,17 @@ func (c *Codex) steerActiveTurn(s *session.Session, clientUserMessageID, content
 		"input":               input,
 		"clientUserMessageId": clientUserMessageID,
 	}
-	raw, err := c.rpcCallAtEpoch("turn/steer", params, 15*time.Second, &epoch)
+	raw, err := c.rpcCallAtEpoch("turn/steer", params, 15*time.Second, &epoch, func() (func(), error) {
+		for _, guard := range guards {
+			if e := guard(); e != nil {
+				return nil, fmt.Errorf("%w: %v", backend.ErrSteerRejected, e)
+			}
+		}
+		if lease != nil {
+			return lease()
+		}
+		return nil, nil
+	})
 	if err != nil {
 		var rejected *rpcResponseError
 		if errors.As(err, &rejected) {
@@ -2551,7 +2576,7 @@ func (c *Codex) steerActiveTurn(s *session.Session, clientUserMessageID, content
 		return backend.SteerResult{}, &codexAcceptanceError{Reason: "native_current_request_changed"}
 	}
 	st.touch(time.Now())
-	if strings.HasPrefix(clientUserMessageID, "ui_async_") {
+	if strings.HasPrefix(clientUserMessageID, "ui_async_") && !strings.HasPrefix(clientUserMessageID, "ui_async_batch_") {
 		c.resolveAsyncReplies(s, threadID, content)
 	}
 	return backend.SteerResult{TurnID: response.TurnID, RequestID: activeRequestID, StrictACK: true}, nil
@@ -3068,7 +3093,7 @@ func (c *Codex) startTurnWithStaleRetry(s *session.Session, st *codexState, thre
 	st.mu.Unlock()
 	err := c.startTurn(threadID, input, snap, sandboxOverride, requestID, guards...)
 	if err == nil {
-		if strings.HasPrefix(requestID, "ui_async_") && len(input) > 0 {
+		if strings.HasPrefix(requestID, "ui_async_") && !strings.HasPrefix(requestID, "ui_async_batch_") && len(input) > 0 {
 			text, _ := input[0]["text"].(string)
 			c.resolveAsyncReplies(s, threadID, text)
 		}
@@ -3346,14 +3371,25 @@ func (c *Codex) startTurn(threadID string, input []map[string]any, snap session.
 			if e = guard(); e != nil {
 				return fail(e)
 			}
-			return release, nil
+			batchRelease, e := c.reserveAsyncStart(st, snap, requestID, input)
+			if e != nil {
+				return fail(e)
+			}
+			return func() {
+				if batchRelease != nil {
+					batchRelease()
+				}
+				if release != nil {
+					release()
+				}
+			}, nil
 		})
 	} else {
 		raw, err = c.rpcCallAtEpoch("turn/start", params, 30*time.Second, &epoch, func() (func(), error) {
 			if e := guard(); e != nil {
 				return nil, e
 			}
-			return nil, nil
+			return c.reserveAsyncStart(st, snap, requestID, input)
 		})
 	}
 	consumedResponseAt := time.Now()

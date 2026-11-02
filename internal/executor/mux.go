@@ -7,6 +7,7 @@ import (
 	"sort"
 
 	"everything-go/internal/backend"
+	"everything-go/internal/protocol"
 	"everything-go/internal/session"
 )
 
@@ -310,6 +311,20 @@ func (m *Mux) PrepareAsyncReply(id string, answers map[string]any, cancelled boo
 		}
 	}
 	return "", "", false, nil
+}
+
+func (m *Mux) PrepareAsyncBatch(s *session.Session, r protocol.AsyncBatchRequest) (string, error) {
+	if n, ok := m.pick(s).(backend.NativeAsyncBatch); ok {
+		return n.PrepareAsyncBatch(s, r)
+	}
+	return "", fmt.Errorf("native_async_batch_unsupported")
+}
+
+func (m *Mux) ReserveAsyncBatch(s *session.Session, r protocol.AsyncBatchRequest) (string, func(), error) {
+	if n, ok := m.pick(s).(backend.NativeAsyncBatchReservation); ok {
+		return n.ReserveAsyncBatch(s, r)
+	}
+	return "", nil, fmt.Errorf("native_async_batch_reservation_unsupported")
 }
 
 func (m *Mux) ReconcileAsyncQuestions(s *session.Session) {

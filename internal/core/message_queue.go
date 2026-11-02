@@ -23,9 +23,11 @@ import (
 )
 
 type queuedPayload struct {
-	RoleEpoch  uint64 `json:"role_epoch,omitempty"`
-	SteerOnly  bool   `json:"steer_only,omitempty"`
-	PipelineID string `json:"pipeline_id,omitempty"`
+	AsyncBatch  *backend.AsyncBatchBinding      `json:"async_batch,omitempty"`
+	AsyncCovers []protocol.AsyncCoveredQuestion `json:"async_covers,omitempty"`
+	RoleEpoch   uint64                          `json:"role_epoch,omitempty"`
+	SteerOnly   bool                            `json:"steer_only,omitempty"`
+	PipelineID  string                          `json:"pipeline_id,omitempty"`
 
 	UnifiedBinding            *unifiedInputBinding       `json:"unified_binding,omitempty"`
 	OwnerCredentialGeneration uint64                     `json:"owner_credential_generation,omitempty"`
@@ -82,6 +84,19 @@ func (e *dispatchTargetExpectation) matches(s *session.Session) bool {
 	return snap.ResumeID == e.ThreadID && snap.ConfigRevision == e.Revision && snap.State != session.Closed && !snap.Hidden
 }
 
+// Correlated native answers pin the original active execution. Future defaults
+// continue to govern ordinary queued instructions and controller dispatch.
+func (p queuedPayload) targetMatches(s *session.Session) bool {
+	if p.ExpectedTarget == nil {
+		return true
+	}
+	if p.AsyncBatch == nil && len(p.AsyncCovers) == 0 {
+		return p.ExpectedTarget.matches(s)
+	}
+	snap := s.Snapshot()
+	return snap.ResumeID == p.ExpectedTarget.ThreadID && snap.ConfigRevision == p.ExpectedTarget.Revision && snap.State != session.Closed && !snap.Hidden
+}
+
 func (h *Hub) enqueueChatMessageExpected(c *Client, cmd clientproto.Command, expected *dispatchTargetExpectation) bool {
 	return h.enqueueChatMessageExpectedInherited(c, cmd, expected, nil)
 }
@@ -96,6 +111,10 @@ func (h *Hub) enqueueChatMessageExpectedInheritedMode(c *Client, cmd clientproto
 		return false
 	}
 
+	if strings.HasPrefix(cmd.RequestID, "ui_async_batch_") && cmd.AsyncBatch == nil {
+		h.queueError(c, cmd, "batch_binding_required", "Use the original typed batch admission")
+		return false
+	}
 	if interactionControlID(cmd.RequestID) && !c.interactionControl {
 		h.queueError(c, cmd, "interaction_control_reserved", "This request belongs to the original question delivery")
 		return false
@@ -145,6 +164,10 @@ func (h *Hub) enqueueChatMessageExpectedInheritedMode(c *Client, cmd clientproto
 		}
 	}
 	config := session.ConfigurationFrom(s.SettingsSnapshot())
+	if cmd.AsyncBatch != nil || len(cmd.AsyncCovers) > 0 {
+		// Native questions belong to the active execution, not future defaults.
+		config = session.ConfigurationFrom(s.Snapshot())
+	}
 	if err := h.jarvisFirstEffect(context.Background(), h.pairedTaskDevice(c), s.ID, cmd.RequestID, "legacy_message", cmd.Content); err != nil {
 		h.queueError(c, cmd, "jarvis_first_effect_required", err.Error())
 		return false
@@ -176,7 +199,7 @@ func (h *Hub) enqueueChatMessageExpectedInheritedMode(c *Client, cmd clientproto
 	if cmd.VisualPresentation != "" || role != nil {
 		userHash, effectiveHash = backend.PresentationHashes(backend.WithPartnerRole(backend.WithVisualPresentation(context.Background(), cmd.VisualPresentation), role), content)
 	}
-	intent, err := json.Marshal(queuedPayload{SteerOnly: steerOnly, VoiceContext: cmd.VoiceContext, VoiceID: cmd.VoiceID, VoiceThread: cmd.ThreadID, PartnerRole: role, CallbackOnComplete: cmd.CallbackOnComplete, VisualUserHash: userHash, VisualEffectiveHash: effectiveHash, VisualPresentation: cmd.VisualPresentation, MessagePurpose: cmd.MessagePurpose, Origin: cmd.TaskOrigin, Content: content, Images: cmd.Images, Files: files, ExpectedTarget: expected})
+	intent, err := json.Marshal(queuedPayload{AsyncBatch: cmd.AsyncBatch, AsyncCovers: cmd.AsyncCovers, SteerOnly: steerOnly, VoiceContext: cmd.VoiceContext, VoiceID: cmd.VoiceID, VoiceThread: cmd.ThreadID, PartnerRole: role, CallbackOnComplete: cmd.CallbackOnComplete, VisualUserHash: userHash, VisualEffectiveHash: effectiveHash, VisualPresentation: cmd.VisualPresentation, MessagePurpose: cmd.MessagePurpose, Origin: cmd.TaskOrigin, Content: content, Images: cmd.Images, Files: files, ExpectedTarget: expected})
 	if err != nil {
 		h.queueError(c, cmd, "invalid_message", err.Error())
 		return false
@@ -186,7 +209,7 @@ func (h *Hub) enqueueChatMessageExpectedInheritedMode(c *Client, cmd clientproto
 	if c.pipelineAdmission != nil {
 		pipelineID = c.pipelineAdmission.ID
 	}
-	payload, err := json.Marshal(queuedPayload{RoleEpoch: h.SessionRoleEpoch(s), SteerOnly: steerOnly, PipelineID: pipelineID, VoiceContext: cmd.VoiceContext, VoiceID: cmd.VoiceID, VoiceThread: cmd.ThreadID, PartnerRole: role, CallbackOnComplete: cmd.CallbackOnComplete, VisualUserHash: userHash, VisualEffectiveHash: effectiveHash, VisualPresentation: cmd.VisualPresentation, MessagePurpose: cmd.MessagePurpose, OwnerDevice: owner, CallbackBinding: callbackBinding(c), Origin: cmd.TaskOrigin, Content: content, Images: cmd.Images, Files: files, Configuration: &config, ExpectedTarget: expected})
+	payload, err := json.Marshal(queuedPayload{AsyncBatch: cmd.AsyncBatch, AsyncCovers: cmd.AsyncCovers, RoleEpoch: h.SessionRoleEpoch(s), SteerOnly: steerOnly, PipelineID: pipelineID, VoiceContext: cmd.VoiceContext, VoiceID: cmd.VoiceID, VoiceThread: cmd.ThreadID, PartnerRole: role, CallbackOnComplete: cmd.CallbackOnComplete, VisualUserHash: userHash, VisualEffectiveHash: effectiveHash, VisualPresentation: cmd.VisualPresentation, MessagePurpose: cmd.MessagePurpose, OwnerDevice: owner, CallbackBinding: callbackBinding(c), Origin: cmd.TaskOrigin, Content: content, Images: cmd.Images, Files: files, Configuration: &config, ExpectedTarget: expected})
 	if err != nil {
 		h.queueError(c, cmd, "invalid_message", err.Error())
 		return false
@@ -205,7 +228,32 @@ func (h *Hub) enqueueChatMessageExpectedInheritedMode(c *Client, cmd clientproto
 			return false
 		}
 	}
-	e, inserted, err := h.messageQueue.Enqueue(messagequeue.Entry{ControllerResult: c.controllerResultAdmission, Pipeline: c.pipelineAdmission, SessionID: cmd.SessionID, RequestID: cmd.RequestID, Content: truncateGraphemes(content, 4000), ImageCount: len(cmd.Images), FileNames: names, Payload: payload, PayloadHash: hex.EncodeToString(intentHash[:]), Inherited: inherited})
+	releaseBatch := func() {}
+	if cmd.AsyncBatch != nil {
+		reservation, ok := h.exec.(backend.NativeAsyncBatchReservation)
+		if !ok {
+			h.queueError(c, cmd, "batch_unsupported", "Native batch reservation unavailable")
+			return false
+		}
+		frozen, release, e := reservation.ReserveAsyncBatch(s, cmd.AsyncBatch.Request)
+		if e != nil {
+			h.queueError(c, cmd, "batch_descriptor_changed", "Selected question changed before admission")
+			return false
+		}
+		releaseBatch = release
+		if frozen != cmd.Content {
+			releaseBatch()
+			h.queueError(c, cmd, "batch_descriptor_changed", "Frozen batch changed before admission")
+			return false
+		}
+	}
+	var questionBatch *messagequeue.QuestionBatchAdmission
+	if cmd.AsyncBatch != nil {
+		raw, _ := json.Marshal(cmd.AsyncBatch.Request)
+		questionBatch = &messagequeue.QuestionBatchAdmission{CanCommit: func() error { return h.asyncBatchSendGuard(s, cmd.AsyncBatch) }, Hash: backend.AsyncContentHash(string(raw)), ContentHash: cmd.AsyncBatch.ContentHash, Covered: cmd.AsyncCovers}
+	}
+	e, inserted, err := h.messageQueue.Enqueue(messagequeue.Entry{QuestionBatch: questionBatch, ControllerResult: c.controllerResultAdmission, Pipeline: c.pipelineAdmission, SessionID: cmd.SessionID, RequestID: cmd.RequestID, Content: truncateGraphemes(content, 4000), ImageCount: len(cmd.Images), FileNames: names, Payload: payload, PayloadHash: hex.EncodeToString(intentHash[:]), Inherited: inherited})
+	releaseBatch()
 	if err != nil {
 		if errors.Is(err, messagequeue.ErrRejected) {
 			h.queueError(c, cmd, "message_rejected", "這則訊息先前已被拒絕，不會自動重送。請確認接管狀態後，以新訊息送出。")
@@ -239,7 +287,13 @@ func (h *Hub) enqueueChatMessageExpectedInheritedMode(c *Client, cmd clientproto
 		h.updateRuntimeQueueLength(cmd.SessionID, s.QueueLen())
 	}
 	// ACK is durable ownership, independent of how far execution has advanced.
-	c.enqueueEvent(protocol.NewMessageAck(cmd.SessionID, e.RequestID, "queued"))
+	if cmd.AsyncBatch != nil {
+		if v, found, e := h.messageQueue.QuestionBatch(cmd.SessionID, cmd.RequestID); e == nil && found {
+			h.sendBatchReceipt(c, v)
+		}
+	} else {
+		c.enqueueEvent(protocol.NewMessageAck(cmd.SessionID, e.RequestID, "queued"))
+	}
 	h.publishMessageQueue(cmd.SessionID)
 	if inserted && cmd.VoiceContext {
 		go h.promoteQueuedMessage(c, clientproto.Command{Kind: "promote_queued_message", SessionID: cmd.SessionID, RequestID: cmd.RequestID, AutoVoicePhoto: true})
@@ -276,7 +330,7 @@ func (h *Hub) runQueuedMessage(s *session.Session, requestID string) {
 			payload.ExpectedTarget.ThreadID = p.Task.NativeThreadID
 		}
 	}
-	if !payload.ExpectedTarget.matches(s) {
+	if !payload.targetMatches(s) {
 		h.Emit(backend.NewError(s.ID, requestID, "dispatch_target_changed", "Target thread or configuration changed while waiting; this instruction was not sent"))
 		return
 	}
@@ -321,7 +375,7 @@ func (h *Hub) runQueuedMessage(s *session.Session, requestID string) {
 		}
 	}
 	// Recheck after activation/events/preview writes, immediately at Send.
-	if !payload.ExpectedTarget.matches(s) || (payload.ExpectedTarget != nil && payload.Configuration != nil && session.ConfigurationFrom(s.Snapshot()) != *payload.Configuration) {
+	if !payload.targetMatches(s) || (payload.ExpectedTarget != nil && payload.Configuration != nil && session.ConfigurationFrom(s.Snapshot()) != *payload.Configuration) {
 		h.Emit(backend.NewError(s.ID, requestID, "dispatch_target_changed", "Target changed before Send"))
 		return
 	}
@@ -339,6 +393,9 @@ func (h *Hub) runQueuedMessage(s *session.Session, requestID string) {
 	}
 	sendContext := backend.WithPartnerRole(backend.WithVisualPresentation(context.Background(), payload.VisualPresentation), payload.PartnerRole)
 	sendContext = backend.WithRoleEpoch(sendContext, payload.RoleEpoch)
+	if payload.AsyncBatch != nil {
+		sendContext = backend.WithAsyncBatch(sendContext, payload.AsyncBatch)
+	}
 	if payload.WorkspaceTask != nil {
 		if _, target, err := h.validateWorkspaceNative(context.Background(), payload.WorkspaceTask.RoomID, payload.WorkspaceTask.TaskID); err != nil || target != s {
 			h.Emit(backend.NewError(s.ID, requestID, "room_authorization_changed", "Room authority changed at Send"))
@@ -371,6 +428,15 @@ func (h *Hub) runQueuedMessage(s *session.Session, requestID string) {
 		return
 	}
 	sendContext = h.withJarvisDispatchGuard(sendContext, s.ID, requestID)
+	if payload.AsyncBatch != nil {
+		prior := sendContext
+		sendContext = backend.WithTaskInputGuard(sendContext, func() error {
+			if e := backend.CheckTaskInputGuard(prior); e != nil {
+				return e
+			}
+			return h.asyncBatchSendGuard(s, payload.AsyncBatch)
+		})
+	}
 	if err = h.exec.Send(sendContext, s, requestID, payload.Content, payload.Images, payload.Files); err != nil {
 		if errors.Is(err, backend.ErrNativeSubmissionBusy) {
 			h.deferUnsubmittedQueuedMessage(s, requestID)
@@ -717,7 +783,7 @@ func (h *Hub) promoteQueuedMessage(c *Client, cmd clientproto.Command) {
 		return
 	}
 	var intended queuedPayload
-	if json.Unmarshal(e.Payload, &intended) != nil || !intended.ExpectedTarget.matches(s) || (intended.Configuration != nil && *intended.Configuration != session.ConfigurationFrom(s.Snapshot())) {
+	if json.Unmarshal(e.Payload, &intended) != nil || !intended.targetMatches(s) || (intended.Configuration != nil && *intended.Configuration != session.ConfigurationFrom(s.Snapshot())) {
 		h.messageQueueMu.Unlock()
 		h.queueResult(c, cmd, "promote", "retained", "此訊息的設定與本輪不同，保留原本的排隊位置。", e)
 		return
@@ -751,7 +817,12 @@ func (h *Hub) promoteQueuedMessage(c *Client, cmd clientproto.Command) {
 			steerErr = fmt.Errorf("%w: original voice ended", backend.ErrSteerRejected)
 		}
 		if decodeErr == nil && steerErr == nil {
-			result, steerErr = steerer.Steer(backend.WithPartnerRole(backend.WithVisualPresentation(context.Background(), payload.VisualPresentation), payload.PartnerRole), s, cmd.RequestID, payload.Content, payload.Images, payload.Files)
+			steerContext := backend.WithPartnerRole(backend.WithVisualPresentation(context.Background(), payload.VisualPresentation), payload.PartnerRole)
+			if payload.AsyncBatch != nil {
+				steerContext = backend.WithAsyncBatch(steerContext, payload.AsyncBatch)
+				steerContext = backend.WithTaskInputGuard(steerContext, func() error { return h.asyncBatchSendGuard(s, payload.AsyncBatch) })
+			}
+			result, steerErr = steerer.Steer(steerContext, s, cmd.RequestID, payload.Content, payload.Images, payload.Files)
 			if steerErr == nil && !result.StrictACK {
 				steerErr = errors.New("native steer acceptance unverified")
 			}

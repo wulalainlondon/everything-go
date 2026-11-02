@@ -41,10 +41,15 @@ func TestIntegrated154HelloPreservesCallbackLINEHistoryAndIOSMusic(t *testing.T)
 			for _, value := range ack["capabilities"].([]any) {
 				caps[value.(string)] = true
 			}
-			for _, cap := range []string{"task_callback_v1", "line_accounts_v1", "line_service_config_v1", "line_control_cli_v1", "history_continuity_v1", "codex_voice_external_music_v1", "codex_voice_external_music_ios_v1", "codex_voice_apple_music_ios_v1"} {
+			for _, cap := range []string{"task_callback_v1", "line_accounts_v1", "line_service_config_v1", "line_control_cli_v1", "history_continuity_v1", "codex_voice_external_music_v1", "codex_voice_apple_music_ios_v1"} {
 				if caps[cap] != paired {
 					t.Fatalf("paired=%v capability=%s advertised=%v", paired, cap, caps[cap])
 				}
+			}
+			// The inherited native-only source retires iOS handoff music while
+			// retaining native Apple Music. Preserve that current policy here.
+			if caps["codex_voice_external_music_ios_v1"] {
+				t.Fatal("retired iOS handoff advertised")
 			}
 			if e.starts.Load() != 0 {
 				t.Fatal("capability discovery started a call")

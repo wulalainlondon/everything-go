@@ -383,6 +383,9 @@
       "type": "usage_report"
     },
     {
+      "type": "user_input_batch_receipt"
+    },
+    {
       "type": "user_input_request"
     },
     {
@@ -731,6 +734,12 @@
     },
     {
       "type": "unclaim_bridge"
+    },
+    {
+      "type": "user_input_batch_response"
+    },
+    {
+      "type": "user_input_batch_status"
     },
     {
       "type": "user_input_response"

@@ -73,6 +73,12 @@ func (h *Hub) intakeSession(id string) (*session.Session, error) {
 	return s, nil
 }
 func (h *Hub) intakeWritePolicy(s *session.Session) error {
+	return h.intakeWritePolicySnapshot(s, s.SettingsSnapshot())
+}
+
+// Native question replies retain their active execution; ordinary instructions
+// continue to use the future-default snapshot through intakeWritePolicy.
+func (h *Hub) intakeWritePolicySnapshot(s *session.Session, snapshot session.Snapshot) error {
 	if readOnly, e := h.IsReadOnlyCollaborationWorker(s.ID); e != nil || readOnly {
 		return taskapi.Failure("permission", "known_none", "request_scope_change")
 	}
@@ -101,7 +107,7 @@ func (h *Hub) intakeWritePolicy(s *session.Session) error {
 	if s.Backend() != backend.Codex && s.Backend() != backend.Claude {
 		return taskapi.Failure("unsupported", "known_none", "read_capabilities")
 	}
-	if s.SettingsSnapshot().Model == "" {
+	if snapshot.Model == "" {
 		return taskapi.Failure("unsupported", "known_none", "read_capabilities")
 	}
 	return nil

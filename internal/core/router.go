@@ -146,6 +146,9 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		}
 		if !c.enrollmentOnly && h.supportsNativeHistoryRanges() {
 			helloInput.Capabilities = append(helloInput.Capabilities, "history_continuity_v1")
+			if _, supported := h.exec.(backend.NativeAsyncBatchReservation); h.messageQueue != nil && supported {
+				helloInput.Capabilities = append(helloInput.Capabilities, "pending_question_batch_v1")
+			}
 		}
 		if h.partners != nil && h.pairedTaskDevice(c) != "" {
 			helloInput.Capabilities = append(helloInput.Capabilities, "teammate_profile_v1")
@@ -1071,7 +1074,13 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 
 	// --- Interactions: AskUserQuestion ------------------------------------
 
+	case "user_input_batch_response":
+		h.replyBatch(c, cmd, false)
+	case "user_input_batch_status":
+		h.replyBatch(c, cmd, true)
 	case "user_input_response":
+		h.asyncBatchAdmissionMu.Lock()
+		defer h.asyncBatchAdmissionMu.Unlock()
 		if h.respondDelegatedInteraction(c, cmd) {
 			return
 		}
@@ -1084,6 +1093,17 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 					h.queueError(c, cmd, "interaction_reply_rejected", err.Error())
 					return
 				}
+				if ir, ok := h.exec.(interactionResponder); ok {
+					for _, q := range ir.PendingInteractions(sid) {
+						if q.RequestID == cmd.RequestID {
+							q = h.projectQuestion(q)
+							if q.QuestionRevision != "" {
+								cmd.AsyncCovers = []protocol.AsyncCoveredQuestion{{RequestID: q.RequestID, QuestionRevision: q.QuestionRevision}}
+							}
+							break
+						}
+					}
+				}
 				cmd.Content = content
 				cmd.Images, cmd.Files = nil, nil // A question answer is text only.
 				admission := cmd
@@ -1095,7 +1115,7 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 				active := found && h.sessionHasActiveTurn(s)
 				var expected *dispatchTargetExpectation
 				if active {
-					expected = &dispatchTargetExpectation{ThreadID: s.ResumeID(), Revision: s.SettingsSnapshot().ConfigRevision}
+					expected = &dispatchTargetExpectation{ThreadID: s.ResumeID(), Revision: s.Snapshot().ConfigRevision}
 				}
 				steerOnly := active
 				// Duplicate answers retain the original immutable queue intent even if
@@ -1104,6 +1124,7 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 					var original queuedPayload
 					if json.Unmarshal(old.Payload, &original) == nil {
 						expected, steerOnly = original.ExpectedTarget, original.SteerOnly
+						cmd.AsyncCovers = original.AsyncCovers
 					}
 				}
 				if !h.enqueueChatMessageExpectedInheritedMode(c, cmd, expected, nil, steerOnly) {
@@ -1196,12 +1217,25 @@ func (h *Hub) sendPendingInteractions(c *Client, cmd clientproto.Command) {
 		}
 		h.interactionSnapshotMu.Unlock()
 	}
+	h.interactionProjectionMu.Lock()
+	defer h.interactionProjectionMu.Unlock()
 	var items []backend.UserInputPayload
 	if ir, ok := h.exec.(interactionResponder); ok {
 		items = ir.PendingInteractions(cmd.SessionID)
 	}
 	items = h.appendTaskInteractionSnapshot(items, cmd.SessionID)
+	for i := range items {
+		items[i] = h.projectQuestion(items[i])
+	}
 	snapshot := h.client.PendingInteractionsList(items)
+	revision, err := h.questionClock()
+	if err != nil {
+		h.queueError(c, cmd, "question_snapshot_unavailable", "Question revision unavailable")
+		return
+	}
+	snapshot.SnapshotRevision = revision
+	snapshot.Generation = h.cfg.InstanceID
+	snapshot.Admitted = h.pendingQuestionAdmissions(c, cmd.SessionID)
 	snapshot.ScopeSessionID, snapshot.SnapshotAll = cmd.SessionID, cmd.SessionID == ""
 	c.enqueueEvent(snapshot)
 }

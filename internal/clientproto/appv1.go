@@ -153,9 +153,14 @@ type Command struct {
 	SDPMid                    string
 	SDPMLineIndex             *int
 
-	Answers   map[string]any
-	Cancelled *bool
-	Decision  string
+	Selected               []protocol.AsyncBatchSelection
+	BatchAuthority         string
+	AsyncCovers            []protocol.AsyncCoveredQuestion // server-owned only
+	ExpectedNativeThreadID string
+	AsyncBatch             *backend.AsyncBatchBinding // internal admission only, never decoded from wire
+	Answers                map[string]any
+	Cancelled              *bool
+	Decision               string
 
 	FileID string
 
@@ -329,6 +334,7 @@ func (AppV1) ParseCommand(in protocol.Inbound) Command {
 		SDPMid:             in.SDPMid,
 		SDPMLineIndex:      in.SDPMLineIndex,
 
+		Selected: in.Selected, ExpectedNativeThreadID: in.ExpectedNativeThreadID, BatchAuthority: in.BatchAuthority,
 		Answers:   in.Answers,
 		Cancelled: in.Cancelled,
 		Decision:  in.Decision,
