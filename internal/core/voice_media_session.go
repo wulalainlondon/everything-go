@@ -27,6 +27,7 @@ type callMediaReceipt struct {
 	command     protocol.VoiceMediaCommand
 	result      backend.VoiceMediaResult
 	causal      *protocol.MediaSessionState
+	observation *protocol.MediaSessionState // read-only original-status response, never causal
 	receivedAt  int64
 	settled     chan struct{}
 	observed    chan struct{}
@@ -96,8 +97,10 @@ func callMediaResult(m *callMediaSession, r *callMediaReceipt) backend.VoiceMedi
 		}
 	}
 	// A retired remote operation remains attributable, not a claim that its old
-	// source is still current after another remote or local source transaction.
-	if r != m.current || (m.snapshot != nil && r.causal != nil && m.snapshot.Revision > r.causal.Revision) {
+	// source/item is still current after another transaction or metadata change.
+	if r != m.current || (m.snapshot != nil && r.causal != nil &&
+		(m.snapshot.Revision > r.causal.Revision || r.causal.PlaybackConfirmed &&
+			(!m.snapshot.PlaybackConfirmed || m.snapshot.ActiveSource != r.causal.ActiveSource || m.snapshot.MediaID != r.causal.MediaID))) {
 		out.ActionConfirmed, out.PlaybackConfirmed = false, false
 		if out.MediaSessionReceipt != nil {
 			out.MediaSessionReceipt.ActionConfirmed = false
@@ -316,7 +319,7 @@ func (h *Hub) executeCallMediaSession(ctx context.Context, parent *session.Sessi
 	commandID := fmt.Sprintf("vm_%x", sha256.Sum256([]byte(h.cfg.InstanceID+"\x00"+s.ID+"\x00"+voiceID+"\x00session\x00"+transport+"\x00"+operationID)))
 	nested := &protocol.MediaSessionCommand{OperationID: commandID, Target: target, Action: action, URI: uri, MediaID: id, Title: input.Title, Artist: input.Artist, PositionMS: input.PositionMS, Volume: input.Volume, ExpectedRevision: input.ExpectedRevision, AdoptCurrent: input.AdoptCurrent, ExpectedMediaID: input.ExpectedMediaID}
 	cmd := protocol.VoiceMediaCommand{Provider: "call_media_session", Action: "session", CommandID: commandID, Sequence: m.sequence, MediaSession: nested}
-	r := &callMediaReceipt{fingerprint: fingerprint, command: cmd, settled: make(chan struct{}), result: backend.VoiceMediaResult{Provider: "call_media_session", Endpoint: h.mediaEndpoint(owner), Transport: transport, Action: action, CommandID: commandID, Sequence: m.sequence, State: "queued", AudioCheck: "unknown"}}
+	r := &callMediaReceipt{fingerprint: fingerprint, command: cmd, settled: make(chan struct{}), result: backend.VoiceMediaResult{Provider: "call_media_session", Endpoint: h.mediaEndpoint(owner), Transport: transport, Action: action, CommandID: commandID, Sequence: m.sequence, State: "queued", AudioCheck: "unknown", DisplayLabel: input.DisplayLabel}}
 	m.receipts[key] = r
 	m.byCommand[commandID] = r
 	m.current = r
@@ -432,22 +435,39 @@ func (h *Hub) handleCallMediaState(c *Client, cmd clientproto.Command) {
 	m := call.callMedia
 	if x.Kind == "receipt" {
 		r := m.byCommand[cmd.MediaCommandID]
-		if r == nil || cmd.MediaSequence != r.command.Sequence || x.OperationID != cmd.MediaCommandID || !sessionCausalMatches(r, x) {
+		if r == nil || cmd.MediaSequence != r.command.Sequence || x.OperationID != cmd.MediaCommandID {
 			return
 		}
-		if r.causal != nil && (x.Version <= r.causal.Version || x.Revision < r.causal.Revision) {
-			return
-		}
-		r.causal = cloneMediaSession(x)
-		r.receivedAt = time.Now().UnixMilli()
-		if r.observed != nil {
-			close(r.observed)
-			r.observed = nil
-		}
-		// A snapshot can never reach this completion branch.
-		if !r.closed && (x.ActionConfirmed || r.command.MediaSession.Action == "observe" || x.Stage == "refused" || x.Phase == "error" || x.Phase == "unknown") {
-			r.closed = true
-			close(r.settled)
+		// Native statusOriginal retains the original outer command ID/sequence.
+		// Its observe-stage receipt describes current state, not a new outcome
+		// of that original mutation. Older natives may retain Dispatched; stage
+		// and the original action still keep that report out of the effect path.
+		if x.Stage == "observe" && r.command.MediaSession.Action != "observe" {
+			if x.ActionConfirmed || r.observation != nil && (x.Version <= r.observation.Version || x.Revision < r.observation.Revision) ||
+				r.causal != nil && (x.Version <= r.causal.Version || x.Revision < r.causal.Revision) {
+				return
+			}
+			r.observation = cloneMediaSession(x)
+			if r.observed != nil {
+				close(r.observed)
+				r.observed = nil
+			}
+		} else {
+			if !sessionCausalMatches(r, x) || r.causal != nil && (x.Version <= r.causal.Version || x.Revision < r.causal.Revision) {
+				return
+			}
+			r.causal = cloneMediaSession(x)
+			r.receivedAt = time.Now().UnixMilli()
+			if r.observed != nil {
+				close(r.observed)
+				r.observed = nil
+			}
+			// Only causal effect feedback (or an actual observe command's own
+			// receipt) reaches completion. Current observations never settle it.
+			if !r.closed && (x.ActionConfirmed || r.command.MediaSession.Action == "observe" || x.Stage == "refused" || x.Phase == "error" || x.Phase == "unknown") {
+				r.closed = true
+				close(r.settled)
+			}
 		}
 	} else if cmd.MediaSequence != x.Revision || !(x.OperationID == cmd.MediaCommandID || strings.HasPrefix(x.OperationID, "local_") && len(x.OperationID) <= 160 && !strings.ContainsAny(x.OperationID, "\r\n\x00")) {
 		return

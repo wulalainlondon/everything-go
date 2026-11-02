@@ -22,9 +22,10 @@ func RunCLI(args []string, out, stderr io.Writer) int {
 	expected := f.String("expected-media-id", "", "Exact fresh foreign item ID; requires explicit adoption")
 	operation := f.String("operation", "", "Original operation for status")
 	url := f.String("url", "", "Verified HTTPS video or selected Music service song URL")
-	title := f.String("title", "", "Track label")
+	title := f.String("title", "", "Exact native Music song title only, without artist prefix; YouTube retains its title label")
+	label := f.String("label", "", "Display label only; never used for native title/artist/item matching")
 	query := f.String("query", "", "Official Music search query")
-	artist := f.String("artist", "", "Expected Music artist")
+	artist := f.String("artist", "", "Exact native Music artist; do not guess localized aliases")
 	position := f.Int64("position-ms", -1, "Music seek position")
 	action := f.String("action", "", "pause, resume, stop, next, previous, seek or volume (provider-dependent)")
 	volume := f.Int("volume", -1, "Player, assistant or explicitly requested phone media volume 0..100")
@@ -42,6 +43,7 @@ func RunCLI(args []string, out, stderr io.Writer) int {
 	q.Input.Source, q.Input.AdoptCurrent, q.Input.ExpectedMediaID = *source, *adopt, *expected
 	q.Input.URL = *url
 	q.Input.Title = *title
+	q.Input.DisplayLabel = *label
 	q.Input.Action = *action
 	q.Input.Query = *query
 	q.Input.Artist = *artist

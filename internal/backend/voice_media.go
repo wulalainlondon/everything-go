@@ -8,6 +8,8 @@ import (
 // Controls only the original caller's active voice endpoint. No caller/voice
 // identity is accepted in model arguments.
 type VoiceMediaRequest struct {
+	// DisplayLabel is presentation only; never a native matching expectation.
+	DisplayLabel      string  `json:"display_label,omitempty"`
 	Source            string  `json:"source,omitempty"`
 	Operation         string  `json:"operation,omitempty"`
 	ExpectedRevision  *uint64 `json:"expected_revision,omitempty"`
@@ -50,6 +52,7 @@ func (e *VoiceMediaNotDispatchedError) Error() string { return e.Cause.Error() }
 func (e *VoiceMediaNotDispatchedError) Unwrap() error { return e.Cause }
 
 type VoiceMediaResult struct {
+	DisplayLabel        string                          `json:"display_label,omitempty"`
 	MediaSession        *protocol.MediaSessionState     `json:"media_session,omitempty"`
 	MediaSessionReceipt *protocol.MediaSessionState     `json:"media_session_receipt,omitempty"`
 	SystemMediaAudio    *protocol.SystemMediaAudioState `json:"system_media_audio,omitempty"`

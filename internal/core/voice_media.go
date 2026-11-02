@@ -165,7 +165,20 @@ func (h *Hub) ExecuteVoiceMedia(ctx context.Context, caller backend.SessionContr
 
 // local_user_socket authority is the private per-call OS-user channel, never a
 // fabricated SessionControlCaller. Both transports share the same scope checks.
-func (h *Hub) executeVoiceMedia(ctx context.Context, parent *session.Session, voiceID, requestID, operationID, transport string, expectedCall *clientVoiceCall, method string, input backend.VoiceMediaRequest) (any, error) {
+func (h *Hub) executeVoiceMedia(ctx context.Context, parent *session.Session, voiceID, requestID, operationID, transport string, expectedCall *clientVoiceCall, method string, input backend.VoiceMediaRequest) (value any, err error) {
+	// The optional label belongs to the Go request/receipt, never the native
+	// command or exact-title matcher. Validate it for every provider, including
+	// legacy clients, before taking any effect route.
+	if !safeSessionLabel(input.DisplayLabel, 200) || input.DisplayLabel != "" && method != "play_music" && method != "play_youtube" {
+		return nil, &backend.VoiceMediaNotDispatchedError{Cause: errors.New("voice_media_display_label_invalid")}
+	}
+	defer func() {
+		if result, ok := value.(backend.VoiceMediaResult); ok && input.DisplayLabel != "" {
+			result.DisplayLabel = input.DisplayLabel
+			value = result
+		}
+	}()
+
 	if input.Operation != "" {
 		return nil, &backend.VoiceMediaNotDispatchedError{Cause: errors.New("media_original_operation_requires_durable_store")}
 	}
