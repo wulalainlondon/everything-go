@@ -31,6 +31,7 @@ import (
 	"everything-go/internal/agentvisibility"
 	"everything-go/internal/backend"
 	"everything-go/internal/executor"
+	"everything-go/internal/lifecycle"
 	"everything-go/internal/protocol"
 	"everything-go/internal/recap"
 	"everything-go/internal/recovery"
@@ -262,6 +263,7 @@ type Codex struct {
 	stallAbortAfter    time.Duration
 	stallCheckEvery    time.Duration
 	dataDir            string
+	lifecycle          *lifecycle.Journal
 	failureJournalMu   sync.Mutex
 	failureJournal     *recovery.Journal
 	historyRequestMu   sync.Mutex
@@ -427,6 +429,7 @@ func (c *Codex) RuntimeDiagnostics() map[string]any {
 func (c *Codex) SetDataDir(path string) {
 	if strings.TrimSpace(path) != "" {
 		c.dataDir = runtime.ExpandPath(path)
+		c.lifecycle = lifecycle.New(c.dataDir)
 		c.loadMaintenance()
 	}
 }
@@ -558,11 +561,14 @@ func (c *Codex) startServerLocked() error {
 	// Write raw to the pipe (line-delimited JSON, one syscall per line, serialized
 	// by the plumber's write mutex) so no flush step can be skipped.
 	c.rpc.setWriter(stdinPipe)
+	c.recordLifecycle(lifecycle.Event{Kind: "process_started", Owner: "bridge_stdio_child", PID: cmd.Process.Pid, ParentPID: os.Getpid(), Reason: "bridge_started_child"})
 
 	go c.readLoop(stdoutPipe)
 	go drainStderr("codex", stderrPipe)
 	go func(started *exec.Cmd, exited chan struct{}) {
-		_ = cmd.Wait()
+		_ = started.Wait()
+		code, signal := processExitEvidence(started.ProcessState)
+		c.recordLifecycle(lifecycle.Event{Kind: "process_exited", Owner: "bridge_stdio_child", PID: started.Process.Pid, ParentPID: os.Getpid(), ExitCode: code, Signal: signal, Reason: "child_exit_observed_initiator_unconfirmed"})
 		c.rpc.failAll(errProcDead)
 		c.invalidateLiveThreads()
 		close(exited)
@@ -694,6 +700,7 @@ func (c *Codex) startRemoteServerLocked(codexHome string) error {
 		return err
 	}
 	log.Printf("[codex] connected shared daemon socket=%s", socketPath)
+	c.recordLifecycle(lifecycle.Event{Kind: "transport_connected", Owner: "provider_connection", Reason: "authenticated_provider_client_connected"})
 	return nil
 }
 
@@ -706,6 +713,11 @@ func (c *Codex) readRemoteLoop(ctx context.Context, conn *websocket.Conn, done c
 			failure = fmt.Errorf("app-server connection lost: %w", readErr)
 			log.Printf("[codex] remote read loop error: %v", readErr)
 		}
+		reason := "bridge_client_connection_closed"
+		if unexpected {
+			reason = "unexpected_transport_close_not_process_exit_proof"
+		}
+		c.recordLifecycle(lifecycle.Event{Kind: "transport_disconnected", Owner: "provider_connection", Reason: reason})
 		c.rpc.failAll(failure)
 		c.failVoiceCalls()
 		if unexpected {
@@ -941,6 +953,7 @@ func (c *Codex) stopServerLocked() error {
 	}
 
 	done := c.procDone
+	c.recordLifecycle(lifecycle.Event{Kind: "process_stop_requested", Owner: "bridge_stdio_child", PID: cmd.Process.Pid, ParentPID: os.Getpid(), Reason: "bridge_closing_owned_child_stdin"})
 	if c.stdin != nil {
 		_ = c.stdin.Close()
 	}

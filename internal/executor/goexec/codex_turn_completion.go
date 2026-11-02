@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 
+	"everything-go/internal/lifecycle"
 	"everything-go/internal/recovery"
 )
 
@@ -90,6 +91,7 @@ func (c *Codex) confirmOwnedTurnSubmissionLive(st *codexState, threadID, request
 		if !confirmed {
 			return
 		}
+		c.recordLifecycle(lifecycle.Event{Kind: "native_turn_accepted", Owner: "bridge_submitted_turn", Request: requestID, Turn: turn.ID, Reason: "exact_turn_start_response"})
 		// Publish the immutable ACK fact outside state/history locks. Hub admission
 		// may hold its canonical queue mutex while revalidating native callers.
 		// A later cancel is late acceptance, not grounds to erase this past fact.

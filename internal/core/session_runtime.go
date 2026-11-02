@@ -26,6 +26,27 @@ func runtimeEvent(view runtimejournal.View) protocol.SessionRuntime {
 	}
 }
 
+// Runtime progress is not proof that this process owns the tool caller.
+// Readiness is re-derived from the current provider, never persisted as a grant.
+func (h *Hub) runtimeEvent(view runtimejournal.View) protocol.SessionRuntime {
+	out := runtimeEvent(view)
+	if view.Phase != "running" && view.Phase != "waiting" && view.Phase != "stopping" {
+		return out
+	}
+	s, ok := h.registry.Get(view.SessionID)
+	if !ok {
+		return out
+	}
+	if router, ok := h.exec.(historyRouter); ok {
+		if provider, found := router.ProviderFor(s); found {
+			if readiness, ok := provider.(interface{ RuntimeToolReadiness(string, string) string }); ok {
+				out.ToolReadiness = readiness.RuntimeToolReadiness(view.SessionID, view.ActiveRequestID)
+			}
+		}
+	}
+	return out
+}
+
 func (h *Hub) updateRuntimeProgress(sessionID, requestID, stage, message string) {
 	view, changed := h.runtimes.Progress(sessionID, requestID, stage, message)
 	if changed {
@@ -52,7 +73,7 @@ func (h *Hub) runtimeSnapshot(deviceID string) protocol.SessionRuntimeSnapshot {
 	views := h.runtimes.Snapshot(deviceID, ids)
 	items := make([]protocol.SessionRuntime, 0, len(views))
 	for _, view := range views {
-		items = append(items, runtimeEvent(view))
+		items = append(items, h.runtimeEvent(view))
 	}
 	return protocol.SessionRuntimeSnapshot{Type: "session_runtime_snapshot", Items: items}
 }
@@ -188,7 +209,7 @@ func (h *Hub) broadcastRuntime(view runtimejournal.View) {
 	for _, c := range clients {
 		deviceView := h.runtimeViewsForClient(c, []string{view.SessionID})
 		if len(deviceView) == 1 {
-			c.enqueueEvent(runtimeEvent(deviceView[0]))
+			c.enqueueEvent(h.runtimeEvent(deviceView[0]))
 		}
 	}
 }

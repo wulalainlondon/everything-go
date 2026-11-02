@@ -52,7 +52,7 @@ func (h *Hub) runtimeSnapshotForClient(c *Client) protocol.SessionRuntimeSnapsho
 	views := h.runtimeViewsForClient(c, ids)
 	snapshot.Items = make([]protocol.SessionRuntime, 0, len(views))
 	for _, view := range views {
-		snapshot.Items = append(snapshot.Items, runtimeEvent(view))
+		snapshot.Items = append(snapshot.Items, h.runtimeEvent(view))
 	}
 	return snapshot
 }

@@ -455,6 +455,7 @@ type SessionRuntime struct {
 	Unread                int    `json:"unread"`
 	DeliveryPending       bool   `json:"delivery_pending"`
 	HistoryReconcile      bool   `json:"history_reconcile"`
+	ToolReadiness         string `json:"tool_readiness,omitempty"`
 	ReadEpoch             string `json:"read_epoch,omitempty"`
 	ReadRevision          uint64 `json:"read_revision,omitempty"`
 	ReadVersion           uint64 `json:"read_version,omitempty"`

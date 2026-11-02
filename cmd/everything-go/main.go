@@ -46,6 +46,7 @@ import (
 	"everything-go/internal/mediaservice"
 	"everything-go/internal/netsvc"
 	"everything-go/internal/relay"
+	"everything-go/internal/runtimeguard"
 	"everything-go/internal/search"
 	"everything-go/internal/session"
 	"everything-go/internal/sourcepolicy"
@@ -208,6 +209,11 @@ func main() {
 		log.Fatalf("listen tcp %s before state initialization: %v", addr, err)
 	}
 	defer listener.Close()
+	releaseData, err := runtimeguard.Acquire(*dataDir)
+	if err != nil {
+		log.Fatalf("claim data directory before state initialization: %v", err)
+	}
+	defer releaseData()
 
 	reg := session.NewRegistry()
 	reg.AttachStore(session.NewStore(sessionStorePath))
