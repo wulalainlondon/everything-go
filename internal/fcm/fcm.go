@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -66,6 +67,13 @@ type ReplyAction struct {
 	ExpiresAt   int64
 }
 
+// Each session serializes its outbound status writes, independently of other
+// sessions. Revision is guarded by statusMu; sending never holds statusMu.
+type sessionStatusDelivery struct {
+	mu       sync.Mutex
+	revision uint64
+}
+
 // Notifier holds the OAuth2 token source and a per-device token registry.
 type Notifier struct {
 	live          liveRegistry
@@ -82,6 +90,7 @@ type Notifier struct {
 	devices map[string]deviceRegistration
 
 	statusMu          sync.Mutex
+	statusDelivery    map[string]*sessionStatusDelivery
 	statusLastSent    map[string]time.Time
 	statusLastPhase   map[string]string
 	statusPending     map[string]v1message
@@ -434,6 +443,23 @@ func summarizeStatus(value string) string {
 func (n *Notifier) enqueueSessionStatus(key, phase string, msg v1message, immediate bool) {
 	n.statusMu.Lock()
 	n.ensureStatusStateLocked()
+	revision, err := strconv.ParseUint(msg.Message.Data["revision"], 10, 64)
+	if err != nil || revision == 0 {
+		n.statusMu.Unlock()
+		return
+	}
+	delivery := n.statusDelivery[key]
+	if delivery == nil {
+		delivery = &sessionStatusDelivery{}
+		n.statusDelivery[key] = delivery
+	}
+	// Core publishes asynchronously. An older goroutine must not replace the
+	// terminal in the coalescing buffer or FCM's per-session collapse slot.
+	if revision <= delivery.revision {
+		n.statusMu.Unlock()
+		return
+	}
+	delivery.revision = revision
 	now := time.Now()
 	interval := n.statusMinInterval
 	if interval <= 0 {
@@ -450,7 +476,7 @@ func (n *Notifier) enqueueSessionStatus(key, phase string, msg v1message, immedi
 		n.statusLastSent[key] = now
 		n.statusLastPhase[key] = phase
 		n.statusMu.Unlock()
-		n.sendSessionStatus(msg)
+		n.sendCurrentSessionStatus(key, msg)
 		return
 	}
 	n.statusPending[key] = msg
@@ -462,6 +488,9 @@ func (n *Notifier) enqueueSessionStatus(key, phase string, msg v1message, immedi
 }
 
 func (n *Notifier) ensureStatusStateLocked() {
+	if n.statusDelivery == nil {
+		n.statusDelivery = make(map[string]*sessionStatusDelivery)
+	}
 	if n.statusLastSent == nil {
 		n.statusLastSent = make(map[string]time.Time)
 	}
@@ -488,8 +517,35 @@ func (n *Notifier) flushSessionStatus(key string) {
 	}
 	n.statusMu.Unlock()
 	if ok {
+		n.sendCurrentSessionStatus(key, msg)
+	}
+}
+
+func (n *Notifier) sendCurrentSessionStatus(key string, msg v1message) {
+	n.statusMu.Lock()
+	delivery := n.statusDelivery[key]
+	n.statusMu.Unlock()
+	if delivery == nil {
+		return
+	}
+	delivery.mu.Lock()
+	defer delivery.mu.Unlock()
+	n.statusMu.Lock()
+	current := msg.Message.Data["revision"] == strconv.FormatUint(delivery.revision, 10)
+	n.statusMu.Unlock()
+	if current {
 		n.sendSessionStatus(msg)
 	}
+}
+
+// Retire a superseded progress packet before another retry / relay write.
+// Already-issued HTTP remains ordered before the newer per-session send.
+func (n *Notifier) sessionStatusCurrent(msg v1message) bool {
+	key := msg.Message.Data["authority_instance_id"] + "\x00" + msg.Message.Data["session_id"]
+	n.statusMu.Lock()
+	defer n.statusMu.Unlock()
+	delivery := n.statusDelivery[key]
+	return delivery == nil || msg.Message.Data["revision"] == strconv.FormatUint(delivery.revision, 10)
 }
 
 func (n *Notifier) sendSessionStatus(msg v1message) {
@@ -668,6 +724,9 @@ func (n *Notifier) send(msg v1message, kind string, dst target) {
 		return
 	}
 	for attempt := 0; attempt < 3; attempt++ {
+		if kind == "session_status" && !n.sessionStatusCurrent(msg) {
+			return
+		}
 		// Re-read preferences for each actual send/retry, not when a status
 		// first entered the coalescing buffer. Never mutate the shared payload.
 		filtered, allowed := n.messageForDevice(msg, kind, dst)

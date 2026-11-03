@@ -454,6 +454,8 @@ func (h *Hub) runQueuedMessage(s *session.Session, requestID string) {
 			code := "send_failed"
 			if errors.Is(err, backend.ErrThreadActiveWriter) {
 				code = "session_controlled_by_desktop"
+			} else if errors.Is(err, recovery.ErrGuard) {
+				code = "recovery_source_changed"
 			}
 			h.Emit(backend.NewError(s.ID, requestID, code, err.Error()))
 		}

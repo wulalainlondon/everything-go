@@ -3726,7 +3726,12 @@ func (c *Codex) ensureThread(s *session.Session, st *codexState, originalRoleEpo
 	c.mu.Lock()
 	c.threadToSession[threadID] = s
 	c.mu.Unlock()
-	if !preserveContext {
+	if !preserveContext && s.ActiveQueuedID() == "" {
+		// A queued message owns its immutable execution configuration. Start /
+		// resume metadata describes native thread defaults, before the admitted
+		// settings are applied below in Send. Importing those defaults here can
+		// change model/effort and retire the initial recovery source before its
+		// first turn/start. Non-queued discovery keeps its metadata behavior.
 		c.applyThreadRuntimeMetadataWithEpoch(s, threadMetadataRaw, epoch)
 	}
 	// Retained task/owner profiles are immutable. Thread defaults are not the

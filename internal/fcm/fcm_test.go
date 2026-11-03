@@ -531,3 +531,99 @@ func TestTokenFatal(t *testing.T) {
 		t.Fatal("503 transient should NOT be fatal")
 	}
 }
+
+func TestSessionStatusLateQueuedCannotReplaceTerminal(t *testing.T) {
+	var mu sync.Mutex
+	var revisions []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var msg v1message
+		json.NewDecoder(r.Body).Decode(&msg)
+		mu.Lock()
+		revisions = append(revisions, msg.Message.Data["revision"])
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	n := testNotifier(filepath.Join(t.TempDir(), "tokens.json"), server.URL, server.Client())
+	n.SetToken("phone", "fixture-token", "android")
+	n.statusMinInterval = time.Hour
+	n.NotifySessionStatus("a", "s", "New Session", "failed", "failed", "", 5, 5, 1, "r", 0, ReplyAction{})
+	n.NotifySessionStatus("a", "s", "New Session", "queued", "queued", "", 2, 2, 1, "r", 1, ReplyAction{})
+	n.NotifySessionStatus("a", "s", "New Session", "running", "thinking", "", 4, 4, 1, "r", 0, ReplyAction{})
+	n.NotifySessionStatus("a", "s", "New Session", "failed", "failed", "", 5, 5, 1, "r", 0, ReplyAction{})
+	n.NotifySessionStatus("a", "s", "New Session", "queued", "queued", "", 6, 6, 6, "next", 1, ReplyAction{})
+	mu.Lock()
+	defer mu.Unlock()
+	if strings.Join(revisions, ",") != "5,6" {
+		t.Fatalf("stale status sent: %v", revisions)
+	}
+	n.statusMu.Lock()
+	pending := len(n.statusPending)
+	n.statusMu.Unlock()
+	if pending != 0 {
+		t.Fatal("old progress remained pending")
+	}
+}
+
+func TestSessionStatusConcurrentWritesKeepTerminalLast(t *testing.T) {
+	first := make(chan struct{})
+	release := make(chan struct{})
+	var mu sync.Mutex
+	var revisions []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var msg v1message
+		json.NewDecoder(r.Body).Decode(&msg)
+		rev := msg.Message.Data["revision"]
+		mu.Lock()
+		revisions = append(revisions, rev)
+		mu.Unlock()
+		if rev == "1" {
+			close(first)
+			<-release
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	n := testNotifier(filepath.Join(t.TempDir(), "tokens.json"), server.URL, server.Client())
+	n.SetToken("phone", "fixture-token", "android")
+	done := make(chan struct{})
+	go func() {
+		n.NotifySessionStatus("a", "s", "New Session", "queued", "queued", "", 1, 1, 1, "r", 1, ReplyAction{})
+		close(done)
+	}()
+	<-first
+	terminal := make(chan struct{})
+	go func() {
+		n.NotifySessionStatus("a", "s", "New Session", "failed", "failed", "", 5, 5, 1, "r", 0, ReplyAction{})
+		close(terminal)
+	}()
+	deadline := time.Now().Add(time.Second)
+	for {
+		n.statusMu.Lock()
+		revision := n.statusDelivery["a\x00s"].revision
+		n.statusMu.Unlock()
+		if revision == 5 {
+			break
+		}
+		if time.Now().After(deadline) {
+			close(release)
+			t.Fatal("terminal not admitted")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	mu.Lock()
+	before := append([]string(nil), revisions...)
+	mu.Unlock()
+	if strings.Join(before, ",") != "1" {
+		close(release)
+		t.Fatalf("terminal overtook in-flight status: %v", before)
+	}
+	close(release)
+	<-done
+	<-terminal
+	mu.Lock()
+	defer mu.Unlock()
+	if strings.Join(revisions, ",") != "1,5" {
+		t.Fatalf("terminal was overwritten: %v", revisions)
+	}
+}

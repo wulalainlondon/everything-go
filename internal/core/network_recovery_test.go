@@ -739,3 +739,31 @@ func TestNetworkRecoveryClockFaultStickyBeforeDurablePauseAndFinalWriter(t *test
 	}
 	s.EndTurn()
 }
+
+// A local recovery refusal is not an upstream model failure. Preserve the
+// original queue/runtime terminal and publish a stable classification.
+type recoveryGuardRejectExec struct{ *fakeExec }
+
+func (f *recoveryGuardRejectExec) Send(context.Context, *session.Session, string, string, []backend.ImageAttachment, []backend.FileAttachment) error {
+	return recovery.ErrGuard
+}
+func TestQueuedRecoveryGuardHasSpecificFailureAndTerminalRuntime(t *testing.T) {
+	h, fe := newTestHub(t)
+	h.SetExecutor(&recoveryGuardRejectExec{fe})
+	c := sharedReadClient(t, h, "owner")
+	s := h.registry.Create("s1", "New Session", t.TempDir(), backend.Codex, "gpt-6.1-sol", "danger-full-access", "")
+	defer s.CloseAndWait()
+	enqueueTestMessage(t, h, c, "r_guard_classification")
+	event := waitForType(t, c, "error")
+	if event["code"] != "recovery_source_changed" {
+		t.Fatalf("error=%+v", event)
+	}
+	runtime := waitForType(t, c, "session_runtime")
+	for runtime["phase"] != "failed" {
+		runtime = waitForType(t, c, "session_runtime")
+	}
+	if runtime["active_request_id"] != "r_guard_classification" {
+		t.Fatalf("wrong terminal %+v", runtime)
+	}
+	expectState(t, h, "r_guard_classification", messagequeue.Failed)
+}

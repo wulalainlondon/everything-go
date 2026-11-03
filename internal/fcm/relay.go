@@ -118,6 +118,9 @@ func (n *Notifier) ConfirmRelayPairing(ctx context.Context, id, code string) err
 }
 
 func (n *Notifier) sendRelay(msg v1message, kind string, dst target) {
+	if kind == "session_status" && !n.sessionStatusCurrent(msg) {
+		return
+	}
 	filtered, allowed := n.messageForDevice(msg, kind, dst)
 	if !allowed {
 		return
@@ -129,6 +132,9 @@ func (n *Notifier) sendRelay(msg v1message, kind string, dst target) {
 	ctx, cancel := context.WithTimeout(context.Background(), 65*time.Second)
 	defer cancel()
 	if err = n.relay.SendFCM(ctx, dst.deviceID, dst.token, body, func() bool {
+		if kind == "session_status" && !n.sessionStatusCurrent(msg) {
+			return false
+		}
 		current, allowed := n.messageForDevice(msg, kind, dst)
 		if !allowed {
 			return false
