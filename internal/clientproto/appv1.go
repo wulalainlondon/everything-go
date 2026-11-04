@@ -24,8 +24,15 @@ func NewAppV1() AppV1 { return AppV1{} }
 
 // Command is the protocol-neutral shape the core router consumes.
 type Command struct {
-	AgentActivity json.RawMessage
-	Workspace     *workspace.Command
+	MediaBatchID       string
+	MediaBatchRevision uint64
+	MediaBodyHash      string
+	MediaItems         []protocol.MediaBatchItem
+	ItemID             string
+	ItemRevision       uint64
+	SHA256             string
+	AgentActivity      json.RawMessage
+	Workspace          *workspace.Command
 	// Internal admission hint; never populated by the wire adapter.
 	AutoVoicePhoto  bool
 	Partner         *partners.Request
@@ -263,6 +270,7 @@ func (AppV1) ParseCommand(in protocol.Inbound) Command {
 		TaskOrigin:         in.TaskOrigin,
 		Content:            in.Content,
 		VisualPresentation: in.VisualPresentation, CallbackOnComplete: in.CallbackOnComplete, CallbackID: in.CallbackID, CallbackInvitation: in.CallbackInvitation, CallbackClaim: in.CallbackClaim,
+		MediaBatchID: in.MediaBatchID, MediaBatchRevision: in.MediaBatchRevision, MediaBodyHash: in.MediaBodyHash, MediaItems: in.MediaItems, ItemID: in.ItemID, ItemRevision: in.ItemRevision, SHA256: in.SHA256,
 		UploadRequestID: in.UploadRequestID,
 		UploadID:        in.UploadID,
 		UploadKind:      in.UploadKind,
@@ -407,6 +415,7 @@ func inboundImagesToBackend(images []protocol.InboundImage) []backend.ImageAttac
 	out := make([]backend.ImageAttachment, 0, len(images))
 	for _, img := range images {
 		out = append(out, backend.ImageAttachment{
+			AttachmentID: img.AttachmentID, SHA256: img.SHA256, SizeBytes: img.SizeBytes,
 			Data:      img.Data,
 			MediaType: img.MediaType,
 		})
@@ -421,6 +430,7 @@ func inboundFilesToBackend(files []protocol.InboundFile) []backend.FileAttachmen
 	out := make([]backend.FileAttachment, 0, len(files))
 	for _, f := range files {
 		out = append(out, backend.FileAttachment{
+			SHA256:       f.SHA256,
 			Name:         f.Name,
 			Content:      f.Content,
 			MediaType:    f.MediaType,

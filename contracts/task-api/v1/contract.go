@@ -30,13 +30,18 @@ var Schema []byte
 //go:embed media-intake.schema.json
 var MediaSchema []byte
 
+//go:embed media-refs.schema.json
+var MediaRefsSchema []byte
+
 //go:embed golden.json
 var Golden []byte
 
 type Contract struct{ validators map[string]*jsonschema.Schema }
 
-func New() (*Contract, error)      { return newContract(Schema) }
-func NewMedia() (*Contract, error) { return newContract(MediaSchema) }
+func New() (*Contract, error)          { return newContract(Schema) }
+func NewMedia() (*Contract, error)     { return newContract(MediaSchema) }
+func NewMediaRefs() (*Contract, error) { return newContract(MediaRefsSchema) }
+func MediaRefsHash() string            { sum := sha256.Sum256(MediaRefsSchema); return hex.EncodeToString(sum[:]) }
 func newContract(schema []byte) (*Contract, error) {
 	doc, err := Parse(schema)
 	if err != nil {

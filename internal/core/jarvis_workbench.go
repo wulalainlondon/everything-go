@@ -186,6 +186,10 @@ func (h *Hub) ServeJarvisAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	path := strings.TrimPrefix(r.URL.Path, "/api/jarvis/v1/")
+	if path == "media/attachment" {
+		h.serveMediaAttachment(w, r)
+		return
+	}
 	if path == "capabilities" && r.Method == http.MethodGet {
 		_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": 1, "capability": "jarvis_workbench_v1", "authority_instance_id": h.cfg.InstanceID, "supported_operations": h.jarvisOperations(), "max_human_instruction_characters": 32000, "max_request_bytes": jarvisMaxBytes, "max_work_refs": 30})
 		return

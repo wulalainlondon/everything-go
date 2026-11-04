@@ -92,13 +92,18 @@ type CatalogProvider interface {
 // protocol adapters are responsible for stripping any transport-specific data
 // URL prefix before this reaches a backend.
 type ImageAttachment struct {
-	Data      string
-	MediaType string
+	AttachmentID string `json:",omitempty"`
+	SHA256       string `json:",omitempty"`
+	SizeBytes    int64  `json:",omitempty"`
+	VerifiedPath string `json:",omitempty"`
+	Data         string
+	MediaType    string
 }
 
 // FileAttachment is a file attached to a user message. Content is the
 // adapter-normalized payload used by the backend implementation.
 type FileAttachment struct {
+	SHA256       string `json:",omitempty"`
 	AttachmentID string
 	Name         string
 	Content      string

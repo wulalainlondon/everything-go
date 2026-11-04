@@ -524,8 +524,9 @@ func main() {
 		}()
 	}
 
+	hub.StartMediaMaintenance(ctx)
 	mux := http.NewServeMux()
-	mux.Handle("/media/", media.Handler())
+	mux.Handle("/media/", media.Handler(hub.TypedMediaPathPrivate))
 	mux.Handle("/upload", transfers.UploadHandler())
 	mux.Handle("/files", transfers.DownloadHandler())
 	mux.Handle("/api/drop/v1/uploads", transfers.DropHandler())

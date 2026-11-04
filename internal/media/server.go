@@ -11,12 +11,13 @@ import (
 // The URL scheme is: /media/<absolute-path-to-file>
 //
 // Example: GET /media/Users/wulala/output/chart.png
-//   → serves /Users/wulala/output/chart.png
+//
+//	→ serves /Users/wulala/output/chart.png
 //
 // Security: ".." components are rejected after URL-decoding and filepath.Clean.
 // The handler does not impose a root-dir jail — it mirrors Python, which serves
 // any path the agent produced. The OS file permissions are the security boundary.
-func Handler() http.Handler {
+func Handler(privateChecks ...func(string) bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Strip the /media prefix, leaving the absolute path (with leading /).
 		raw := strings.TrimPrefix(r.URL.Path, "/media")
@@ -45,6 +46,12 @@ func Handler() http.Handler {
 			return
 		}
 
+		for _, check := range privateChecks {
+			if check(cleaned) {
+				http.Error(w, "use authenticated attachment relation", http.StatusForbidden)
+				return
+			}
+		}
 		http.ServeFile(w, r, cleaned)
 	})
 }

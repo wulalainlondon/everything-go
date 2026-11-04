@@ -47,3 +47,22 @@ func TestProviderDefaultEffortReceiptsCannotBeForgedOrSurviveSourceABA(t *testin
 		})
 	}
 }
+
+func TestMediaHostDefaultEffortEpochZeroCannotBecomeRoleReceipt(t *testing.T) {
+	s := NewRegistry().Create("media-original", "Media", t.TempDir(), "codex", "gpt-6.1-sol", "read-only", "")
+	high := "high"
+	_, _, proof := s.ApplyProviderMediaRuntimeMetadata(nil, &high, 0)
+	if proof == nil {
+		t.Fatal("media ordinary receipt absent")
+	}
+	if e := s.WithDefaultEffortTransition(proof, func(Snapshot, Snapshot, string) error { t.Fatal("epoch zero acquired role receipt"); return nil }); e == nil {
+		t.Fatal("old role API accepted ordinary proof")
+	}
+	if e := s.WithMediaDefaultEffortTransition(proof, func(Snapshot, Snapshot, string) error { return nil }); e != nil {
+		t.Fatal(e)
+	}
+	s.SetResumeID("unproved")
+	if e := s.WithMediaDefaultEffortTransition(proof, func(Snapshot, Snapshot, string) error { t.Fatal("ABA proof accepted"); return nil }); e == nil {
+		t.Fatal("changed source adopted")
+	}
+}

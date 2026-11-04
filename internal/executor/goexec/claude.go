@@ -274,19 +274,36 @@ func (c *Claude) Send(ctx context.Context, s *session.Session, reqID, content st
 		c.sink.Emit(backend.NewSessionCommandStarted(s.ID, reqID, 0))
 	}
 
-	payload := userMessageJSON(backend.PresentationContent(ctx, content), images, files)
+	payload, mediaErr := checkedUserMessageJSON(backend.PresentationContent(ctx, content), images, files)
+	if mediaErr != nil {
+		return mediaErr
+	}
 	if p.taskLease != nil {
 		var frame map[string]any
-		json.Unmarshal(payload, &frame)
+		if !backend.HasImageRefs(images) {
+			json.Unmarshal(payload, &frame)
+		}
 		p.mu.Lock()
 		p.inputUUID = uuid.NewString()
 		p.acceptedUUID = ""
 		p.finalMessageID = ""
 		p.finalAssistantText = ""
-		frame["uuid"] = p.inputUUID
+		inputUUID := p.inputUUID
 		p.mu.Unlock()
-		payload, _ = json.Marshal(frame)
-		payload = append(payload, '\n')
+		if backend.HasImageRefs(images) {
+			suffix, _ := json.Marshal(inputUUID)
+			payload = append(payload[:len(payload)-2], []byte(`,"uuid":`)...)
+			payload = append(payload, suffix...)
+			payload = append(payload, '}', '\n')
+			if int64(len(payload)) > backend.MediaModelMaxBytes {
+				return backend.ErrMediaBudget
+			}
+		} else {
+			frame["uuid"] = inputUUID
+			payload, _ = json.Marshal(frame)
+			payload = append(payload, '\n')
+		}
+
 	}
 	if err := p.stdin.WriteGuarded(payload, func() error { return backend.CheckTaskInputGuard(ctx) }); err != nil {
 		if isCompact {

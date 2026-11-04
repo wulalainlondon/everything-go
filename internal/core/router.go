@@ -215,6 +215,9 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 			helloInput.Capabilities = append(helloInput.Capabilities, "message_queue_v1", "queue_message_detail_v1", "session_tasks_v1", "queue_receipt_reconciliation_v1")
 			if h.taskService != nil && h.pairedTaskDevice(c) != "" {
 				helloInput.Capabilities = append(helloInput.Capabilities, "task_api_v1_rc1", "task_legacy_source_v1")
+				if h.media != nil && h.media.err == nil {
+					helloInput.Capabilities = append(helloInput.Capabilities, "media_attachment_refs_v1", "media_task_api_request")
+				}
 				if h.interactions != nil {
 					helloInput.Capabilities = append(helloInput.Capabilities, "task_interactions_v5")
 				}
@@ -310,8 +313,10 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		}
 		c.enqueuePong()
 
+	case "media_batch_capabilities", "media_batch_prepare", "media_batch_status", "media_batch_cancel":
+		h.handleMediaBatch(c, cmd)
 	case "attachment_upload_init":
-		c.uploads.initKind(cmd.SessionID, cmd.UploadRequestID, cmd.Name, cmd.MediaType, cmd.SizeBytes, cmd.UploadKind)
+		c.uploads.initCommand(cmd)
 
 	case "attachment_upload_finish":
 		c.uploads.finish(cmd.UploadID)
@@ -1311,7 +1316,7 @@ func (h *Hub) sendHistory(c *Client, s *session.Session, cmd clientproto.Command
 	if !c.live() {
 		return // client replaced/gone while loading → drop (#3)
 	}
-	msgs := res.Messages
+	msgs := h.projectMediaHistory(s, res.Messages)
 	if msgs == nil {
 		msgs = []map[string]any{}
 	}

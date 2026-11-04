@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
@@ -14,9 +15,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"everything-go/internal/backend"
@@ -36,6 +39,8 @@ const (
 var safeAttachmentComponent = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
 
 type activeAttachmentUpload struct {
+	Scope                              *mediaUploadScope
+	LegacyLarge                        bool
 	id, requestID, sessionID, deviceID string
 	name, mediaType                    string
 	originalName                       string
@@ -47,43 +52,48 @@ type activeAttachmentUpload struct {
 }
 
 type attachmentUploads struct {
-	root    string
-	client  *Client
-	active  map[string]*activeAttachmentUpload
-	cleaned bool
+	initialScope  *mediaUploadScope
+	lifecycleHeld bool
+	root          string
+	client        *Client
+	active        map[string]*activeAttachmentUpload
+	cleaned       bool
 }
 
 type uploadedVideoManifest struct {
-	OriginalName string `json:"original_name,omitempty"`
-	Kind         string `json:"kind,omitempty"`
-	Version      int    `json:"version"`
-	UploadID     string `json:"upload_id"`
-	SessionID    string `json:"session_id"`
-	DeviceID     string `json:"device_id"`
-	Name         string `json:"name"`
-	MediaType    string `json:"media_type"`
-	SizeBytes    int64  `json:"size_bytes"`
-	SHA256       string `json:"sha256"`
-	Path         string `json:"path"`
-	DurationMS   int64  `json:"duration_ms,omitempty"`
-	Width        int    `json:"width,omitempty"`
-	Height       int    `json:"height,omitempty"`
+	Scope        *mediaUploadScope `json:"scope,omitempty"`
+	OriginalName string            `json:"original_name,omitempty"`
+	Kind         string            `json:"kind,omitempty"`
+	Version      int               `json:"version"`
+	UploadID     string            `json:"upload_id"`
+	SessionID    string            `json:"session_id"`
+	DeviceID     string            `json:"device_id"`
+	Name         string            `json:"name"`
+	MediaType    string            `json:"media_type"`
+	SizeBytes    int64             `json:"size_bytes"`
+	SHA256       string            `json:"sha256"`
+	Path         string            `json:"path"`
+	DurationMS   int64             `json:"duration_ms,omitempty"`
+	Width        int               `json:"width,omitempty"`
+	Height       int               `json:"height,omitempty"`
 }
 
 type resumableUploadState struct {
-	OriginalName string `json:"original_name,omitempty"`
-	Kind         string `json:"kind,omitempty"`
-	Version      int    `json:"version"`
-	UploadID     string `json:"upload_id"`
-	RequestID    string `json:"upload_request_id"`
-	SessionID    string `json:"session_id"`
-	DeviceID     string `json:"device_id"`
-	Name         string `json:"name"`
-	MediaType    string `json:"media_type"`
-	ExpectedSize int64  `json:"expected_size"`
-	ReceivedSize int64  `json:"received_size"`
-	PartPath     string `json:"part_path"`
-	FinalPath    string `json:"final_path"`
+	Scope        *mediaUploadScope `json:"scope,omitempty"`
+	PrefixSHA256 string            `json:"prefix_sha256,omitempty"`
+	OriginalName string            `json:"original_name,omitempty"`
+	Kind         string            `json:"kind,omitempty"`
+	Version      int               `json:"version"`
+	UploadID     string            `json:"upload_id"`
+	RequestID    string            `json:"upload_request_id"`
+	SessionID    string            `json:"session_id"`
+	DeviceID     string            `json:"device_id"`
+	Name         string            `json:"name"`
+	MediaType    string            `json:"media_type"`
+	ExpectedSize int64             `json:"expected_size"`
+	ReceivedSize int64             `json:"received_size"`
+	PartPath     string            `json:"part_path"`
+	FinalPath    string            `json:"final_path"`
 }
 
 func newAttachmentUploads(c *Client, dataDir string) *attachmentUploads {
@@ -126,13 +136,23 @@ func (u *attachmentUploads) initKind(sessionID, requestID, name, mediaType strin
 	if kind == "" {
 		kind = "video"
 	}
-	if kind != "video" && kind != "file" {
+	if kind != "video" && kind != "file" && (kind != "image" || u.initialScope == nil) {
 		u.sendError(requestID, "", "Unsupported upload kind")
 		return
 	}
-	if !u.cleaned {
+	if !u.cleaned && u.initialScope == nil {
 		u.cleanupStale()
 		u.cleaned = true
+	}
+	if !u.lifecycleHeld && u.client.hub.media != nil && u.client.hub.media.err == nil && u.client.hub.media.root == u.root {
+		done, e := u.client.hub.media.begin()
+		if e != nil {
+			u.sendError(requestID, "", "Media lifecycle unavailable")
+			return
+		}
+		defer done()
+		u.lifecycleHeld = true
+		defer func() { u.lifecycleHeld = false }()
 	}
 	if requestID == "" || len(requestID) > 200 || len(name) > 500 || len(mediaType) > 150 {
 		u.sendError(requestID, "", "Missing upload_request_id")
@@ -147,29 +167,30 @@ func (u *attachmentUploads) initKind(sessionID, requestID, name, mediaType strin
 		u.sendError(requestID, "", "Video is empty")
 		return
 	}
-	if kind == "video" && size > maxVideoUploadBytes {
-		u.sendError(requestID, "", "Video exceeds the 2048 MB limit")
+	if size > maxFileUploadBytes {
+		u.sendError(requestID, "", "File exceeds the 2048 MB limit")
 		return
 	}
-	if kind == "file" && size > maxFileUploadBytes {
-		u.sendError(requestID, "", "File exceeds the 2048 MB limit")
+	if kind == "image" && size > backend.MediaImageMaxBytes {
+		u.sendError(requestID, "", "Prepared image exceeds 4 MiB")
 		return
 	}
 	if kind == "video" && (!strings.HasPrefix(mediaType, "video/") || !isVideoExtension(ext)) {
 		u.sendError(requestID, "", "Unsupported video format")
 		return
 	}
+
 	id := resumableAttachmentID(u.client.deviceID, requestID)
 	if existing := u.active[id]; existing != nil {
 		if existing.sessionID != sessionID || existing.expected != size || existing.mediaType != mediaType || existing.kind != kind || existing.originalName != name {
 			u.sendError(requestID, id, "Upload intent conflict")
 			return
 		}
-		u.client.enqueueEvent(map[string]any{
+		u.client.enqueueEvent(u.scopeEvent(map[string]any{
 			"type": "attachment_upload_ready", "upload_request_id": requestID,
 			"upload_id": id, "chunk_size": attachmentChunkBytes,
 			"protocol_version": 2, "received_bytes": existing.received,
-		})
+		}, existing))
 		return
 	}
 	if len(u.active) >= 2 {
@@ -178,7 +199,21 @@ func (u *attachmentUploads) initKind(sessionID, requestID, name, mediaType strin
 	}
 	safeName := attachmentSafe(strings.TrimSuffix(filepath.Base(name), filepath.Ext(name)), "recording") + ext
 	dir := filepath.Join(u.root, attachmentSafe(sessionID, "session"), id)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	legacyLarge := false
+	if mediaVideoHint(kind, name, mediaType) && size > mediaVideoMaxBytes {
+		generation := uint64(0)
+		if actor, e := u.client.hub.mediaActor(u.client); e == nil {
+			generation = actor.NamespaceGeneration
+		}
+		part := filepath.Join(dir, "."+safeName+".part")
+		legacyLarge = u.legacyContinuation(filepath.Join(dir, "upload-state.json"), part, u.client.deviceID, generation) || u.legacyContinuation(filepath.Join(dir, "manifest.json"), filepath.Join(dir, safeName), u.client.deviceID, generation)
+		if !legacyLarge {
+			u.sendError(requestID, id, "Video exceeds the 1 GiB limit")
+			return
+		}
+	}
+
+	if err := ensureMediaDirectory(u.root, dir); err != nil {
 		u.sendError(requestID, id, "Cannot create attachment store")
 		return
 	}
@@ -188,7 +223,7 @@ func (u *attachmentUploads) initKind(sessionID, requestID, name, mediaType strin
 	// A completed request retains its intent even if a retry changes filename.
 	if raw, err := os.ReadFile(filepath.Join(dir, "manifest.json")); err == nil {
 		var previous uploadedVideoManifest
-		if json.Unmarshal(raw, &previous) != nil || previous.Path != finalPath || (previous.OriginalName != "" && previous.OriginalName != name) {
+		if json.Unmarshal(raw, &previous) != nil || previous.SessionID != sessionID || previous.UploadID != id || previous.DeviceID != u.client.deviceID || !reflect.DeepEqual(previous.Scope, u.initialScope) || previous.Path != finalPath || (previous.OriginalName != "" && previous.OriginalName != name) {
 			u.sendError(requestID, id, "Upload intent conflict")
 			return
 		}
@@ -212,7 +247,14 @@ func (u *attachmentUploads) initKind(sessionID, requestID, name, mediaType strin
 		u.sendError(requestID, id, err.Error())
 		return
 	}
-	f, err := os.OpenFile(partPath, os.O_WRONLY|os.O_CREATE, 0o600)
+	if raw, e := os.ReadFile(statePath); e == nil {
+		var old resumableUploadState
+		if json.Unmarshal(raw, &old) != nil || !reflect.DeepEqual(old.Scope, u.initialScope) {
+			u.sendError(requestID, id, "Upload owner/scope changed")
+			return
+		}
+	}
+	f, err := openMediaPart(partPath)
 	if err != nil {
 		u.sendError(requestID, id, "Cannot create upload file")
 		return
@@ -223,6 +265,7 @@ func (u *attachmentUploads) initKind(sessionID, requestID, name, mediaType strin
 		return
 	}
 	u.active[id] = &activeAttachmentUpload{
+		Scope: u.initialScope, LegacyLarge: legacyLarge,
 		kind: kind,
 		id:   id, requestID: requestID, sessionID: sessionID, deviceID: u.client.deviceID,
 		name: safeName, originalName: name, mediaType: mediaType, expected: size, received: received,
@@ -234,12 +277,28 @@ func (u *attachmentUploads) initKind(sessionID, requestID, name, mediaType strin
 		u.sendError(requestID, id, "Cannot save upload state")
 		return
 	}
+	if up := u.active[id]; u.lifecycleHeld {
+		m := u.client.hub.media
+		if m.data.Readers == nil {
+			m.data.Readers = map[string]mediaReadLease{}
+		}
+		digest := ""
+		if up.Scope != nil {
+			digest = up.Scope.SHA256
+		}
+		m.data.Readers[u.uploadLeaseID(up)] = mediaReadLease{up.id, up.sessionID, up.partPath, digest, up.expected, "upload_holder"}
+		if e := m.save(); e != nil {
+			u.sendError(requestID, id, "Upload holder receipt unknown")
+			return
+		}
+	}
+
 	u.client.uploadActive.Store(true)
-	u.client.enqueueEvent(map[string]any{
+	u.client.enqueueEvent(u.scopeEvent(map[string]any{
 		"type": "attachment_upload_ready", "upload_request_id": requestID,
 		"upload_id": id, "chunk_size": attachmentChunkBytes,
 		"protocol_version": 2, "received_bytes": received,
-	})
+	}, u.active[id]))
 }
 
 func (u *attachmentUploads) cleanupStale() {
@@ -256,10 +315,25 @@ func (u *attachmentUploads) cleanupStale() {
 		return nil
 	})
 	for _, dir := range staleDirs {
-		if _, err := os.Stat(filepath.Join(dir, "manifest.json")); errors.Is(err, os.ErrNotExist) {
+		m := u.client.hub.media
+		release := func() {}
+		if m != nil {
+			done, e := m.begin()
+			if e != nil {
+				continue
+			}
+			release = done
+			if m.pinnedID(filepath.Base(dir)) {
+				release()
+				continue
+			}
+		}
+		if _, e := os.Stat(filepath.Join(dir, "manifest.json")); errors.Is(e, os.ErrNotExist) {
 			_ = os.RemoveAll(dir)
 		}
+		release()
 	}
+
 }
 
 func (u *attachmentUploads) writeFrame(data []byte) bool {
@@ -282,6 +356,12 @@ func (u *attachmentUploads) writeFrame(data []byte) bool {
 	if up == nil {
 		return true
 	}
+	done, e := u.guardUpload(up)
+	if e != nil {
+		u.sendError(up.requestID, up.id, e.Error())
+		return true
+	}
+	defer done()
 	if magic == attachmentMagicV2 {
 		offset := int64(binary.BigEndian.Uint64(data[header-attachmentOffsetBytes : header]))
 		if offset != up.received {
@@ -296,6 +376,10 @@ func (u *attachmentUploads) writeFrame(data []byte) bool {
 	}
 	if up.received+int64(len(chunk)) > up.expected {
 		u.fail(up, "Received more bytes than declared")
+		return true
+	}
+	if e := u.validatePrefix(up, chunk); e != nil {
+		u.fail(up, e.Error())
 		return true
 	}
 	n, err := up.file.Write(chunk)
@@ -325,8 +409,30 @@ func (u *attachmentUploads) finish(id string) {
 		u.sendError("", id, "Unknown or expired upload")
 		return
 	}
+	done, e := u.guardUpload(up)
+	if e != nil {
+		u.sendError(up.requestID, id, e.Error())
+		return
+	}
+	defer func() {
+		if done != nil {
+			done()
+		}
+	}()
+	u.lifecycleHeld = true
+	defer func() { u.lifecycleHeld = false }()
 	if up.received != up.expected {
 		u.fail(up, fmt.Sprintf("Incomplete upload (%d/%d bytes)", up.received, up.expected))
+		return
+	}
+	prefix := make([]byte, 512)
+	n, pe := up.file.ReadAt(prefix, 0)
+	if pe != nil && pe != io.EOF {
+		u.fail(up, "Cannot validate final media prefix")
+		return
+	}
+	if pe = validateMediaPrefix(up, prefix[:n], true); pe != nil {
+		u.fail(up, pe.Error())
 		return
 	}
 	if err := up.file.Sync(); err != nil {
@@ -342,6 +448,16 @@ func (u *attachmentUploads) finish(id string) {
 		u.fail(up, "Failed to finalize upload")
 		return
 	}
+	// Upload holder pin remains durable while full validation/probing runs
+	// outside the admission/GC guard. Re-enter the exact source before publish.
+	done()
+	done = nil
+	u.lifecycleHeld = false
+	actualHash, hashErr := hashRegularFile(up.finalPath, up.expected)
+	if hashErr != nil || actualHash != hex.EncodeToString(up.digest.Sum(nil)) {
+		u.sendError(up.requestID, id, "Final media digest changed; original remains pending")
+		return
+	}
 	manifest := uploadedVideoManifest{
 		OriginalName: up.originalName,
 		Kind:         up.kind,
@@ -349,30 +465,58 @@ func (u *attachmentUploads) finish(id string) {
 		Name: up.name, MediaType: up.mediaType, SizeBytes: up.expected,
 		SHA256: hex.EncodeToString(up.digest.Sum(nil)), Path: up.finalPath,
 	}
+	if err := u.finishTyped(up, &manifest); err != nil {
+		u.sendError(up.requestID, id, err.Error())
+		return
+	}
 	if up.kind == "video" {
 		manifest.DurationMS, manifest.Width, manifest.Height = probeVideo(up.finalPath)
 	}
-	raw, err := json.MarshalIndent(manifest, "", "  ")
-	if err != nil || os.WriteFile(filepath.Join(filepath.Dir(up.finalPath), "manifest.json"), raw, 0o600) != nil {
-		_ = os.Remove(up.finalPath)
+	done, e = u.guardUpload(up)
+	if e != nil {
+		u.sendError(up.requestID, id, "Final media source cancelled, changed or unknown")
+		return
+	}
+	u.lifecycleHeld = true
+	if err := mediaAtomicJSON(filepath.Join(filepath.Dir(up.finalPath), "manifest.json"), manifest); err != nil {
 		u.fail(up, "Failed to save upload manifest")
 		return
+	}
+	if up.Scope != nil {
+		h := u.client.hub
+		b := h.media.data.Batches[mediaKey(up.deviceID, up.Scope.Generation, up.Scope.BatchID)]
+		b.Objects[up.requestID] = up.id
+		delete(h.media.data.Readers, u.uploadLeaseID(up))
+		if err := h.media.save(); err != nil {
+			u.sendError(up.requestID, up.id, "Manifest committed; pin receipt unknown, query original")
+			return
+		}
+	}
+
+	if u.client.hub.media != nil && u.client.hub.media.root == u.root {
+		delete(u.client.hub.media.data.Readers, u.uploadLeaseID(up))
+		if e := u.client.hub.media.save(); e != nil {
+			u.sendError(up.requestID, id, "Completed receipt unknown; query original")
+			return
+		}
 	}
 	_ = os.Remove(up.statePath)
 	delete(u.active, id)
 	u.client.uploadActive.Store(len(u.active) > 0)
-	u.client.enqueueEvent(map[string]any{
+	u.client.enqueueEvent(u.scopeEvent(map[string]any{
 		"type": "attachment_upload_complete", "upload_request_id": up.requestID,
 		"upload_kind": up.kind,
 		"upload_id":   up.id, "name": up.name, "media_type": up.mediaType,
 		"size_bytes": up.expected, "sha256": manifest.SHA256,
 		"remote_path": up.finalPath, "path": up.finalPath,
 		"duration_ms": manifest.DurationMS, "width": manifest.Width, "height": manifest.Height,
-	})
+	}, up))
 }
 
 func probeVideo(path string) (int64, int, int) {
-	out, err := exec.Command(
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx,
 		"ffprobe", "-v", "error", "-show_entries", "format=duration:stream=width,height",
 		"-select_streams", "v:0", "-of", "json", path,
 	).Output()
@@ -394,7 +538,19 @@ func probeVideo(path string) (int64, int, int) {
 }
 
 func (u *attachmentUploads) cancel(id string) {
+	if up := u.active[id]; up != nil && up.Scope != nil {
+		u.sendError(up.requestID, id, "Use original media batch cancellation receipt")
+		return
+	}
 	if up := u.active[id]; up != nil {
+		done, e := u.guardUpload(up)
+		if e != nil {
+			u.sendError(up.requestID, id, e.Error())
+			return
+		}
+		defer done()
+		u.lifecycleHeld = true
+		defer func() { u.lifecycleHeld = false }()
 		u.discard(up)
 	}
 	u.client.uploadActive.Store(len(u.active) > 0)
@@ -404,8 +560,17 @@ func (u *attachmentUploads) close() {
 	for _, up := range u.active {
 		if up.file != nil {
 			_ = up.file.Sync()
-			_ = up.file.Close()
+			closed := up.file.Close() == nil
 			up.file = nil
+			if closed && u.client.hub.media != nil && u.client.hub.media.root == u.root {
+				release, e := u.client.hub.media.begin()
+				if e == nil {
+					delete(u.client.hub.media.data.Readers, u.uploadLeaseID(up))
+					_ = u.client.hub.media.save()
+					release()
+				}
+			}
+
 		}
 		_ = u.persistState(up)
 		delete(u.active, up.id)
@@ -422,8 +587,24 @@ func (u *attachmentUploads) fail(up *activeAttachmentUpload, message string) {
 
 func (u *attachmentUploads) discard(up *activeAttachmentUpload) {
 	delete(u.active, up.id)
+	closed := true
 	if up.file != nil {
-		_ = up.file.Close()
+		closed = up.file.Close() == nil
+		up.file = nil
+	}
+	if up.Scope != nil {
+		if closed && u.persistState(up) == nil {
+			delete(u.client.hub.media.data.Readers, u.uploadLeaseID(up))
+			_ = u.client.hub.media.save()
+		}
+		return
+	}
+	if u.client.hub.media != nil && u.client.hub.media.root == u.root && u.lifecycleHeld && closed {
+		delete(u.client.hub.media.data.Readers, u.uploadLeaseID(up))
+		_ = u.client.hub.media.save()
+	}
+	if !closed {
+		return
 	}
 	_ = os.Remove(up.partPath)
 	_ = os.Remove(up.statePath)
@@ -431,14 +612,15 @@ func (u *attachmentUploads) discard(up *activeAttachmentUpload) {
 }
 
 func (u *attachmentUploads) sendAck(up *activeAttachmentUpload) {
-	u.client.enqueueEvent(map[string]any{
+	u.client.enqueueEvent(u.scopeEvent(map[string]any{
 		"type": "attachment_upload_ack", "upload_request_id": up.requestID,
 		"upload_id": up.id, "received_bytes": up.received,
-	})
+	}, up))
 }
 
 func (u *attachmentUploads) persistState(up *activeAttachmentUpload) error {
 	state := resumableUploadState{
+		Scope: up.Scope, PrefixSHA256: hex.EncodeToString(up.digest.Sum(nil)),
 		OriginalName: up.originalName,
 		Kind:         up.kind,
 		Version:      2, UploadID: up.id, RequestID: up.requestID,
@@ -447,15 +629,7 @@ func (u *attachmentUploads) persistState(up *activeAttachmentUpload) error {
 		ExpectedSize: up.expected, ReceivedSize: up.received,
 		PartPath: up.partPath, FinalPath: up.finalPath,
 	}
-	raw, err := json.MarshalIndent(state, "", "  ")
-	if err != nil {
-		return err
-	}
-	tmp := up.statePath + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, up.statePath)
+	return mediaAtomicJSON(up.statePath, state)
 }
 
 func (u *attachmentUploads) loadResumableState(
@@ -499,7 +673,7 @@ func (u *attachmentUploads) loadResumableState(
 	}
 	defer f.Close()
 	n, err := io.Copy(digest, f)
-	if err != nil || n != state.ReceivedSize || n > expected {
+	if err != nil || n != state.ReceivedSize || n > expected || (state.PrefixSHA256 != "" && hex.EncodeToString(digest.Sum(nil)) != state.PrefixSHA256) {
 		return 0, nil, errors.New("Upload partial file is inconsistent")
 	}
 	return n, digest, nil
@@ -519,21 +693,40 @@ func (u *attachmentUploads) completedUpload(
 		manifest.Path != finalPath {
 		return nil, false
 	}
-	info, err := os.Stat(finalPath)
-	if err != nil || info.Size() != manifest.SizeBytes {
+	digest, err := hashRegularFile(finalPath, manifest.SizeBytes)
+	if err != nil || digest != manifest.SHA256 {
 		return nil, false
 	}
 	if manifest.Kind == "" {
 		manifest.Kind = "video"
 	}
-	return map[string]any{
+
+	if manifest.Scope != nil {
+		m := u.client.hub.media
+		b := m.data.Batches[mediaKey(manifest.DeviceID, manifest.Scope.Generation, manifest.Scope.BatchID)]
+		if !u.lifecycleHeld || b == nil || b.State != "prepared" || b.BodyHash != manifest.Scope.BodyHash {
+			return nil, false
+		}
+		b.Objects[requestID] = id
+		if e := m.save(); e != nil {
+			return nil, false
+		}
+	}
+	event := map[string]any{
 		"upload_kind": manifest.Kind,
 		"type":        "attachment_upload_complete", "upload_request_id": requestID,
 		"upload_id": manifest.UploadID, "name": manifest.Name,
 		"media_type": manifest.MediaType, "size_bytes": manifest.SizeBytes,
 		"sha256": manifest.SHA256, "remote_path": manifest.Path, "path": manifest.Path,
 		"duration_ms": manifest.DurationMS, "width": manifest.Width, "height": manifest.Height,
-	}, true
+	}
+	if manifest.Scope != nil {
+		event["media_batch_id"] = manifest.Scope.BatchID
+		event["media_batch_revision"] = manifest.Scope.Revision
+		event["item_id"] = manifest.Scope.ItemID
+		event["item_revision"] = manifest.Scope.ItemRevision
+	}
+	return event, true
 }
 
 func (u *attachmentUploads) sendError(requestID, id, message string) {
@@ -655,6 +848,9 @@ func verifyStoredAttachment(root, path string, size int64, digest string) error 
 	if err != nil || !info.Mode().IsRegular() {
 		return errors.New("attachment is not a regular file")
 	}
+	if st, ok := info.Sys().(*syscall.Stat_t); !ok || st.Nlink != 1 {
+		return errors.New("attachment aliases another owner")
+	}
 	anchored, err := os.OpenRoot(root)
 	if err != nil {
 		return err
@@ -673,6 +869,11 @@ func verifyStoredAttachment(root, path string, size int64, digest string) error 
 	n, err := io.Copy(hash, io.LimitReader(f, size+1))
 	if err != nil || n != size || hex.EncodeToString(hash.Sum(nil)) != digest {
 		return errors.New("attachment digest mismatch")
+	}
+	after, se := os.Lstat(path)
+	held, fe := f.Stat()
+	if se != nil || fe != nil || !os.SameFile(info, after) || !os.SameFile(info, held) || after.Size() != size || after.ModTime() != info.ModTime() {
+		return errors.New("attachment final identity changed")
 	}
 	return nil
 }

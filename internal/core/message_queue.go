@@ -20,14 +20,17 @@ import (
 	"everything-go/internal/recovery"
 	"everything-go/internal/runtimejournal"
 	"everything-go/internal/session"
+	"everything-go/internal/taskapi"
 )
 
 type queuedPayload struct {
-	AsyncBatch  *backend.AsyncBatchBinding      `json:"async_batch,omitempty"`
-	AsyncCovers []protocol.AsyncCoveredQuestion `json:"async_covers,omitempty"`
-	RoleEpoch   uint64                          `json:"role_epoch,omitempty"`
-	SteerOnly   bool                            `json:"steer_only,omitempty"`
-	PipelineID  string                          `json:"pipeline_id,omitempty"`
+	MediaBodyHash string                          `json:"media_body_hash,omitempty"`
+	MediaBatchID  string                          `json:"media_batch_id,omitempty"`
+	AsyncBatch    *backend.AsyncBatchBinding      `json:"async_batch,omitempty"`
+	AsyncCovers   []protocol.AsyncCoveredQuestion `json:"async_covers,omitempty"`
+	RoleEpoch     uint64                          `json:"role_epoch,omitempty"`
+	SteerOnly     bool                            `json:"steer_only,omitempty"`
+	PipelineID    string                          `json:"pipeline_id,omitempty"`
 
 	UnifiedBinding            *unifiedInputBinding       `json:"unified_binding,omitempty"`
 	OwnerCredentialGeneration uint64                     `json:"owner_credential_generation,omitempty"`
@@ -150,10 +153,45 @@ func (h *Hub) enqueueChatMessageExpectedInheritedMode(c *Client, cmd clientproto
 	if cmd.MessagePurpose != "" && cmd.MessagePurpose != "instruction" {
 		cmd.VisualPresentation = ""
 	}
+	var err error
+	cmd.Images, err = h.resolveMediaImages(cmd.SessionID, cmd.Images)
+	if err != nil {
+		h.queueError(c, cmd, "invalid_image_ref", err.Error())
+		return false
+	}
+	if len(cmd.Images)+len(cmd.Files) > 8 {
+		h.queueError(c, cmd, "media_item_limit", "Maximum 8 media items")
+		return false
+	}
 	content, files, err := h.resolveUploadedVideos(cmd.SessionID, cmd.Content, cmd.Files)
 	if err != nil {
 		h.queueError(c, cmd, "invalid_attachment", err.Error())
 		return false
+	}
+	var batch *mediaBatch
+	var mediaCaller taskapi.VerifiedContext
+	mediaFrozenHash := ""
+	if cmd.MediaBatchID != "" || backend.HasImageRefs(cmd.Images) || h.hasTypedFiles(cmd.SessionID, cmd.Files) {
+		actor, e := h.mediaActor(c)
+		if e != nil {
+			h.queueError(c, cmd, "media_caller_unbound", "Original paired media source required")
+			return false
+		}
+		release, e := h.media.begin()
+		if e != nil {
+			h.queueError(c, cmd, "media_store_unavailable", e.Error())
+			return false
+		}
+		defer release()
+		if e = backend.ValidateMediaBudget(s.Backend(), content, cmd.Images, files); e != nil {
+			h.queueError(c, cmd, "media_model_budget", e.Error())
+			return false
+		}
+		mediaCaller = actor
+		if original := h.media.data.Batches[mediaKey(strings.TrimPrefix(actor.StableScopeID, "device:"), actor.NamespaceGeneration, cmd.MediaBatchID)]; original != nil {
+			mediaFrozenHash = original.BodyHash
+		}
+
 	}
 	h.messageQueueMu.Lock()
 	defer h.messageQueueMu.Unlock()
@@ -199,7 +237,7 @@ func (h *Hub) enqueueChatMessageExpectedInheritedMode(c *Client, cmd clientproto
 	if cmd.VisualPresentation != "" || role != nil {
 		userHash, effectiveHash = backend.PresentationHashes(backend.WithPartnerRole(backend.WithVisualPresentation(context.Background(), cmd.VisualPresentation), role), content)
 	}
-	intent, err := json.Marshal(queuedPayload{AsyncBatch: cmd.AsyncBatch, AsyncCovers: cmd.AsyncCovers, SteerOnly: steerOnly, VoiceContext: cmd.VoiceContext, VoiceID: cmd.VoiceID, VoiceThread: cmd.ThreadID, PartnerRole: role, CallbackOnComplete: cmd.CallbackOnComplete, VisualUserHash: userHash, VisualEffectiveHash: effectiveHash, VisualPresentation: cmd.VisualPresentation, MessagePurpose: cmd.MessagePurpose, Origin: cmd.TaskOrigin, Content: content, Images: cmd.Images, Files: files, ExpectedTarget: expected})
+	intent, err := json.Marshal(queuedPayload{MediaBodyHash: mediaFrozenHash, MediaBatchID: cmd.MediaBatchID, AsyncBatch: cmd.AsyncBatch, AsyncCovers: cmd.AsyncCovers, SteerOnly: steerOnly, VoiceContext: cmd.VoiceContext, VoiceID: cmd.VoiceID, VoiceThread: cmd.ThreadID, PartnerRole: role, CallbackOnComplete: cmd.CallbackOnComplete, VisualUserHash: userHash, VisualEffectiveHash: effectiveHash, VisualPresentation: cmd.VisualPresentation, MessagePurpose: cmd.MessagePurpose, Origin: cmd.TaskOrigin, Content: content, Images: cmd.Images, Files: files, ExpectedTarget: expected})
 	if err != nil {
 		h.queueError(c, cmd, "invalid_message", err.Error())
 		return false
@@ -209,7 +247,7 @@ func (h *Hub) enqueueChatMessageExpectedInheritedMode(c *Client, cmd clientproto
 	if c.pipelineAdmission != nil {
 		pipelineID = c.pipelineAdmission.ID
 	}
-	payload, err := json.Marshal(queuedPayload{AsyncBatch: cmd.AsyncBatch, AsyncCovers: cmd.AsyncCovers, RoleEpoch: h.SessionRoleEpoch(s), SteerOnly: steerOnly, PipelineID: pipelineID, VoiceContext: cmd.VoiceContext, VoiceID: cmd.VoiceID, VoiceThread: cmd.ThreadID, PartnerRole: role, CallbackOnComplete: cmd.CallbackOnComplete, VisualUserHash: userHash, VisualEffectiveHash: effectiveHash, VisualPresentation: cmd.VisualPresentation, MessagePurpose: cmd.MessagePurpose, OwnerDevice: owner, CallbackBinding: callbackBinding(c), Origin: cmd.TaskOrigin, Content: content, Images: cmd.Images, Files: files, Configuration: &config, ExpectedTarget: expected})
+	payload, err := json.Marshal(queuedPayload{MediaBodyHash: mediaFrozenHash, MediaBatchID: cmd.MediaBatchID, AsyncBatch: cmd.AsyncBatch, AsyncCovers: cmd.AsyncCovers, RoleEpoch: h.SessionRoleEpoch(s), SteerOnly: steerOnly, PipelineID: pipelineID, VoiceContext: cmd.VoiceContext, VoiceID: cmd.VoiceID, VoiceThread: cmd.ThreadID, PartnerRole: role, CallbackOnComplete: cmd.CallbackOnComplete, VisualUserHash: userHash, VisualEffectiveHash: effectiveHash, VisualPresentation: cmd.VisualPresentation, MessagePurpose: cmd.MessagePurpose, OwnerDevice: owner, CallbackBinding: callbackBinding(c), Origin: cmd.TaskOrigin, Content: content, Images: cmd.Images, Files: files, Configuration: &config, ExpectedTarget: expected})
 	if err != nil {
 		h.queueError(c, cmd, "invalid_message", err.Error())
 		return false
@@ -252,6 +290,21 @@ func (h *Hub) enqueueChatMessageExpectedInheritedMode(c *Client, cmd clientproto
 		raw, _ := json.Marshal(cmd.AsyncBatch.Request)
 		questionBatch = &messagequeue.QuestionBatchAdmission{CanCommit: func() error { return h.asyncBatchSendGuard(s, cmd.AsyncBatch) }, Hash: backend.AsyncContentHash(string(raw)), ContentHash: cmd.AsyncBatch.ContentHash, Covered: cmd.AsyncCovers}
 	}
+	if cmd.MediaBatchID != "" {
+		finalContext := backend.WithPartnerRole(backend.WithVisualPresentation(context.Background(), cmd.VisualPresentation), role)
+		if e := backend.ValidateMediaBudget(s.Backend(), backend.PresentationContent(finalContext, content), cmd.Images, files); e != nil {
+			releaseBatch()
+			h.queueError(c, cmd, "media_model_budget", e.Error())
+			return false
+		}
+		var e error
+		batch, e = h.mediaBeginAdmission(mediaCaller, cmd.SessionID, cmd.MediaBatchID, cmd.RequestID, cmd.Content, cmd.Images, cmd.Files)
+		if e != nil {
+			releaseBatch()
+			h.queueError(c, cmd, "media_batch_not_admissible", e.Error())
+			return false
+		}
+	}
 	e, inserted, err := h.messageQueue.Enqueue(messagequeue.Entry{QuestionBatch: questionBatch, ControllerResult: c.controllerResultAdmission, Pipeline: c.pipelineAdmission, SessionID: cmd.SessionID, RequestID: cmd.RequestID, Content: truncateGraphemes(content, 4000), ImageCount: len(cmd.Images), FileNames: names, Payload: payload, PayloadHash: hex.EncodeToString(intentHash[:]), Inherited: inherited})
 	releaseBatch()
 	if err != nil {
@@ -260,6 +313,10 @@ func (h *Hub) enqueueChatMessageExpectedInheritedMode(c *Client, cmd clientproto
 			return false
 		}
 		h.queueError(c, cmd, "queue_persist_failed", err.Error())
+		return false
+	}
+	if err := h.mediaAdmitted(batch); err != nil {
+		h.queueError(c, cmd, "media_acceptance_unknown", "Queue accepted; original media receipt must be queried")
 		return false
 	}
 	if inserted && cmd.CallbackOnComplete != nil && *cmd.CallbackOnComplete {
@@ -437,6 +494,13 @@ func (h *Hub) runQueuedMessage(s *session.Session, requestID string) {
 			return h.asyncBatchSendGuard(s, payload.AsyncBatch)
 		})
 	}
+	releaseMedia, mediaErr := h.acquireModelMediaReader(s, requestID, payload)
+	if mediaErr != nil {
+		h.Emit(backend.NewError(s.ID, requestID, "media_reader_unavailable", mediaErr.Error()))
+		return
+	}
+	defer releaseMedia()
+	sendContext = h.withMediaInputGuard(sendContext, s.ID, requestID, payload)
 	if err = h.exec.Send(sendContext, s, requestID, payload.Content, payload.Images, payload.Files); err != nil {
 		if errors.Is(err, backend.ErrNativeSubmissionBusy) {
 			h.deferUnsubmittedQueuedMessage(s, requestID)
@@ -824,7 +888,14 @@ func (h *Hub) promoteQueuedMessage(c *Client, cmd clientproto.Command) {
 				steerContext = backend.WithAsyncBatch(steerContext, payload.AsyncBatch)
 				steerContext = backend.WithTaskInputGuard(steerContext, func() error { return h.asyncBatchSendGuard(s, payload.AsyncBatch) })
 			}
-			result, steerErr = steerer.Steer(steerContext, s, cmd.RequestID, payload.Content, payload.Images, payload.Files)
+			release, e := h.acquireModelMediaReader(s, cmd.RequestID, payload)
+			if e != nil {
+				steerErr = fmt.Errorf("%w: %v", backend.ErrSteerRejected, e)
+			} else {
+				defer release()
+				steerContext = h.withMediaInputGuard(steerContext, s.ID, cmd.RequestID, payload)
+				result, steerErr = steerer.Steer(steerContext, s, cmd.RequestID, payload.Content, payload.Images, payload.Files)
+			}
 			if steerErr == nil && !result.StrictACK {
 				steerErr = errors.New("native steer acceptance unverified")
 			}

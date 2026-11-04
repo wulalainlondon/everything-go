@@ -583,10 +583,20 @@ func (c *Client) dispatchFrame(ctx context.Context, data []byte) error {
 		return nil
 	}
 	var taskHeader struct {
-		Type string `json:"type"`
+		Type         string `json:"type"`
+		MediaBatchID string `json:"media_batch_id"`
+	}
+	if json.Unmarshal(data, &taskHeader) == nil && (strings.HasPrefix(taskHeader.Type, "media_batch_") || taskHeader.MediaBatchID != "") {
+		if !c.hub.validateMediaControl(c, data) {
+			return nil
+		}
 	}
 	if json.Unmarshal(data, &taskHeader) == nil && taskHeader.Type == "task_callback_request" {
 		c.hub.handleTaskCallback(ctx, c, data)
+		return nil
+	}
+	if json.Unmarshal(data, &taskHeader) == nil && taskHeader.Type == "media_task_api_request" {
+		c.hub.handleMediaTaskAPI(ctx, c, data)
 		return nil
 	}
 	if json.Unmarshal(data, &taskHeader) == nil && (taskHeader.Type == "task_api_request" || taskHeader.Type == "task_api_unified_request" || taskHeader.Type == "task_api_controller_results_request") {

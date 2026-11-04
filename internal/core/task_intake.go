@@ -22,10 +22,14 @@ type intakeTarget struct {
 	Revision uint64  `json:"expected_config_revision"`
 }
 type intakeImage struct {
-	Data      string `json:"data"`
-	MediaType string `json:"media_type"`
+	AttachmentID string `json:"attachment_id,omitempty"`
+	SHA256       string `json:"sha256,omitempty"`
+	SizeBytes    int64  `json:"size_bytes,omitempty"`
+	Data         string `json:"data,omitempty"`
+	MediaType    string `json:"media_type"`
 }
 type intakeFile struct {
+	SHA256       string `json:"sha256,omitempty"`
 	AttachmentID string `json:"attachment_id"`
 	Name         string `json:"name"`
 	Content      string `json:"content"`
@@ -33,13 +37,14 @@ type intakeFile struct {
 	SizeBytes    int64  `json:"size_bytes"`
 }
 type intakeInput struct {
-	Action    string        `json:"action"`
-	SessionID string        `json:"session_id"`
-	RequestID string        `json:"submission_request_id"`
-	Target    intakeTarget  `json:"target"`
-	Goal      string        `json:"goal"`
-	Images    []intakeImage `json:"images"`
-	Files     []intakeFile  `json:"files"`
+	MediaBatchID string        `json:"media_batch_id,omitempty"`
+	Action       string        `json:"action"`
+	SessionID    string        `json:"session_id"`
+	RequestID    string        `json:"submission_request_id"`
+	Target       intakeTarget  `json:"target"`
+	Goal         string        `json:"goal"`
+	Images       []intakeImage `json:"images"`
+	Files        []intakeFile  `json:"files"`
 }
 
 // Media-only input keeps the user's exact empty goal. An attachment envelope
@@ -131,7 +136,7 @@ func (h *Hub) authorizeIntake(ctx context.Context, c taskapi.VerifiedContext, r 
 	if in.Action == "inspect" {
 		return l, nil
 	}
-	if in.Action != "submit" || in.RequestID != r.IdempotencyKey || !intakeHasInput(in) || (strings.TrimSpace(in.Goal) == "" && c.TaskSchemaHash != contract.MediaHash()) {
+	if in.Action != "submit" || in.RequestID != r.IdempotencyKey || !intakeHasInput(in) || (strings.TrimSpace(in.Goal) == "" && c.TaskSchemaHash != contract.MediaHash() && c.TaskSchemaHash != contract.MediaRefsHash()) {
 		return l, taskapi.Failure("invalid_argument", "known_none", "correct_input")
 	}
 	if in.Target.Instance != h.cfg.InstanceID {
@@ -211,6 +216,24 @@ func (h *Hub) readIntake(ctx context.Context, c taskapi.AuthorizedCommand) (any,
 	return map[string]any{"status": status, "reason": reason, "session_id": s.ID, "target": map[string]any{"instance_id": h.cfg.InstanceID, "session_id": s.ID, "expected_native_thread_id": thread, "expected_config_revision": v.ConfigRevision}, "current_configuration": map[string]string{"backend": string(v.Backend), "model": v.Model, "effort": v.Effort, "sandbox": v.Sandbox, "cwd": v.Cwd}, "configuration_known": v.Model != "", "delegation_grant_enabled": grant, "scope_behavior": "preserve_current_session", "server_verified_binding": "paired_human", "max_frame_bytes": 262144, "max_goal_chars": 32000}, nil
 }
 func (h *Hub) mutateIntake(ctx context.Context, c taskapi.AuthorizedCommand) (any, error) {
+	var initial intakeInput
+	json.Unmarshal(c.Request.Input, &initial)
+	if prior, e := h.messageQueue.TaskJournal().Lookup(ctx, c.Namespace, c.Request.IdempotencyKey); e == nil {
+		return h.apiReceipt(ctx, c, prior)
+	}
+	content, images, files, resolved, prepErr := h.prepareIntakeMedia(initial.Target.Session, initial)
+	if prepErr != nil {
+		return nil, prepErr
+	}
+
+	if initial.MediaBatchID != "" {
+		release, e := h.media.begin()
+		if e != nil {
+			return nil, e
+		}
+		defer release()
+	}
+
 	h.messageQueueMu.Lock()
 	defer h.messageQueueMu.Unlock()
 	if e := c.Revalidate(ctx); e != nil {
@@ -228,19 +251,13 @@ func (h *Hub) mutateIntake(ctx context.Context, c taskapi.AuthorizedCommand) (an
 	if e != nil {
 		return nil, e
 	}
-	images := make([]backend.ImageAttachment, 0, len(in.Images))
-	for _, i := range in.Images {
-		if decoded, e := base64.StdEncoding.DecodeString(i.Data); e != nil || len(decoded) == 0 {
-			return nil, taskapi.Failure("invalid_argument", "known_none", "correct_input")
+	var mediaPrepared *mediaBatch
+	if in.MediaBatchID != "" {
+		mediaPrepared, e = h.mediaBeginAdmission(c.Caller, s.ID, in.MediaBatchID, in.RequestID, in.Goal, images, files)
+		if e != nil {
+			return nil, taskapi.Failure("unknown_acceptance", "unknown", "lookup_original")
 		}
-		images = append(images, backend.ImageAttachment{Data: i.Data, MediaType: i.MediaType})
-	}
-	files := make([]backend.FileAttachment, 0, len(in.Files))
-	for _, f := range in.Files {
-		files = append(files, backend.FileAttachment{AttachmentID: f.AttachmentID, Name: f.Name, Content: f.Content, MediaType: f.MediaType, SizeBytes: f.SizeBytes})
-	}
-	content, resolved, e := h.resolveUploadedVideos(s.ID, in.Goal, files)
-	if e != nil {
+	} else if backend.HasImageRefs(images) || h.hasTypedFiles(s.ID, files) {
 		return nil, taskapi.Failure("invalid_argument", "known_none", "correct_input")
 	}
 	config := session.ConfigurationFrom(s.SettingsSnapshot())
@@ -254,7 +271,12 @@ func (h *Hub) mutateIntake(ctx context.Context, c taskapi.AuthorizedCommand) (an
 	}
 	metadata, _ := json.Marshal(apiMetadata{Request: c.Request, Caller: c.Caller, Transport: c.Caller.Transport, Intake: &intakeMetadata{Source: source, Goal: in.Goal, Configuration: config}})
 	record := taskapi.IntentRecord{ReceiptID: "tr_" + randomID(), NativeID: s.ID + "/" + in.RequestID, SessionID: s.ID, RequestID: in.RequestID, TaskID: apiID(h.cfg.InstanceID, "ordinary", s.ID+"/"+in.RequestID), Metadata: metadata}
-	payload, _ := json.Marshal(queuedPayload{RoleEpoch: h.SessionRoleEpoch(s), FormalIntake: true, Content: content, Images: images, Files: resolved, MessagePurpose: "instruction", OwnerDevice: strings.TrimPrefix(c.Caller.StableScopeID, "device:"), Configuration: &config, ExpectedTarget: &dispatchTargetExpectation{ThreadID: thread, Revision: in.Target.Revision}})
+	payload, _ := json.Marshal(queuedPayload{MediaBodyHash: func() string {
+		if mediaPrepared != nil {
+			return mediaPrepared.BodyHash
+		}
+		return ""
+	}(), MediaBatchID: in.MediaBatchID, RoleEpoch: h.SessionRoleEpoch(s), FormalIntake: true, Content: content, Images: images, Files: resolved, MessagePurpose: "instruction", OwnerDevice: strings.TrimPrefix(c.Caller.StableScopeID, "device:"), Configuration: &config, ExpectedTarget: &dispatchTargetExpectation{ThreadID: thread, Revision: in.Target.Revision}})
 	names := []string{}
 	for _, f := range files {
 		names = append(names, f.Name)
@@ -269,6 +291,9 @@ func (h *Hub) mutateIntake(ctx context.Context, c taskapi.AuthorizedCommand) (an
 	if e != nil {
 		return nil, e
 	}
+	if e = h.mediaAdmitted(mediaPrepared); e != nil {
+		return nil, taskapi.Failure("unknown_acceptance", "unknown", "lookup_original")
+	}
 	stored, e := h.messageQueue.TaskJournal().Lookup(ctx, c.Namespace, c.Request.IdempotencyKey)
 	if e != nil {
 		return nil, e
@@ -278,4 +303,39 @@ func (h *Hub) mutateIntake(ctx context.Context, c taskapi.AuthorizedCommand) (an
 		h.submitAPINamed(s, entry.RequestID)
 	}
 	return h.apiReceipt(ctx, c, stored)
+}
+
+func (h *Hub) prepareIntakeMedia(sid string, in intakeInput) (string, []backend.ImageAttachment, []backend.FileAttachment, []backend.FileAttachment, error) {
+	s, e := h.intakeSession(sid)
+	if e != nil {
+		return "", nil, nil, nil, e
+	}
+	images := make([]backend.ImageAttachment, 0, len(in.Images))
+	for _, i := range in.Images {
+		if i.AttachmentID == "" {
+			if decoded, e := base64.StdEncoding.DecodeString(i.Data); e != nil || len(decoded) == 0 {
+				return "", nil, nil, nil, taskapi.Failure("invalid_argument", "known_none", "correct_input")
+			}
+		}
+		images = append(images, backend.ImageAttachment{AttachmentID: i.AttachmentID, SHA256: i.SHA256, SizeBytes: i.SizeBytes, Data: i.Data, MediaType: i.MediaType})
+	}
+	images, e = h.resolveMediaImages(sid, images)
+	if e != nil {
+		return "", nil, nil, nil, taskapi.Failure("invalid_argument", "known_none", "correct_input")
+	}
+	files := make([]backend.FileAttachment, 0, len(in.Files))
+	for _, f := range in.Files {
+		files = append(files, backend.FileAttachment{SHA256: f.SHA256, AttachmentID: f.AttachmentID, Name: f.Name, Content: f.Content, MediaType: f.MediaType, SizeBytes: f.SizeBytes})
+	}
+	content, resolved, e := h.resolveUploadedVideos(sid, in.Goal, files)
+	if e != nil {
+		return "", nil, nil, nil, taskapi.Failure("invalid_argument", "known_none", "correct_input")
+	}
+	if len(images)+len(files) > 8 {
+		return "", nil, nil, nil, taskapi.Failure("invalid_argument", "known_none", "correct_input")
+	}
+	if e = backend.ValidateMediaBudget(s.Backend(), content, images, resolved); e != nil {
+		return "", nil, nil, nil, taskapi.Failure("invalid_argument", "known_none", "correct_input")
+	}
+	return content, images, files, resolved, nil
 }

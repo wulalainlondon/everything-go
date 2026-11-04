@@ -643,8 +643,8 @@ func (h *Hub) Read(ctx context.Context, c taskapi.AuthorizedCommand) (any, error
 			}
 		}
 		schemaHash := contract.Hash()
-		if c.Caller.TaskSchemaHash == contract.MediaHash() {
-			schemaHash = contract.MediaHash()
+		if c.Caller.TaskSchemaHash == contract.MediaHash() || c.Caller.TaskSchemaHash == contract.MediaRefsHash() {
+			schemaHash = c.Caller.TaskSchemaHash
 		}
 		return map[string]any{"api_versions": []string{contract.Version}, "schema_hash": schemaHash, "allowed_operations": ops, "paths": []string{"ordinary", "controller", "delegation"}, "providers": providers, "limits": map[string]int{"max_instruction_chars": 32000, "max_pending_children": capacity.Active, "event_retention_days": 30, "max_events_per_scope": 100000, "receipt_retention_days": 90}, "default_worker_profile": map[string]string{"backend": "codex", "model": "gpt-6.1-sol", "effort": "high"}, "mutation_authority_instance_id": h.cfg.InstanceID, "create_routes": routes}, nil
 	case "get":

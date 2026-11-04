@@ -88,6 +88,7 @@ type Config struct {
 // the executor.Sink (Emit broadcasts an event to connected clients, or buffers
 // it when none are connected so a reconnecting client can recover it).
 type Hub struct {
+	media                   *mediaLifecycle
 	networkRecoveryBarriers sync.Map
 	networkRecoveryNow      func() time.Time
 	networkRecoveryClock    func() (recovery.ClockAnchor, error)
@@ -291,6 +292,10 @@ func NewHub(reg *session.Registry, cfg Config, pairing *governance.Pairing, port
 		automationWake:      make(chan struct{}, 1),
 		relayWake:           make(chan struct{}, 1),
 		relayNonces:         make(map[string]int64),
+	}
+	h.media = openMediaLifecycle(cfg.DataDir)
+	if h.media != nil && h.media.err == nil {
+		h.media.captureCredentialEra(pairing)
 	}
 	if store, err := partners.Open(cfg.DataDir); err == nil {
 		h.partners = store
@@ -708,6 +713,7 @@ func (h *Hub) Emit(event any) {
 
 	if observed, ok := event.(backend.ProviderDefaultEffortObserved); ok {
 		h.migrateJarvisDefaultEffort(observed.Transition)
+		h.migrateMediaDefaultEffort(observed.Transition)
 		return
 	}
 	if evidence, ok := event.(backend.ContextTelemetry); ok {
@@ -923,6 +929,9 @@ func (h *Hub) Emit(event any) {
 	// persist-on-turn-complete trigger.
 	switch event.(type) {
 	case protocol.SessionUUID:
+		if observed, ok := event.(protocol.SessionUUID); ok {
+			h.migrateMediaInitialThread(observed.SessionID, observed.ClaudeUUID)
+		}
 		if observed, ok := event.(protocol.SessionUUID); ok && h.workspace != nil {
 			if current, found := h.registry.Get(observed.SessionID); found && current.ResumeID() == observed.ClaudeUUID {
 				if strings.HasPrefix(observed.SessionID, "s_cw_") && h.search != nil {

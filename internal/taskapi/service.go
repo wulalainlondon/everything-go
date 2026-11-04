@@ -14,10 +14,11 @@ import (
 )
 
 type Service struct {
-	contract      *taskcontract.Contract
-	mediaContract *taskcontract.Contract
-	policy        Authorizer
-	gateway       Gateway
+	contract          *taskcontract.Contract
+	mediaContract     *taskcontract.Contract
+	mediaRefsContract *taskcontract.Contract
+	policy            Authorizer
+	gateway           Gateway
 }
 
 func NewService(policy Authorizer, gateway Gateway) (*Service, error) {
@@ -29,7 +30,11 @@ func NewService(policy Authorizer, gateway Gateway) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Service{contract: c, mediaContract: media, policy: policy, gateway: gateway}, nil
+	refs, err := taskcontract.NewMediaRefs()
+	if err != nil {
+		return nil, err
+	}
+	return &Service{contract: c, mediaContract: media, mediaRefsContract: refs, policy: policy, gateway: gateway}, nil
 }
 
 var operations = map[string]bool{"capabilities": true, "intake": true, "create_dispatch": true, "list": true, "get": true, "read_result": true, "append": true, "cancel": true, "snapshot": true, "events": true, "deliver_result": true, "read_input": true, "legacy_source": true}
@@ -71,6 +76,8 @@ func (s *Service) Execute(ctx context.Context, caller BoundCaller, raw []byte) R
 	case "", taskcontract.Hash():
 	case taskcontract.MediaHash():
 		validator = s.mediaContract
+	case taskcontract.MediaRefsHash():
+		validator = s.mediaRefsContract
 	default:
 		return fail(Failure("unsupported", "known_none", "read_capabilities"))
 	}
@@ -226,7 +233,7 @@ func readDiagnostic(request Request, schema, stage string, err error, size int) 
 	case stage == "response_validate":
 		reason = "schema"
 	}
-	if schema != taskcontract.MediaHash() {
+	if schema != taskcontract.MediaHash() && schema != taskcontract.MediaRefsHash() {
 		schema = taskcontract.Hash()
 	}
 	digest := sha256.Sum256([]byte(request.CorrelationID))
@@ -356,5 +363,5 @@ func withTaskSchema(ctx context.Context, hash string) context.Context {
 // MediaTaskView only changes the wire projection; canonical task data is never rewritten.
 func MediaTaskView(ctx context.Context) bool {
 	hash, _ := ctx.Value(taskSchemaContextKey{}).(string)
-	return hash == taskcontract.MediaHash()
+	return hash == taskcontract.MediaHash() || hash == taskcontract.MediaRefsHash()
 }

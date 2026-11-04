@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestAttachmentUpload2048MiBBoundaryForVideoAndGenericFiles(t *testing.T) {
+func TestAttachmentUploadNewVideo1GiBGenericFile2GiBBoundary(t *testing.T) {
 	if maxVideoUploadBytes != 2147483648 || maxFileUploadBytes != 2147483648 {
 		t.Fatal("attachment caps must be exactly 2048 MiB")
 	}
@@ -18,14 +18,20 @@ func TestAttachmentUpload2048MiBBoundaryForVideoAndGenericFiles(t *testing.T) {
 			c.deviceID = "large-fixture"
 			c.uploads = newAttachmentUploads(c, h.cfg.DataDir)
 			defer c.uploads.close()
-			c.uploads.initKind("large-file", "exact-limit", "boundary.mov", "video/quicktime", maxFileUploadBytes, kind)
+			size := mediaVideoMaxBytes
+			name, mime := "boundary.mov", "video/quicktime"
+			if kind == "file" {
+				size = maxFileUploadBytes
+				name, mime = "archive.zip", "application/zip"
+			}
+			c.uploads.initKind("large-file", "exact-limit", name, mime, size, kind)
 			ready := waitForType(t, c, "attachment_upload_ready")
 			if ready["protocol_version"] != float64(2) || ready["received_bytes"] != float64(0) {
 				t.Fatal(ready)
 			}
-			c.uploads.initKind("large-file", "over-limit", "too-big.mov", "video/quicktime", maxFileUploadBytes+1, kind)
+			c.uploads.initKind("large-file", "over-limit", name, mime, size+1, kind)
 			failed := waitForType(t, c, "attachment_upload_error")
-			if !strings.Contains(failed["message"].(string), "2048 MB") {
+			if !strings.Contains(failed["message"].(string), "2048 MB") && !strings.Contains(failed["message"].(string), "1 GiB") {
 				t.Fatal(failed)
 			}
 		})

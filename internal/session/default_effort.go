@@ -54,9 +54,18 @@ func (s *Session) defaultEffortTransitionLocked(before Snapshot, reason string, 
 
 // ApplyProviderRuntimeMetadata preserves the existing metadata/context behavior.
 // Only resolving an undeclared effort in an otherwise identical configuration
-// can issue a role receipt. A different model, explicit effort or queued config
+// can issue a host receipt. Epoch zero remains an ordinary source, not a role grant. A different model, explicit effort or queued config
 // remains a real source change and cannot be normalized into authorization.
 func (s *Session) ApplyProviderRuntimeMetadata(model, effort *string, roleEpoch uint64) (*string, *string, *DefaultEffortTransition) {
+	return s.applyProviderRuntimeMetadata(model, effort, roleEpoch, false)
+}
+
+// Media execution uses an explicit host-only observer. Epoch zero may continue
+// its ordinary source, but is never accepted by the existing role receipt API.
+func (s *Session) ApplyProviderMediaRuntimeMetadata(model, effort *string, roleEpoch uint64) (*string, *string, *DefaultEffortTransition) {
+	return s.applyProviderRuntimeMetadata(model, effort, roleEpoch, true)
+}
+func (s *Session) applyProviderRuntimeMetadata(model, effort *string, roleEpoch uint64, ordinary bool) (*string, *string, *DefaultEffortTransition) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	before := s.snapshotLocked()
@@ -77,7 +86,7 @@ func (s *Session) ApplyProviderRuntimeMetadata(model, effort *string, roleEpoch 
 		v := *effort
 		changedEffort = &v
 	}
-	if changedModel == nil && changedEffort != nil && roleEpoch > 0 && before.Backend == "codex" && before.Effort == "" && declared == ConfigurationFrom(before) && knownDefaultEffort(*changedEffort) && !s.configUpdating && s.contextResetID == "" && s.state != Closed {
+	if changedModel == nil && changedEffort != nil && (roleEpoch > 0 || ordinary) && before.Backend == "codex" && before.Effort == "" && declared == ConfigurationFrom(before) && knownDefaultEffort(*changedEffort) && !s.configUpdating && s.contextResetID == "" && s.state != Closed {
 		s.runtimeDefaultEffort = &runtimeDefaultEffort{s.sourceRevision, s.resumeID, s.cwd, declared, *changedEffort, roleEpoch}
 		return changedModel, changedEffort, s.defaultEffortTransitionLocked(before, "provider_default_effort_observed", roleEpoch)
 	}
@@ -100,9 +109,15 @@ func (s *Session) restorableDefaultEffortLocked() *runtimeDefaultEffort {
 // WithDefaultEffortTransition fences the actual current Session through the
 // durable role CAS. Any intervening mutation (including an ABA) retires it.
 func (s *Session) WithDefaultEffortTransition(t *DefaultEffortTransition, fn func(Snapshot, Snapshot, string) error) error {
+	return s.withDefaultEffortTransition(t, fn, false)
+}
+func (s *Session) WithMediaDefaultEffortTransition(t *DefaultEffortTransition, fn func(Snapshot, Snapshot, string) error) error {
+	return s.withDefaultEffortTransition(t, fn, true)
+}
+func (s *Session) withDefaultEffortTransition(t *DefaultEffortTransition, fn func(Snapshot, Snapshot, string) error, ordinary bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if t == nil || t.owner != s || t.epoch == 0 || t.serial != s.defaultEffortSerial || s.state == Closed || s.contextResetID != "" || s.configUpdating {
+	if t == nil || t.owner != s || (t.epoch == 0 && !ordinary) || t.serial != s.defaultEffortSerial || s.state == Closed || s.contextResetID != "" || s.configUpdating {
 		return errors.New("default_effort_transition_retired")
 	}
 	now := s.snapshotLocked()

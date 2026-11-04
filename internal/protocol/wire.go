@@ -22,17 +22,36 @@ import (
 // Inbound is a flat superset of every client→bridge frame we currently handle.
 // All fields are optional; only `Type` is always present. New command fields can
 // be appended without breaking older ones.
+type MediaBatchItem struct {
+	ItemID          string `json:"item_id"`
+	ItemRevision    uint64 `json:"item_revision"`
+	UploadRequestID string `json:"upload_request_id"`
+	UploadKind      string `json:"upload_kind"`
+	AttachmentID    string `json:"attachment_id,omitempty"`
+	Name            string `json:"name"`
+	MediaType       string `json:"media_type"`
+	SizeBytes       int64  `json:"size_bytes"`
+	SHA256          string `json:"sha256"`
+}
+
 type Inbound struct {
-	BatchAuthority  string                             `json:"authority_instance_id,omitempty"`
-	AgentActivity   json.RawMessage                    `json:"agent_activity,omitempty"`
-	Workspace       *workspace.Command                 `json:"workspace,omitempty"`
-	Partner         *partners.Request                  `json:"partner,omitempty"`
-	ToolEnvironment *toolenv.Request                   `json:"tool_environment,omitempty"`
-	PM              *coordination.Command              `json:"pm,omitempty"`
-	Collaboration   *coordination.CollaborationCommand `json:"collaboration,omitempty"`
-	Type            string                             `json:"type"`
-	SessionID       string                             `json:"session_id"`
-	RequestID       string                             `json:"request_id"`
+	MediaBatchID       string                             `json:"media_batch_id,omitempty"`
+	MediaBatchRevision uint64                             `json:"media_batch_revision,omitempty"`
+	MediaBodyHash      string                             `json:"media_body_hash,omitempty"`
+	MediaItems         []MediaBatchItem                   `json:"items,omitempty"`
+	ItemID             string                             `json:"item_id,omitempty"`
+	ItemRevision       uint64                             `json:"item_revision,omitempty"`
+	SHA256             string                             `json:"sha256,omitempty"`
+	BatchAuthority     string                             `json:"authority_instance_id,omitempty"`
+	AgentActivity      json.RawMessage                    `json:"agent_activity,omitempty"`
+	Workspace          *workspace.Command                 `json:"workspace,omitempty"`
+	Partner            *partners.Request                  `json:"partner,omitempty"`
+	ToolEnvironment    *toolenv.Request                   `json:"tool_environment,omitempty"`
+	PM                 *coordination.Command              `json:"pm,omitempty"`
+	Collaboration      *coordination.CollaborationCommand `json:"collaboration,omitempty"`
+	Type               string                             `json:"type"`
+	SessionID          string                             `json:"session_id"`
+	RequestID          string                             `json:"request_id"`
 
 	// hello / pairing
 	DeviceID             string      `json:"device_id"`
@@ -263,12 +282,16 @@ type ClientInfo struct {
 // InboundImage is one attached image on a message (app strips the data-URL
 // prefix, so Data is raw base64).
 type InboundImage struct {
-	Data      string `json:"data"`
-	MediaType string `json:"media_type"`
+	AttachmentID string `json:"attachment_id,omitempty"`
+	SHA256       string `json:"sha256,omitempty"`
+	SizeBytes    int64  `json:"size_bytes,omitempty"`
+	Data         string `json:"data"`
+	MediaType    string `json:"media_type"`
 }
 
 // InboundFile is one attached file on a message.
 type InboundFile struct {
+	SHA256       string `json:"sha256,omitempty"`
 	Name         string `json:"name"`
 	Content      string `json:"content"`
 	MediaType    string `json:"media_type"`

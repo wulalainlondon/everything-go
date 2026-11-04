@@ -40,6 +40,9 @@ func (h *Hub) unifiedUpload(session, id string) (uploadedVideoManifest, error) {
 	if e != nil || len(b) > 65536 || json.Unmarshal(b, &m) != nil || m.SessionID != session || m.UploadID != id || !jarvisSHA.MatchString(m.SHA256) {
 		return m, unifiedError("invalid_argument")
 	}
+	if m.Kind == "" {
+		m.Kind = "video"
+	}
 	return m, nil
 }
 func (h *Hub) verifyUnifiedUpload(b unifiedUploadBinding) error {
@@ -60,7 +63,7 @@ func (h *Hub) prepareUnifiedMedia(ctx context.Context, c taskapi.VerifiedContext
 	if !intakeHasInput(intakeInput{Goal: content, Images: images, Files: files}) {
 		return "", nil, nil, nil, unifiedError("invalid_argument")
 	}
-	if len(images) > 12 || len(files) > 12 {
+	if len(images)+len(files) > 8 {
 		return "", nil, nil, nil, unifiedError("invalid_argument")
 	}
 	outImages := []backend.ImageAttachment{}
@@ -70,11 +73,20 @@ func (h *Hub) prepareUnifiedMedia(ctx context.Context, c taskapi.VerifiedContext
 		if i.MediaType != "image/jpeg" && i.MediaType != "image/png" && i.MediaType != "image/webp" {
 			return "", nil, nil, nil, unifiedError("invalid_argument")
 		}
+		if i.AttachmentID != "" {
+			m, e := h.unifiedUpload(target.SessionID, i.AttachmentID)
+			if e != nil || m.DeviceID != strings.TrimPrefix(c.StableScopeID, "device:") {
+				return "", nil, nil, nil, unifiedError("permission")
+			}
+			outImages = append(outImages, backend.ImageAttachment{AttachmentID: i.AttachmentID, SHA256: i.SHA256, SizeBytes: i.SizeBytes, MediaType: i.MediaType})
+			bindings = append(bindings, unifiedUploadBinding{m.SessionID, m.UploadID, m.SHA256, m.SizeBytes, m.DeviceID, m.Path})
+			continue
+		}
 		b, e := base64.StdEncoding.DecodeString(i.Data)
 		if e != nil || len(b) == 0 || len(i.Data) > 200000 {
 			return "", nil, nil, nil, unifiedError("invalid_argument")
 		}
-		outImages = append(outImages, backend.ImageAttachment{Data: i.Data, MediaType: i.MediaType})
+		outImages = append(outImages, backend.ImageAttachment{AttachmentID: i.AttachmentID, SHA256: i.SHA256, SizeBytes: i.SizeBytes, Data: i.Data, MediaType: i.MediaType})
 	}
 	for _, f := range files {
 		if f.AttachmentID != "" {
@@ -98,6 +110,10 @@ func (h *Hub) prepareUnifiedMedia(ctx context.Context, c taskapi.VerifiedContext
 	}
 	if strings.TrimSpace(content) == "" && len(outImages) == 0 && len(outFiles) == 0 {
 		return "", nil, nil, nil, unifiedError("invalid_argument")
+	}
+	outImages, e := h.resolveMediaImages(target.SessionID, outImages)
+	if e != nil {
+		return "", nil, nil, nil, e
 	}
 	prepared, resolved, e := h.resolveUploadedVideos(target.SessionID, content, outFiles)
 	if e != nil {
@@ -152,7 +168,7 @@ func (h *Hub) prepareUnifiedEditMedia(ctx context.Context, c taskapi.VerifiedCon
 	if images == nil {
 		images = []intakeImage{}
 		for _, i := range p.Images {
-			images = append(images, intakeImage{Data: i.Data, MediaType: i.MediaType})
+			images = append(images, intakeImage{AttachmentID: i.AttachmentID, SHA256: i.SHA256, SizeBytes: i.SizeBytes, Data: i.Data, MediaType: i.MediaType})
 		}
 	}
 	if files == nil {

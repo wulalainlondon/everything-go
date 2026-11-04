@@ -4139,6 +4139,14 @@ func validateCodexInlineFiles(files []backend.FileAttachment) error {
 }
 
 func (c *Codex) codexInput(s *session.Session, reqID, imageOwnerID, content string, images []backend.ImageAttachment, files []backend.FileAttachment, st *codexState) ([]map[string]any, error) {
+	if backend.HasImageRefs(images) {
+		if e := backend.ValidateMediaBudget(backend.Codex, content, images, files); e != nil {
+			return nil, e
+		}
+		mediaMaterializers <- struct{}{}
+		defer func() { <-mediaMaterializers }()
+	}
+
 	userText := content
 	for _, f := range files {
 		name := f.Name
@@ -4163,10 +4171,20 @@ func (c *Codex) codexInput(s *session.Session, reqID, imageOwnerID, content stri
 		staged = append(staged, item["path"].(string))
 		input = append(input, item)
 	}
+	if backend.HasImageRefs(images) {
+		raw, e := json.Marshal(input)
+		if e != nil || int64(len(raw)) > backend.MediaModelMaxBytes {
+			c.cleanupTempImagePaths(st, imageOwnerID, staged)
+			return nil, backend.ErrMediaBudget
+		}
+	}
 	return input, nil
 }
 
 func (c *Codex) prepareCodexImageInput(s *session.Session, reqID, imageOwnerID string, img backend.ImageAttachment, st *codexState) (map[string]any, error) {
+	if img.AttachmentID != "" {
+		return c.prepareCodexImageRef(s, reqID, imageOwnerID, img, st)
+	}
 	raw := strings.TrimSpace(img.Data)
 	if raw == "" {
 		return nil, &imageInputError{cause: errors.New("empty image input")}
@@ -4470,7 +4488,7 @@ func (c *Codex) applyThreadRuntimeMetadataWithEpoch(s *session.Session, raw json
 	if effort != nil && strings.TrimSpace(*effort) == "" {
 		effort = nil
 	}
-	changedModel, changedEffort, transition := s.ApplyProviderRuntimeMetadata(model, effort, epoch)
+	changedModel, changedEffort, transition := s.ApplyProviderMediaRuntimeMetadata(model, effort, epoch)
 	if transition != nil {
 		c.sink.Emit(backend.ProviderDefaultEffortObserved{Transition: transition})
 	}

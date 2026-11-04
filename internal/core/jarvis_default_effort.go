@@ -47,6 +47,7 @@ func (h *Hub) migrateJarvisDefaultEffort(t *session.DefaultEffortTransition) {
 func (h *Hub) prepareJarvisEndTurn(s *session.Session) func() {
 	release, transition := s.PrepareEndTurnWithDefaultEffort()
 	h.migrateJarvisDefaultEffort(transition)
+	h.migrateMediaDefaultEffort(transition)
 	return release
 }
 
