@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"syscall"
@@ -308,6 +309,26 @@ func (h *Hub) handleMediaBatch(c *Client, cmd clientproto.Command) {
 	device := strings.TrimPrefix(caller.StableScopeID, "device:")
 	key := mediaKey(device, caller.NamespaceGeneration, cmd.MediaBatchID)
 	batch := h.media.data.Batches[key]
+	// A retry/conflict observes the original actor's durable effect before any
+	// fresh source validation. A changed descriptor can reject THIS attempt but
+	// must never relabel an already admitted/UNKNOWN original as known-none.
+	if op == "prepare" && batch != nil {
+		if batch.Session != s.ID {
+			fail("permission")
+			return
+		}
+		same := cmd.ExpectedConfigRevision != nil && *cmd.ExpectedConfigRevision == batch.Config && cmd.ExpectedNativeThreadID == batch.Thread && cmd.MediaBatchRevision == batch.Revision && cmd.Content == batch.Content && reflect.DeepEqual(cmd.MediaItems, batch.Items)
+		if !same {
+			event["error_code"] = "idempotency_conflict"
+		} else if batch.State == "prepared" {
+			if e := h.mediaBatchTarget(batch); e != nil {
+				event["error_code"] = "source_changed"
+			}
+		}
+		h.mediaBatchReceipt(event, batch)
+		c.enqueueEvent(event)
+		return
+	}
 	if op == "prepare" {
 		thread := cmd.ExpectedNativeThreadID
 		if cmd.ExpectedConfigRevision == nil || cmd.MediaBatchRevision == 0 || cmd.MediaBatchRevision > 9007199254740991 || len(cmd.MediaItems) == 0 || len(cmd.MediaItems) > 8 {

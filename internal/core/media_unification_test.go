@@ -163,7 +163,7 @@ func TestMediaUnificationCancelBeforePrepareCannotResurrect(t *testing.T) {
 		t.Fatal(got)
 	}
 	h.handleMediaBatch(c, clientproto.Command{Kind: "media_batch_prepare", RequestID: "prepare-late", SessionID: s.ID, MediaBatchID: "r_early"})
-	if got := waitForType(t, c, "media_batch_receipt"); got["state"] != "rejected_known_none" {
+	if got := waitForType(t, c, "media_batch_receipt"); got["state"] != "cancelled_before_admission" {
 		t.Fatal(got)
 	}
 	if b := h.media.data.Batches[mediaKey("phone-a", jarvisTokenGeneration("mua-token"), "r_early")]; b == nil || b.State != "cancelled_before_admission" {
@@ -718,4 +718,108 @@ func TestMediaUnificationOversizedLogicalSetRejectedBeforeOpeningRefs(t *testing
 	if got["code"] != "media_model_budget" {
 		t.Fatal("attempted nonexistent file before metadata rejection", got)
 	}
+}
+
+func TestMediaUnificationRepreparePreservesOriginalEffectDespiteConflictOrSourceABA(t *testing.T) {
+	for _, state := range []string{"prepared", "admitting_unknown", "admitted", "cancelled_before_admission"} {
+		for _, change := range []string{"descriptor", "source", "sourceABA"} {
+			t.Run(state+"/"+change, func(t *testing.T) {
+				h, s, c, _ := mediaFixture(t)
+				data := mediaPNG(t)
+				cmd, _, _ := mediaPrepareItem(t, h, s, c, "r_original_receipt", data)
+				done, e := h.media.begin()
+				if e != nil {
+					t.Fatal(e)
+				}
+				b := h.media.data.Batches[mediaKey(c.deviceID, jarvisTokenGeneration("mua-token"), cmd.MediaBatchID)]
+				b.State = state
+				originalHash := b.BodyHash
+				originalRevision := b.Revision
+				e = h.media.save()
+				done()
+				if e != nil {
+					t.Fatal(e)
+				}
+				if change == "descriptor" {
+					cmd.Content = "changed after uncertainty"
+				} else {
+					s.SetResumeID("other-source")
+					if change == "sourceABA" {
+						s.SetResumeID("")
+					}
+				}
+				cmd.RequestID = "new-prepare-query"
+				h.handleMediaBatch(c, cmd)
+				got := waitForType(t, c, "media_batch_receipt")
+				if got["state"] != state || got["body_hash"] != originalHash || got["media_batch_revision"] != float64(originalRevision) {
+					t.Fatal("original downgraded or replaced", got)
+				}
+				expected := "unknown"
+				if state == "prepared" || state == "cancelled_before_admission" {
+					expected = "none"
+				}
+				if state == "admitted" {
+					expected = "admitted"
+				}
+				if got["known_effect"] != expected {
+					t.Fatal(got)
+				}
+				if change == "descriptor" && got["error_code"] != "idempotency_conflict" {
+					t.Fatal(got)
+				}
+				if state == "prepared" && change != "descriptor" && got["error_code"] != "source_changed" {
+					t.Fatal(got)
+				}
+				// Reopen the actual durable original; the conflicting attempt cannot mutate it.
+				reopened := openMediaLifecycle(h.cfg.DataDir)
+				original := reopened.data.Batches[mediaKey(c.deviceID, jarvisTokenGeneration("mua-token"), cmd.MediaBatchID)]
+				if original == nil || original.State != state || original.BodyHash != originalHash || original.Content != "" {
+					t.Fatal("original receipt mutated", original)
+				}
+				if _, found, e := h.messageQueue.Get(s.ID, cmd.MediaBatchID); e != nil || found {
+					t.Fatal("observation admitted new effect", e)
+				}
+			})
+		}
+	}
+}
+func TestMediaUnificationReprepareForeignActorCannotBorrowOriginalReceipt(t *testing.T) {
+	h, s, c, _ := mediaFixture(t)
+	data := mediaPNG(t)
+	cmd, _, _ := mediaPrepareItem(t, h, s, c, "r_foreign_receipt", data)
+	done, e := h.media.begin()
+	if e != nil {
+		t.Fatal(e)
+	}
+	key := mediaKey(c.deviceID, jarvisTokenGeneration("mua-token"), cmd.MediaBatchID)
+	b := h.media.data.Batches[key]
+	b.State = "admitted"
+	originalHash := b.BodyHash
+	e = h.media.save()
+	done()
+	if e != nil {
+		t.Fatal(e)
+	}
+	other := sharedReadClient(t, h, "other-reader")
+	h.registerLatest(other)
+	other.ctx = context.Background()
+	h.handleMediaBatch(other, clientproto.Command{Kind: "media_batch_status", RequestID: "foreign-query", SessionID: s.ID, MediaBatchID: cmd.MediaBatchID})
+	got := waitForType(t, other, "media_batch_receipt")
+	if got["state"] != "not_found" || got["known_effect"] != "unknown" || got["body_hash"] != nil {
+		t.Fatal("foreign receipt leaked", got)
+	}
+	cmd.RequestID = "foreign-prepare"
+	h.handleMediaBatch(other, cmd)
+	got = waitForType(t, other, "media_batch_receipt")
+	if got["state"] != "prepared" || got["body_hash"] == originalHash {
+		t.Fatal("borrowed original actor effect", got)
+	}
+	done, e = h.media.begin()
+	if e != nil {
+		t.Fatal(e)
+	}
+	if original := h.media.data.Batches[key]; original.State != "admitted" || original.BodyHash != originalHash {
+		t.Fatal("foreign actor changed original", original)
+	}
+	done()
 }
