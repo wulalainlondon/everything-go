@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -82,4 +83,31 @@ func TestMediaRefsClaudeActualImageBlockSameBytes(t *testing.T) {
 	if cap(mediaMaterializers) != 2 {
 		t.Fatal("materializers not globally bounded2")
 	}
+}
+
+func TestMediaRefsEightClearObjectsMeasuredNativeEnvelope(t *testing.T) {
+	// One immutable source object, eight intentional references. Materialization
+	// must stream each original rather than retain eight decoded/base64 copies.
+	data := bytes.Repeat([]byte{0x5a}, 1<<20)
+	path := filepath.Join(t.TempDir(), "prepared.jpg")
+	if e := os.WriteFile(path, data, 0600); e != nil {
+		t.Fatal(e)
+	}
+	sum := sha256.Sum256(data)
+	images := make([]backend.ImageAttachment, 8)
+	for n := range images {
+		images[n] = backend.ImageAttachment{AttachmentID: "u_" + strings.Repeat("a", 32), MediaType: "image/jpeg", SizeBytes: int64(len(data)), SHA256: hex.EncodeToString(sum[:]), VerifiedPath: path}
+	}
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	raw, e := checkedUserMessageJSON("eight original objects", images, nil)
+	runtime.ReadMemStats(&after)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if int64(len(raw)) > backend.MediaModelMaxBytes || !json.Valid(raw) {
+		t.Fatal("invalid or overbudget native envelope")
+	}
+	t.Logf("materializer measurement: objects=8 rawEach=%d nativeEnvelope=%d heapAllocBefore=%d heapAllocAfter=%d totalAllocatedDelta=%d; process RSS measured separately; no provider effect", len(data), len(raw), before.HeapAlloc, after.HeapAlloc, after.TotalAlloc-before.TotalAlloc)
 }
