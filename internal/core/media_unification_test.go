@@ -638,7 +638,7 @@ func TestMediaUnificationExecutionObservedFirstThreadAndExplicitResetFence(t *te
 	if proof == nil {
 		t.Fatal("observed metadata proof missing")
 	}
-	h.Emit(backend.ProviderDefaultEffortObserved{Transition: proof})
+	h.Emit(backend.MediaDefaultEffortObserved{Transition: proof})
 	if e = backend.CheckTaskInputGuard(guard); e != nil {
 		t.Fatal("provider metadata broke original", e)
 	}

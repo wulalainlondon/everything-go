@@ -711,6 +711,10 @@ func (h *Hub) Emit(event any) {
 		h.interactionProjectionMu.Unlock()
 	}
 
+	if observed, ok := event.(backend.MediaDefaultEffortObserved); ok {
+		h.migrateMediaDefaultEffort(observed.Transition)
+		return
+	}
 	if observed, ok := event.(backend.ProviderDefaultEffortObserved); ok {
 		h.migrateJarvisDefaultEffort(observed.Transition)
 		h.migrateMediaDefaultEffort(observed.Transition)

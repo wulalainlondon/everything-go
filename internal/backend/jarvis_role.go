@@ -14,6 +14,13 @@ type SessionRoleProvider interface{ SessionRoleEpoch(*session.Session) uint64 }
 type ProviderDefaultEffortObserved struct {
 	Transition *session.DefaultEffortTransition
 }
+
+// Ordinary media has its own host-only witness event; it cannot refresh role
+// authority or be interpreted as a positive role-epoch receipt.
+type MediaDefaultEffortObserved struct {
+	Transition *session.DefaultEffortTransition
+}
+
 type ResidentObservation struct {
 	State      string `json:"state"`
 	Thread     string `json:"thread_id"`

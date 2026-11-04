@@ -4490,7 +4490,11 @@ func (c *Codex) applyThreadRuntimeMetadataWithEpoch(s *session.Session, raw json
 	}
 	changedModel, changedEffort, transition := s.ApplyProviderMediaRuntimeMetadata(model, effort, epoch)
 	if transition != nil {
-		c.sink.Emit(backend.ProviderDefaultEffortObserved{Transition: transition})
+		if epoch == 0 {
+			c.sink.Emit(backend.MediaDefaultEffortObserved{Transition: transition})
+		} else {
+			c.sink.Emit(backend.ProviderDefaultEffortObserved{Transition: transition})
+		}
 	}
 	if changedModel != nil || changedEffort != nil {
 		c.sink.Emit(backend.NewSessionRuntimeMetadata(s.ID, changedModel, changedEffort))
