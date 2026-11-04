@@ -100,7 +100,7 @@ func (h *Hub) handleMediaDraftRelease(c *Client, cmd clientproto.Command) {
 		r.Error = "parent_not_cancelled"
 	case batch.Revision != cmd.MediaBatchRevision || batch.BodyHash != cmd.MediaBodyHash:
 		r.Error = "descriptor_conflict"
-	case h.mediaBatchTarget(batch) != nil:
+	case cmd.HandoffBatchID == "" && h.mediaBatchTarget(batch) != nil:
 		r.Error = "source_changed"
 	default:
 		for j := range batch.Items {
@@ -129,14 +129,7 @@ func (h *Hub) handleMediaDraftRelease(c *Client, cmd clientproto.Command) {
 	}
 	if r.Error == "" && cmd.HandoffBatchID != "" {
 		next := h.media.data.Batches[mediaKey(device, actor.NamespaceGeneration, cmd.HandoffBatchID)]
-		protected := false
-		if next != nil && next.ID != batch.ID && next.Session == batch.Session && next.State == "prepared" && h.mediaBatchTarget(next) == nil {
-			for _, i := range next.Items {
-				if next.Objects[i.UploadRequestID] == r.UploadID && i.SHA256 == item.SHA256 && i.SizeBytes == item.SizeBytes && i.MediaType == item.MediaType {
-					protected = true
-				}
-			}
-		}
+		protected := h.mediaHandoffProtects(batch, next, item, r.UploadID)
 		if !protected {
 			r.Error = "handoff_not_pinned"
 		}
@@ -211,4 +204,34 @@ func mediaDraftAbandonedAt(m *mediaLifecycle, b *mediaBatch, intent string) int6
 		}
 	}
 	return 0
+}
+
+// Caller holds the lifecycle guard. Handoff retires only the old draft pin:
+// the successor's durable prepared/UNKNOWN/admitted pin remains untouched.
+// Both descriptors must have been frozen under the SAME original authority
+// and source. Only the existing provider-observed execution witness may carry
+// that source forward; this is not permission to adopt arbitrary new settings.
+func (h *Hub) mediaHandoffProtects(old, next *mediaBatch, item *protocol.MediaBatchItem, object string) bool {
+	if old == nil || next == nil || item == nil || next.ID == old.ID || next.BodyHash == "" || next.Device != old.Device || next.Generation != old.Generation || next.Session != old.Session || next.Thread != old.Thread || next.Config != old.Config || next.SourceRevision != old.SourceRevision || next.RoleEpoch != old.RoleEpoch {
+		return false
+	}
+	switch next.State {
+	case "prepared":
+		if h.mediaBatchTarget(next) != nil {
+			return false
+		}
+	case "admitting_unknown", "admitted":
+		s, e := h.intakeSession(next.Session)
+		if e != nil || h.intakeWritePolicy(s) != nil || h.mediaExecutionCurrent(next) != nil {
+			return false
+		}
+	default:
+		return false
+	}
+	for _, i := range next.Items {
+		if next.Objects[i.UploadRequestID] == object && i.SHA256 == item.SHA256 && i.SizeBytes == item.SizeBytes && i.MediaType == item.MediaType && i.UploadKind == item.UploadKind {
+			return true
+		}
+	}
+	return false
 }
