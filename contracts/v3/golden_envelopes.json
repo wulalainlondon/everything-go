@@ -176,6 +176,9 @@
       "type": "media_batch_receipt"
     },
     {
+      "type": "media_draft_release_receipt"
+    },
+    {
       "type": "message_ack"
     },
     {
@@ -587,6 +590,12 @@
     },
     {
       "type": "media_batch_status"
+    },
+    {
+      "type": "media_draft_release"
+    },
+    {
+      "type": "media_draft_release_status"
     },
     {
       "type": "message"

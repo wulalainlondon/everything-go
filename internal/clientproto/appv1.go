@@ -24,6 +24,9 @@ func NewAppV1() AppV1 { return AppV1{} }
 
 // Command is the protocol-neutral shape the core router consumes.
 type Command struct {
+	KeepDraftItems     bool
+	OperationID        string
+	HandoffBatchID     string
 	MediaBatchID       string
 	MediaBatchRevision uint64
 	MediaBodyHash      string
@@ -270,7 +273,7 @@ func (AppV1) ParseCommand(in protocol.Inbound) Command {
 		TaskOrigin:         in.TaskOrigin,
 		Content:            in.Content,
 		VisualPresentation: in.VisualPresentation, CallbackOnComplete: in.CallbackOnComplete, CallbackID: in.CallbackID, CallbackInvitation: in.CallbackInvitation, CallbackClaim: in.CallbackClaim,
-		MediaBatchID: in.MediaBatchID, MediaBatchRevision: in.MediaBatchRevision, MediaBodyHash: in.MediaBodyHash, MediaItems: in.MediaItems, ItemID: in.ItemID, ItemRevision: in.ItemRevision, SHA256: in.SHA256,
+		KeepDraftItems: in.KeepDraftItems, OperationID: in.OperationID, HandoffBatchID: in.HandoffBatchID, MediaBatchID: in.MediaBatchID, MediaBatchRevision: in.MediaBatchRevision, MediaBodyHash: in.MediaBodyHash, MediaItems: in.MediaItems, ItemID: in.ItemID, ItemRevision: in.ItemRevision, SHA256: in.SHA256,
 		UploadRequestID: in.UploadRequestID,
 		UploadID:        in.UploadID,
 		UploadKind:      in.UploadKind,

@@ -272,6 +272,16 @@ func (u *attachmentUploads) scopeEvent(v map[string]any, up *activeAttachmentUpl
 		v["media_batch_revision"] = up.Scope.Revision
 		v["item_id"] = up.Scope.ItemID
 		v["item_revision"] = up.Scope.ItemRevision
+		if v["type"] == "attachment_upload_complete" && u.lifecycleHeld {
+			b := u.client.hub.media.data.Batches[mediaKey(up.deviceID, up.Scope.Generation, up.Scope.BatchID)]
+			if b != nil {
+				for _, i := range b.Items {
+					if i.UploadRequestID == up.requestID {
+						v["release_descriptor"] = mediaReleaseDescriptor(b, i)
+					}
+				}
+			}
+		}
 	}
 	v["size_bytes"] = up.expected
 	return v

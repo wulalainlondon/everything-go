@@ -89,6 +89,10 @@ func mediaUploadItem(t *testing.T, h *Hub, s *session.Session, c *Client, cmd cl
 	}
 	c.uploads.finish(id)
 	complete := waitForType(t, c, "attachment_upload_complete")
+	descriptor, ok := complete["release_descriptor"].(map[string]any)
+	if !ok || descriptor["upload_id"] != id || descriptor["media_body_hash"] != body || descriptor["upload_request_id"] != item.UploadRequestID || descriptor["session_id"] != s.ID {
+		t.Fatal("missing server release witness", complete)
+	}
 	if complete["sha256"] != item.SHA256 || complete["media_batch_id"] != cmd.MediaBatchID || complete["width"] != float64(7) || complete["height"] != float64(9) {
 		t.Fatal(complete)
 	}

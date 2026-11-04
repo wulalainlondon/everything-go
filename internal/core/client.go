@@ -604,7 +604,7 @@ func (c *Client) dispatchFrame(ctx context.Context, data []byte) error {
 			mediaRefs = true
 		}
 	}
-	if strings.HasPrefix(taskHeader.Type, "media_batch_") || taskHeader.MediaBatchID != "" || (taskHeader.Type == "message" && mediaRefs) {
+	if (strings.HasPrefix(taskHeader.Type, "media_batch_") || strings.HasPrefix(taskHeader.Type, "media_draft_")) || taskHeader.MediaBatchID != "" || (taskHeader.Type == "message" && mediaRefs) {
 		if !c.hub.validateMediaControl(c, data) {
 			return nil
 		}

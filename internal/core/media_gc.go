@@ -14,26 +14,19 @@ import (
 
 func mediaGCReferences(m *mediaLifecycle, id, ownReader string, now time.Time) bool {
 	for _, b := range m.data.Batches {
-		referenced := false
-		sibling := false
+		protects := func(intent string) bool {
+			at := mediaDraftAbandonedAt(m, b, intent)
+			return at == 0 || now.UnixMilli()-at < int64(24*time.Hour/time.Millisecond)
+		}
 		for intent, object := range b.Objects {
-			if object == id {
-				referenced = true
-				if intent != b.CancelItem || b.CancelItem == "" {
-					sibling = true
-				}
+			if object == id && protects(intent) {
+				return true
 			}
 		}
 		for _, i := range b.Items {
-			if resumableAttachmentID(b.Device, i.UploadRequestID) == id {
-				referenced = true
-				if i.UploadRequestID != b.CancelItem || b.CancelItem == "" {
-					sibling = true
-				}
+			if resumableAttachmentID(b.Device, i.UploadRequestID) == id && protects(i.UploadRequestID) {
+				return true
 			}
-		}
-		if referenced && (sibling || b.State != "cancelled_before_admission" || b.Updated == 0 || now.UnixMilli()-b.Updated < int64(24*time.Hour/time.Millisecond)) {
-			return true
 		}
 	}
 	for key, r := range m.data.Readers {
@@ -86,17 +79,14 @@ func (h *Hub) collectMediaGarbage(now time.Time) error {
 		if b.State != "cancelled_before_admission" {
 			continue
 		}
-		// Cancel fences the whole business, but only the named item is an
-		// explicit abandonment. Editable siblings have no server draft handoff yet
-		// and stay durable indefinitely rather than being guessed orphaned at24h.
-		if b.CancelItem == "" {
-			continue
-		}
-		if id := b.Objects[b.CancelItem]; id != "" {
-			candidates[id] = b.Session
-		}
 		for _, i := range b.Items {
-			if i.AttachmentID == "" && i.UploadRequestID == b.CancelItem {
+			if mediaDraftAbandonedAt(m, b, i.UploadRequestID) == 0 {
+				continue
+			}
+			if id := b.Objects[i.UploadRequestID]; id != "" {
+				candidates[id] = b.Session
+			}
+			if i.AttachmentID == "" {
 				candidates[resumableAttachmentID(b.Device, i.UploadRequestID)] = b.Session
 			}
 		}

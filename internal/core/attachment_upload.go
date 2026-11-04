@@ -725,6 +725,14 @@ func (u *attachmentUploads) completedUpload(
 		event["media_batch_revision"] = manifest.Scope.Revision
 		event["item_id"] = manifest.Scope.ItemID
 		event["item_revision"] = manifest.Scope.ItemRevision
+		b := u.client.hub.media.data.Batches[mediaKey(manifest.DeviceID, manifest.Scope.Generation, manifest.Scope.BatchID)]
+		if b != nil {
+			for _, i := range b.Items {
+				if i.UploadRequestID == requestID {
+					event["release_descriptor"] = mediaReleaseDescriptor(b, i)
+				}
+			}
+		}
 	}
 	return event, true
 }

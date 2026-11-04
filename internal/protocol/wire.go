@@ -35,6 +35,9 @@ type MediaBatchItem struct {
 }
 
 type Inbound struct {
+	KeepDraftItems     bool                               `json:"keep_draft_items,omitempty"`
+	OperationID        string                             `json:"operation_id,omitempty"`
+	HandoffBatchID     string                             `json:"handoff_batch_id,omitempty"`
 	MediaBatchID       string                             `json:"media_batch_id,omitempty"`
 	MediaBatchRevision uint64                             `json:"media_batch_revision,omitempty"`
 	MediaBodyHash      string                             `json:"media_body_hash,omitempty"`

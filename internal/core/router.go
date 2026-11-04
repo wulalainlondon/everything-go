@@ -216,7 +216,7 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 			if h.taskService != nil && h.pairedTaskDevice(c) != "" {
 				helloInput.Capabilities = append(helloInput.Capabilities, "task_api_v1_rc1", "task_legacy_source_v1")
 				if h.media != nil && h.media.err == nil {
-					helloInput.Capabilities = append(helloInput.Capabilities, "media_attachment_refs_v1", "media_task_api_request")
+					helloInput.Capabilities = append(helloInput.Capabilities, "media_attachment_refs_v1", "media_task_api_request", "media_draft_release_v1")
 				}
 				if h.interactions != nil {
 					helloInput.Capabilities = append(helloInput.Capabilities, "task_interactions_v5")
@@ -313,6 +313,10 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		}
 		c.enqueuePong()
 
+	case "media_draft_release":
+		h.handleMediaDraftRelease(c, cmd)
+	case "media_draft_release_status":
+		h.handleMediaDraftRelease(c, cmd)
 	case "media_batch_capabilities":
 		h.handleMediaBatch(c, cmd)
 	case "media_batch_prepare":

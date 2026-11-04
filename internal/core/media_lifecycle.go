@@ -43,7 +43,9 @@ type mediaBatch struct {
 	BodyHash        string                    `json:"body_hash"`
 	State           string                    `json:"state"`
 	CancelID        string                    `json:"cancel_id,omitempty"`
+	CancelKeepDraft bool                      `json:"cancel_keep_draft,omitempty"`
 	CancelItem      string                    `json:"cancel_item,omitempty"`
+	ReleasedItems   map[string]string         `json:"released_items,omitempty"`
 	Objects         map[string]string         `json:"objects"`
 	Updated         int64                     `json:"updated"`
 }
@@ -70,13 +72,14 @@ type mediaGCTombstone struct {
 	State    string `json:"state"`
 }
 type mediaLifecycleState struct {
-	Readers     map[string]mediaReadLease     `json:"readers,omitempty"`
-	GC          map[string]mediaGCTombstone   `json:"gc,omitempty"`
-	Credentials map[string]uint64             `json:"credentials,omitempty"`
-	Version     int                           `json:"version"`
-	Batches     map[string]*mediaBatch        `json:"batches"`
-	Legacy      map[string]mediaLegacyWitness `json:"legacy"`
-	Created     int64                         `json:"created"`
+	DraftReleases map[string]*mediaDraftRelease `json:"draft_releases,omitempty"`
+	Readers       map[string]mediaReadLease     `json:"readers,omitempty"`
+	GC            map[string]mediaGCTombstone   `json:"gc,omitempty"`
+	Credentials   map[string]uint64             `json:"credentials,omitempty"`
+	Version       int                           `json:"version"`
+	Batches       map[string]*mediaBatch        `json:"batches"`
+	Legacy        map[string]mediaLegacyWitness `json:"legacy"`
+	Created       int64                         `json:"created"`
 }
 type mediaLifecycle struct {
 	gcMu  sync.Mutex
@@ -166,6 +169,9 @@ func (m *mediaLifecycle) begin() (func(), error) {
 		if e == nil {
 			if fresh.Readers == nil {
 				fresh.Readers = map[string]mediaReadLease{}
+			}
+			if fresh.DraftReleases == nil {
+				fresh.DraftReleases = map[string]*mediaDraftRelease{}
 			}
 			m.data = fresh
 		}
@@ -289,6 +295,8 @@ func (h *Hub) handleMediaBatch(c *Client, cmd clientproto.Command) {
 		event["policy"] = policy
 		event["policy_hash"] = mediaHash(policy)
 		event["task_api_schema_hash"] = contract.MediaRefsHash()
+		event["media_draft_release_v1"] = available
+		event["draft_release_available"] = available
 		event["target"] = map[string]any{"instance_id": h.cfg.InstanceID, "session_id": s.ID, "expected_native_thread_id": thread, "expected_config_revision": v.ConfigRevision}
 		if !available {
 			event["reason"] = "unavailable"
@@ -414,7 +422,7 @@ func (h *Hub) handleMediaBatch(c *Client, cmd clientproto.Command) {
 			if revision == 0 {
 				revision = 1
 			}
-			batch = &mediaBatch{ID: cmd.MediaBatchID, Revision: revision, Session: s.ID, Device: device, Generation: caller.NamespaceGeneration, State: "cancelled_before_admission", CancelID: cmd.RequestID, CancelItem: cmd.UploadRequestID, Objects: map[string]string{}, Updated: time.Now().UnixMilli()}
+			batch = &mediaBatch{ID: cmd.MediaBatchID, Revision: revision, Session: s.ID, Device: device, Generation: caller.NamespaceGeneration, State: "cancelled_before_admission", CancelID: cmd.RequestID, CancelItem: cmd.UploadRequestID, CancelKeepDraft: cmd.KeepDraftItems, Objects: map[string]string{}, Updated: time.Now().UnixMilli()}
 			h.media.data.Batches[key] = batch
 		} else if batch.Session != s.ID {
 			fail("permission")
@@ -433,6 +441,7 @@ func (h *Hub) handleMediaBatch(c *Client, cmd clientproto.Command) {
 			batch.State = "cancelled_before_admission"
 			batch.CancelID = cmd.RequestID
 			batch.CancelItem = cmd.UploadRequestID
+			batch.CancelKeepDraft = cmd.KeepDraftItems
 			batch.Updated = time.Now().UnixMilli()
 		}
 		// admitting_unknown is never downgraded by absence of a queue row.
@@ -477,6 +486,7 @@ func (h *Hub) mediaBatchReceipt(event map[string]any, b *mediaBatch) {
 		event["known_effect"] = "admitted"
 	}
 	event["cancel_request_id"] = b.CancelID
+	event["cancel_keeps_draft"] = b.CancelKeepDraft
 	event["cancelled_upload_request_id"] = b.CancelItem
 	items := []map[string]any{}
 	for _, i := range b.Items {
@@ -496,6 +506,7 @@ func (h *Hub) mediaBatchReceipt(event map[string]any, b *mediaBatch) {
 			v["received_bytes"] = i.SizeBytes
 			v["state"] = "complete"
 		}
+		v["release_descriptor"] = mediaReleaseDescriptor(b, i)
 		items = append(items, v)
 	}
 	event["items"] = items
