@@ -585,8 +585,26 @@ func (c *Client) dispatchFrame(ctx context.Context, data []byte) error {
 	var taskHeader struct {
 		Type         string `json:"type"`
 		MediaBatchID string `json:"media_batch_id"`
+		Images       []struct {
+			AttachmentID string `json:"attachment_id"`
+		} `json:"images"`
+		Files []struct {
+			AttachmentID string `json:"attachment_id"`
+		} `json:"files"`
 	}
-	if json.Unmarshal(data, &taskHeader) == nil && (strings.HasPrefix(taskHeader.Type, "media_batch_") || taskHeader.MediaBatchID != "") {
+	_ = json.Unmarshal(data, &taskHeader)
+	mediaRefs := false
+	for _, i := range taskHeader.Images {
+		if i.AttachmentID != "" {
+			mediaRefs = true
+		}
+	}
+	for _, i := range taskHeader.Files {
+		if i.AttachmentID != "" {
+			mediaRefs = true
+		}
+	}
+	if strings.HasPrefix(taskHeader.Type, "media_batch_") || taskHeader.MediaBatchID != "" || (taskHeader.Type == "message" && mediaRefs) {
 		if !c.hub.validateMediaControl(c, data) {
 			return nil
 		}

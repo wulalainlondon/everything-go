@@ -52,3 +52,15 @@ func (h *Hub) hasTypedFiles(sid string, files []backend.FileAttachment) bool {
 	}
 	return false
 }
+
+// Count client descriptors before any full-file verification or model staging.
+// This placeholder can only reach the metadata counter, never a file opener.
+func mediaRefPreflight(provider, content string, images []backend.ImageAttachment) error {
+	preview := append([]backend.ImageAttachment(nil), images...)
+	for n := range preview {
+		if preview[n].AttachmentID != "" {
+			preview[n].VerifiedPath = "/metadata-counter-only"
+		}
+	}
+	return backend.ValidateMediaBudget(provider, content, preview, nil)
+}

@@ -310,6 +310,9 @@ func (h *Hub) prepareIntakeMedia(sid string, in intakeInput) (string, []backend.
 	if e != nil {
 		return "", nil, nil, nil, e
 	}
+	if len(in.Images)+len(in.Files) > 8 {
+		return "", nil, nil, nil, taskapi.Failure("invalid_argument", "known_none", "correct_input")
+	}
 	images := make([]backend.ImageAttachment, 0, len(in.Images))
 	for _, i := range in.Images {
 		if i.AttachmentID == "" {
@@ -318,6 +321,9 @@ func (h *Hub) prepareIntakeMedia(sid string, in intakeInput) (string, []backend.
 			}
 		}
 		images = append(images, backend.ImageAttachment{AttachmentID: i.AttachmentID, SHA256: i.SHA256, SizeBytes: i.SizeBytes, Data: i.Data, MediaType: i.MediaType})
+	}
+	if e := mediaRefPreflight(s.Backend(), in.Goal, images); e != nil {
+		return "", nil, nil, nil, taskapi.Failure("invalid_argument", "known_none", "correct_input")
 	}
 	images, e = h.resolveMediaImages(sid, images)
 	if e != nil {

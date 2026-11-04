@@ -120,6 +120,14 @@ func mediaVideoHint(kind, name, mime string) bool {
 	return kind == "video" || strings.HasPrefix(strings.ToLower(mime), "video/") || isVideoExtension(filepath.Ext(name))
 }
 func mediaPrefixKind(p []byte) string {
+	// Classic QuickTime MOV may start with a media/movie/wide atom, without ftyp.
+	if len(p) >= 8 {
+		switch string(p[4:8]) {
+		case "moov", "mdat", "wide", "pnot":
+			return "video"
+		}
+	}
+
 	if len(p) >= 12 && string(p[4:8]) == "ftyp" {
 		brand := string(p[8:12])
 		if strings.HasPrefix(brand, "hei") || strings.HasPrefix(brand, "mif") || brand == "avif" || brand == "avis" {

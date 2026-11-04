@@ -153,6 +153,14 @@ func (h *Hub) enqueueChatMessageExpectedInheritedMode(c *Client, cmd clientproto
 	if cmd.MessagePurpose != "" && cmd.MessagePurpose != "instruction" {
 		cmd.VisualPresentation = ""
 	}
+	if len(cmd.Images)+len(cmd.Files) > 8 {
+		h.queueError(c, cmd, "media_item_limit", "Maximum 8 media items")
+		return false
+	}
+	if e := mediaRefPreflight(s.Backend(), cmd.Content, cmd.Images); e != nil {
+		h.queueError(c, cmd, "media_model_budget", e.Error())
+		return false
+	}
 	var err error
 	cmd.Images, err = h.resolveMediaImages(cmd.SessionID, cmd.Images)
 	if err != nil {
@@ -166,6 +174,10 @@ func (h *Hub) enqueueChatMessageExpectedInheritedMode(c *Client, cmd clientproto
 	content, files, err := h.resolveUploadedVideos(cmd.SessionID, cmd.Content, cmd.Files)
 	if err != nil {
 		h.queueError(c, cmd, "invalid_attachment", err.Error())
+		return false
+	}
+	if cmd.MediaBatchID == "" && (backend.HasImageRefs(cmd.Images) || h.hasTypedFiles(cmd.SessionID, cmd.Files)) {
+		h.queueError(c, cmd, "media_batch_required", "Typed media requires its original frozen batch")
 		return false
 	}
 	var batch *mediaBatch

@@ -681,3 +681,41 @@ func TestMediaUnificationHistoryDescriptorOnlyForExactOriginalRequest(t *testing
 		t.Fatal("provider cache mutated")
 	}
 }
+
+func TestMediaUnificationBareImageRefCannotBypassFrozenBatch(t *testing.T) {
+	h, s, c, starts := mediaFixture(t)
+	data := mediaPNG(t)
+	cmd, item, body := mediaPrepareItem(t, h, s, c, "r_no_bypass", data)
+	id := mediaUploadItem(t, h, s, c, cmd, item, body, data)
+	raw, _ := json.Marshal(map[string]any{"type": "message", "request_id": "r_forged_no_batch", "session_id": s.ID, "images": []any{map[string]any{"attachment_id": id, "media_type": item.MediaType, "sha256": item.SHA256, "size_bytes": item.SizeBytes}}})
+	route(h, c, string(raw))
+	got := waitForType(t, c, "error")
+	if got["code"] != "media_batch_required" {
+		t.Fatal(got)
+	}
+	select {
+	case <-starts:
+		t.Fatal("bare ref sent")
+	default:
+	}
+	if _, found, e := h.messageQueue.Get(s.ID, "r_forged_no_batch"); e != nil || found {
+		t.Fatal("bare ref admitted", e)
+	}
+	if mediaPrefixKind([]byte("\x00\x00\x00\x08wide")) != "video" || mediaPrefixKind([]byte("\x00\x00\x00\x08moov")) != "video" {
+		t.Fatal("classic QuickTime MOV missing")
+	}
+}
+
+func TestMediaUnificationOversizedLogicalSetRejectedBeforeOpeningRefs(t *testing.T) {
+	h, s, c, _ := mediaFixture(t)
+	images := []map[string]any{}
+	for n := 0; n < 8; n++ {
+		images = append(images, map[string]any{"attachment_id": "u_" + strings.Repeat("f", 32), "media_type": "image/jpeg", "size_bytes": backend.MediaImageMaxBytes, "sha256": strings.Repeat("f", 64)})
+	}
+	raw, _ := json.Marshal(map[string]any{"type": "message", "request_id": "r_huge_metadata", "session_id": s.ID, "media_batch_id": "r_huge_metadata", "images": images})
+	route(h, c, string(raw))
+	got := waitForType(t, c, "error")
+	if got["code"] != "media_model_budget" {
+		t.Fatal("attempted nonexistent file before metadata rejection", got)
+	}
+}
