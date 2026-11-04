@@ -173,6 +173,9 @@
       "type": "media"
     },
     {
+      "type": "media_batch_receipt"
+    },
+    {
       "type": "message_ack"
     },
     {
@@ -572,6 +575,18 @@
     },
     {
       "type": "list_instances"
+    },
+    {
+      "type": "media_batch_cancel"
+    },
+    {
+      "type": "media_batch_capabilities"
+    },
+    {
+      "type": "media_batch_prepare"
+    },
+    {
+      "type": "media_batch_status"
     },
     {
       "type": "message"

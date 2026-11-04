@@ -313,7 +313,13 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		}
 		c.enqueuePong()
 
-	case "media_batch_capabilities", "media_batch_prepare", "media_batch_status", "media_batch_cancel":
+	case "media_batch_capabilities":
+		h.handleMediaBatch(c, cmd)
+	case "media_batch_prepare":
+		h.handleMediaBatch(c, cmd)
+	case "media_batch_status":
+		h.handleMediaBatch(c, cmd)
+	case "media_batch_cancel":
 		h.handleMediaBatch(c, cmd)
 	case "attachment_upload_init":
 		c.uploads.initCommand(cmd)
