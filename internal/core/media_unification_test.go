@@ -823,3 +823,157 @@ func TestMediaUnificationReprepareForeignActorCannotBorrowOriginalReceipt(t *tes
 	}
 	done()
 }
+
+func TestMediaUnificationEarlyCancelCarriesRevisionThroughLatePrepareAndStatus(t *testing.T) {
+	for _, revision := range []uint64{0, 1, 2} {
+		t.Run(string(rune('0'+revision)), func(t *testing.T) {
+			h, s, c, _ := mediaFixture(t)
+			expected := revision
+			if expected == 0 {
+				expected = 1
+			}
+			id := "r_early_revision"
+			vu := "vu_original_revision"
+			cancel := clientproto.Command{Kind: "media_batch_cancel", RequestID: "cancel-original", SessionID: s.ID, MediaBatchID: id, MediaBatchRevision: revision, UploadRequestID: vu}
+			h.handleMediaBatch(c, cancel)
+			got := waitForType(t, c, "media_batch_receipt")
+			check := func(got map[string]any) {
+				t.Helper()
+				if got["state"] != "cancelled_before_admission" || got["known_effect"] != "none" || got["media_batch_revision"] != float64(expected) || got["cancel_request_id"] != "cancel-original" || got["cancelled_upload_request_id"] != vu {
+					t.Fatal("original cancellation unmatchable", got)
+				}
+			}
+			check(got)
+			data := mediaPNG(t)
+			sum := sha256.Sum256(data)
+			item := protocol.MediaBatchItem{ItemID: "original-item", ItemRevision: 1, UploadRequestID: vu, UploadKind: "image", Name: "clear.png", MediaType: "image/png", SizeBytes: int64(len(data)), SHA256: hex.EncodeToString(sum[:])}
+			cfg := s.SettingsSnapshot().ConfigRevision
+			h.handleMediaBatch(c, clientproto.Command{Kind: "media_batch_prepare", RequestID: "late-prepare", SessionID: s.ID, MediaBatchID: id, MediaBatchRevision: expected, ExpectedConfigRevision: &cfg, MediaItems: []protocol.MediaBatchItem{item}})
+			check(waitForType(t, c, "media_batch_receipt"))
+			h.handleMediaBatch(c, clientproto.Command{Kind: "media_batch_status", RequestID: "status-original", SessionID: s.ID, MediaBatchID: id})
+			check(waitForType(t, c, "media_batch_receipt"))
+			reopened := openMediaLifecycle(h.cfg.DataDir)
+			if b := reopened.data.Batches[mediaKey(c.deviceID, jarvisTokenGeneration("mua-token"), id)]; b == nil || b.Revision != expected || b.State != "cancelled_before_admission" {
+				t.Fatal("reopen lost original revision", b)
+			}
+			if _, found, e := h.messageQueue.Get(s.ID, id); e != nil || found {
+				t.Fatal("cancel-before-prepare admitted effect", e)
+			}
+		})
+	}
+}
+func TestMediaUnificationCancelRevisionConflictPreservesOriginalEffect(t *testing.T) {
+	h, s, c, _ := mediaFixture(t)
+	data := mediaPNG(t)
+	cmd, item, _ := mediaPrepareItem(t, h, s, c, "r_cancel_revision_conflict", data)
+	h.handleMediaBatch(c, clientproto.Command{Kind: "media_batch_cancel", RequestID: "wrong-revision", SessionID: s.ID, MediaBatchID: cmd.MediaBatchID, MediaBatchRevision: 2, UploadRequestID: item.UploadRequestID})
+	got := waitForType(t, c, "media_batch_receipt")
+	if got["state"] != "prepared" || got["error_code"] != "revision_conflict" || got["media_batch_revision"] != float64(1) || got["cancel_request_id"] != "" {
+		t.Fatal("conflicting revision mutated original", got)
+	}
+	// Previously persisted zero tombstones remain exact historical evidence.
+	done, e := h.media.begin()
+	if e != nil {
+		t.Fatal(e)
+	}
+	b := h.media.data.Batches[mediaKey(c.deviceID, jarvisTokenGeneration("mua-token"), cmd.MediaBatchID)]
+	b.State = "cancelled_before_admission"
+	b.Revision = 0
+	b.CancelID = "old-zero-cancel"
+	b.CancelItem = item.UploadRequestID
+	e = h.media.save()
+	done()
+	if e != nil {
+		t.Fatal(e)
+	}
+	h.handleMediaBatch(c, clientproto.Command{Kind: "media_batch_status", RequestID: "old-zero-observation", SessionID: s.ID, MediaBatchID: cmd.MediaBatchID})
+	got = waitForType(t, c, "media_batch_receipt")
+	if got["media_batch_revision"] != float64(0) || got["cancel_request_id"] != "old-zero-cancel" {
+		t.Fatal("historical zero silently rewritten", got)
+	}
+}
+
+func TestMediaUnificationGCCancelledItemDoesNotAbandonEditableSiblings(t *testing.T) {
+	for _, siblingPhase := range []string{"completed", "partial", "alias"} {
+		t.Run(siblingPhase, func(t *testing.T) {
+			h, s, c, _ := mediaFixture(t)
+			data := mediaPNG(t)
+			hash := sha256.Sum256(data)
+			first := protocol.MediaBatchItem{ItemID: "target", ItemRevision: 1, UploadRequestID: "vu_target", UploadKind: "image", Name: "clear.png", MediaType: "image/png", SizeBytes: int64(len(data)), SHA256: hex.EncodeToString(hash[:])}
+			second := first
+			second.ItemID = "sibling"
+			second.UploadRequestID = "vu_sibling"
+			cfg := s.SettingsSnapshot().ConfigRevision
+			cmd := clientproto.Command{Kind: "media_batch_prepare", RequestID: "prepare-siblings", SessionID: s.ID, MediaBatchID: "r_editable_siblings", MediaBatchRevision: 1, ExpectedConfigRevision: &cfg, MediaItems: []protocol.MediaBatchItem{first, second}}
+			h.handleMediaBatch(c, cmd)
+			prep := waitForType(t, c, "media_batch_receipt")
+			if prep["state"] != "prepared" {
+				t.Fatal(prep)
+			}
+			body := prep["body_hash"].(string)
+			target := mediaUploadItem(t, h, s, c, cmd, first, body, data)
+			targetManifest, e := h.unifiedUpload(s.ID, target)
+			if e != nil {
+				t.Fatal(e)
+			}
+			siblingPath := ""
+			if siblingPhase == "completed" {
+				id := mediaUploadItem(t, h, s, c, cmd, second, body, data)
+				m, e := h.unifiedUpload(s.ID, id)
+				if e != nil {
+					t.Fatal(e)
+				}
+				siblingPath = m.Path
+			} else if siblingPhase == "partial" {
+				c.uploads.initCommand(clientproto.Command{SessionID: s.ID, UploadRequestID: second.UploadRequestID, UploadKind: second.UploadKind, Name: second.Name, MediaType: second.MediaType, SizeBytes: second.SizeBytes, MediaBatchID: cmd.MediaBatchID, MediaBatchRevision: 1, MediaBodyHash: body, ItemID: second.ItemID, ItemRevision: 1, SHA256: second.SHA256})
+				ready := waitForType(t, c, "attachment_upload_ready")
+				id := ready["upload_id"].(string)
+				c.uploads.writeFrame(makeV2AttachmentFrame(id, 0, data[:4]))
+				waitForType(t, c, "attachment_upload_ack")
+				siblingPath = c.uploads.active[id].partPath
+			} else {
+				done, e := h.media.begin()
+				if e != nil {
+					t.Fatal(e)
+				}
+				h.media.data.Batches[mediaKey(c.deviceID, jarvisTokenGeneration("mua-token"), cmd.MediaBatchID)].Objects[second.UploadRequestID] = target
+				e = h.media.save()
+				done()
+				if e != nil {
+					t.Fatal(e)
+				}
+				siblingPath = targetManifest.Path
+			}
+			h.handleMediaBatch(c, clientproto.Command{Kind: "media_batch_cancel", RequestID: "cancel-target", SessionID: s.ID, MediaBatchID: cmd.MediaBatchID, MediaBatchRevision: 1, UploadRequestID: first.UploadRequestID})
+			got := waitForType(t, c, "media_batch_receipt")
+			if got["state"] != "cancelled_before_admission" {
+				t.Fatal(got)
+			}
+			if e = h.collectMediaGarbage(time.Now().Add(25 * time.Hour)); e != nil {
+				t.Fatal(e)
+			}
+			if _, e = os.Stat(siblingPath); e != nil {
+				t.Fatal("legitimate editable sibling deleted after24h", e)
+			}
+			_, targetErr := os.Stat(targetManifest.Path)
+			if siblingPhase != "alias" && !os.IsNotExist(targetErr) {
+				t.Fatal("explicit own target not reclaimed", targetErr)
+			}
+			if siblingPhase == "alias" && targetErr != nil {
+				t.Fatal("shared alias object deleted", targetErr)
+			}
+			reopened := openMediaLifecycle(h.cfg.DataDir)
+			if reopened.err != nil {
+				t.Fatal(reopened.err)
+			}
+			done, e := reopened.begin()
+			if e != nil {
+				t.Fatal(e)
+			}
+			if !reopened.pinnedID(filepath.Base(filepath.Dir(siblingPath))) {
+				t.Fatal("durable sibling pin absent after reopen")
+			}
+			done()
+		})
+	}
+}

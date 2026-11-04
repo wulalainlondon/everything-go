@@ -397,8 +397,24 @@ func (h *Hub) handleMediaBatch(c *Client, cmd clientproto.Command) {
 			batch = b
 		}
 	} else if op == "cancel" {
+		if cmd.MediaBatchRevision > 9007199254740991 {
+			fail("invalid_argument")
+			return
+		}
+		if batch != nil && cmd.MediaBatchRevision != 0 && cmd.MediaBatchRevision != batch.Revision {
+			event["error_code"] = "revision_conflict"
+			h.mediaBatchReceipt(event, batch)
+			c.enqueueEvent(event)
+			return
+		}
 		if batch == nil { // A cancel arriving before prepare/init is a durable fence.
-			batch = &mediaBatch{ID: cmd.MediaBatchID, Session: s.ID, Device: device, Generation: caller.NamespaceGeneration, State: "cancelled_before_admission", CancelID: cmd.RequestID, CancelItem: cmd.UploadRequestID, Objects: map[string]string{}, Updated: time.Now().UnixMilli()}
+			revision := cmd.MediaBatchRevision
+			// Version1 clients originally omitted cancel revision; their newly-created
+			// batches are fixed at1. Never invent an unmatchable revision0 tombstone.
+			if revision == 0 {
+				revision = 1
+			}
+			batch = &mediaBatch{ID: cmd.MediaBatchID, Revision: revision, Session: s.ID, Device: device, Generation: caller.NamespaceGeneration, State: "cancelled_before_admission", CancelID: cmd.RequestID, CancelItem: cmd.UploadRequestID, Objects: map[string]string{}, Updated: time.Now().UnixMilli()}
 			h.media.data.Batches[key] = batch
 		} else if batch.Session != s.ID {
 			fail("permission")

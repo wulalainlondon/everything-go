@@ -15,17 +15,24 @@ import (
 func mediaGCReferences(m *mediaLifecycle, id, ownReader string, now time.Time) bool {
 	for _, b := range m.data.Batches {
 		referenced := false
-		for _, object := range b.Objects {
+		sibling := false
+		for intent, object := range b.Objects {
 			if object == id {
 				referenced = true
+				if intent != b.CancelItem || b.CancelItem == "" {
+					sibling = true
+				}
 			}
 		}
 		for _, i := range b.Items {
 			if resumableAttachmentID(b.Device, i.UploadRequestID) == id {
 				referenced = true
+				if i.UploadRequestID != b.CancelItem || b.CancelItem == "" {
+					sibling = true
+				}
 			}
 		}
-		if referenced && (b.State != "cancelled_before_admission" || b.Updated == 0 || now.UnixMilli()-b.Updated < int64(24*time.Hour/time.Millisecond)) {
+		if referenced && (sibling || b.State != "cancelled_before_admission" || b.Updated == 0 || now.UnixMilli()-b.Updated < int64(24*time.Hour/time.Millisecond)) {
 			return true
 		}
 	}
@@ -79,11 +86,17 @@ func (h *Hub) collectMediaGarbage(now time.Time) error {
 		if b.State != "cancelled_before_admission" {
 			continue
 		}
-		for _, id := range b.Objects {
+		// Cancel fences the whole business, but only the named item is an
+		// explicit abandonment. Editable siblings have no server draft handoff yet
+		// and stay durable indefinitely rather than being guessed orphaned at24h.
+		if b.CancelItem == "" {
+			continue
+		}
+		if id := b.Objects[b.CancelItem]; id != "" {
 			candidates[id] = b.Session
 		}
 		for _, i := range b.Items {
-			if i.AttachmentID == "" {
+			if i.AttachmentID == "" && i.UploadRequestID == b.CancelItem {
 				candidates[resumableAttachmentID(b.Device, i.UploadRequestID)] = b.Session
 			}
 		}
