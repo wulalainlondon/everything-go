@@ -168,7 +168,7 @@ func (h *Hub) authorizeIntake(ctx context.Context, c taskapi.VerifiedContext, r 
 	if in.Target.Thread != nil {
 		thread = *in.Target.Thread
 	}
-	if s.ResumeID() != thread || s.SettingsSnapshot().ConfigRevision != in.Target.Revision {
+	if !h.humanIntakeThreadMatches(ctx, s, thread) || s.SettingsSnapshot().ConfigRevision != in.Target.Revision {
 		return l, taskapi.Failure("stale_revision", "known_none", "refresh_identity")
 	}
 	// Never relabel an existing ordinary/admission request or another device's row.
@@ -252,12 +252,13 @@ func (h *Hub) mutateIntake(ctx context.Context, c taskapi.AuthorizedCommand) (an
 		return nil, e
 	}
 	var mediaPrepared *mediaBatch
-	if in.MediaBatchID != "" {
+	human := humanIntakeSeal(ctx)
+	if in.MediaBatchID != "" && human == nil {
 		mediaPrepared, e = h.mediaBeginAdmission(c.Caller, s.ID, in.MediaBatchID, in.RequestID, in.Goal, images, files)
 		if e != nil {
 			return nil, taskapi.Failure("unknown_acceptance", "unknown", "lookup_original")
 		}
-	} else if backend.HasImageRefs(images) || h.hasTypedFiles(s.ID, files) {
+	} else if in.MediaBatchID == "" && (backend.HasImageRefs(images) || h.hasTypedFiles(s.ID, files)) {
 		return nil, taskapi.Failure("invalid_argument", "known_none", "correct_input")
 	}
 	config := session.ConfigurationFrom(s.SettingsSnapshot())
@@ -272,18 +273,34 @@ func (h *Hub) mutateIntake(ctx context.Context, c taskapi.AuthorizedCommand) (an
 	metadata, _ := json.Marshal(apiMetadata{Request: c.Request, Caller: c.Caller, Transport: c.Caller.Transport, Intake: &intakeMetadata{Source: source, Goal: in.Goal, Configuration: config}})
 	record := taskapi.IntentRecord{ReceiptID: "tr_" + randomID(), NativeID: s.ID + "/" + in.RequestID, SessionID: s.ID, RequestID: in.RequestID, TaskID: apiID(h.cfg.InstanceID, "ordinary", s.ID+"/"+in.RequestID), Metadata: metadata}
 	payload, _ := json.Marshal(queuedPayload{MediaBodyHash: func() string {
+		if human != nil && in.MediaBatchID != "" {
+			return human.Proof
+		}
 		if mediaPrepared != nil {
 			return mediaPrepared.BodyHash
 		}
 		return ""
 	}(), MediaBatchID: in.MediaBatchID, RoleEpoch: h.SessionRoleEpoch(s), FormalIntake: true, Content: content, Images: images, Files: resolved, MessagePurpose: "instruction", OwnerDevice: strings.TrimPrefix(c.Caller.StableScopeID, "device:"), Configuration: &config, ExpectedTarget: &dispatchTargetExpectation{ThreadID: thread, Revision: in.Target.Revision}})
+	if human != nil {
+		if e = h.messageQueue.PrepareHumanSeal(human, payload); e != nil {
+			return nil, e
+		}
+		human.Prepared = true
+		if in.MediaBatchID != "" {
+			mediaPrepared, e = h.mediaBeginAdmission(c.Caller, s.ID, in.MediaBatchID, in.RequestID, in.Goal, images, files, human)
+			if e != nil {
+				_, _ = h.messageQueue.AbortPreparedHumanSeal(human.Binding, human.Operation)
+				return nil, e
+			}
+		}
+	}
 	names := []string{}
 	for _, f := range files {
 		names = append(names, f.Name)
 	}
-	entry, created, e := h.messageQueue.Enqueue(messagequeue.Entry{SessionID: s.ID, RequestID: in.RequestID, Content: truncateGraphemes(in.Goal, 4000), ImageCount: len(images), FileNames: names, Payload: payload, PayloadHash: c.IntentHash, API: &messagequeue.APIAdmission{Command: c, Record: record, CanCommit: func() bool {
+	entry, created, e := h.messageQueue.Enqueue(messagequeue.Entry{HumanSeal: human, SessionID: s.ID, RequestID: in.RequestID, Content: truncateGraphemes(in.Goal, 4000), ImageCount: len(images), FileNames: names, Payload: payload, PayloadHash: c.IntentHash, API: &messagequeue.APIAdmission{Command: c, Record: record, CanCommitContext: func(commitContext context.Context) bool {
 		current, found := h.registry.Get(s.ID)
-		return c.Revalidate(ctx) == nil && found && current == s && !current.Snapshot().Hidden && current.State() != session.Closed && h.controllerInScope(current) && h.intakeWritePolicy(current) == nil && current.ResumeID() == thread && current.SettingsSnapshot().ConfigRevision == in.Target.Revision
+		return c.Revalidate(ctx) == nil && found && current == s && !current.Snapshot().Hidden && current.State() != session.Closed && h.controllerInScope(current) && h.intakeWritePolicy(current) == nil && (current.ResumeID() == thread || human != nil && human.Binding.Thread == thread && h.messageQueue.HumanThreadCompatibleContext(commitContext, human.Binding, current.ResumeID())) && current.SettingsSnapshot().ConfigRevision == in.Target.Revision
 	}}})
 	if errors.Is(e, messagequeue.ErrConflict) {
 		return nil, taskapi.Failure("idempotency_conflict", "known_receipt", "lookup_original")

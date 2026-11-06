@@ -9,14 +9,14 @@ import (
 )
 
 func unifiedRows(ctx context.Context, tx *sql.Tx, session string, eligible map[string]bool) ([]taskapi.QueueRow, error) {
-	rows, e := tx.QueryContext(ctx, `SELECT seq,request_id,state,payload_hash FROM queue_commands WHERE session_id=? AND state IN ('queued','running','steering','uncertain') ORDER BY seq`, session)
+	rows, e := tx.QueryContext(ctx, `SELECT q.seq,q.request_id,q.state,q.payload_hash,CASE WHEN n.rank>0 THEN n.rank ELSE COALESCE(n.sequence,q.seq) END FROM queue_commands q LEFT JOIN message_order_nodes n ON n.session=q.session_id AND n.id=q.request_id WHERE q.session_id=? AND q.state IN ('queued','running','steering','uncertain') ORDER BY q.seq`, session)
 	if e != nil {
 		return nil, e
 	}
 	out := []taskapi.QueueRow{}
 	for rows.Next() {
 		r := taskapi.QueueRow{Session: session}
-		if e = rows.Scan(&r.Sequence, &r.ID, &r.State, &r.ContentHash); e != nil {
+		if e = rows.Scan(&r.Sequence, &r.ID, &r.State, &r.ContentHash, &r.Rank); e != nil {
 			rows.Close()
 			return nil, e
 		}
@@ -32,6 +32,27 @@ func unifiedRows(ctx context.Context, tx *sql.Tx, session string, eligible map[s
 	rows.Close()
 	if e != nil {
 		return nil, e
+	}
+	reserved, err := tx.QueryContext(ctx, `SELECT n.sequence,n.id,n.rank,json_extract(i.body,'$.state') FROM message_order_nodes n JOIN input_reservations i ON i.session=n.session AND i.id=n.id LEFT JOIN queue_commands q ON q.session_id=n.session AND q.request_id=n.id WHERE n.session=? AND q.request_id IS NULL AND json_extract(i.body,'$.state')!='cancelled'`, session)
+	if err != nil {
+		return nil, err
+	}
+	for reserved.Next() {
+		r := taskapi.QueueRow{Session: session, Barrier: "original_input_or_native_boundary"}
+		if err = reserved.Scan(&r.Sequence, &r.ID, &r.Rank, &r.State); err != nil {
+			reserved.Close()
+			return nil, err
+		}
+		r.Request = r.ID
+		if r.Rank == 0 {
+			r.Rank = r.Sequence
+		}
+		out = append(out, r)
+	}
+	err = reserved.Err()
+	reserved.Close()
+	if err != nil {
+		return nil, err
 	}
 	for i := range out {
 		var v uint64

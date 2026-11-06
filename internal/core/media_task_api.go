@@ -11,6 +11,9 @@ import (
 // Explicit per-request media dialect; the connection's existing immutable hello
 // selector is never changed. Only representation changes, no caller authority.
 func (h *Hub) handleMediaTaskAPI(ctx context.Context, c *Client, raw []byte) {
+	c.enqueueEvent(h.executeMediaTaskAPI(ctx, c, raw))
+}
+func (h *Hub) executeMediaTaskAPI(ctx context.Context, c *Client, raw []byte) taskapi.Response {
 	var envelope struct {
 		Type    string          `json:"type"`
 		Hash    string          `json:"schema_hash"`
@@ -23,8 +26,7 @@ func (h *Hub) handleMediaTaskAPI(ctx context.Context, c *Client, raw []byte) {
 	response := taskapi.Response{Type: "task_api_response", Version: contract.Version, CorrelationID: req.CorrelationID, Operation: &op, Error: taskapi.Failure("invalid_argument", "known_none", "correct_input")}
 	parsed, pe := taskapiParseMediaEnvelope(raw)
 	if err != nil || pe != nil || !parsed || len(raw) > mediaControlMaxBytes || envelope.Type != "media_task_api_request" || envelope.Hash != contract.MediaRefsHash() || h.media == nil || h.media.err != nil || (op != "intake" && op != "get" && op != "capabilities") {
-		c.enqueueEvent(response)
-		return
+		return response
 	}
 	caller, e := taskapi.BindCaller(ctx, apiVerifier{func() (taskapi.VerifiedContext, error) {
 		b, e := h.taskHuman(c)
@@ -40,11 +42,10 @@ func (h *Hub) handleMediaTaskAPI(ctx context.Context, c *Client, raw []byte) {
 	}}, taskapi.Invocation{})
 	if e != nil {
 		response.Error = taskapi.Failure("caller_unbound", "known_none", "refresh_identity")
-		c.enqueueEvent(response)
-		return
+		return response
 	}
 	response = h.taskService.Execute(ctx, caller, envelope.Request)
-	c.enqueueEvent(response)
+	return response
 }
 func taskapiParseMediaEnvelope(raw []byte) (bool, error) {
 	v, e := contract.Parse(raw)

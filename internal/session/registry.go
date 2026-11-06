@@ -33,6 +33,7 @@ type Session struct {
 	sourceRevision       uint64
 	contextNotBeforeMS   int64
 	futureConfig         *Configuration
+	queuedActivation     *queuedConfigurationActivation
 	runtimeDefaultEffort *runtimeDefaultEffort
 	defaultEffortSerial  uint64
 

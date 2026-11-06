@@ -3,6 +3,8 @@ package core
 import (
 	"errors"
 	"log"
+	"sync"
+	"sync/atomic"
 
 	"everything-go/internal/clientproto"
 	"everything-go/internal/protocol"
@@ -10,6 +12,29 @@ import (
 )
 
 type pairedReadIdentity struct{ token, deviceID string }
+
+// Re-key/retirement and the final original-identity commit have one linearized
+// boundary. Load stays lock-free for ordinary read paths; Store preserves the
+// existing caller API, including disconnect/unpair and test transport setters.
+type serializedReadIdentity struct {
+	mutex sync.RWMutex
+	value atomic.Pointer[pairedReadIdentity]
+}
+
+func (i *serializedReadIdentity) Load() *pairedReadIdentity { return i.value.Load() }
+func (i *serializedReadIdentity) Store(value *pairedReadIdentity) {
+	i.mutex.Lock()
+	defer i.mutex.Unlock()
+	i.value.Store(value)
+}
+func (i *serializedReadIdentity) WithCurrent(expected *pairedReadIdentity, commit func() error) error {
+	i.mutex.RLock()
+	defer i.mutex.RUnlock()
+	if expected == nil || i.value.Load() != expected {
+		return errors.New("source_identity_changed")
+	}
+	return commit()
+}
 
 func (h *Hub) sharedReadAuthorized(c *Client) bool {
 	identity := c.readIdentity.Load()

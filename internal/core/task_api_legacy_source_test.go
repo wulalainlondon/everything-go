@@ -235,6 +235,12 @@ func TestLegacySourceScopedPaginationFrozenMembershipAndNoFalseCaller(t *testing
 		if response["ok"] != true {
 			t.Fatal(response)
 		}
+		// This fixture exercises 101 historical links, not 101 simultaneous
+		// waiting inputs. Finish each original row through the ordinary store
+		// transition so the shared 64 waiting-slot policy remains enforced.
+		if _, changed, err := h.messageQueue.Transition(target.ID, request, []messagequeue.State{messagequeue.Queued}, messagequeue.Completed, "", "", ""); err != nil || !changed {
+			t.Fatal("historical fixture completion", changed, err)
+		}
 	}
 	reply := call("legacy_source", map[string]any{"action": "list", "session_id": parent.ID}, "")
 	if reply["ok"] != true {

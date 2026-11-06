@@ -29,7 +29,7 @@ func (h *Hub) acquireModelMediaReader(s *session.Session, request string, p queu
 		}
 	}
 	if batch != nil && batch.State == "admitting_unknown" && mediaQueueBinding(batch, p) {
-		if entry, found, e := h.messageQueue.Get(s.ID, request); e == nil && found {
+		if entry, found, e := h.messageQueue.GetEffective(s.ID, request); e == nil && found {
 			var original queuedPayload
 			if json.Unmarshal(entry.Payload, &original) == nil && mediaQueueBinding(batch, original) {
 				batch.State = "admitted"
@@ -39,7 +39,7 @@ func (h *Hub) acquireModelMediaReader(s *session.Session, request string, p queu
 			}
 		}
 	}
-	if batch == nil || batch.State != "admitted" || batch.ID != request || !mediaQueueBinding(batch, p) {
+	if batch == nil || batch.State != "admitted" || mediaBusinessID(batch) != request || !mediaQueueBinding(batch, p) {
 		return nil, errors.New("media admission unresolved")
 	}
 	if e := h.mediaExecutionCurrent(batch); e != nil {
@@ -82,7 +82,7 @@ func (h *Hub) acquireModelMediaReader(s *session.Session, request string, p queu
 			return
 		}
 		defer release()
-		entry, found, e := h.messageQueue.Get(s.ID, request)
+		entry, found, e := h.messageQueue.GetEffective(s.ID, request)
 		if e != nil || !found {
 			return
 		}

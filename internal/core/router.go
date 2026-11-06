@@ -217,6 +217,7 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 				helloInput.Capabilities = append(helloInput.Capabilities, "task_api_v1_rc1", "task_legacy_source_v1")
 				if h.media != nil && h.media.err == nil {
 					helloInput.Capabilities = append(helloInput.Capabilities, "media_attachment_refs_v1", "media_task_api_request", "media_draft_release_v1")
+					helloInput.Capabilities = append(helloInput.Capabilities, "human_input_outbox_v2", "message_queue_reservation_v1", "own_waiting_input_edit_v1", "own_waiting_input_move_v1", "message_projection_v2")
 				}
 				if h.interactions != nil {
 					helloInput.Capabilities = append(helloInput.Capabilities, "task_interactions_v5")
@@ -520,6 +521,8 @@ func (h *Hub) route(ctx context.Context, c *Client, cmd clientproto.Command) {
 		h.enqueueChatMessage(c, cmd)
 	case "request_session_tasks":
 		go h.sendSessionTasks(c, cmd)
+	case "queue_input_request":
+		h.handleHumanInput(c, cmd)
 	case "read_message_queue":
 		h.sendReadonlyMessageQueue(c, cmd)
 	case "reconcile_queue_receipts":

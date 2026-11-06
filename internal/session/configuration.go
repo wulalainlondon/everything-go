@@ -104,7 +104,16 @@ func (s *Session) ActivateQueuedConfiguration(c Configuration) error {
 		current := ConfigurationFrom(s.snapshotLocked())
 		s.futureConfig = &current
 	}
+	observed := s.queuedActivation
+	if observed != nil && !s.queuedActivationCurrentLocked(observed) {
+		observed = nil
+	}
 	s.applyConfigurationLocked(c)
+	s.queuedActivation = observed
+	if observed != nil {
+		observed.after = s.snapshotLocked()
+		observed.config = c
+	}
 	return nil
 }
 

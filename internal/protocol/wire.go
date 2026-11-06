@@ -35,6 +35,7 @@ type MediaBatchItem struct {
 }
 
 type Inbound struct {
+	QueueInput         json.RawMessage                    `json:"queue_input,omitempty"`
 	KeepDraftItems     bool                               `json:"keep_draft_items,omitempty"`
 	OperationID        string                             `json:"operation_id,omitempty"`
 	HandoffBatchID     string                             `json:"handoff_batch_id,omitempty"`

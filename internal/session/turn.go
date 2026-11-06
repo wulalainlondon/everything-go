@@ -323,9 +323,14 @@ func (s *Session) beginTurnLocked() <-chan struct{} {
 		close(ch)
 		return ch
 	}
+	before := s.snapshotLocked()
 	s.state = Streaming
 	if s.futureConfig != nil {
 		s.applyConfigurationLocked(*s.futureConfig)
+	}
+	s.queuedActivation = nil
+	if s.activeQueuedID != "" {
+		s.queuedActivation = &queuedConfigurationActivation{s, s.activeQueuedID, before, s.snapshotLocked(), ConfigurationFrom(s.snapshotLocked())}
 	}
 	s.lastActivity = nowSeconds()
 	s.turnDone = make(chan struct{})
@@ -473,6 +478,12 @@ func (s *Session) CloseAndWait() {
 // the queue boundary. It cannot promote, reserve native execution or move an
 // active/held/anonymous input. The expected vector prevents partial reorders.
 func (s *Session) ReorderWaiting(expected, ordered []string) error {
+	return s.ReorderWaitingCommitted(expected, ordered, func() error { return nil })
+}
+
+// Validate the complete actor membership before the durable order commit, and
+// keep the mailbox locked until its infallible projection is installed.
+func (s *Session) ReorderWaitingCommitted(expected, ordered []string, commit func() error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.queueHolds < 1 || len(expected) != len(s.mailbox) || len(ordered) != len(expected) {
@@ -496,6 +507,9 @@ func (s *Session) ReorderWaiting(expected, ordered []string) error {
 		}
 		next = append(next, q)
 		delete(items, id)
+	}
+	if err := commit(); err != nil {
+		return err
 	}
 	s.mailbox = next
 	s.signalQueueLocked()

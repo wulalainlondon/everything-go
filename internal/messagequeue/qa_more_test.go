@@ -1,0 +1,3 @@
+package messagequeue
+import("testing";"time")
+func TestQAFoundationAdditionalCancelProviderConflict(t *testing.T){s,b:=humanFixture(t);a:=humanReserve(t,s,b,"a","");if _,_,e:=s.Enqueue(humanSealEntry(a));e!=nil{t.Fatal(e)};if _,e:=s.db.Exec("INSERT INTO task_provider_conflicts VALUES(?,?)",b.Session,"a");e!=nil{t.Fatal(e)};v,_:=s.HumanInputs(b);r,e:=s.HumanApply(b,HumanOperation{ID:"cancel_conflict",Kind:"cancel",Request:"a",ExpectedRevision:v[0].Revision},"boot",time.Now());if e==nil&&r.Status=="committed"{t.Fatalf("cancel reported committed despite original provider conflict: %s",r.Input.State)}}

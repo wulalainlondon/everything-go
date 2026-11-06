@@ -335,6 +335,9 @@ func NewHub(reg *session.Registry, cfg Config, pairing *governance.Pairing, port
 	} else if err = store.Recover(); err != nil {
 		store.Close()
 		log.Printf("[message-queue] recovery unavailable: %v", err)
+	} else if err = store.RecoverPreparedHumanSeals(); err != nil {
+		store.Close()
+		log.Printf("[message-queue] prepared input recovery unavailable: %v", err)
 	} else {
 		h.messageQueue = store
 	}

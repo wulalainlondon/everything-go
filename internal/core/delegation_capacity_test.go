@@ -361,6 +361,9 @@ func TestCapacityHubAPIAppendUsesReservationAndOriginalNativeThread(t *testing.T
 	if _, e := h.delegations.Complete(ctx, child.ID, first.ChildRequestID, "completed", "synthetic original final", "", nil); e != nil {
 		t.Fatal(e)
 	}
+	// EndTurn alone does not produce a queue terminal. Use the real terminal
+	// projection for this synthetic provider final before starting its successor.
+	h.Emit(protocol.NewDone(child.ID, first.ChildRequestID))
 	child.EndTurn()
 	if e := h.provisionDelegation(ctx, waiting); e != nil {
 		t.Fatal(e)

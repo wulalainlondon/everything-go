@@ -18,6 +18,7 @@ import (
 	contract "everything-go/contracts/task-api/v1"
 	"everything-go/internal/backend"
 	"everything-go/internal/clientproto"
+	"everything-go/internal/messagequeue"
 	"everything-go/internal/protocol"
 	"everything-go/internal/session"
 	"everything-go/internal/taskapi"
@@ -27,6 +28,8 @@ const mediaVideoMaxBytes int64 = 1073741824
 const mediaControlMaxBytes = 262144
 
 type mediaBatch struct {
+	HumanAdmission  *humanMediaAdmission      `json:"human_admission,omitempty"`
+	HumanStage      *humanMediaStage          `json:"human_stage,omitempty"`
 	ExecutionThread string                    `json:"execution_thread,omitempty"`
 	ExecutionSource uint64                    `json:"execution_source_revision,omitempty"`
 	ID              string                    `json:"id"`
@@ -317,6 +320,18 @@ func (h *Hub) handleMediaBatch(c *Client, cmd clientproto.Command) {
 	device := strings.TrimPrefix(caller.StableScopeID, "device:")
 	key := mediaKey(device, caller.NamespaceGeneration, cmd.MediaBatchID)
 	batch := h.media.data.Batches[key]
+	if e = h.reconcileHumanMediaAdmission(batch); e != nil {
+		fail("admission_receipt_unavailable")
+		return
+	}
+	var stage *humanMediaStage
+	if op == "prepare" {
+		stage, e = h.mediaHumanStage(c, s, cmd, batch == nil)
+		if e != nil {
+			fail("staged_edit_changed")
+			return
+		}
+	}
 	// A retry/conflict observes the original actor's durable effect before any
 	// fresh source validation. A changed descriptor can reject THIS attempt but
 	// must never relabel an already admitted/UNKNOWN original as known-none.
@@ -325,7 +340,7 @@ func (h *Hub) handleMediaBatch(c *Client, cmd clientproto.Command) {
 			fail("permission")
 			return
 		}
-		same := cmd.ExpectedConfigRevision != nil && *cmd.ExpectedConfigRevision == batch.Config && cmd.ExpectedNativeThreadID == batch.Thread && cmd.MediaBatchRevision == batch.Revision && cmd.Content == batch.Content && reflect.DeepEqual(cmd.MediaItems, batch.Items)
+		same := cmd.ExpectedConfigRevision != nil && *cmd.ExpectedConfigRevision == batch.Config && cmd.ExpectedNativeThreadID == batch.Thread && cmd.MediaBatchRevision == batch.Revision && cmd.Content == batch.Content && reflect.DeepEqual(cmd.MediaItems, batch.Items) && reflect.DeepEqual(stage, batch.HumanStage)
 		if !same {
 			event["error_code"] = "idempotency_conflict"
 		} else if batch.State == "prepared" {
@@ -347,7 +362,7 @@ func (h *Hub) handleMediaBatch(c *Client, cmd clientproto.Command) {
 			fail("source_changed")
 			return
 		}
-		b := &mediaBatch{ID: cmd.MediaBatchID, Revision: cmd.MediaBatchRevision, Session: s.ID, Thread: thread, Config: *cmd.ExpectedConfigRevision, SourceRevision: s.SettingsSnapshot().SourceRevision, RoleEpoch: h.SessionRoleEpoch(s), Device: device, Generation: caller.NamespaceGeneration, Content: cmd.Content, Items: cmd.MediaItems, Objects: map[string]string{}, State: "prepared", Updated: time.Now().UnixMilli()}
+		b := &mediaBatch{HumanStage: stage, ID: cmd.MediaBatchID, Revision: cmd.MediaBatchRevision, Session: s.ID, Thread: thread, Config: *cmd.ExpectedConfigRevision, SourceRevision: s.SettingsSnapshot().SourceRevision, RoleEpoch: h.SessionRoleEpoch(s), Device: device, Generation: caller.NamespaceGeneration, Content: cmd.Content, Items: cmd.MediaItems, Objects: map[string]string{}, State: "prepared", Updated: time.Now().UnixMilli()}
 		frozen := *b
 		frozen.Updated = 0
 		frozen.State = ""
@@ -454,7 +469,7 @@ func (h *Hub) handleMediaBatch(c *Client, cmd clientproto.Command) {
 		return
 	}
 	if batch != nil && batch.Session == s.ID && batch.State == "admitting_unknown" {
-		if entry, found, e := h.messageQueue.Get(s.ID, batch.ID); e == nil && found {
+		if entry, found, e := h.messageQueue.GetEffective(s.ID, mediaBusinessID(batch)); e == nil && found {
 			var queued queuedPayload
 			if json.Unmarshal(entry.Payload, &queued) == nil && mediaQueueBinding(batch, queued) {
 				batch.State = "admitted"
@@ -530,7 +545,7 @@ func validMediaDescriptor(i protocol.MediaBatchItem) bool {
 // Caller already holds lifecycle guard; queue/intake transaction follows it.
 // PREPARE is durable before admission. A crash after reserving admission always
 // leaves an UNKNOWN pin, even if the separate queue transaction is absent.
-func (h *Hub) mediaBeginAdmission(caller taskapi.VerifiedContext, sid, batchID, requestID, content string, images []backend.ImageAttachment, files []backend.FileAttachment) (*mediaBatch, error) {
+func (h *Hub) mediaBeginAdmission(caller taskapi.VerifiedContext, sid, batchID, requestID, content string, images []backend.ImageAttachment, files []backend.FileAttachment, seals ...*messagequeue.HumanSeal) (*mediaBatch, error) {
 	if len(images)+len(files) > 8 {
 		return nil, errors.New("maximum 8 media items")
 	}
@@ -547,8 +562,20 @@ func (h *Hub) mediaBeginAdmission(caller taskapi.VerifiedContext, sid, batchID, 
 	}
 	device := strings.TrimPrefix(caller.StableScopeID, "device:")
 	b := h.media.data.Batches[mediaKey(device, caller.NamespaceGeneration, batchID)]
-	if b == nil || b.Session != sid || b.ID != requestID || b.Content != content {
+	if b == nil || b.Session != sid || mediaBusinessID(b) != requestID || b.Content != content {
 		return nil, errors.New("media batch mismatch")
+	}
+	if err := h.reconcileHumanMediaAdmission(b); err != nil {
+		return nil, err
+	}
+	if b.HumanStage != nil {
+		var seal *messagequeue.HumanSeal
+		if len(seals) == 1 {
+			seal = seals[0]
+		}
+		if !humanStageSealMatches(b.HumanStage, seal) {
+			return nil, errors.New("original staged edit required")
+		}
 	}
 	if b.State == "admitted" {
 		return b, nil
@@ -614,6 +641,13 @@ func (h *Hub) mediaBeginAdmission(caller taskapi.VerifiedContext, sid, batchID, 
 			return nil, errors.New("media object changed")
 		}
 	}
+	if len(seals) == 1 && seals[0] != nil {
+		seal := seals[0]
+		if !seal.Prepared {
+			return nil, errors.New("original input preparation required")
+		}
+		b.HumanAdmission = &humanMediaAdmission{seal.Binding, seal.Operation, seal.Proof}
+	}
 	b.State = "admitting_unknown"
 	b.Updated = time.Now().UnixMilli()
 	if e := h.media.save(); e != nil {
@@ -674,11 +708,25 @@ func (m *mediaLifecycle) protectDirectory(dir string) bool {
 }
 
 func (h *Hub) mediaBatchTarget(b *mediaBatch) error {
-	if e := h.mediaTarget(b.Session, b.Thread, b.Config); e != nil {
+	if b.HumanStage != nil && b.State != "admitted" && !h.mediaHumanStageLive(b.HumanStage) {
+		return errors.New("original staged edit expired")
+	}
+	// Existing exact native acceptance may have arrived after SessionUUID.
+	// Pure status/receipt reads never enter this mutation-only target gate.
+	h.continueMediaInitialThread(b)
+	thread, sourceRevision := mediaExecutionSource(b)
+	if thread == "" && h.messageQueue != nil {
+		if original, found := h.messageQueue.HumanBindingForRequest(b.Session, mediaBusinessID(b)); found && original.Device == b.Device && original.Generation == b.Generation && original.Config == b.Config && original.Epoch == b.RoleEpoch {
+			if s, exists := h.registry.Get(b.Session); exists && h.messageQueue.HumanThreadCompatible(original, s.ResumeID()) {
+				thread = s.ResumeID()
+			}
+		}
+	}
+	if e := h.mediaTarget(b.Session, thread, b.Config); e != nil {
 		return e
 	}
 	s, ok := h.registry.Get(b.Session)
-	if !ok || s.SettingsSnapshot().SourceRevision != b.SourceRevision || h.SessionRoleEpoch(s) != b.RoleEpoch {
+	if !ok || s.SettingsSnapshot().SourceRevision != sourceRevision || h.SessionRoleEpoch(s) != b.RoleEpoch {
 		return errors.New("media source revision changed")
 	}
 	return nil

@@ -39,12 +39,15 @@ var ErrConflict = errors.New("request ID already belongs to different message co
 var ErrRejected = errors.New("message request was permanently rejected")
 
 type APIAdmission struct {
-	Command   taskapi.AuthorizedCommand
-	Record    taskapi.IntentRecord
-	CanCommit func() bool
+	Command          taskapi.AuthorizedCommand
+	Record           taskapi.IntentRecord
+	CanCommit        func() bool
+	CanCommitContext func(context.Context) bool
 }
 
 type Entry struct {
+	HumanSeal *HumanSeal
+
 	QuestionBatch *QuestionBatchAdmission
 
 	ControllerResult *ControllerResultAdmission
@@ -74,8 +77,9 @@ type Snapshot struct {
 	Items    []Entry
 }
 type Store struct {
-	db    *sql.DB
-	clock elapsedClock
+	db           *sql.DB
+	clock        elapsedClock
+	humanStarted time.Time
 }
 
 func Open(dataDir string) (*Store, error) {
@@ -147,7 +151,11 @@ func Open(dataDir string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-	s := &Store{db: db}
+	if err = installHumanInputs(db); err != nil {
+		db.Close()
+		return nil, err
+	}
+	s := &Store{db: db, humanStarted: time.Now()}
 	if err := s.installContextObservations(); err != nil {
 		db.Close()
 		return nil, err
@@ -212,6 +220,22 @@ func (s *Store) Get(sessionID, requestID string) (Entry, bool, error) {
 	return lookup(s.db, sessionID, requestID)
 }
 
+// Versioned waiting edits retain the original queue payload hash. Recovery of
+// their media proof must read the same effective version that Send consumes.
+func (s *Store) GetEffective(sessionID, requestID string) (Entry, bool, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return Entry{}, false, err
+	}
+	defer tx.Rollback()
+	e, found, err := lookup(tx, sessionID, requestID)
+	if err != nil || !found {
+		return e, found, err
+	}
+	e, err = effectiveInput(context.Background(), tx, e)
+	return e, true, err
+}
+
 // GetContext preserves the original native caller's admission check inside a
 // same-Store writer without recursively borrowing its single SQL connection.
 func (s *Store) GetContext(ctx context.Context, sessionID, requestID string) (Entry, bool, error) {
@@ -244,6 +268,32 @@ func (s *Store) Enqueue(e Entry) (Entry, bool, error) {
 		return Entry{}, false, err
 	}
 	defer tx.Rollback()
+	if e.HumanSeal != nil && e.HumanSeal.Boot == s.clock.domain {
+		copy := *e.HumanSeal
+		copy.Clock = s.HumanClock
+		e.HumanSeal = &copy
+	}
+	if e.HumanSeal != nil {
+		if r, found, err := humanReceiptTx(tx, e.HumanSeal.Binding, e.HumanSeal.Operation.ID, humanHash(e.HumanSeal.Operation)); err != nil {
+			return Entry{}, false, err
+		} else if found {
+			if r.Status != "committed" {
+				return Entry{}, false, ErrRejected
+			}
+			prior, ok, err := lookup(tx, e.SessionID, e.RequestID)
+			if !ok && err == nil {
+				err = ErrConflict
+			}
+			return prior, false, err
+		}
+	}
+	if err := verifyPreparedHumanTx(tx, e); err != nil {
+		return Entry{}, false, err
+	}
+	human, humanErr := beginHumanSealTx(tx, e)
+	if humanErr != nil {
+		return Entry{}, false, humanErr
+	}
 	if e.Unified != nil {
 		if e.Unified.Revalidate == nil {
 			return Entry{}, false, taskapi.Failure("caller_unbound", "known_none", "refresh_identity")
@@ -260,7 +310,7 @@ func (s *Store) Enqueue(e Entry) (Entry, bool, error) {
 			return entry, false, err
 		}
 	}
-	if e.API != nil && e.API.CanCommit != nil && !e.API.CanCommit() {
+	if e.API != nil && ((e.API.CanCommit != nil && !e.API.CanCommit()) || (e.API.CanCommitContext != nil && !e.API.CanCommitContext(s.nativeAcceptanceContext(context.Background(), tx)))) {
 		return Entry{}, false, taskapi.Failure("permission", "known_none", "refresh_identity")
 	}
 	if e.API != nil {
@@ -288,10 +338,49 @@ func (s *Store) Enqueue(e Entry) (Entry, bool, error) {
 		if e.API != nil && e.API.Command.Request.Operation == "intake" {
 			return previous, false, ErrConflict // never backfill/rebind a preexisting ordinary or other-device request
 		}
+		if e.HumanSeal != nil && e.HumanSeal.Operation.Kind == "commit_edit" {
+			if previous.State != Queued {
+				return previous, false, ErrConflict
+			}
+			var native bool
+			if err = tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM task_native_acceptance WHERE session_id=? AND request_id=?)`, e.SessionID, e.RequestID).Scan(&native); err != nil {
+				return previous, false, err
+			}
+			if native {
+				return previous, false, ErrConflict
+			}
+			updated, err := commitHumanEditTx(tx, e, human, previous)
+			if err != nil {
+				return previous, false, err
+			}
+			return updated, false, commitHumanAdmission(tx, e)
+		}
 		if previous.PayloadHash != hashText {
 			return previous, false, ErrConflict
 		}
 		return previous, false, nil
+	}
+	if err := ensureHumanOrderTx(tx, e.SessionID); err != nil {
+		return Entry{}, false, err
+	}
+	// A reservation already owns exactly one quota slot. All legacy/formal
+	// first admissions share the same counter and cannot bypass that slot.
+	if human == nil {
+		if _, reserved, err := humanNodeTx(tx, e.SessionID, e.RequestID); err != nil {
+			return Entry{}, false, err
+		} else if reserved {
+			return Entry{}, false, ErrConflict // v2 has one exclusive seal writer
+		}
+		count, err := humanWaitingCountTx(tx, e.SessionID)
+		if err != nil {
+			return Entry{}, false, err
+		}
+		if count >= HumanInputLimit {
+			return Entry{}, false, fmt.Errorf("%w: queue_full", ErrRejected)
+		}
+	}
+	if _, err = tx.Exec(`INSERT OR IGNORE INTO message_order_nodes(session,id) VALUES(?,?)`, e.SessionID, e.RequestID); err != nil {
+		return Entry{}, false, err
 	}
 	if err := admitQuestionBatchTx(tx, e); err != nil {
 		return Entry{}, false, err
@@ -344,7 +433,7 @@ func (s *Store) Enqueue(e Entry) (Entry, bool, error) {
 	if err != nil {
 		return Entry{}, false, err
 	}
-	if e.API != nil && e.API.CanCommit != nil && !e.API.CanCommit() {
+	if e.API != nil && ((e.API.CanCommit != nil && !e.API.CanCommit()) || (e.API.CanCommitContext != nil && !e.API.CanCommitContext(s.nativeAcceptanceContext(context.Background(), tx)))) {
 		return Entry{}, false, taskapi.Failure("permission", "known_none", "refresh_identity")
 	}
 	if e.Unified != nil {
@@ -358,7 +447,10 @@ func (s *Store) Enqueue(e Entry) (Entry, bool, error) {
 			return Entry{}, false, err
 		}
 	}
-	if err = tx.Commit(); err != nil {
+	if err = commitHumanSealTx(tx, e, human); err != nil {
+		return Entry{}, false, err
+	}
+	if err = commitHumanAdmission(tx, e); err != nil {
 		return Entry{}, false, err
 	}
 	return inserted, true, nil
@@ -407,6 +499,13 @@ func (s *Store) Transition(sessionID, requestID string, from []State, to State, 
 	}
 	if !allowed {
 		return e, false, nil
+	}
+	if to == Steering {
+		if input, found, err := humanNodeTx(tx, sessionID, requestID); err != nil {
+			return e, false, err
+		} else if found && (input.Lease != nil || input.State != "ready_queued") {
+			return e, false, ErrConflict
+		}
 	}
 	if to == Running {
 		if err := contextBarrierTx(tx, sessionID); err != nil {

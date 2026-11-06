@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -264,6 +265,23 @@ func (h *Hub) enqueueChatMessageExpectedInheritedMode(c *Client, cmd clientproto
 		h.queueError(c, cmd, "invalid_message", err.Error())
 		return false
 	}
+	if cmd.HumanSeal != nil && cmd.HumanSeal.Operation.Kind == "commit_edit" {
+		previous, found, e := h.messageQueue.GetEffective(s.ID, cmd.RequestID)
+		var original, next queuedPayload
+		if e != nil || !found || json.Unmarshal(previous.Payload, &original) != nil || json.Unmarshal(payload, &next) != nil {
+			h.queueError(c, cmd, "original_input_unavailable", "Original waiting input unavailable")
+			return false
+		}
+		original.Content, original.Images, original.Files = next.Content, next.Images, next.Files
+		original.MediaBatchID, original.MediaBodyHash = next.MediaBatchID, next.MediaBodyHash
+		original.VisualUserHash, original.VisualEffectiveHash = next.VisualUserHash, next.VisualEffectiveHash
+		payload, err = json.Marshal(original)
+		if err != nil {
+			h.queueError(c, cmd, "invalid_message", err.Error())
+			return false
+		}
+	}
+
 	names := []string{}
 	for _, file := range cmd.Files {
 		names = append(names, file.Name)
@@ -302,6 +320,13 @@ func (h *Hub) enqueueChatMessageExpectedInheritedMode(c *Client, cmd clientproto
 		raw, _ := json.Marshal(cmd.AsyncBatch.Request)
 		questionBatch = &messagequeue.QuestionBatchAdmission{CanCommit: func() error { return h.asyncBatchSendGuard(s, cmd.AsyncBatch) }, Hash: backend.AsyncContentHash(string(raw)), ContentHash: cmd.AsyncBatch.ContentHash, Covered: cmd.AsyncCovers}
 	}
+	if cmd.HumanSeal != nil {
+		if err := h.messageQueue.PrepareHumanSeal(cmd.HumanSeal, payload); err != nil {
+			h.queueError(c, cmd, "input_prepare_failed", err.Error())
+			return false
+		}
+		cmd.HumanSeal.Prepared = true
+	}
 	if cmd.MediaBatchID != "" {
 		finalContext := backend.WithPartnerRole(backend.WithVisualPresentation(context.Background(), cmd.VisualPresentation), role)
 		if e := backend.ValidateMediaBudget(s.Backend(), backend.PresentationContent(finalContext, content), cmd.Images, files); e != nil {
@@ -310,14 +335,14 @@ func (h *Hub) enqueueChatMessageExpectedInheritedMode(c *Client, cmd clientproto
 			return false
 		}
 		var e error
-		batch, e = h.mediaBeginAdmission(mediaCaller, cmd.SessionID, cmd.MediaBatchID, cmd.RequestID, cmd.Content, cmd.Images, cmd.Files)
+		batch, e = h.mediaBeginAdmission(mediaCaller, cmd.SessionID, cmd.MediaBatchID, cmd.RequestID, cmd.Content, cmd.Images, cmd.Files, cmd.HumanSeal)
 		if e != nil {
 			releaseBatch()
 			h.queueError(c, cmd, "media_batch_not_admissible", e.Error())
 			return false
 		}
 	}
-	e, inserted, err := h.messageQueue.Enqueue(messagequeue.Entry{QuestionBatch: questionBatch, ControllerResult: c.controllerResultAdmission, Pipeline: c.pipelineAdmission, SessionID: cmd.SessionID, RequestID: cmd.RequestID, Content: truncateGraphemes(content, 4000), ImageCount: len(cmd.Images), FileNames: names, Payload: payload, PayloadHash: hex.EncodeToString(intentHash[:]), Inherited: inherited})
+	e, inserted, err := h.messageQueue.Enqueue(messagequeue.Entry{HumanSeal: cmd.HumanSeal, QuestionBatch: questionBatch, ControllerResult: c.controllerResultAdmission, Pipeline: c.pipelineAdmission, SessionID: cmd.SessionID, RequestID: cmd.RequestID, Content: truncateGraphemes(content, 4000), ImageCount: len(cmd.Images), FileNames: names, Payload: payload, PayloadHash: hex.EncodeToString(intentHash[:]), Inherited: inherited})
 	releaseBatch()
 	if err != nil {
 		if errors.Is(err, messagequeue.ErrRejected) {
@@ -399,6 +424,15 @@ func (h *Hub) runQueuedMessage(s *session.Session, requestID string) {
 			payload.ExpectedTarget.ThreadID = p.Task.NativeThreadID
 		}
 	}
+	if payload.ExpectedTarget != nil && payload.ExpectedTarget.ThreadID == "" && h.messageQueue != nil {
+		if original, found := h.messageQueue.HumanBindingForRequest(s.ID, requestID); found &&
+			original.Device == payload.OwnerDevice && original.Config == payload.ExpectedTarget.Revision && original.Epoch == payload.RoleEpoch &&
+			h.messageQueue.HumanThreadCompatible(original, s.ResumeID()) {
+			// The payload remains immutable. Only this execution-local target may
+			// follow a native acceptance recorded for the original owner.
+			payload.ExpectedTarget.ThreadID = s.ResumeID()
+		}
+	}
 	if !payload.targetMatches(s) {
 		h.Emit(backend.NewError(s.ID, requestID, "dispatch_target_changed", "Target thread or configuration changed while waiting; this instruction was not sent"))
 		return
@@ -418,6 +452,10 @@ func (h *Hub) runQueuedMessage(s *session.Session, requestID string) {
 	if payload.Configuration != nil {
 		if err = s.ActivateQueuedConfiguration(*payload.Configuration); err != nil {
 			h.Emit(backend.NewError(s.ID, requestID, "queued_configuration_rejected", err.Error()))
+			return
+		}
+		if err = h.migrateMediaQueuedConfiguration(s, requestID, payload); err != nil {
+			h.Emit(backend.NewError(s.ID, requestID, "media_configuration_activation_retired", err.Error()))
 			return
 		}
 		active := s.Snapshot()
@@ -543,6 +581,9 @@ func (h *Hub) runQueuedMessage(s *session.Session, requestID string) {
 
 func (h *Hub) queuedSubmissionReady(s *session.Session, requestID string) bool {
 	if h.messageQueue == nil {
+		return false
+	}
+	if !h.messageQueue.HumanReady(s.ID, requestID) {
 		return false
 	}
 	entry, found, lookupErr := h.messageQueue.Get(s.ID, requestID)
@@ -822,7 +863,7 @@ func (h *Hub) promoteQueuedMessage(c *Client, cmd clientproto.Command) {
 		h.queueResult(c, cmd, "promote", "retained", "上下文整理尚未確認，不能插入新指令", messagequeue.Entry{})
 		return
 	}
-	e, found, err := h.messageQueue.Get(cmd.SessionID, cmd.RequestID)
+	e, found, err := h.messageQueue.GetEffective(cmd.SessionID, cmd.RequestID)
 	if err != nil || !found {
 		h.messageQueueMu.Unlock()
 		h.queueResult(c, cmd, "promote", "rejected", "Message not found", e)
@@ -872,8 +913,12 @@ func (h *Hub) promoteQueuedMessage(c *Client, cmd clientproto.Command) {
 		h.queueResult(c, cmd, "promote", "retained", err.Error(), e)
 		return
 	}
-	e, _, err = h.messageQueue.Transition(cmd.SessionID, cmd.RequestID, []messagequeue.State{messagequeue.Queued}, messagequeue.Steering, "", "", "")
-	if err != nil {
+	var changed bool
+	_, changed, err = h.messageQueue.Transition(cmd.SessionID, cmd.RequestID, []messagequeue.State{messagequeue.Queued}, messagequeue.Steering, "", "", "")
+	if err == nil && changed {
+		e, _, err = h.messageQueue.GetEffective(cmd.SessionID, cmd.RequestID)
+	}
+	if err != nil || !changed {
 		finish(false)
 		h.messageQueueMu.Unlock()
 		h.queueResult(c, cmd, "promote", "retained", "Could not save steering intent", e)
@@ -992,6 +1037,33 @@ func (h *Hub) resumeQueuedMessages() {
 		log.Printf("[message-queue] recovery failed: %v", err)
 		return
 	}
+	reserved, reserveErr := h.messageQueue.HumanReserved()
+	if reserveErr != nil {
+		log.Printf("[message-queue] reservation recovery unavailable: %v", reserveErr)
+		return
+	}
+	entries = append(entries, reserved...)
+	ranks := map[string]map[string]int{}
+	for _, e := range entries {
+		if ranks[e.SessionID] != nil {
+			continue
+		}
+		order, err := h.messageQueue.HumanOrder(e.SessionID)
+		if err != nil {
+			log.Printf("[message-queue] original order unavailable: %v", err)
+			return
+		}
+		ranks[e.SessionID] = map[string]int{}
+		for i, id := range order {
+			ranks[e.SessionID][id] = i
+		}
+	}
+	sort.SliceStable(entries, func(i, j int) bool {
+		if entries[i].SessionID != entries[j].SessionID {
+			return entries[i].SessionID < entries[j].SessionID
+		}
+		return ranks[entries[i].SessionID][entries[i].RequestID] < ranks[entries[j].SessionID][entries[j].RequestID]
+	})
 	for _, e := range entries {
 		var pending queuedPayload
 		if (json.Unmarshal(e.Payload, &pending) == nil && pending.SteerOnly) || strings.HasPrefix(e.RequestID, "ui_async_") {

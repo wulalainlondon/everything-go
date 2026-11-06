@@ -165,7 +165,7 @@ type Client struct {
 	// per-event fallback so they remain compatible without overflowing send.
 	supportsReplayAck       bool
 	supportsSessionReadSync atomic.Bool
-	readIdentity            atomic.Pointer[pairedReadIdentity]
+	readIdentity            serializedReadIdentity
 	supportsCollaborationV2 atomic.Bool
 	activity                activityClient
 

@@ -218,6 +218,9 @@
       "type": "queue_action_result"
     },
     {
+      "type": "queue_input_result"
+    },
+    {
       "type": "queue_receipts_reconciled"
     },
     {
@@ -632,6 +635,9 @@
     },
     {
       "type": "push_file"
+    },
+    {
+      "type": "queue_input_request"
     },
     {
       "type": "read_message_queue"
