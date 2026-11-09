@@ -245,7 +245,7 @@ func (h *Hub) mediaTarget(sid string, thread string, revision uint64) error {
 	if e != nil {
 		return e
 	}
-	if e = h.intakeWritePolicy(s); e != nil {
+	if e = h.ordinaryInputWritePolicy(s); e != nil {
 		return e
 	}
 	v := s.SettingsSnapshot()
@@ -292,7 +292,7 @@ func (h *Hub) handleMediaBatch(c *Client, cmd clientproto.Command) {
 			thread = v.ResumeID
 		}
 		policy := mediaPolicy()
-		available := h.media != nil && h.media.err == nil && h.intakeWritePolicy(s) == nil
+		available := h.media != nil && h.media.err == nil && h.ordinaryInputWritePolicy(s) == nil
 		event["state"] = "capabilities"
 		event["available"] = available
 		event["policy"] = policy

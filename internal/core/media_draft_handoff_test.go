@@ -13,9 +13,12 @@ import (
 	"everything-go/internal/session"
 )
 
-func mediaHandoffPrepared(t *testing.T) (*Hub, *session.Session, *Client, clientproto.Command, clientproto.Command, protocol.MediaBatchItem, string, chan mediaIntakeInvocation) {
+func mediaHandoffPrepared(t *testing.T, unconfigured ...bool) (*Hub, *session.Session, *Client, clientproto.Command, clientproto.Command, protocol.MediaBatchItem, string, chan mediaIntakeInvocation) {
 	t.Helper()
 	h, s, c, starts := mediaFixture(t)
+	if len(unconfigured) > 0 && unconfigured[0] {
+		s.SetModel("")
+	}
 	data := mediaPNG(t)
 	old, item, body := mediaPrepareItem(t, h, s, c, "r_handoff_old", data)
 	object := mediaUploadItem(t, h, s, c, old, item, body, data)

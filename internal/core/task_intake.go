@@ -84,6 +84,20 @@ func (h *Hub) intakeWritePolicy(s *session.Session) error {
 // Native question replies retain their active execution; ordinary instructions
 // continue to use the future-default snapshot through intakeWritePolicy.
 func (h *Hub) intakeWritePolicySnapshot(s *session.Session, snapshot session.Snapshot) error {
+	if e := h.ordinaryInputWritePolicy(s); e != nil {
+		return e
+	}
+	if snapshot.Model == "" {
+		return taskapi.Failure("unsupported", "known_none", "read_capabilities")
+	}
+	return nil
+}
+
+// Ordinary attachments resume the same authorized native conversation, just
+// like ordinary text. Native catalog imports intentionally have no configured
+// model. Keep source/ownership restrictions shared with formal intake without
+// inventing or changing that native conversation's configuration.
+func (h *Hub) ordinaryInputWritePolicy(s *session.Session) error {
 	if readOnly, e := h.IsReadOnlyCollaborationWorker(s.ID); e != nil || readOnly {
 		return taskapi.Failure("permission", "known_none", "request_scope_change")
 	}
@@ -110,9 +124,6 @@ func (h *Hub) intakeWritePolicySnapshot(s *session.Session, snapshot session.Sna
 		return taskapi.Failure("permission", "known_none", "request_scope_change")
 	}
 	if s.Backend() != backend.Codex && s.Backend() != backend.Claude {
-		return taskapi.Failure("unsupported", "known_none", "read_capabilities")
-	}
-	if snapshot.Model == "" {
 		return taskapi.Failure("unsupported", "known_none", "read_capabilities")
 	}
 	return nil

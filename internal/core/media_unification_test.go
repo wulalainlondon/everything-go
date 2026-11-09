@@ -69,7 +69,7 @@ func mediaPrepareItem(t *testing.T, h *Hub, s *session.Session, c *Client, id st
 	hash := sha256.Sum256(data)
 	item := protocol.MediaBatchItem{ItemID: "item-1", ItemRevision: 1, UploadRequestID: "vu_" + id, UploadKind: "image", Name: "圖片.png", MediaType: "image/png", SizeBytes: int64(len(data)), SHA256: hex.EncodeToString(hash[:])}
 	rev := s.SettingsSnapshot().ConfigRevision
-	cmd := clientproto.Command{Kind: "media_batch_prepare", RequestID: "prepare-" + id, MediaBatchID: id, MediaBatchRevision: 1, SessionID: s.ID, ExpectedConfigRevision: &rev, MediaItems: []protocol.MediaBatchItem{item}}
+	cmd := clientproto.Command{Kind: "media_batch_prepare", RequestID: "prepare-" + id, MediaBatchID: id, MediaBatchRevision: 1, SessionID: s.ID, ExpectedNativeThreadID: s.ResumeID(), ExpectedConfigRevision: &rev, MediaItems: []protocol.MediaBatchItem{item}}
 	h.handleMediaBatch(c, cmd)
 	receipt := waitForType(t, c, "media_batch_receipt")
 	if receipt["state"] != "prepared" {

@@ -222,7 +222,7 @@ func (h *Hub) mediaHandoffProtects(old, next *mediaBatch, item *protocol.MediaBa
 		}
 	case "admitting_unknown", "admitted":
 		s, e := h.intakeSession(next.Session)
-		if e != nil || h.intakeWritePolicy(s) != nil || h.mediaExecutionCurrent(next) != nil {
+		if e != nil || h.ordinaryInputWritePolicy(s) != nil || h.mediaExecutionCurrent(next) != nil {
 			return false
 		}
 	default:
