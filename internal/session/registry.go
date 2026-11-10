@@ -28,6 +28,7 @@ import (
 type Session struct {
 	mu                   sync.Mutex
 	configUpdating       bool
+	contextGeneration    uint64
 	contextResetID       string
 	configRevision       uint64
 	sourceRevision       uint64
@@ -86,6 +87,7 @@ type Session struct {
 // Snapshot is an immutable, lock-free copy of a session's fields for callers
 // that need several at once (summaries, task listings, spawn argument building).
 type Snapshot struct {
+	ContextGeneration   uint64
 	SourceRevision      uint64
 	ContextNotBeforeMS  int64
 	ConfigRevision      uint64
@@ -131,7 +133,8 @@ func (s *Session) Snapshot() Snapshot {
 
 func (s *Session) snapshotLocked() Snapshot {
 	return Snapshot{
-		ConfigRevision: s.configRevision, SourceRevision: s.sourceRevision, ContextNotBeforeMS: s.contextNotBeforeMS,
+		ContextGeneration: s.contextGeneration,
+		ConfigRevision:    s.configRevision, SourceRevision: s.sourceRevision, ContextNotBeforeMS: s.contextNotBeforeMS,
 		ID: s.ID, Name: s.name, Cwd: s.cwd, Backend: s.backend,
 		MetadataRevision: s.metadataRevision, NameUpdatedAt: s.nameUpdatedAt,
 		NameUpdatedBy: s.nameUpdatedBy, LastNameMutationID: s.lastNameMutationID,
@@ -283,6 +286,11 @@ func (s *Session) ApplyConfig(backend, model, sandbox string) {
 // when a turn establishes or clears one).
 func (s *Session) SetResumeID(id string) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.setResumeIDLocked(id)
+}
+
+func (s *Session) setResumeIDLocked(id string) {
 	firstDefault := s.runtimeDefaultEffort
 	first := s.resumeID == "" && id != "" && firstDefault != nil && firstDefault.source == s.sourceRevision && firstDefault.thread == ""
 	if id != "" && s.resumeID != "" && s.resumeID != id {
@@ -306,7 +314,6 @@ func (s *Session) SetResumeID(id string) {
 		copy.source, copy.thread = s.sourceRevision, id
 		s.runtimeDefaultEffort = &copy
 	}
-	s.mu.Unlock()
 }
 
 // ClearResumeIDs intentionally forgets the entire logical history chain. Use
@@ -314,6 +321,7 @@ func (s *Session) SetResumeID(id string) {
 // call SetResumeID("") so archived generations remain readable.
 func (s *Session) ClearResumeIDs() {
 	s.mu.Lock()
+	s.contextGeneration++
 	if s.resumeID != "" {
 		s.advanceSourceRevisionLocked()
 	}
@@ -415,7 +423,7 @@ func (r *Registry) AttachStore(store *Store) {
 			created = float64(e.LastUsed)
 		}
 		s := &Session{
-			configRevision: e.ConfigRevision, sourceRevision: e.SourceRevision, contextNotBeforeMS: e.ContextNotBeforeMS,
+			contextGeneration: e.ContextGeneration, configRevision: e.ConfigRevision, sourceRevision: e.SourceRevision, contextNotBeforeMS: e.ContextNotBeforeMS,
 			ID: id, CreatedAt: created,
 			name: e.Name, cwd: e.Cwd, backend: e.Backend,
 			metadataRevision: e.MetadataRevision, nameUpdatedAt: e.NameUpdatedAt,

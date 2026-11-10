@@ -34,6 +34,9 @@ func (c *Codex) QueuedSubmissionReady(ctx context.Context, s *session.Session, r
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if err := c.threadInitReady(s.Snapshot()); err != nil {
+		return err
+	}
 	st := c.state(s.ID)
 	st.mu.Lock()
 	threadID, busy := st.threadID, st.turnActive || st.compactActive

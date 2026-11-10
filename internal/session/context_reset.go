@@ -38,6 +38,7 @@ func (s *Session) DetachReservedContext(old string) error {
 	if s.contextResetID == "" || old == "" || s.resumeID != old {
 		return errors.New("reserved_context_changed")
 	}
+	s.contextGeneration++
 	s.historicalResumeIDs = appendUniqueResumeID(s.historicalResumeIDs, old, "")
 	s.resumeID = ""
 	s.advanceSourceRevisionLocked()

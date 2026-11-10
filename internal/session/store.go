@@ -16,6 +16,7 @@ import (
 // saved_sessions.json. Store writes known fields back into the original raw JSON
 // object so Python-only metadata survives Go updates.
 type savedEntry struct {
+	ContextGeneration   uint64   `json:"context_generation,omitempty"`
 	ContextNotBeforeMS  int64    `json:"context_not_before_ms,omitempty"`
 	SourceRevision      uint64   `json:"source_revision,omitempty"`
 	ConfigRevision      uint64   `json:"config_revision,omitempty"`
@@ -70,6 +71,13 @@ func (st *Store) Load() map[string]savedEntry {
 	raw := st.loadRawLocked()
 	out := make(map[string]savedEntry, len(raw))
 	for id, obj := range raw {
+		if value, present := obj["context_generation"]; present {
+			var generation uint64
+			if string(value) == "null" || json.Unmarshal(value, &generation) != nil {
+				delete(st.knownIDs, id)
+				continue
+			}
+		}
 		if value, present := obj["source_revision"]; present {
 			var revision uint64
 			if string(value) == "null" || json.Unmarshal(value, &revision) != nil {
@@ -134,7 +142,7 @@ func (st *Store) Save(sessions []*Session) error {
 		}
 		entry := savedEntry{
 			Name: snap.Name, ResumeID: snap.ResumeID, ClaudeUUID: snap.ResumeID,
-			ConfigRevision: snap.ConfigRevision, SourceRevision: snap.SourceRevision, ContextNotBeforeMS: contextNotBefore, MetadataRevision: snap.MetadataRevision, NameUpdatedAt: snap.NameUpdatedAt,
+			ContextGeneration: snap.ContextGeneration, ConfigRevision: snap.ConfigRevision, SourceRevision: snap.SourceRevision, ContextNotBeforeMS: contextNotBefore, MetadataRevision: snap.MetadataRevision, NameUpdatedAt: snap.NameUpdatedAt,
 			NameUpdatedBy: snap.NameUpdatedBy, LastNameMutationID: snap.LastNameMutationID,
 			LastUsed: lastUsed, Cwd: snap.Cwd, Backend: snap.Backend, Model: snap.Model,
 			PreviewText: snap.PreviewText, PreviewRole: snap.PreviewRole,
@@ -223,6 +231,7 @@ func putKnownFields(obj map[string]json.RawMessage, entry savedEntry) {
 	put("metadata_revision", entry.MetadataRevision)
 	put("config_revision", entry.ConfigRevision)
 	put("source_revision", entry.SourceRevision)
+	put("context_generation", entry.ContextGeneration)
 	put("context_not_before_ms", entry.ContextNotBeforeMS)
 	put("name_updated_at", entry.NameUpdatedAt)
 	put("name_updated_by", entry.NameUpdatedBy)
@@ -324,6 +333,7 @@ func entryFromRaw(obj map[string]json.RawMessage) savedEntry {
 	}
 	return savedEntry{
 		SourceRevision:      rawUint64(obj, "source_revision"),
+		ContextGeneration:   rawUint64(obj, "context_generation"),
 		ContextNotBeforeMS:  rawInt64(obj, "context_not_before_ms"),
 		Name:                rawString(obj, "name"),
 		MetadataRevision:    uint64(rawInt64(obj, "metadata_revision")),

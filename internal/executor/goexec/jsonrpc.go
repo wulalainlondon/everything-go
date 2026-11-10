@@ -122,6 +122,12 @@ func (p *rpcPlumber) requestAtEpochContext(ctx context.Context, method string, p
 }
 
 func (p *rpcPlumber) requestAtEpochGuarded(ctx context.Context, method string, params any, timeout time.Duration, expected *uint64, guard func() (func(), error)) (json.RawMessage, error) {
+	return p.requestAtEpochObserved(ctx, method, params, timeout, expected, guard, nil)
+}
+
+// beforeWrite pins this exact RPC id before any bytes can leave the writer.
+// The hook is local evidence only; it cannot replay or adopt a response.
+func (p *rpcPlumber) requestAtEpochObserved(ctx context.Context, method string, params any, timeout time.Duration, expected *uint64, guard func() (func(), error), beforeWrite func(int) error) (json.RawMessage, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -156,7 +162,18 @@ func (p *rpcPlumber) requestAtEpochGuarded(ctx context.Context, method string, p
 				}
 				return nil, e
 			}
+			if beforeWrite != nil {
+				if e := beforeWrite(id); e != nil {
+					if release != nil {
+						release()
+					}
+					return nil, e
+				}
+			}
 			return release, nil
+		}
+		if beforeWrite != nil {
+			return nil, beforeWrite(id)
 		}
 		return nil, nil
 	})
@@ -209,7 +226,11 @@ func (p *rpcPlumber) dispatchResponse(raw json.RawMessage) bool {
 	if ch == nil {
 		return true
 	}
-	if probe.Error != nil {
+	if probe.Error != nil && probe.Result != nil {
+		// JSON-RPC permits exactly one result or error. Conflicting evidence is
+		// not a definitive rejection and must never unlock a mutation retry.
+		ch <- rpcReply{err: fmt.Errorf("[%s] conflicting RPC result and error", p.name)}
+	} else if probe.Error != nil {
 		ch <- rpcReply{err: &rpcResponseError{raw: string(probe.Error)}}
 	} else {
 		ch <- rpcReply{result: probe.Result}

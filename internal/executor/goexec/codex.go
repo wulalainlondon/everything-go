@@ -245,55 +245,59 @@ type Codex struct {
 	authReloadDeferred    bool
 	authWatchOnce         sync.Once
 
-	mu                 sync.Mutex
-	states             map[string]*codexState
-	threadToSession    map[string]*session.Session
-	activeThreadOwner  map[string]*session.Session
-	interMu            sync.Mutex
-	interactions       map[string]codexInteraction
-	asyncMu            sync.Mutex
-	asyncResolved      map[string]bool
-	asyncSessions      map[string]*session.Session
-	asyncScanMu        sync.Mutex
-	asyncScanned       map[string]asyncScanStamp
-	catalogMu          sync.RWMutex
-	catalog            backend.Definition
-	collaborationModes map[string]map[string]any
-	exactFinalMu       sync.Mutex
-	exactFinalScans    map[string]*exactFinalScan
-	exactFinalClock    uint64
-	rolloutMu          sync.Mutex
-	rolloutRoot        string
-	rolloutScannedAt   time.Time
-	rolloutPaths       []string
-	rolloutByID        map[string]string
-	stallWarnAfter     time.Duration
-	stallAbortAfter    time.Duration
-	stallCheckEvery    time.Duration
-	dataDir            string
-	lifecycle          *lifecycle.Journal
-	failureJournalMu   sync.Mutex
-	failureJournal     *recovery.Journal
-	historyRequestMu   sync.Mutex
-	ownedFinalMu       sync.Mutex
-	ownedFinalEpoch    uint64
-	ownedFinals        map[string]ownedFinalCacheEntry
-	ownedFinalOrder    []string
-	maintenanceMu      sync.Mutex
-	maintenance        map[string]backend.Maintenance
-	rolloverEnabled    bool
-	coldResumeMaxBytes int64
-	checkpointMaxBytes int
-	appServerMode      string // daemon (default) | stdio (compatibility fallback)
-	appServerSocket    string
-	connectOnly        bool
-	subjectAuthPath    string
-	runtimeMu          sync.RWMutex
-	runtimeDiagnostics map[string]any
-	reconnectMu        sync.Mutex
-	reconnectRunning   bool
-	remoteReconnect    bool
-	health             codexHealth
+	mu                  sync.Mutex
+	states              map[string]*codexState
+	threadToSession     map[string]*session.Session
+	activeThreadOwner   map[string]*session.Session
+	interMu             sync.Mutex
+	interactions        map[string]codexInteraction
+	asyncMu             sync.Mutex
+	asyncResolved       map[string]bool
+	asyncSessions       map[string]*session.Session
+	asyncScanMu         sync.Mutex
+	asyncScanned        map[string]asyncScanStamp
+	catalogMu           sync.RWMutex
+	catalog             backend.Definition
+	collaborationModes  map[string]map[string]any
+	exactFinalMu        sync.Mutex
+	exactFinalScans     map[string]*exactFinalScan
+	exactFinalClock     uint64
+	rolloutMu           sync.Mutex
+	rolloutRoot         string
+	rolloutScannedAt    time.Time
+	rolloutPaths        []string
+	rolloutByID         map[string]string
+	stallWarnAfter      time.Duration
+	stallAbortAfter     time.Duration
+	stallCheckEvery     time.Duration
+	threadInitMu        sync.Mutex
+	threadInitRecords   map[string]codexThreadInitRecord
+	threadInitSlowAfter time.Duration // deterministic owned tests; zero uses production budget
+	threadInitTimeout   time.Duration
+	dataDir             string
+	lifecycle           *lifecycle.Journal
+	failureJournalMu    sync.Mutex
+	failureJournal      *recovery.Journal
+	historyRequestMu    sync.Mutex
+	ownedFinalMu        sync.Mutex
+	ownedFinalEpoch     uint64
+	ownedFinals         map[string]ownedFinalCacheEntry
+	ownedFinalOrder     []string
+	maintenanceMu       sync.Mutex
+	maintenance         map[string]backend.Maintenance
+	rolloverEnabled     bool
+	coldResumeMaxBytes  int64
+	checkpointMaxBytes  int
+	appServerMode       string // daemon (default) | stdio (compatibility fallback)
+	appServerSocket     string
+	connectOnly         bool
+	subjectAuthPath     string
+	runtimeMu           sync.RWMutex
+	runtimeDiagnostics  map[string]any
+	reconnectMu         sync.Mutex
+	reconnectRunning    bool
+	remoteReconnect     bool
+	health              codexHealth
 }
 
 type codexInteraction struct {
@@ -306,6 +310,8 @@ type codexInteraction struct {
 	nativeConfig *session.Configuration
 	submitting   bool
 }
+
+var codexDefaultDataDir = func(home string) string { return filepath.Join(home, ".everything-go-runtime") }
 
 func NewCodex(sink executor.Sink, codexBin string) *Codex {
 	if codexBin == "" {
@@ -330,7 +336,7 @@ func NewCodex(sink executor.Sink, codexBin string) *Codex {
 		stallWarnAfter:     codexStallWarnAfter,
 		stallAbortAfter:    codexStallAbortAfter,
 		stallCheckEvery:    codexStallCheckEvery,
-		dataDir:            filepath.Join(home, ".everything-go-runtime"),
+		dataDir:            codexDefaultDataDir(home),
 		rolloverEnabled:    envBool("EVERYTHING_GO_CODEX_ROLLOVER_ENABLED", false),
 		coldResumeMaxBytes: envInt64("EVERYTHING_GO_CODEX_COLD_RESUME_MAX_BYTES", 256*1024*1024),
 		checkpointMaxBytes: int(envInt64("EVERYTHING_GO_CODEX_CHECKPOINT_MAX_BYTES", 128*1024)),
@@ -2346,12 +2352,15 @@ func (c *Codex) Send(ctx context.Context, s *session.Session, reqID, content str
 	} else {
 		// Admission's original epoch (including zero) cannot be refreshed from
 		// a later assignment while provider initialization is in flight.
-		threadErr = c.ensureThread(s, st, backend.RoleEpoch(ctx))
+		threadErr = c.ensureThreadWithContext(ctx, s, st, reqID, backend.RoleEpoch(ctx))
 	}
 	if err := threadErr; err != nil {
 		if !errors.Is(err, backend.ErrThreadActiveWriter) {
-			c.sink.Emit(backend.NewError(s.ID, reqID, backend.ErrProcessDied, "failed to start codex thread: "+err.Error()))
+			c.sink.Emit(backend.NewError(s.ID, reqID, codexThreadInitCode(err), "failed to start codex thread: "+err.Error()))
 		}
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if auto := recovery.Automatic(ctx); auto != nil {
@@ -3507,6 +3516,10 @@ func codexUsageValues(u codexTokenUsage) (int, int) {
 
 // ensureThread starts or resumes the codex thread for this session.
 func (c *Codex) ensureThread(s *session.Session, st *codexState, originalRoleEpoch ...uint64) error {
+	return c.ensureThreadWithContext(context.Background(), s, st, s.ActiveQueuedID(), originalRoleEpoch...)
+}
+
+func (c *Codex) ensureThreadWithContext(ctx context.Context, s *session.Session, st *codexState, requestID string, originalRoleEpoch ...uint64) error {
 	epoch := uint64(0)
 	if len(originalRoleEpoch) > 0 {
 		epoch = originalRoleEpoch[0]
@@ -3534,6 +3547,12 @@ func (c *Codex) ensureThread(s *session.Session, st *codexState, originalRoleEpo
 	have := st.threadID
 	st.mu.Unlock()
 	snap := s.Snapshot()
+	if err := c.threadInitReady(snap); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	preserveContext, pinErr := c.delegationContextPinned(s)
 	if pinErr != nil {
 		return pinErr
@@ -3607,6 +3626,8 @@ func (c *Codex) ensureThread(s *session.Session, st *codexState, originalRoleEpo
 	sandbox := codexSandboxForSession(snap)
 
 	var threadID string
+	var initializedSnapshot *session.Snapshot
+	var initializedTransport uint64
 	var threadMetadataRaw json.RawMessage
 	var recovery *codexRecovery
 	if snap.ResumeID != "" {
@@ -3706,14 +3727,30 @@ func (c *Codex) ensureThread(s *session.Session, st *codexState, originalRoleEpo
 		if err := c.applyPMThreadPolicy(s, startParams); err != nil {
 			return err
 		}
-		raw, err := c.rpcCall("thread/start", startParams, 15*time.Second)
+		initializedTransport = c.rpc.transportEpoch.Load()
+		raw, err := c.startThreadOnce(ctx, s, snap, requestID, epoch, startParams)
 		if err != nil {
 			return err
 		}
+		initializedSnapshot = &snap
 		threadID = extractThreadID(raw, "")
 		threadMetadataRaw = append(json.RawMessage(nil), raw...)
 		if threadID == "" {
 			return errNoThreadID
+		}
+	}
+	boundInitialization := false
+	if initializedSnapshot != nil {
+		if !c.threadInitSourceCurrent(ctx, s, *initializedSnapshot, initializedTransport, epoch) {
+			return &codexThreadInitError{Code: "thread_initialization_unknown"}
+		}
+		if recovery == nil {
+			// The session lock makes the final original-source check and bind one
+			// operation. Role/config changes during ACK persistence cannot overwrite it.
+			if !s.BindInitializedThread(ctx, *initializedSnapshot, threadID, func() bool { return c.rpc.transportEpoch.Load() == initializedTransport }) {
+				return &codexThreadInitError{Code: "thread_initialization_unknown"}
+			}
+			boundInitialization = true
 		}
 	}
 	st.mu.Lock()
@@ -3738,7 +3775,9 @@ func (c *Codex) ensureThread(s *session.Session, st *codexState, originalRoleEpo
 	// admitted turn configuration and must not disable its scoped toolset.
 
 	if recovery == nil {
-		s.SetResumeID(threadID)
+		if !boundInitialization {
+			s.SetResumeID(threadID)
+		}
 		c.sink.Emit(backend.NewSessionUUID(s.ID, threadID))
 		log.Printf("[codex] session=%s thread=%s", s.ID, threadID)
 	} else {
