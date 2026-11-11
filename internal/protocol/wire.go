@@ -1428,12 +1428,14 @@ type DirSession struct {
 }
 
 type DirListing struct {
-	Type      string       `json:"type"`
-	Path      string       `json:"path"`
-	Entries   []DirEntry   `json:"entries"`
-	Sessions  []DirSession `json:"sessions"`
-	Hash      string       `json:"hash"`
-	Unchanged bool         `json:"unchanged"`
+	Type           string       `json:"type"`
+	Path           string       `json:"path"`
+	Entries        []DirEntry   `json:"entries"`
+	Sessions       []DirSession `json:"sessions"`
+	Hash           string       `json:"hash"`
+	Unchanged      bool         `json:"unchanged"`
+	RequestID      string       `json:"request_id,omitempty"`
+	DirectoryStage int          `json:"directory_stage,omitempty"`
 }
 
 func NewDirListing(path string, entries []DirEntry, sessions []DirSession, hash string, unchanged bool) DirListing {

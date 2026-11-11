@@ -136,7 +136,13 @@ func (h *Hub) sendDirListing(c *Client, cmd clientproto.Command) {
 
 	// Stage 1: active sessions rooted at this path (cheap).
 	active := h.activeSessionsForPath(path)
-	c.enqueueEvent(protocol.NewDirListing(path, sendEntries, active, hash, unchanged))
+	first := protocol.NewDirListing(path, sendEntries, active, hash, unchanged)
+	// Correlation is independent of the canonical path. Legacy requests retain
+	// their original two-stage envelope, with these optional fields omitted.
+	if cmd.RequestID != "" {
+		first.RequestID, first.DirectoryStage = cmd.RequestID, 1
+	}
+	c.enqueueEvent(first)
 
 	// Stage 2: enrich with resumable sessions for this path (heavy scan, coalesced
 	// + cached). Re-check liveness before sending — a stale client gets nothing (#3).
@@ -145,7 +151,11 @@ func (h *Hub) sendDirListing(c *Client, cmd clientproto.Command) {
 		return
 	}
 	merged := append(append([]protocol.DirSession{}, active...), resumable...)
-	c.enqueueEvent(protocol.NewDirListing(path, sendEntries, merged, hash, unchanged))
+	last := protocol.NewDirListing(path, sendEntries, merged, hash, unchanged)
+	if cmd.RequestID != "" {
+		last.RequestID, last.DirectoryStage = cmd.RequestID, 2
+	}
+	c.enqueueEvent(last)
 }
 
 const maxPreviewFileBytes = 256 * 1024

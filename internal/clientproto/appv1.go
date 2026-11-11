@@ -484,7 +484,7 @@ func (AppV1) HelloAck(in HelloInput) protocol.HelloAck {
 		LanIP:           in.LanIP,
 		TunnelURL:       in.TunnelURL,
 		Backends:        backendDefinitionsToWire(in.Backends),
-		Capabilities:    append(append([]string(nil), in.Capabilities...), "offline_device_guard_v1"),
+		Capabilities:    append(append([]string(nil), in.Capabilities...), "offline_device_guard_v1", "directory_request_correlation_v1"),
 	}
 }
 
