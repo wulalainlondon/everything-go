@@ -116,32 +116,46 @@ type MediaSessionCommand struct {
 	ExpectedMediaID  string  `json:"expectedMediaId,omitempty"`
 }
 
+// NativeMusicMatch is explicit Android post-dispatch metadata evidence. It never
+// claims that expectedMediaId was observed as the actual native mediaId.
+type NativeMusicMatch struct {
+	Version         int    `json:"version"`
+	Basis           string `json:"basis"`
+	Action          string `json:"action"`
+	ExpectedMediaID string `json:"expectedMediaId"`
+	BeforeBindingID string `json:"beforeBindingId"`
+	BeforeMediaID   string `json:"beforeMediaId"`
+	BeforeTitle     string `json:"beforeTitle"`
+	BeforeArtist    string `json:"beforeArtist"`
+}
+
 // Receipt causality and local snapshots are independent. Device monotonic age
 // is composed with Go receive age; no device wall clock is trusted.
 type MediaSessionState struct {
-	Volume            *int     `json:"volume,omitempty"`
-	Kind              string   `json:"kind"`
-	OperationID       string   `json:"operationId"`
-	Revision          uint64   `json:"revision"`
-	Version           uint64   `json:"version"`
-	ActiveSource      string   `json:"activeSource"`
-	ReservedSource    string   `json:"reservedSource"`
-	NativeProvider    string   `json:"nativeProvider"`
-	Phase             string   `json:"phase"`
-	Stage             string   `json:"stage"`
-	Dispatched        bool     `json:"dispatched"`
-	ActionConfirmed   bool     `json:"actionConfirmed"`
-	PlaybackConfirmed bool     `json:"playbackConfirmed"`
-	MayBePlaying      bool     `json:"mayBePlaying"`
-	Error             string   `json:"error"`
-	Title             string   `json:"title"`
-	Artist            string   `json:"artist"`
-	MediaID           string   `json:"mediaId"`
-	BindingID         string   `json:"bindingId"`
-	SupportedActions  []string `json:"supportedActions"`
-	PositionMS        *int64   `json:"positionMs,omitempty"`
-	DurationMS        *int64   `json:"durationMs,omitempty"`
-	ObservationAgeMS  int64    `json:"observationAgeMs"`
+	NativeMatch       *NativeMusicMatch `json:"nativeMatch,omitempty"`
+	Volume            *int              `json:"volume,omitempty"`
+	Kind              string            `json:"kind"`
+	OperationID       string            `json:"operationId"`
+	Revision          uint64            `json:"revision"`
+	Version           uint64            `json:"version"`
+	ActiveSource      string            `json:"activeSource"`
+	ReservedSource    string            `json:"reservedSource"`
+	NativeProvider    string            `json:"nativeProvider"`
+	Phase             string            `json:"phase"`
+	Stage             string            `json:"stage"`
+	Dispatched        bool              `json:"dispatched"`
+	ActionConfirmed   bool              `json:"actionConfirmed"`
+	PlaybackConfirmed bool              `json:"playbackConfirmed"`
+	MayBePlaying      bool              `json:"mayBePlaying"`
+	Error             string            `json:"error"`
+	Title             string            `json:"title"`
+	Artist            string            `json:"artist"`
+	MediaID           string            `json:"mediaId"`
+	BindingID         string            `json:"bindingId"`
+	SupportedActions  []string          `json:"supportedActions"`
+	PositionMS        *int64            `json:"positionMs,omitempty"`
+	DurationMS        *int64            `json:"durationMs,omitempty"`
+	ObservationAgeMS  int64             `json:"observationAgeMs"`
 }
 
 // Missing/null source counters and age are unknown, never a synthetic fresh zero.

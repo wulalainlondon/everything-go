@@ -23,6 +23,7 @@ var mediaSessionError = regexp.MustCompile(`^[a-z0-9_]{0,128}$`)
 var mediaSessionCommandID = regexp.MustCompile(`^vm_[a-f0-9]{64}$`)
 
 type callMediaReceipt struct {
+	before        *protocol.MediaSessionState // immutable fresh pre-admission ownership snapshot, never a later read
 	fingerprint   string
 	command       protocol.VoiceMediaCommand
 	result        backend.VoiceMediaResult
@@ -315,6 +316,9 @@ func (h *Hub) executeCallMediaSession(ctx context.Context, parent *session.Sessi
 	nested := &protocol.MediaSessionCommand{OperationID: commandID, Target: target, Action: action, URI: uri, MediaID: id, Title: input.Title, Artist: input.Artist, PositionMS: input.PositionMS, Volume: input.Volume, ExpectedRevision: input.ExpectedRevision, AdoptCurrent: input.AdoptCurrent, ExpectedMediaID: input.ExpectedMediaID}
 	cmd := protocol.VoiceMediaCommand{Provider: "call_media_session", Action: "session", CommandID: commandID, Sequence: m.sequence, MediaSession: nested}
 	r := &callMediaReceipt{fingerprint: fingerprint, command: cmd, settled: make(chan struct{}), result: backend.VoiceMediaResult{Provider: "call_media_session", Endpoint: h.mediaEndpoint(owner), Transport: transport, Action: action, CommandID: commandID, Sequence: m.sequence, State: "queued", AudioCheck: "unknown", DisplayLabel: input.DisplayLabel}}
+	if _, fresh := sessionSampleAge(m.snapshot, m.snapshotAt); fresh {
+		r.before = cloneMediaSession(m.snapshot)
+	}
 	m.receipts[key] = r
 	m.byCommand[commandID] = r
 	m.current = r
@@ -370,13 +374,19 @@ func validCallMediaState(x *protocol.MediaSessionState) bool {
 	if x.PositionMS != nil && (*x.PositionMS < 0 || *x.PositionMS > 9007199254740991) || x.DurationMS != nil && (*x.DurationMS <= 0 || *x.DurationMS > 9007199254740991) {
 		return false
 	}
-	if x.PlaybackConfirmed && (x.Phase != "playing" || x.ActiveSource == "none" || x.MediaID == "" || x.ObservationAgeMS < 0 || x.ObservationAgeMS > 5000 || x.Error != "") {
+	if x.NativeMatch != nil && !validNativeMetadataEvidence(x) {
+		return false
+	}
+	if x.PlaybackConfirmed && (x.Phase != "playing" || x.ActiveSource == "none" || (x.MediaID == "" && !validNativeMetadataEvidence(x)) || x.ObservationAgeMS < 0 || x.ObservationAgeMS > 5000 || x.Error != "") {
 		return false
 	}
 	return true
 }
 func sessionCausalMatches(r *callMediaReceipt, x *protocol.MediaSessionState) bool {
 	cmd := r.command.MediaSession
+	if x.NativeMatch != nil {
+		return nativeMetadataCausalMatches(r, x)
+	}
 	if x.PlaybackConfirmed && (x.ActiveSource != cmd.Target || cmd.MediaID != "" && x.MediaID != cmd.MediaID) {
 		return false
 	}
@@ -456,6 +466,11 @@ func (h *Hub) handleCallMediaState(c *Client, cmd clientproto.Command) {
 				r.observed = nil
 			}
 		} else {
+			// A terminal mutation receipt is immutable. Later native feedback
+			// may arrive as a separate snapshot, never a rewrite of its outcome.
+			if r.closed && r.causal != nil && r.command.MediaSession.Action != "observe" {
+				return
+			}
 			if !sessionCausalMatches(r, x) || r.causal != nil && (x.Version <= r.causal.Version || x.Revision < r.causal.Revision) ||
 				r.observation != nil && (x.Version <= r.observation.Version || x.Revision < r.observation.Revision) {
 				return
@@ -481,6 +496,7 @@ func (h *Hub) handleCallMediaState(c *Client, cmd clientproto.Command) {
 	}
 	m.snapshot = cloneMediaSession(x)
 	m.snapshot.Kind = "snapshot"
+	m.snapshot.NativeMatch = nil
 	m.snapshot.ActionConfirmed = false
 	m.snapshotAt = time.Now().UnixMilli()
 }

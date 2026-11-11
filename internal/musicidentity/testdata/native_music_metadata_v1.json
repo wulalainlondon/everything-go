@@ -1,0 +1,166 @@
+{
+  "schema": 1,
+  "scope": "Exact Android empty-ID metadata proof; expected and observed IDs are separate and never synthesized.",
+  "cases": [
+    {
+      "name": "exact",
+      "expectedTitle": "Yellow",
+      "expectedArtist": "Coldplay",
+      "title": "Yellow",
+      "artist": "Coldplay",
+      "match": true
+    },
+    {
+      "name": "officialVideo",
+      "expectedTitle": "Wish You Well",
+      "expectedArtist": "Sigala, Becky Hill",
+      "title": "Wish You Well (Official Video)",
+      "artist": "Sigala 和 Becky Hill",
+      "match": true
+    },
+    {
+      "name": "officialMusicVideo",
+      "expectedTitle": "Wish You Well",
+      "expectedArtist": "Becky Hill & Sigala",
+      "title": "Wish You Well [Official Music Video]",
+      "artist": "Sigala 和 Becky Hill",
+      "match": true
+    },
+    {
+      "name": "officialAudio",
+      "expectedTitle": "Yellow",
+      "expectedArtist": "Coldplay",
+      "title": "Yellow (Official Audio)",
+      "artist": "Coldplay",
+      "match": true
+    },
+    {
+      "name": "liveRequested",
+      "expectedTitle": "Yellow Live",
+      "expectedArtist": "Coldplay",
+      "title": "Yellow Live (Official Video)",
+      "artist": "Coldplay",
+      "match": true
+    },
+    {
+      "name": "liveWrong",
+      "expectedTitle": "Yellow",
+      "expectedArtist": "Coldplay",
+      "title": "Yellow Live",
+      "artist": "Coldplay",
+      "match": false
+    },
+    {
+      "name": "remixWrong",
+      "expectedTitle": "Yellow",
+      "expectedArtist": "Coldplay",
+      "title": "Yellow (Remix)",
+      "artist": "Coldplay",
+      "match": false
+    },
+    {
+      "name": "acousticWrong",
+      "expectedTitle": "Yellow",
+      "expectedArtist": "Coldplay",
+      "title": "Yellow Acoustic",
+      "artist": "Coldplay",
+      "match": false
+    },
+    {
+      "name": "coverWrong",
+      "expectedTitle": "Yellow",
+      "expectedArtist": "Coldplay",
+      "title": "Yellow Cover",
+      "artist": "Coldplay",
+      "match": false
+    },
+    {
+      "name": "officialLiveWrong",
+      "expectedTitle": "Yellow",
+      "expectedArtist": "Coldplay",
+      "title": "Yellow (Official Live Video)",
+      "artist": "Coldplay",
+      "match": false
+    },
+    {
+      "name": "extraCredit",
+      "expectedTitle": "Wish You Well",
+      "expectedArtist": "Sigala, Becky Hill",
+      "title": "Wish You Well",
+      "artist": "Sigala 和 Becky Hill 和 Guest",
+      "match": false
+    },
+    {
+      "name": "missingCredit",
+      "expectedTitle": "Wish You Well",
+      "expectedArtist": "Sigala, Becky Hill",
+      "title": "Wish You Well",
+      "artist": "Sigala",
+      "match": false
+    },
+    {
+      "name": "duplicateCredit",
+      "expectedTitle": "Wish You Well",
+      "expectedArtist": "Sigala, Becky Hill",
+      "title": "Wish You Well",
+      "artist": "Sigala, Becky Hill, Sigala",
+      "match": false
+    },
+    {
+      "name": "duplicateExpected",
+      "expectedTitle": "Wish You Well",
+      "expectedArtist": "Sigala, Sigala",
+      "title": "Wish You Well",
+      "artist": "Sigala",
+      "match": false
+    },
+    {
+      "name": "blankExpectedArtist",
+      "expectedTitle": "Yellow",
+      "expectedArtist": "",
+      "title": "Yellow",
+      "artist": "Coldplay",
+      "match": false
+    },
+    {
+      "name": "localizedAliasNotGuessed",
+      "expectedTitle": "Yellow",
+      "expectedArtist": "Coldplay",
+      "title": "Yellow",
+      "artist": "酷玩樂團",
+      "match": false
+    },
+    {
+      "name": "artistPrefixNotMetadataProof",
+      "expectedTitle": "Yellow",
+      "expectedArtist": "Coldplay",
+      "title": "Coldplay - Yellow",
+      "artist": "Coldplay",
+      "match": false
+    },
+    {
+      "name": "fullwidthCase",
+      "expectedTitle": "ＹＥＬＬＯＷ",
+      "expectedArtist": "Ｃｏｌｄｐｌａｙ",
+      "title": "Yellow",
+      "artist": "coldplay",
+      "match": true
+    },
+    {
+      "name": "unlistedSuffix",
+      "expectedTitle": "Yellow",
+      "expectedArtist": "Coldplay",
+      "title": "Yellow (Audio HQ)",
+      "artist": "Coldplay",
+      "match": false
+    },
+    {
+      "name": "emptyCredit",
+      "expectedTitle": "Wish You Well",
+      "expectedArtist": "Sigala, Becky Hill",
+      "title": "Wish You Well",
+      "artist": "Sigala,,Becky Hill",
+      "match": false
+    }
+  ]
+}
