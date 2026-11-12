@@ -365,8 +365,12 @@ func (s *Store) Put(b []byte) (string, error) {
 	if len(b) == 0 || len(b) > MaxImageBytes {
 		return "", errors.New("image size unsupported")
 	}
-	if _, _, _, e := ImageInfo(b); e != nil {
+	mime, _, _, e := ImageInfo(b)
+	if e != nil {
 		return "", e
+	}
+	if e = validateImage(b, mime); e != nil {
+		return "", errors.New("image incomplete or undecodable")
 	}
 	hash := IDBytes(b)
 	s.mu.Lock()
