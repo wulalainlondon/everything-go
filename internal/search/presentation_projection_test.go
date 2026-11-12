@@ -60,7 +60,7 @@ func TestPresentationProjectionRepairPreservesNativeIdentityAndOriginalFile(t *t
 
 func TestOriginalPresentationContentExactBoundary(t *testing.T) {
 	user := "原字 e\u0301😀\n第二行"
-	for _, mode := range []string{"auto-v1", "text-v1"} {
+	for _, mode := range []string{"auto-v1", "text-v1", "explore-v1"} {
 		raw := backend.PresentationContent(backend.WithVisualPresentation(context.Background(), mode), user)
 		if backend.OriginalPresentationContent(raw) != user {
 			t.Fatalf("lost original for %s", mode)
