@@ -128,7 +128,7 @@ func (c *Claude) LoadHistory(resumeID string, opts history.Opts) (*history.Resul
 	mtimeNS := fi.ModTime().UnixNano()
 	size := fi.Size()
 	key := history.FileKey{Path: path, MtimeNS: mtimeNS, Size: size}
-	cacheName := "claude:user-images-v2:" + resumeID
+	cacheName := "claude:user-images-cwd-v3:" + resumeID
 	if messages, ok := history.DefaultCache().Load(cacheName, key); ok {
 		if !opts.IncludeThinking {
 			messages = history.StripThinkingBlocks(messages)
@@ -247,6 +247,9 @@ func parseClaudeHistoryLines(lines []history.TailLine, resumeID string, fileMtim
 			d.Type, text, tsMs, blocks,
 		)
 		message["history_timestamp_verified"] = verifiedTimestamp
+		if filepath.IsAbs(d.Cwd) {
+			message["source_cwd"] = filepath.Clean(d.Cwd)
+		}
 		if len(images) > 0 {
 			message["images"] = images
 		}

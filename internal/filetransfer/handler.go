@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"everything-go/internal/sessionmedia"
 	"fmt"
 	"io"
 	"log"
@@ -428,6 +429,9 @@ func (s *Service) cleanupStale() {
 }
 
 func (s *Service) pathAllowed(path string) bool {
+	if sessionmedia.PrivatePath(s.dataDir, path) {
+		return false
+	}
 	for _, root := range s.allowedRoots {
 		rel, err := filepath.Rel(root, path)
 		if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {

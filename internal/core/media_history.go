@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"everything-go/internal/session"
+	"everything-go/internal/sessionmedia"
 	"io"
 	"net/http"
 	"os"
@@ -129,6 +130,9 @@ func (w *mediaReadWriter) Write(p []byte) (int, error) {
 // The legacy absolute-path media route must not expose new private object/index
 // files. Existing historical non-typed media behavior remains unchanged.
 func (h *Hub) TypedMediaPathPrivate(path string) bool {
+	if sessionmedia.PrivatePath(h.cfg.DataDir, path) {
+		return true
+	}
 	if h.media == nil {
 		return false
 	}

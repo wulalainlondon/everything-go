@@ -227,6 +227,15 @@ func (s *Store) List(session string, c Checkpoint, filter, token string, limit i
 			return nil, "", 0, errors.New("stale cursor")
 		}
 	}
+	if token != "" && cur.High != "~" {
+		var newer int
+		if e := s.db.QueryRow("SELECT count(*) FROM pictures WHERE session=? AND author LIKE ? AND ordering>?", session, map[string]string{"all": "%", "user": "user", "assistant": "assistant"}[filter], cur.High).Scan(&newer); e != nil {
+			return nil, "", 0, e
+		}
+		if newer > 0 {
+			return nil, "", 0, errors.New("gallery updated; refresh required")
+		}
+	}
 	if limit < 1 || limit > 60 {
 		limit = 60
 	}

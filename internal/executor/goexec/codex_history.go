@@ -69,7 +69,7 @@ func (c *Codex) LoadHistory(resumeID string, opts history.Opts) (*history.Result
 	if fi, err := os.Stat(path); err == nil && !fi.IsDir() {
 		key := history.FileKey{Path: path, MtimeNS: fi.ModTime().UnixNano(), Size: fi.Size()}
 		// Reparse older tails whose typed tool-output parts were saved empty.
-		cacheName := "codex:turns-v7-user-images:" + resumeID
+		cacheName := "codex:turns-v8-images-cwd:" + resumeID
 		if messages, ok := history.DefaultCache().Load(cacheName, key); ok {
 			if !opts.IncludeThinking {
 				messages = history.StripThinkingBlocks(messages)
@@ -326,12 +326,22 @@ func parseCodexHistoryWindow(lines []history.TailLine, resumeID string, truncate
 	turnID := ""
 	tailClosed := false
 	turnBySource := map[string]string{}
+	cwdBySource := map[string]string{}
+	sourceCwd := ""
 	// A bounded tail may begin inside a turn, before its exact closing marker.
 	unboundLeadingTail := truncated
 	for _, ln := range lines {
 		var row codexHistoryRow
 		if json.Unmarshal(ln.Data, &row) != nil {
 			continue
+		}
+		if row.Type == "session_meta" || row.Type == "turn_context" {
+			var context struct {
+				Cwd string `json:"cwd"`
+			}
+			if json.Unmarshal(row.Payload, &context) == nil && filepath.IsAbs(context.Cwd) {
+				sourceCwd = filepath.Clean(context.Cwd)
+			}
 		}
 		if row.Type == "turn_context" || row.Type == "event_msg" {
 			var event struct {
@@ -374,6 +384,7 @@ func parseCodexHistoryWindow(lines []history.TailLine, resumeID string, truncate
 		}
 		tailClosed = false
 		records = append(records, rec{lineNo: ln.LineNo, row: row, turnID: turnID})
+		cwdBySource["codex:"+resumeID+":line:"+itoa(ln.LineNo)] = sourceCwd
 		turnBySource["codex:"+resumeID+":line:"+itoa(ln.LineNo)] = turnID
 		if id, out, ok := codexResponseToolOutput(row.Payload); ok {
 			toolOutputs[id] = out
@@ -487,6 +498,9 @@ func parseCodexHistoryWindow(lines []history.TailLine, resumeID string, truncate
 	}
 	for _, message := range messages {
 		sourceID, _ := message["source_message_id"].(string)
+		if cwd := cwdBySource[sourceID]; cwd != "" {
+			message["source_cwd"] = cwd
+		}
 		if turn := turnBySource[sourceID]; turn != "" {
 			message["source_turn_id"] = turn
 		}

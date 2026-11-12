@@ -10,7 +10,6 @@ import (
 	"net/url"
 	"path/filepath"
 	"reflect"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,6 +19,9 @@ import (
 	"everything-go/internal/history"
 	"everything-go/internal/session"
 	"everything-go/internal/sessionmedia"
+	"github.com/yuin/goldmark"
+	"github.com/yuin/goldmark/ast"
+	"github.com/yuin/goldmark/text"
 )
 
 type sessionGallery struct {
@@ -174,7 +176,7 @@ func (h *Hub) serveSessionGallery(w http.ResponseWriter, r *http.Request, operat
 			http.Error(w, "original message exceeds history window budget", 413)
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"schema": 1, "authority_instance_id": h.cfg.InstanceID, "session_id": sid, "message_id": record.Entry.Message, "messages": bounded.Messages})
+		_ = json.NewEncoder(w).Encode(map[string]any{"schema": 1, "authority_instance_id": h.cfg.InstanceID, "session_id": sid, "message_id": record.Entry.Message, "messages": bounded.Messages, "source_threads": binding.threads})
 		return
 	}
 	if operation != "thumbnail" && operation != "original" {
@@ -301,6 +303,11 @@ func (h *Hub) advanceGallery(s *session.Session, b galleryBinding, c sessionmedi
 		c.MoreAfter = page.HasMoreAfter
 	} else if opts.Before != "" {
 		c.Complete = !page.HasMoreBefore
+		// Backfill used the initial newest anchor. Reconcile appends before
+		// declaring coverage complete, even when the initial tail was closed.
+		if c.Complete {
+			c.MoreAfter = true
+		}
 	} else {
 		c.MoreAfter = page.HasMoreAfter
 	}
@@ -452,7 +459,7 @@ func (h *Hub) galleryRecords(s *session.Session, threads []string, row map[strin
 			continue
 		}
 		entry := makeEntry(n, "generated")
-		entry.ID = sessionmedia.ID(s.ID, request, path)
+		entry.ID = sessionmedia.ID(s.ID, message, strconv.Itoa(n), "generated")
 		source := sessionmedia.Source{Path: path}
 		hash, e := store.Capture(s.ID, request, path)
 		if e == nil {
@@ -465,13 +472,10 @@ func (h *Hub) galleryRecords(s *session.Session, threads []string, row map[strin
 	}
 	if request != "" && row["history_read_result_verified"] == true {
 		for n, record := range h.attachments.ForRequest(s.ID, request) {
-			id := sessionmedia.ID(s.ID, request, record.Path)
-			if prior, e := store.Get(s.ID, id); e == nil && prior.Entry.Provenance == "generated" {
-				continue
-			}
+			id := sessionmedia.ID(s.ID, message, strconv.Itoa(1000+n), "attached")
 			found := false
 			for _, r := range out {
-				found = found || r.Entry.ID == id
+				found = found || r.Source.Path == record.Path
 			}
 			if found {
 				continue
@@ -488,23 +492,20 @@ func (h *Hub) galleryRecords(s *session.Session, threads []string, row map[strin
 			out = append(out, sessionmedia.Record{Entry: entry, Source: source})
 		}
 	}
-	// Explicit image Markdown is an attachment reference on this exact source
-	// row. Plain path mentions, remote URLs and tool outputs are not admitted.
+	// Deduplicate alternate representations on this exact native row only.
+	// Distinct Markdown occurrences keep their own ordinal, even for one asset.
+	represented := map[string]bool{}
+	for _, prior := range out {
+		represented[prior.Source.Path] = true
+	}
 	for n, path := range galleryMarkdownPaths(str(row["content"]), str(row["source_cwd"])) {
-		duplicate := false
-		for _, r := range out {
-			duplicate = duplicate || r.Source.Path == path
+		if filepath.IsAbs(path) && h.TypedMediaPathPrivate(path) {
+			continue
 		}
-		if duplicate {
+		if represented[path] {
 			continue
 		}
 		entry := makeEntry(2000+n, "attached")
-		if request != "" {
-			entry.ID = sessionmedia.ID(s.ID, request, path)
-			if prior, e := store.Get(s.ID, entry.ID); e == nil && prior.Entry.Provenance == "generated" {
-				continue
-			}
-		}
 		source := sessionmedia.Source{Path: path}
 		if !filepath.IsAbs(path) {
 			entry.Availability = "unknown"
@@ -520,15 +521,28 @@ func (h *Hub) galleryRecords(s *session.Session, threads []string, row map[strin
 	return out
 }
 
-var galleryImageMarkdown = regexp.MustCompile(`!\[[^\]\r\n]*\]\((?:<([^>\r\n]+)>|([^\s)]+))\)`)
-
+// Only actual Markdown image nodes grant a local attachment relation. Code,
+// comments and raw HTML nodes never become filesystem reads.
 func galleryMarkdownPaths(content, cwd string) []string {
-	out := []string{}
-	for _, match := range galleryImageMarkdown.FindAllStringSubmatch(galleryVisibleMarkdown(content), -1) {
-		raw := match[1]
-		if raw == "" {
-			raw = match[2]
+	lines := strings.Split(content, "\n")
+	// Conservatively exclude indented examples even in ambiguous paragraph
+	// continuation positions; they never authorize a local file read.
+	for i, line := range lines {
+		if strings.HasPrefix(line, "    ") || strings.HasPrefix(strings.TrimLeft(line, " "), "\t") {
+			lines[i] = ""
 		}
+	}
+	source := []byte(strings.Join(lines, "\n"))
+	document := goldmark.DefaultParser().Parse(text.NewReader(source))
+	destinations := []string{}
+	_ = ast.Walk(document, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
+		if image, ok := node.(*ast.Image); entering && ok {
+			destinations = append(destinations, string(image.Destination))
+		}
+		return ast.WalkContinue, nil
+	})
+	out := []string{}
+	for _, raw := range destinations {
 		u, e := url.Parse(raw)
 		if e != nil || u.Scheme != "" || u.Host != "" || u.RawQuery != "" || u.Fragment != "" || strings.HasPrefix(raw, "//") {
 			continue
@@ -554,60 +568,4 @@ func galleryMarkdownPaths(content, cwd string) []string {
 		}
 	}
 	return out
-}
-
-// A literal example inside code is not an attachment in the rendered message.
-func galleryVisibleMarkdown(content string) string {
-	lines := strings.Split(content, "\n")
-	fence := byte(0)
-	length := 0
-	for i, line := range lines {
-		trim := strings.TrimLeft(line, " ")
-		indent := len(line) - len(trim)
-		run := 0
-		if len(trim) > 0 && (trim[0] == '`' || trim[0] == '~') {
-			for run < len(trim) && trim[run] == trim[0] {
-				run++
-			}
-		}
-		if fence != 0 {
-			lines[i] = ""
-			if indent <= 3 && run >= length && trim[0] == fence && strings.TrimSpace(trim[run:]) == "" {
-				fence = 0
-			}
-			continue
-		}
-		if indent >= 4 {
-			lines[i] = ""
-			continue
-		}
-		if run >= 3 {
-			fence = trim[0]
-			length = run
-			lines[i] = ""
-			continue
-		}
-		raw := []byte(strings.ReplaceAll(line, "\\!", "  "))
-		for at := 0; at < len(raw); at++ {
-			if raw[at] != '`' {
-				continue
-			}
-			end := at
-			for end < len(raw) && raw[end] == '`' {
-				end++
-			}
-			delimiter := strings.Repeat("`", end-at)
-			close := strings.Index(string(raw[end:]), delimiter)
-			if close < 0 {
-				continue
-			}
-			finish := end + close + len(delimiter)
-			for n := at; n < finish; n++ {
-				raw[n] = ' '
-			}
-			at = finish - 1
-		}
-		lines[i] = string(raw)
-	}
-	return strings.Join(lines, "\n")
 }
