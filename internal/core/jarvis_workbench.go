@@ -186,6 +186,10 @@ func (h *Hub) ServeJarvisAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	path := strings.TrimPrefix(r.URL.Path, "/api/jarvis/v1/")
+	if strings.HasPrefix(path, "media/gallery/") {
+		h.serveSessionGallery(w, r, strings.TrimPrefix(path, "media/gallery/"))
+		return
+	}
 	if path == "media/attachment" {
 		h.serveMediaAttachment(w, r)
 		return

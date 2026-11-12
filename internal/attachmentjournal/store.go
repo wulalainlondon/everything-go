@@ -134,6 +134,19 @@ func (s *Store) Get(attachmentID string) (Record, bool) {
 	return cloneRecord(record), true
 }
 
+// ForRequest projects existing trusted mentions without delivery, ACK or GC.
+func (s *Store) ForRequest(sessionID, requestID string) []Record {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := []Record{}
+	for _, r := range s.records {
+		if r.SessionID == sessionID && r.RequestID == requestID && r.MediaType == "image" {
+			out = append(out, cloneRecord(r))
+		}
+	}
+	return out
+}
+
 // ListSession is a bounded source view; it neither changes device ACKs nor
 // exposes records belonging to a different conversation.
 func (s *Store) ListSession(sessionID string, limit int) []Record {

@@ -30,6 +30,13 @@ func (h *Hub) emitAttachment(event any) {
 		return
 	}
 	record, added := h.attachments.Add(event)
+	if record.MediaType == "image" && record.RequestID != "" && h.cfg.DataDir != "" {
+		// Freeze the first trusted mention, before a later turn can overwrite or
+		// remove its output path. Failure never changes the original delivery.
+		if _, err := h.sessionGallery().store.Capture(record.SessionID, record.RequestID, record.Path); err != nil {
+			log.Printf("[gallery] retained original unavailable attachment=%s", record.AttachmentID)
+		}
+	}
 	if !added {
 		return
 	}

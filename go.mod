@@ -3,6 +3,7 @@ module everything-go
 go 1.26.3
 
 require (
+	golang.org/x/image v0.38.0
 	github.com/coder/websocket v1.8.14
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
 	github.com/pion/webrtc/v4 v4.2.14

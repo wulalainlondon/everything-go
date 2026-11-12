@@ -128,7 +128,7 @@ func (c *Claude) LoadHistory(resumeID string, opts history.Opts) (*history.Resul
 	mtimeNS := fi.ModTime().UnixNano()
 	size := fi.Size()
 	key := history.FileKey{Path: path, MtimeNS: mtimeNS, Size: size}
-	cacheName := "claude:" + resumeID
+	cacheName := "claude:user-images-v2:" + resumeID
 	if messages, ok := history.DefaultCache().Load(cacheName, key); ok {
 		if !opts.IncludeThinking {
 			messages = history.StripThinkingBlocks(messages)
@@ -212,6 +212,10 @@ func parseClaudeHistoryLines(lines []history.TailLine, resumeID string, fileMtim
 			continue
 		}
 		text, blocks := buildClaudeBlocks(d.Message.Content, d.Type, toolOutputs)
+		var images []map[string]string
+		if d.Type == "user" {
+			images = claudeHistoryInputImages(d.Message.Content)
+		}
 		hasThinking := false
 		for _, b := range blocks {
 			if b["type"] == "thinking" {
@@ -223,7 +227,7 @@ func parseClaudeHistoryLines(lines []history.TailLine, resumeID string, fileMtim
 		// deliberately, for Python-shape parity — tool_use-only assistant rows),
 		// EXCEPT thinking rows, which clients need to keep the process fold
 		// visible after a history reload.
-		if (text == "" && !hasThinking) || strings.HasPrefix(text, "<") || strings.HasPrefix(text, "[Request interrupted") {
+		if (text == "" && !hasThinking && len(images) == 0) || strings.HasPrefix(text, "<") || strings.HasPrefix(text, "[Request interrupted") {
 			continue
 		}
 		if strings.HasPrefix(text, "Base directory for this skill:") {
@@ -243,6 +247,9 @@ func parseClaudeHistoryLines(lines []history.TailLine, resumeID string, fileMtim
 			d.Type, text, tsMs, blocks,
 		)
 		message["history_timestamp_verified"] = verifiedTimestamp
+		if len(images) > 0 {
+			message["images"] = images
+		}
 		// A fresh thinking/tool/progress row from the same API request is not
 		// proof that the completed answer has reached native history.
 		message["history_read_result_verified"] = d.Type == "assistant" && d.Message.StopReason == "end_turn" && strings.TrimSpace(text) != ""
