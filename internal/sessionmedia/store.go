@@ -67,6 +67,7 @@ type Checkpoint struct {
 	Started   bool   `json:"started"`
 	Complete  bool   `json:"complete"`
 	MoreAfter bool   `json:"more_after"`
+	Revision  uint64 `json:"revision"`
 }
 type Store struct {
 	free func(string) (uint64, error)
@@ -104,7 +105,8 @@ func (s *Store) open() error {
  CREATE TABLE IF NOT EXISTS pictures(session TEXT, id TEXT, ordering TEXT, author TEXT, entry BLOB, source BLOB, PRIMARY KEY(session,id));
  CREATE INDEX IF NOT EXISTS picture_order ON pictures(session,ordering DESC);
  CREATE TABLE IF NOT EXISTS assets(hash TEXT PRIMARY KEY, bytes INTEGER NOT NULL);
- CREATE TABLE IF NOT EXISTS captures(identity TEXT PRIMARY KEY, hash TEXT NOT NULL);`)
+ CREATE TABLE IF NOT EXISTS captures(identity TEXT PRIMARY KEY, hash TEXT NOT NULL);
+ CREATE TABLE IF NOT EXISTS derivatives(original TEXT,variant TEXT,version INTEGER,digest TEXT,bytes INTEGER,PRIMARY KEY(original,variant));`)
 	if e != nil {
 		db.Close()
 		return e
@@ -127,6 +129,9 @@ func ID(parts ...string) string {
 func (s *Store) Load(session, binding string) (Checkpoint, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.loadLocked(session, binding)
+}
+func (s *Store) loadLocked(session, binding string) (Checkpoint, error) {
 	if e := s.open(); e != nil {
 		return Checkpoint{}, e
 	}
@@ -148,7 +153,20 @@ func (s *Store) Load(session, binding string) (Checkpoint, error) {
 		}
 	}
 	if c.Binding != binding {
-		return Checkpoint{Binding: binding, Epoch: Random(), Secret: Random()}, nil
+		c = Checkpoint{Binding: binding, Epoch: Random(), Secret: Random()}
+		tx, e := s.db.Begin()
+		if e != nil {
+			return c, e
+		}
+		defer tx.Rollback()
+		if _, e = tx.Exec("DELETE FROM pictures WHERE session=?", session); e != nil {
+			return c, e
+		}
+		raw, _ := json.Marshal(c)
+		if _, e = tx.Exec("INSERT OR REPLACE INTO checkpoints VALUES(?,?)", session, raw); e != nil {
+			return c, e
+		}
+		return c, tx.Commit()
 	}
 	return c, nil
 }
@@ -157,6 +175,14 @@ func (s *Store) Load(session, binding string) (Checkpoint, error) {
 func (s *Store) Commit(session string, c Checkpoint, records []Record) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.commitLocked(session, c, records, nil)
+}
+func (s *Store) CommitCAS(session string, expected, c Checkpoint, records []Record) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.commitLocked(session, c, records, &expected)
+}
+func (s *Store) commitLocked(session string, c Checkpoint, records []Record, expected *Checkpoint) error {
 	if e := s.open(); e != nil {
 		return e
 	}
@@ -172,6 +198,10 @@ func (s *Store) Commit(session string, c Checkpoint, records []Record) error {
 	}
 	var previous Checkpoint
 	_ = json.Unmarshal(old, &previous)
+	if expected != nil && (previous.Epoch != expected.Epoch || previous.Binding != expected.Binding || previous.Revision != expected.Revision) {
+		return errors.New("gallery checkpoint changed")
+	}
+	c.Revision = previous.Revision + 1
 	if previous.Binding != c.Binding {
 		if _, e = tx.Exec("DELETE FROM pictures WHERE session=?", session); e != nil {
 			return e
@@ -209,6 +239,21 @@ func cursorMAC(c Checkpoint, session, body string) []byte {
 func (s *Store) List(session string, c Checkpoint, filter, token string, limit int) ([]Entry, string, int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.listLocked(session, c, filter, token, limit)
+}
+
+// Every component of a response is captured under the same store lock/read view.
+func (s *Store) View(session, binding, filter, token string, limit int) (Checkpoint, []Entry, string, int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c, e := s.loadLocked(session, binding)
+	if e != nil {
+		return c, nil, "", 0, e
+	}
+	items, next, count, e := s.listLocked(session, c, filter, token, limit)
+	return c, items, next, count, e
+}
+func (s *Store) listLocked(session string, c Checkpoint, filter, token string, limit int) ([]Entry, string, int, error) {
 	if e := s.open(); e != nil {
 		return nil, "", 0, e
 	}
@@ -399,7 +444,11 @@ func (s *Store) Put(b []byte) (string, error) {
 		if e := s.db.QueryRow("SELECT COALESCE(sum(bytes + 81920),0) FROM assets").Scan(&total); e != nil {
 			return "", e
 		}
-		if total+int64(len(b))+81920 > maxVaultBytes {
+		var previews int64
+		if e := s.db.QueryRow("SELECT COALESCE(sum(bytes),0) FROM derivatives WHERE variant='preview'").Scan(&previews); e != nil {
+			return "", e
+		}
+		if total+previews+int64(len(b))+81920 > maxVaultBytes {
 			return "", errors.New("gallery retained storage full")
 		}
 		if _, e := s.db.Exec("INSERT INTO assets VALUES(?,?)", hash, len(b)); e != nil {

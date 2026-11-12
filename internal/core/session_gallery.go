@@ -25,9 +25,13 @@ import (
 )
 
 type sessionGallery struct {
-	store  *sessionmedia.Store
-	scan   sync.Mutex
-	decode chan struct{}
+	store       *sessionmedia.Store
+	scan        chan struct{}
+	jobsMu      sync.Mutex
+	jobs        map[string]*galleryScanJob
+	subscribers int
+	decode      chan struct{}
+	io          galleryIOAdmission
 }
 
 func (h *Hub) sessionGallery() *sessionGallery {
@@ -36,7 +40,7 @@ func (h *Hub) sessionGallery() *sessionGallery {
 		if h.cfg.DataDir != "" {
 			root = filepath.Join(h.cfg.DataDir, "session-media")
 		}
-		h.gallery = &sessionGallery{store: sessionmedia.New(root), decode: make(chan struct{}, 2)}
+		h.gallery = &sessionGallery{store: sessionmedia.New(root), decode: make(chan struct{}, 1), scan: make(chan struct{}, 1), jobs: map[string]*galleryScanJob{}}
 	})
 	return h.gallery
 }
@@ -77,7 +81,7 @@ func (h *Hub) galleryBinding(s *session.Session) (galleryBinding, error) {
 func (h *Hub) serveSessionGallery(w http.ResponseWriter, r *http.Request, operation string) {
 	w.Header().Set("Cache-Control", "private, no-store")
 	w.Header().Set("Access-Control-Expose-Headers", "X-Bridge-Image-SHA256")
-	if r.Method != http.MethodGet {
+	if r.Method != http.MethodGet && !(r.Method == http.MethodPost && (operation == "advance" || operation == "validate")) {
 		http.Error(w, "method", 405)
 		return
 	}
@@ -105,34 +109,40 @@ func (h *Hub) serveSessionGallery(w http.ResponseWriter, r *http.Request, operat
 		return e == nil && now.key == binding.key
 	}
 	gallery := h.sessionGallery()
-	if operation == "list" {
-		if !gallery.scan.TryLock() {
-			http.Error(w, "gallery busy", 503)
+	if operation == "capabilities" {
+		if !current() {
+			http.Error(w, "source changed", 409)
 			return
 		}
-		defer gallery.scan.Unlock()
-		c, e := gallery.store.Load(sid, binding.key)
-		if e != nil {
-			http.Error(w, "gallery checkpoint unavailable", 503)
-			return
-		}
-		// A stale pagination token must never advance a changed source or bind to it.
+		_ = json.NewEncoder(w).Encode(map[string]any{"schema": 1, "authority_instance_id": h.cfg.InstanceID, "session_id": sid, "loading_version": 1, "indexed_list": true, "status": true, "advance": true, "validate": true, "preview": true})
+		return
+	}
+	if operation == "list" || operation == "status" || operation == "advance" {
 		filter := r.URL.Query().Get("filter")
 		if filter == "" {
 			filter = "all"
 		}
 		token := r.URL.Query().Get("cursor")
-		if _, _, _, e = gallery.store.List(sid, c, filter, token, 1); e != nil {
-			http.Error(w, "gallery cursor changed; refresh", 409)
-			return
-		}
-		c, e = h.advanceGallery(s, binding, c, current)
-		if e != nil {
-			http.Error(w, e.Error(), 503)
-			return
-		}
 		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-		items, next, count, e := gallery.store.List(sid, c, filter, token, limit)
+		// Reject a stale cursor before a legacy request can advance anything.
+		if token != "" {
+			if _, _, _, _, e := gallery.store.View(sid, binding.key, filter, token, 1); e != nil {
+				http.Error(w, "gallery cursor changed; refresh", 409)
+				return
+			}
+		}
+		if operation == "advance" || operation == "list" && r.URL.Query().Get("mode") != "indexed" {
+			if e := h.joinGalleryAdvance(r.Context(), s, binding, current); e != nil {
+				w.Header().Set("Retry-After", "1")
+				http.Error(w, e.Error(), 503)
+				return
+			}
+		}
+		if !current() {
+			http.Error(w, "source changed", 409)
+			return
+		}
+		c, items, next, count, e := gallery.store.View(sid, binding.key, filter, token, limit)
 		if e != nil {
 			http.Error(w, "gallery cursor changed; refresh", 409)
 			return
@@ -142,15 +152,37 @@ func (h *Hub) serveSessionGallery(w http.ResponseWriter, r *http.Request, operat
 			return
 		}
 		coverage := "indexing"
-		if c.Complete && !c.MoreAfter {
+		if c.Started && c.Complete && !c.MoreAfter {
 			coverage = "complete"
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"schema": 1, "authority_instance_id": h.cfg.InstanceID, "session_id": sid, "snapshot": c.Epoch, "coverage": coverage, "count": count, "items": items, "next_cursor": next, "has_more": next != ""})
+		result := map[string]any{"loading_version": 1, "loading_capabilities": map[string]bool{"indexed_list": true, "status": true, "advance": true, "validate": true, "preview": true}, "schema": 1, "authority_instance_id": h.cfg.InstanceID, "session_id": sid, "snapshot": c.Epoch, "revision": c.Revision, "coverage": coverage, "count": count}
+		if operation == "list" {
+			result["items"] = items
+			result["next_cursor"] = next
+			result["has_more"] = next != ""
+		}
+		_ = json.NewEncoder(w).Encode(result)
 		return
 	}
+
+	priority := 1
+	if operation == "original" || operation == "validate" && r.URL.Query().Get("priority") == "foreground" {
+		priority = 0
+	}
+	releaseIO, e := gallery.io.acquire(r.Context(), binding.key, priority)
+	if e != nil {
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, e.Error(), 503)
+		return
+	}
+	defer releaseIO()
 	c, e := gallery.store.Load(sid, binding.key)
 	if e != nil || !c.Started || r.URL.Query().Get("snapshot") != c.Epoch {
 		http.Error(w, "gallery source changed", 409)
+		return
+	}
+	if operation == "validate" {
+		h.validateGallery(w, r, sid, binding, c, current)
 		return
 	}
 	record, e := gallery.store.Get(sid, r.URL.Query().Get("id"))
@@ -179,16 +211,31 @@ func (h *Hub) serveSessionGallery(w http.ResponseWriter, r *http.Request, operat
 		_ = json.NewEncoder(w).Encode(map[string]any{"schema": 1, "authority_instance_id": h.cfg.InstanceID, "session_id": sid, "message_id": record.Entry.Message, "messages": bounded.Messages, "source_threads": binding.threads})
 		return
 	}
-	if operation != "thumbnail" && operation != "original" {
+	if operation != "thumbnail" && operation != "original" && operation != "preview" && operation != "validate" {
 		http.NotFound(w, r)
 		return
 	}
-	select {
-	case gallery.decode <- struct{}{}:
-		defer func() { <-gallery.decode }()
-	case <-r.Context().Done():
-		return
+
+	if record.Source.Hash != "" && (operation == "thumbnail" || operation == "preview") {
+		cached, mime, hit, err := gallery.store.VerifiedDerivative(record.Source.Hash, operation)
+		if err != nil {
+			http.Error(w, "original unavailable or changed", 404)
+			return
+		}
+		if hit {
+			h.writeGalleryBytes(w, cached, mime, current)
+			return
+		}
 	}
+	if operation != "original" {
+		select {
+		case gallery.decode <- struct{}{}:
+			defer func() { <-gallery.decode }()
+		case <-r.Context().Done():
+			return
+		}
+	}
+
 	var b []byte
 	if record.Source.Hash != "" {
 		b, e = gallery.store.Read(record.Source.Hash)
@@ -220,14 +267,17 @@ func (h *Hub) serveSessionGallery(w http.ResponseWriter, r *http.Request, operat
 		http.Error(w, "image unsupported", 415)
 		return
 	}
-	if operation == "thumbnail" {
-		b, e = gallery.store.Thumbnail(sessionmedia.IDBytes(b), b)
+	if operation == "thumbnail" || operation == "preview" {
+		b, e = gallery.store.Derivative(sessionmedia.IDBytes(b), b, operation)
 		mime = "image/jpeg"
 		if e != nil {
 			http.Error(w, "thumbnail unavailable", 415)
 			return
 		}
 	}
+	h.writeGalleryBytes(w, b, mime, current)
+}
+func (h *Hub) writeGalleryBytes(w http.ResponseWriter, b []byte, mime string, current func() bool) {
 	if !current() {
 		http.Error(w, "source changed", 409)
 		return
@@ -238,7 +288,7 @@ func (h *Hub) serveSessionGallery(w http.ResponseWriter, r *http.Request, operat
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	guarded := &mediaReadWriter{ResponseWriter: w, allowed: current}
 	for offset := 0; offset < len(b); offset += 64 << 10 {
-		if _, e = guarded.Write(b[offset:min(len(b), offset+(64<<10))]); e != nil {
+		if _, e := guarded.Write(b[offset:min(len(b), offset+(64<<10))]); e != nil {
 			return
 		}
 	}
@@ -261,6 +311,11 @@ func (c *galleryCapture) Write(b []byte) (int, error) {
 }
 
 func (h *Hub) advanceGallery(s *session.Session, b galleryBinding, c sessionmedia.Checkpoint, current func() bool) (sessionmedia.Checkpoint, error) {
+	return h.advanceGalleryCommit(s, b, c, current, func(next sessionmedia.Checkpoint, records []sessionmedia.Record) error {
+		return h.sessionGallery().store.CommitCAS(s.ID, c, next, records)
+	})
+}
+func (h *Hub) advanceGalleryCommit(s *session.Session, b galleryBinding, c sessionmedia.Checkpoint, current func() bool, commit func(sessionmedia.Checkpoint, []sessionmedia.Record) error) (sessionmedia.Checkpoint, error) {
 	opts := history.Opts{Scoped: true, Mode: "snapshot", Limit: 100}
 	if c.Started {
 		if !c.Complete {
@@ -331,7 +386,10 @@ func (h *Hub) advanceGallery(s *session.Session, b galleryBinding, c sessionmedi
 	if !current() {
 		return c, errors.New("gallery source changed")
 	}
-	e = h.sessionGallery().store.Commit(s.ID, c, records)
+	e = commit(c, records)
+	if e == nil {
+		c.Revision++
+	}
 	return c, e
 }
 func maps(raw any) []map[string]any {
