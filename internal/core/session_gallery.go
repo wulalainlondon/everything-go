@@ -127,7 +127,7 @@ func (h *Hub) serveSessionGallery(w http.ResponseWriter, r *http.Request, operat
 	gallery := h.sessionGallery()
 	if operation == "capabilities" {
 		if !current() {
-			http.Error(w, "source changed", 409)
+			galleryError(w, current, "source changed", 409)
 			return
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"schema": 1, "authority_instance_id": h.cfg.InstanceID, "session_id": sid, "loading_version": 1, "indexed_list": binding.revision != "", "status": binding.revision != "", "advance": binding.revision != "", "validate": binding.revision != "", "preview": binding.revision != ""})
@@ -143,28 +143,28 @@ func (h *Hub) serveSessionGallery(w http.ResponseWriter, r *http.Request, operat
 		// Reject a stale cursor before a legacy request can advance anything.
 		if token != "" {
 			if _, _, _, _, e := gallery.store.ViewGuarded(sid, binding.key, filter, token, 1, current); e != nil {
-				http.Error(w, "gallery cursor changed; refresh", 409)
+				galleryError(w, current, "gallery cursor changed; refresh", 409)
 				return
 			}
 		}
 		if operation == "advance" || operation == "list" && r.URL.Query().Get("mode") != "indexed" {
 			if e := h.joinGalleryAdvance(r.Context(), s, binding, current); e != nil {
 				w.Header().Set("Retry-After", "1")
-				http.Error(w, e.Error(), 503)
+				galleryError(w, current, e.Error(), 503)
 				return
 			}
 		}
 		if !current() {
-			http.Error(w, "source changed", 409)
+			galleryError(w, current, "source changed", 409)
 			return
 		}
 		c, items, next, count, e := gallery.store.ViewGuarded(sid, binding.key, filter, token, limit, current)
 		if e != nil {
-			http.Error(w, "gallery cursor changed; refresh", 409)
+			galleryError(w, current, "gallery cursor changed; refresh", 409)
 			return
 		}
 		if !current() {
-			http.Error(w, "source changed", 409)
+			galleryError(w, current, "source changed", 409)
 			return
 		}
 		coverage := "indexing"
@@ -188,13 +188,13 @@ func (h *Hub) serveSessionGallery(w http.ResponseWriter, r *http.Request, operat
 	releaseIO, e := gallery.io.acquire(r.Context(), binding.key, priority)
 	if e != nil {
 		w.Header().Set("Retry-After", "1")
-		http.Error(w, e.Error(), 503)
+		galleryError(w, current, e.Error(), 503)
 		return
 	}
 	defer releaseIO()
 	c, e := gallery.store.CheckpointView(sid, binding.key, current)
 	if e != nil || !c.Started || r.URL.Query().Get("snapshot") != c.Epoch {
-		http.Error(w, "gallery source changed", 409)
+		galleryError(w, current, "gallery source changed", 409)
 		return
 	}
 	if operation == "validate" {
@@ -203,7 +203,7 @@ func (h *Hub) serveSessionGallery(w http.ResponseWriter, r *http.Request, operat
 	}
 	record, e := gallery.store.RecordView(sid, c, r.URL.Query().Get("id"), current)
 	if e != nil {
-		http.Error(w, "picture not found", 404)
+		galleryError(w, current, "picture not found", 404)
 		return
 	}
 	if operation == "message" {
@@ -211,31 +211,31 @@ func (h *Hub) serveSessionGallery(w http.ResponseWriter, r *http.Request, operat
 		// active chat window, read receipts or event/delivery journals.
 		res, e := loadLogicalSessionHistory(binding.provider, binding.threads, history.Opts{Scoped: true, Mode: "continuation", KnownLast: record.Entry.Message, Limit: 12})
 		if e != nil || !res.KnownIDFound || len(res.Messages) == 0 || res.Messages[0]["source_message_id"] != record.Entry.Message {
-			http.Error(w, "original message unavailable", 404)
+			galleryError(w, current, "original message unavailable", 404)
 			return
 		}
 		rows := h.projectMediaHistory(s, res.Messages)
 		if !current() {
-			http.Error(w, "source changed", 409)
+			galleryError(w, current, "source changed", 409)
 			return
 		}
 		bounded, err := boundScopedHistoryFrame(&history.Result{Messages: rows}, clientproto.Command{Mode: "continuation"})
 		if err != nil {
-			http.Error(w, "original message exceeds history window budget", 413)
+			galleryError(w, current, "original message exceeds history window budget", 413)
 			return
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"schema": 1, "authority_instance_id": h.cfg.InstanceID, "session_id": sid, "message_id": record.Entry.Message, "messages": bounded.Messages, "source_threads": binding.threads})
 		return
 	}
 	if operation != "thumbnail" && operation != "original" && operation != "preview" && operation != "validate" {
-		http.NotFound(w, r)
+		galleryError(w, current, "not found", http.StatusNotFound)
 		return
 	}
 
 	if record.Source.Hash != "" && (operation == "thumbnail" || operation == "preview") {
 		cached, mime, hit, err := gallery.store.VerifiedDerivative(record.Source.Hash, operation)
 		if err != nil {
-			http.Error(w, "original unavailable or changed", 404)
+			galleryError(w, current, "original unavailable or changed", 404)
 			return
 		}
 		if hit {
@@ -267,7 +267,7 @@ func (h *Hub) serveSessionGallery(w http.ResponseWriter, r *http.Request, operat
 		capture := newGalleryCapture()
 		h.serveMediaAttachment(capture, copyReq)
 		if capture.status != 200 {
-			http.Error(w, "original attachment unavailable", capture.status)
+			galleryError(w, current, "original attachment unavailable", capture.status)
 			return
 		}
 		b = capture.body.Bytes()
@@ -275,19 +275,26 @@ func (h *Hub) serveSessionGallery(w http.ResponseWriter, r *http.Request, operat
 		e = errors.New("original unavailable")
 	}
 	if e != nil || len(b) > sessionmedia.MaxImageBytes || record.Entry.SHA256 != "" && sessionmedia.IDBytes(b) != record.Entry.SHA256 {
-		http.Error(w, "original unavailable or changed", 404)
+		galleryError(w, current, "original unavailable or changed", 404)
 		return
 	}
 	mime, _, _, e := sessionmedia.ImageInfo(b)
 	if e != nil {
-		http.Error(w, "image unsupported", 415)
+		galleryError(w, current, "image unsupported", 415)
 		return
 	}
 	if operation == "thumbnail" || operation == "preview" {
 		b, e = gallery.store.Derivative(sessionmedia.IDBytes(b), b, operation, current)
 		mime = "image/jpeg"
 		if e != nil {
-			http.Error(w, "thumbnail unavailable", 415)
+			status, message := http.StatusUnsupportedMediaType, "thumbnail unavailable"
+			if errors.Is(e, sessionmedia.ErrSourceRetired) {
+				status, message = http.StatusConflict, "gallery source changed"
+			} else if errors.Is(e, sessionmedia.ErrResourceBusy) {
+				status, message = http.StatusServiceUnavailable, "gallery resource busy"
+				w.Header().Set("Retry-After", "1")
+			}
+			galleryError(w, current, message, status)
 			return
 		}
 	}
@@ -685,4 +692,14 @@ func galleryMarkdownPaths(content, cwd string) []string {
 
 func galleryResourceError(e error) bool {
 	return errors.Is(e, sessionmedia.ErrResourceBusy) || errors.Is(e, sessionmedia.ErrSourceRetired)
+}
+
+// A known retired source is always observable as authority/snapshot retirement,
+// regardless of the lower-level operation that noticed it. Resource pressure
+// remains retryable, never mislabeled as an unsupported image format.
+func galleryError(w http.ResponseWriter, current func() bool, message string, status int) {
+	if !current() {
+		message, status = "gallery source changed", http.StatusConflict
+	}
+	http.Error(w, message, status)
 }

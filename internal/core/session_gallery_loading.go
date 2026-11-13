@@ -144,7 +144,7 @@ func (h *Hub) validateGallery(w http.ResponseWriter, r *http.Request, sid string
 		d := json.NewDecoder(io.LimitReader(r.Body, 16385))
 		d.DisallowUnknownFields()
 		if d.Decode(&body) != nil || d.Decode(new(any)) != io.EOF || len(body.Items) < 1 || len(body.Items) > 12 {
-			http.Error(w, "invalid validation batch", 400)
+			galleryError(w, current, "invalid validation batch", 400)
 			return
 		}
 		items = body.Items
@@ -152,12 +152,12 @@ func (h *Hub) validateGallery(w http.ResponseWriter, r *http.Request, sid string
 	out := []map[string]any{}
 	for _, item := range items {
 		if item.Purpose != "thumbnail_display" && item.Purpose != "full_preview" && item.Purpose != "download" && item.Purpose != "quote" {
-			http.Error(w, "invalid validation purpose", 400)
+			galleryError(w, current, "invalid validation purpose", 400)
 			return
 		}
 		record, e := h.sessionGallery().store.RecordView(sid, c, item.ID, current)
 		if e != nil || record.Entry.Availability != "available" {
-			http.Error(w, "original unavailable", 404)
+			galleryError(w, current, "original unavailable", 404)
 			return
 		}
 		var hash, mime string
@@ -178,7 +178,7 @@ func (h *Hub) validateGallery(w http.ResponseWriter, r *http.Request, sid string
 			capture := newGalleryCapture()
 			h.serveMediaAttachment(capture, copyReq)
 			if capture.status != 200 {
-				http.Error(w, "original attachment unavailable", capture.status)
+				galleryError(w, current, "original attachment unavailable", capture.status)
 				return
 			}
 			bytes := capture.body.Bytes()
@@ -189,17 +189,17 @@ func (h *Hub) validateGallery(w http.ResponseWriter, r *http.Request, sid string
 			e = errors.New("original missing")
 		}
 		if e != nil || item.SHA != "" && item.SHA != hash || record.Entry.SHA256 != "" && record.Entry.SHA256 != hash {
-			http.Error(w, "original unavailable or changed", 409)
+			galleryError(w, current, "original unavailable or changed", 409)
 			return
 		}
 		if !current() {
-			http.Error(w, "source changed", 409)
+			galleryError(w, current, "source changed", 409)
 			return
 		}
 		out = append(out, map[string]any{"id": item.ID, "purpose": item.Purpose, "sha256": hash, "mime_type": mime, "size_bytes": size, "width": width, "height": height, "allowed": true})
 	}
 	if !current() {
-		http.Error(w, "source changed", 409)
+		galleryError(w, current, "source changed", 409)
 		return
 	}
 	_ = json.NewEncoder(w).Encode(map[string]any{"schema": 1, "authority_instance_id": h.cfg.InstanceID, "session_id": sid, "snapshot": c.Epoch, "items": out})
