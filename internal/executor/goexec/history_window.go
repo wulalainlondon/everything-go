@@ -227,3 +227,33 @@ func loadNativeWindowPage(kind, resumeID string, opts history.Opts, read func(in
 	}
 	return result, nil
 }
+
+func (c *Codex) HistorySourceRevision(id string) (string, error) {
+	path, e := c.findCodexSessionFileChecked(id)
+	if e != nil {
+		return "", e
+	}
+	if path == "" {
+		return "", fmt.Errorf("history source not available")
+	}
+	if e = history.CheckFile("codex", path); e != nil {
+		return "", e
+	}
+	if strings.HasSuffix(path, ".gz") {
+		return history.ImmutableFileGeneration(path)
+	}
+	return history.FileWindowRevision(path)
+}
+func (c *Claude) HistorySourceRevision(id string) (string, error) {
+	path, e := c.findSessionFileChecked(id)
+	if e != nil {
+		return "", e
+	}
+	if path == "" {
+		return "", fmt.Errorf("history source not available")
+	}
+	if e = history.CheckFile("claude", path); e != nil {
+		return "", e
+	}
+	return history.FileWindowRevision(path)
+}

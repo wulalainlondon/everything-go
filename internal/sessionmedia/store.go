@@ -59,15 +59,16 @@ type Record struct {
 	Source Source
 }
 type Checkpoint struct {
-	Binding   string `json:"binding"`
-	Epoch     string `json:"epoch"`
-	Secret    string `json:"secret"`
-	Before    string `json:"before"`
-	Last      string `json:"last"`
-	Started   bool   `json:"started"`
-	Complete  bool   `json:"complete"`
-	MoreAfter bool   `json:"more_after"`
-	Revision  uint64 `json:"revision"`
+	Binding         string `json:"binding"`
+	Epoch           string `json:"epoch"`
+	Secret          string `json:"secret"`
+	Before          string `json:"before"`
+	Last            string `json:"last"`
+	Started         bool   `json:"started"`
+	Complete        bool   `json:"complete"`
+	MoreAfter       bool   `json:"more_after"`
+	Revision        uint64 `json:"revision"`
+	HistoryRevision string `json:"history_revision,omitempty"`
 }
 type Store struct {
 	free func(string) (uint64, error)
@@ -127,8 +128,14 @@ func ID(parts ...string) string {
 	return hex.EncodeToString(h[:])
 }
 func (s *Store) Load(session, binding string) (Checkpoint, error) {
+	return s.LoadGuarded(session, binding, func() bool { return true })
+}
+func (s *Store) LoadGuarded(session, binding string, current func() bool) (Checkpoint, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if !current() {
+		return Checkpoint{}, errors.New("gallery source retired")
+	}
 	return s.loadLocked(session, binding)
 }
 func (s *Store) loadLocked(session, binding string) (Checkpoint, error) {
@@ -244,8 +251,14 @@ func (s *Store) List(session string, c Checkpoint, filter, token string, limit i
 
 // Every component of a response is captured under the same store lock/read view.
 func (s *Store) View(session, binding, filter, token string, limit int) (Checkpoint, []Entry, string, int, error) {
+	return s.ViewGuarded(session, binding, filter, token, limit, func() bool { return true })
+}
+func (s *Store) ViewGuarded(session, binding, filter, token string, limit int, current func() bool) (Checkpoint, []Entry, string, int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if !current() {
+		return Checkpoint{}, nil, "", 0, errors.New("gallery source retired")
+	}
 	c, e := s.loadLocked(session, binding)
 	if e != nil {
 		return c, nil, "", 0, e
@@ -340,6 +353,9 @@ func (s *Store) listLocked(session string, c Checkpoint, filter, token string, l
 func (s *Store) Get(session, id string) (Record, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.getLocked(session, id)
+}
+func (s *Store) getLocked(session, id string) (Record, error) {
 	if e := s.open(); e != nil {
 		return Record{}, e
 	}
@@ -410,10 +426,15 @@ func (s *Store) Put(b []byte) (string, error) {
 	if len(b) == 0 || len(b) > MaxImageBytes {
 		return "", errors.New("image size unsupported")
 	}
-	mime, _, _, e := ImageInfo(b)
+	mime, width, height, e := ImageInfo(b)
 	if e != nil {
 		return "", e
 	}
+	release, e := acquireImageDecode(b, width, height, mime == "image/gif", false)
+	if e != nil {
+		return "", e
+	}
+	defer release()
 	if e = validateImage(b, mime); e != nil {
 		return "", errors.New("image incomplete or undecodable")
 	}
@@ -445,7 +466,7 @@ func (s *Store) Put(b []byte) (string, error) {
 			return "", e
 		}
 		var previews int64
-		if e := s.db.QueryRow("SELECT COALESCE(sum(bytes),0) FROM derivatives WHERE variant='preview'").Scan(&previews); e != nil {
+		if previews, e = s.previewBytes(""); e != nil {
 			return "", e
 		}
 		if total+previews+int64(len(b))+81920 > maxVaultBytes {
@@ -516,6 +537,11 @@ func Thumbnail(b []byte) ([]byte, error) {
 	if e != nil {
 		return nil, e
 	}
+	release, e := acquireImageDecode(b, w, h, false, true)
+	if e != nil {
+		return nil, e
+	}
+	defer release()
 	src, _, e := image.Decode(bytes.NewReader(b))
 	if e != nil {
 		return nil, e
@@ -570,4 +596,41 @@ func (s *Store) Thumbnail(hash string, b []byte) ([]byte, error) {
 		_ = os.Rename(tmp, path)
 	}
 	return thumb, nil
+}
+
+// Asset reads are read-only: an obsolete queued request may never reset a newer
+// binding. Record and checkpoint are checked in one committed store view.
+func (s *Store) checkpointLocked(session, binding string, current func() bool) (Checkpoint, error) {
+	if !current() {
+		return Checkpoint{}, errors.New("gallery source retired")
+	}
+	if e := s.open(); e != nil {
+		return Checkpoint{}, e
+	}
+	var raw []byte
+	var c Checkpoint
+	if e := s.db.QueryRow("SELECT value FROM checkpoints WHERE session=?", session).Scan(&raw); e != nil {
+		return c, e
+	}
+	if json.Unmarshal(raw, &c) != nil || c.Binding != binding {
+		return c, errors.New("gallery source changed")
+	}
+	return c, nil
+}
+func (s *Store) CheckpointView(session, binding string, current func() bool) (Checkpoint, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.checkpointLocked(session, binding, current)
+}
+func (s *Store) RecordView(session string, expected Checkpoint, id string, current func() bool) (Record, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c, e := s.checkpointLocked(session, expected.Binding, current)
+	if e != nil {
+		return Record{}, e
+	}
+	if c.Epoch != expected.Epoch || c.Revision != expected.Revision {
+		return Record{}, errors.New("gallery catalog changed")
+	}
+	return s.getLocked(session, id)
 }

@@ -36,7 +36,7 @@ func (h *Hub) joinGalleryAdvance(ctx context.Context, s *session.Session, b gall
 			g.jobsMu.Unlock()
 			return errors.New("gallery source changed")
 		}
-		checkpoint, err := g.store.Load(s.ID, b.key)
+		checkpoint, err := g.store.LoadGuarded(s.ID, b.key, current)
 		if err != nil {
 			g.jobsMu.Unlock()
 			return err
@@ -142,7 +142,7 @@ func (h *Hub) validateGallery(w http.ResponseWriter, r *http.Request, sid string
 			http.Error(w, "invalid validation purpose", 400)
 			return
 		}
-		record, e := h.sessionGallery().store.Get(sid, item.ID)
+		record, e := h.sessionGallery().store.RecordView(sid, c, item.ID, current)
 		if e != nil || record.Entry.Availability != "available" {
 			http.Error(w, "original unavailable", 404)
 			return

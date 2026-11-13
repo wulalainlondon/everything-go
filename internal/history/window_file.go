@@ -384,22 +384,51 @@ func ReadFileWindow(path string, cursorLine, budget int) (FileWindow, error) {
 	return FileWindow{Lines: lines, MoreBefore: start > 0 || cut, MoreAfter: end < idx.size, Generation: hex.EncodeToString(generation[:]), StartLine: base + 1, EndLine: base + int(physicalLineCount(raw))}, nil
 }
 
-func FileWindowGeneration(path string) (string, error) {
+// FileWindowWitness reads only bounded head/stat metadata. Append changes the
+// revision while preserving the durable generation; no history-row scan occurs.
+func FileWindowWitness(path string) (string, string, error) {
 	f, e := os.Open(path)
 	if e != nil {
-		return "", e
+		return "", "", e
 	}
 	defer f.Close()
 	info, e := f.Stat()
 	if e != nil {
-		return "", e
+		return "", "", e
 	}
-	idx, e := indexHistoryFile(f, path, info)
+	head := make([]byte, 8192)
+	n, e := f.ReadAt(head, 0)
+	if e != nil && e != io.EOF {
+		return "", "", e
+	}
+	head = head[:n]
+	if at := bytes.IndexByte(head, '\n'); at >= 0 {
+		head = head[:at]
+	}
+	sum := sha256.Sum256(head)
+	identity := hex.EncodeToString(sum[:])
+	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+		identity = fmt.Sprintf("%d:%d:%s", stat.Dev, stat.Ino, identity)
+	}
+	generation, e := retainedFileGeneration(f, path, identity, info)
 	if e != nil {
-		return "", e
+		return "", "", e
 	}
-	sum := sha256.Sum256([]byte(idx.generation))
-	return hex.EncodeToString(sum[:]), nil
+	after, e := os.Stat(path)
+	if e != nil || !os.SameFile(info, after) || after.Size() != info.Size() || after.ModTime() != info.ModTime() {
+		return "", "", fmt.Errorf("history changed during witness")
+	}
+	gen := sha256.Sum256([]byte(generation))
+	revision := sha256.Sum256([]byte(fmt.Sprintf("%s:%d:%d", generation, info.Size(), info.ModTime().UnixNano())))
+	return hex.EncodeToString(gen[:]), hex.EncodeToString(revision[:]), nil
+}
+func FileWindowGeneration(path string) (string, error) {
+	generation, _, e := FileWindowWitness(path)
+	return generation, e
+}
+func FileWindowRevision(path string) (string, error) {
+	_, revision, e := FileWindowWitness(path)
+	return revision, e
 }
 func ImmutableFileGeneration(path string) (string, error) {
 	f, e := os.Open(path)

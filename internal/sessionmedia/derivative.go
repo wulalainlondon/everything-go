@@ -92,6 +92,11 @@ func (s *Store) Derivative(hash string, b []byte, variant string) ([]byte, error
 	if e != nil {
 		return nil, e
 	}
+	release, e := acquireImageDecode(b, w, h, false, true)
+	if e != nil {
+		return nil, e
+	}
+	defer release()
 	src, _, e := image.Decode(bytes.NewReader(b))
 	if e != nil {
 		return nil, e
@@ -135,7 +140,7 @@ func (s *Store) Derivative(hash string, b []byte, variant string) ([]byte, error
 	if e = s.db.QueryRow("SELECT COALESCE(sum(bytes+81920),0) FROM assets").Scan(&originals); e != nil {
 		return nil, e
 	}
-	if e = s.db.QueryRow("SELECT COALESCE(sum(bytes),0) FROM derivatives WHERE variant='preview' AND NOT(original=? AND variant=?)", hash, variant).Scan(&previews); e != nil {
+	if previews, e = s.previewBytes(derivativePath(s.root, hash, variant)); e != nil {
 		return nil, e
 	}
 	free, e := s.free(s.root)
@@ -157,11 +162,22 @@ func (s *Store) Derivative(hash string, b []byte, variant string) ([]byte, error
 	if e == nil {
 		e = ce
 	}
+	owned, _ := os.Stat(tmp)
 	if e == nil {
 		e = os.Rename(tmp, derivativePath(s.root, hash, variant))
 	}
 	if e == nil {
 		_, e = s.db.Exec("INSERT OR REPLACE INTO derivatives VALUES(?,?,1,?,?)", hash, variant, IDBytes(data), len(data))
+	}
+	if e != nil && owned != nil {
+		path := derivativePath(s.root, hash, variant)
+		if now, err := os.Lstat(path); err == nil && os.SameFile(owned, now) {
+			_ = os.Remove(path)
+		}
+	}
+	if dir, err := os.Open(filepath.Join(s.root, "blobs")); err == nil {
+		_ = dir.Sync()
+		_ = dir.Close()
 	}
 	// Cache failure never grants access to unverified data nor changes original.
 	return data, nil
@@ -172,4 +188,31 @@ func derivativePath(root, hash, variant string) string {
 		return filepath.Join(root, "blobs", hash+".thumb.jpg")
 	}
 	return filepath.Join(root, "blobs", hash+"."+variant+".v1.jpg")
+}
+
+// Count actual published preview files, including crash-orphans lacking a
+// manifest. Such files are never trusted hits, and can never bypass quota.
+func (s *Store) previewBytes(exclude string) (int64, error) {
+	paths, e := filepath.Glob(filepath.Join(s.root, "blobs", "*.preview.v1.jpg"))
+	if e != nil {
+		return 0, e
+	}
+	var total int64
+	for _, path := range paths {
+		if path == exclude {
+			continue
+		}
+		info, e := os.Lstat(path)
+		if e != nil {
+			return 0, e
+		}
+		if !info.Mode().IsRegular() {
+			return 0, errors.New("invalid preview cache file")
+		}
+		total += info.Size()
+		if total > maxVaultBytes {
+			return total, errors.New("preview cache exceeds quota")
+		}
+	}
+	return total, nil
 }

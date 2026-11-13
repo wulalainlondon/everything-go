@@ -111,3 +111,36 @@ func TestLoadingOrientedViewPreservesCameraTransforms(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadingDecodeAdmissionAndCrashOrphanQuota(t *testing.T) {
+	b := testPNG(t, color.White)
+	release, e := acquireImageDecode(b, 1, 1, false, false)
+	if e != nil {
+		t.Fatal(e)
+	}
+	imageDecodes.Lock()
+	active := imageDecodes.active
+	imageDecodes.Unlock()
+	if !active {
+		t.Fatal("decode reservation not held")
+	}
+	release()
+	release()
+	if free, e := acquireImageDecode(b, 8000, 8000, false, true); e == nil {
+		free()
+		t.Fatal("unqualified64MP allocation admitted")
+	}
+	s := New(t.TempDir())
+	defer s.Close()
+	if _, e = s.Put(b); e != nil {
+		t.Fatal(e)
+	}
+	path := filepath.Join(s.root, "blobs", ID("crash-orphan")+".preview.v1.jpg")
+	if e = os.WriteFile(path, []byte("orphan-owned-by-fixture"), 0600); e != nil {
+		t.Fatal(e)
+	}
+	n, e := s.previewBytes("")
+	if e != nil || n != int64(len("orphan-owned-by-fixture")) {
+		t.Fatal("crash orphan unaccounted", n, e)
+	}
+}

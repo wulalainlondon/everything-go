@@ -27,7 +27,7 @@ func (a *galleryIOAdmission) dispatch() {
 			if w.priority > 0 && a.background >= 1 {
 				continue
 			}
-			if best < 0 || galleryRank(w) < galleryRank(a.queue[best]) {
+			if best < 0 || (galleryRank(w) < galleryRank(a.queue[best]) || galleryRank(w) == galleryRank(a.queue[best]) && w.at.Before(a.queue[best].at)) {
 				best = i
 			}
 		}
@@ -45,8 +45,8 @@ func (a *galleryIOAdmission) dispatch() {
 	}
 }
 func galleryRank(w *galleryIOWaiter) int {
-	if w.priority > 1 && time.Since(w.at) >= 2*time.Second {
-		return 1
+	if w.priority > 0 && time.Since(w.at) >= 2*time.Second {
+		return 0
 	}
 	return w.priority
 }

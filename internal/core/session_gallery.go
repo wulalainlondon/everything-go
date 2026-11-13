@@ -49,6 +49,7 @@ type galleryBinding struct {
 	provider backend.HistoryProvider
 	threads  []string
 	key      string
+	revision string
 }
 
 func (h *Hub) galleryBinding(s *session.Session) (galleryBinding, error) {
@@ -68,15 +69,30 @@ func (h *Hub) galleryBinding(s *session.Session) (galleryBinding, error) {
 	if len(ids) == 0 {
 		return galleryBinding{}, errors.New("history source not ready")
 	}
-	parts := []string{h.cfg.InstanceID, s.ID, s.Backend(), s.ResumeID()}
+	snap := s.Snapshot()
+	parts := []string{h.cfg.InstanceID, s.ID, snap.Backend, snap.ResumeID, strconv.FormatUint(snap.SourceRevision, 10)}
+	witnesses := []string{}
+	revisions, supported := provider.(interface{ HistorySourceRevision(string) (string, error) })
 	for _, id := range ids {
 		g, e := generations.HistorySourceGeneration(id)
 		if e != nil || g == "" {
 			return galleryBinding{}, errors.New("history source unavailable")
 		}
 		parts = append(parts, id, g)
+		if supported {
+			v, err := revisions.HistorySourceRevision(id)
+			if err != nil || v == "" {
+				supported = false
+			} else {
+				witnesses = append(witnesses, id, v)
+			}
+		}
 	}
-	return galleryBinding{provider, ids, sessionmedia.ID(parts...)}, nil
+	revision := ""
+	if supported {
+		revision = sessionmedia.ID(witnesses...)
+	}
+	return galleryBinding{provider: provider, threads: ids, key: sessionmedia.ID(parts...), revision: revision}, nil
 }
 func (h *Hub) serveSessionGallery(w http.ResponseWriter, r *http.Request, operation string) {
 	w.Header().Set("Cache-Control", "private, no-store")
@@ -114,7 +130,7 @@ func (h *Hub) serveSessionGallery(w http.ResponseWriter, r *http.Request, operat
 			http.Error(w, "source changed", 409)
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"schema": 1, "authority_instance_id": h.cfg.InstanceID, "session_id": sid, "loading_version": 1, "indexed_list": true, "status": true, "advance": true, "validate": true, "preview": true})
+		_ = json.NewEncoder(w).Encode(map[string]any{"schema": 1, "authority_instance_id": h.cfg.InstanceID, "session_id": sid, "loading_version": 1, "indexed_list": binding.revision != "", "status": binding.revision != "", "advance": binding.revision != "", "validate": binding.revision != "", "preview": binding.revision != ""})
 		return
 	}
 	if operation == "list" || operation == "status" || operation == "advance" {
@@ -126,7 +142,7 @@ func (h *Hub) serveSessionGallery(w http.ResponseWriter, r *http.Request, operat
 		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 		// Reject a stale cursor before a legacy request can advance anything.
 		if token != "" {
-			if _, _, _, _, e := gallery.store.View(sid, binding.key, filter, token, 1); e != nil {
+			if _, _, _, _, e := gallery.store.ViewGuarded(sid, binding.key, filter, token, 1, current); e != nil {
 				http.Error(w, "gallery cursor changed; refresh", 409)
 				return
 			}
@@ -142,7 +158,7 @@ func (h *Hub) serveSessionGallery(w http.ResponseWriter, r *http.Request, operat
 			http.Error(w, "source changed", 409)
 			return
 		}
-		c, items, next, count, e := gallery.store.View(sid, binding.key, filter, token, limit)
+		c, items, next, count, e := gallery.store.ViewGuarded(sid, binding.key, filter, token, limit, current)
 		if e != nil {
 			http.Error(w, "gallery cursor changed; refresh", 409)
 			return
@@ -155,7 +171,7 @@ func (h *Hub) serveSessionGallery(w http.ResponseWriter, r *http.Request, operat
 		if c.Started && c.Complete && !c.MoreAfter {
 			coverage = "complete"
 		}
-		result := map[string]any{"loading_version": 1, "loading_capabilities": map[string]bool{"indexed_list": true, "status": true, "advance": true, "validate": true, "preview": true}, "schema": 1, "authority_instance_id": h.cfg.InstanceID, "session_id": sid, "snapshot": c.Epoch, "revision": c.Revision, "coverage": coverage, "count": count}
+		result := map[string]any{"loading_version": 1, "loading_capabilities": map[string]bool{"indexed_list": binding.revision != "", "status": binding.revision != "", "advance": binding.revision != "", "validate": binding.revision != "", "preview": binding.revision != ""}, "schema": 1, "authority_instance_id": h.cfg.InstanceID, "session_id": sid, "snapshot": c.Epoch, "revision": c.Revision, "coverage": coverage, "count": count, "dirty": binding.revision != "" && c.HistoryRevision != binding.revision}
 		if operation == "list" {
 			result["items"] = items
 			result["next_cursor"] = next
@@ -176,7 +192,7 @@ func (h *Hub) serveSessionGallery(w http.ResponseWriter, r *http.Request, operat
 		return
 	}
 	defer releaseIO()
-	c, e := gallery.store.Load(sid, binding.key)
+	c, e := gallery.store.CheckpointView(sid, binding.key, current)
 	if e != nil || !c.Started || r.URL.Query().Get("snapshot") != c.Epoch {
 		http.Error(w, "gallery source changed", 409)
 		return
@@ -185,7 +201,7 @@ func (h *Hub) serveSessionGallery(w http.ResponseWriter, r *http.Request, operat
 		h.validateGallery(w, r, sid, binding, c, current)
 		return
 	}
-	record, e := gallery.store.Get(sid, r.URL.Query().Get("id"))
+	record, e := gallery.store.RecordView(sid, c, r.URL.Query().Get("id"), current)
 	if e != nil {
 		http.Error(w, "picture not found", 404)
 		return
@@ -383,6 +399,7 @@ func (h *Hub) advanceGalleryCommit(s *session.Session, b galleryBinding, c sessi
 		return c, errors.New("gallery requires a smaller history range")
 	}
 	c.Started = true
+	c.HistoryRevision = b.revision
 	if !current() {
 		return c, errors.New("gallery source changed")
 	}
@@ -464,12 +481,7 @@ func (h *Hub) galleryRecords(s *session.Session, threads []string, row map[strin
 	}
 	populate := func(entry *sessionmedia.Entry, hash string) {
 		entry.SHA256 = hash
-		b, e := store.Read(hash)
-		if e != nil {
-			entry.Availability = "missing"
-			return
-		}
-		mime, w, height, e := sessionmedia.ImageInfo(b)
+		mime, w, height, size, e := store.VerifyOriginal(hash)
 		if e != nil {
 			entry.Availability = "unsupported"
 			return
@@ -477,7 +489,7 @@ func (h *Hub) galleryRecords(s *session.Session, threads []string, row map[strin
 		entry.MIME = mime
 		entry.Width = w
 		entry.Height = height
-		entry.Bytes = int64(len(b))
+		entry.Bytes = size
 		entry.Availability = "available"
 	}
 	if role == "user" {

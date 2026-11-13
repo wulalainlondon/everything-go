@@ -8,6 +8,7 @@ import (
 	"everything-go/internal/sessionmedia"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -186,4 +187,13 @@ func TestGalleryAdvanceCoalescesAndFirstCancellationDoesNotBorrowOrKill(t *testi
 	if e != nil || !c.Started || p.loads != 1 {
 		t.Fatal("coalesced commit/read snapshot failed", c, p.loads, e)
 	}
+}
+
+func (p *historyRangeFixtureProvider) HistorySourceRevision(id string) (string, error) {
+	rows := p.byID[id]
+	last := ""
+	if len(rows) > 0 {
+		last, _ = rows[len(rows)-1]["source_message_id"].(string)
+	}
+	return sessionmedia.ID(p.generation[id], last, strconv.Itoa(len(rows))), nil
 }
