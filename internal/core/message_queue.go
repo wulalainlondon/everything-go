@@ -544,7 +544,7 @@ func (h *Hub) runQueuedMessage(s *session.Session, requestID string) {
 			return h.asyncBatchSendGuard(s, payload.AsyncBatch)
 		})
 	}
-	releaseMedia, mediaErr := h.acquireModelMediaReader(s, requestID, payload)
+	releaseMedia, mediaErr := h.acquireModelMediaReader(s, requestID, &payload)
 	if mediaErr != nil {
 		h.Emit(backend.NewError(s.ID, requestID, "media_reader_unavailable", mediaErr.Error()))
 		return
@@ -945,7 +945,7 @@ func (h *Hub) promoteQueuedMessage(c *Client, cmd clientproto.Command) {
 				steerContext = backend.WithAsyncBatch(steerContext, payload.AsyncBatch)
 				steerContext = backend.WithTaskInputGuard(steerContext, func() error { return h.asyncBatchSendGuard(s, payload.AsyncBatch) })
 			}
-			release, e := h.acquireModelMediaReader(s, cmd.RequestID, payload)
+			release, e := h.acquireModelMediaReader(s, cmd.RequestID, &payload)
 			if e != nil {
 				steerErr = fmt.Errorf("%w: %v", backend.ErrSteerRejected, e)
 			} else {

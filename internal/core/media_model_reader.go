@@ -6,12 +6,18 @@ import (
 	"encoding/json"
 	"errors"
 
+	"everything-go/internal/backend"
 	"everything-go/internal/messagequeue"
 	"everything-go/internal/session"
 )
 
-func (h *Hub) acquireModelMediaReader(s *session.Session, request string, p queuedPayload) (func(), error) {
+func (h *Hub) acquireModelMediaReader(s *session.Session, request string, p *queuedPayload) (func(), error) {
 	if p.MediaBatchID == "" {
+		for _, f := range p.Files {
+			if backend.IsAudioType(f.MediaType) {
+				return nil, errors.New("recording requires original media admission")
+			}
+		}
 		return func() {}, nil
 	}
 	done, e := h.media.begin()
@@ -28,7 +34,7 @@ func (h *Hub) acquireModelMediaReader(s *session.Session, request string, p queu
 			batch = b
 		}
 	}
-	if batch != nil && batch.State == "admitting_unknown" && mediaQueueBinding(batch, p) {
+	if batch != nil && batch.State == "admitting_unknown" && mediaQueueBinding(batch, *p) {
 		if entry, found, e := h.messageQueue.GetEffective(s.ID, request); e == nil && found {
 			var original queuedPayload
 			if json.Unmarshal(entry.Payload, &original) == nil && mediaQueueBinding(batch, original) {
@@ -39,7 +45,7 @@ func (h *Hub) acquireModelMediaReader(s *session.Session, request string, p queu
 			}
 		}
 	}
-	if batch == nil || batch.State != "admitted" || mediaBusinessID(batch) != request || !mediaQueueBinding(batch, p) {
+	if batch == nil || batch.State != "admitted" || mediaBusinessID(batch) != request || !mediaQueueBinding(batch, *p) {
 		return nil, errors.New("media admission unresolved")
 	}
 	if e := h.mediaExecutionCurrent(batch); e != nil {
@@ -55,6 +61,9 @@ func (h *Hub) acquireModelMediaReader(s *session.Session, request string, p queu
 	}
 	if !currentActor {
 		return nil, errors.New("media original credential generation retired")
+	}
+	if err := h.restoreModelAudioInput(s, p, batch); err != nil {
+		return nil, err
 	}
 	if h.media.data.Readers == nil {
 		h.media.data.Readers = map[string]mediaReadLease{}
@@ -98,4 +107,37 @@ func (h *Hub) acquireModelMediaReader(s *session.Session, request string, p queu
 		}
 		_ = h.media.save()
 	}, nil
+}
+
+// Queue JSON intentionally drops server-only trust markers. Rebuild audio trust
+// only inside the original admitted/current model-reader boundary, using the
+// exact batch descriptor and freshly verified immutable upload bytes.
+func (h *Hub) restoreModelAudioInput(s *session.Session, p *queuedPayload, batch *mediaBatch) error {
+	files := append([]backend.FileAttachment(nil), p.Files...)
+	for n, file := range files {
+		if !backend.IsAudioType(file.MediaType) {
+			continue
+		}
+		matched := false
+		for _, item := range batch.Items {
+			if batch.Objects[item.UploadRequestID] == file.AttachmentID && file.AttachmentID != "" && item.UploadKind == "file" && item.MediaType == file.MediaType && item.SHA256 == file.SHA256 && item.SizeBytes == file.SizeBytes && item.Name == file.Name {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return errors.New("recording differs from original admitted batch")
+		}
+		file.VerifiedAudioPath = ""
+		_, restored, err := h.resolveUploadedVideos(s.ID, "", []backend.FileAttachment{file})
+		if err != nil {
+			return err
+		}
+		if len(restored) != 1 || restored[0].VerifiedAudioPath == "" || restored[0].SHA256 != file.SHA256 || restored[0].SizeBytes != file.SizeBytes {
+			return errors.New("recording verification unavailable at consumption")
+		}
+		files[n] = restored[0]
+	}
+	p.Files = files
+	return nil
 }

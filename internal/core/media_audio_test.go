@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"everything-go/internal/backend"
 	"everything-go/internal/clientproto"
 	"everything-go/internal/protocol"
@@ -13,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 type recordingFixtureExecutor struct{ *mediaIntakeExecutor }
@@ -84,7 +86,7 @@ func TestRecordingTypedUploadRetainsOriginalReceiptAndNativeAudioReference(t *te
 	if _, e := exec.LookPath("ffprobe"); e != nil {
 		t.Skip("real recording container validation unavailable")
 	}
-	h, s, c, _ := mediaFixture(t)
+	h, s, c, starts := mediaFixture(t)
 	h.SetExecutor(&recordingFixtureExecutor{h.exec.(*mediaIntakeExecutor)})
 	data := make([]byte, 44+32000)
 	copy(data, "RIFF")
@@ -103,7 +105,7 @@ func TestRecordingTypedUploadRetainsOriginalReceiptAndNativeAudioReference(t *te
 	digest := hex.EncodeToString(sum[:])
 	revision := s.SettingsSnapshot().ConfigRevision
 	item := protocol.MediaBatchItem{ItemID: "recording-1", ItemRevision: 1, UploadRequestID: "vu_synthetic_audio", UploadKind: "file", Name: "voice.wav", MediaType: "audio/wav", SizeBytes: int64(len(data)), SHA256: digest}
-	cmd := clientproto.Command{Kind: "media_batch_prepare", RequestID: "prepare-recording", MediaBatchID: "r_synthetic_audio", MediaBatchRevision: 1, SessionID: s.ID, ExpectedNativeThreadID: s.ResumeID(), ExpectedConfigRevision: &revision, MediaItems: []protocol.MediaBatchItem{item}}
+	cmd := clientproto.Command{Kind: "media_batch_prepare", RequestID: "prepare-recording", Content: "summarize", MediaBatchID: "r_synthetic_audio", MediaBatchRevision: 1, SessionID: s.ID, ExpectedNativeThreadID: s.ResumeID(), ExpectedConfigRevision: &revision, MediaItems: []protocol.MediaBatchItem{item}}
 	h.handleMediaBatch(c, cmd)
 	prepared := waitForType(t, c, "media_batch_receipt")
 	if prepared["state"] != "prepared" {
@@ -130,5 +132,49 @@ func TestRecordingTypedUploadRetainsOriginalReceiptAndNativeAudioReference(t *te
 	again := waitForType(t, c, "media_batch_receipt")
 	if again["body_hash"] != body || again["state"] != "prepared" {
 		t.Fatal("original receipt not retained", again)
+	}
+	// Exercise the actual admitted message queue JSON roundtrip and consumer.
+	raw, _ := json.Marshal(map[string]any{"type": "message", "request_id": cmd.MediaBatchID, "session_id": s.ID, "media_batch_id": cmd.MediaBatchID, "content": cmd.Content, "files": []any{map[string]any{"attachment_id": id, "name": item.Name, "media_type": item.MediaType, "sha256": digest, "size_bytes": item.SizeBytes}}})
+	route(h, c, string(raw))
+	waitForType(t, c, "message_ack")
+	select {
+	case got := <-starts:
+		if len(got.files) != 1 || got.files[0].VerifiedAudioPath == "" || got.files[0].SHA256 != digest || got.content != cmd.Content {
+			t.Fatalf("queue lost verified native audio: %#v", got)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("queued recording never reached executor")
+	}
+	entry, found, err := h.messageQueue.GetEffective(s.ID, cmd.MediaBatchID)
+	if err != nil || !found {
+		t.Fatal(entry, err)
+	}
+	var saved queuedPayload
+	if err = json.Unmarshal(entry.Payload, &saved); err != nil {
+		t.Fatal(err)
+	}
+	if saved.Files[0].VerifiedAudioPath != "" {
+		t.Fatal("server trust serialized into queue JSON")
+	}
+	restored := saved
+	release, err := h.acquireModelMediaReader(s, cmd.MediaBatchID, &restored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	if restored.Files[0].VerifiedAudioPath == "" {
+		t.Fatal("admitted consumer did not restore verified bytes")
+	}
+	changed := saved
+	changed.Files = append([]backend.FileAttachment(nil), saved.Files...)
+	changed.Files[0].SHA256 = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+	if _, err = h.acquireModelMediaReader(s, cmd.MediaBatchID, &changed); err == nil {
+		t.Fatal("changed queued audio descriptor acquired trust")
+	}
+	if err = os.WriteFile(restored.Files[0].VerifiedAudioPath, make([]byte, len(data)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = h.acquireModelMediaReader(s, cmd.MediaBatchID, &saved); err == nil {
+		t.Fatal("audio changed after admission acquired trust")
 	}
 }

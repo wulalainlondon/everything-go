@@ -90,7 +90,7 @@ func TestQAStagedEditCommittedMediaReachesExecutionGuards(t *testing.T) {
 	if e = json.Unmarshal(entry.Payload, &p); e != nil {
 		t.Fatal(e)
 	}
-	release, readErr := h.acquireModelMediaReader(s, op.Request, p)
+	release, readErr := h.acquireModelMediaReader(s, op.Request, &p)
 	if readErr == nil {
 		defer release()
 	}
