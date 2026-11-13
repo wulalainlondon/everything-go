@@ -185,8 +185,14 @@ func (s *Store) Commit(session string, c Checkpoint, records []Record) error {
 	return s.commitLocked(session, c, records, nil)
 }
 func (s *Store) CommitCAS(session string, expected, c Checkpoint, records []Record) error {
+	return s.CommitCASGuarded(session, expected, c, records, func() bool { return true })
+}
+func (s *Store) CommitCASGuarded(session string, expected, c Checkpoint, records []Record, current func() bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if !current() {
+		return ErrSourceRetired
+	}
 	return s.commitLocked(session, c, records, &expected)
 }
 func (s *Store) commitLocked(session string, c Checkpoint, records []Record, expected *Checkpoint) error {
@@ -422,7 +428,11 @@ func ImageInfo(b []byte) (string, int, int, error) {
 	}
 	return mime, c.Width, c.Height, nil
 }
-func (s *Store) Put(b []byte) (string, error) {
+func (s *Store) Put(b []byte) (string, error) { return s.PutGuarded(b, func() bool { return true }) }
+func (s *Store) PutGuarded(b []byte, current func() bool) (string, error) {
+	if !current() {
+		return "", ErrSourceRetired
+	}
 	if len(b) == 0 || len(b) > MaxImageBytes {
 		return "", errors.New("image size unsupported")
 	}
@@ -430,7 +440,7 @@ func (s *Store) Put(b []byte) (string, error) {
 	if e != nil {
 		return "", e
 	}
-	release, e := acquireImageDecode(b, width, height, mime == "image/gif", false)
+	release, e := acquireImageDecode(b, width, height, mime == "image/gif", false, current)
 	if e != nil {
 		return "", e
 	}
@@ -441,6 +451,9 @@ func (s *Store) Put(b []byte) (string, error) {
 	hash := IDBytes(b)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if !current() {
+		return "", ErrSourceRetired
+	}
 	if e := s.open(); e != nil {
 		return "", e
 	}
@@ -500,8 +513,18 @@ func (s *Store) Put(b []byte) (string, error) {
 // Capture freezes a trusted attachment mention once; replay cannot adopt new
 // bytes at a reused path. Historical reads and live output share this identity.
 func (s *Store) Capture(session, request, path string) (string, error) {
+	return s.CaptureGuarded(session, request, path, func() bool { return true })
+}
+func (s *Store) CaptureGuarded(session, request, path string, current func() bool) (string, error) {
+	if !current() {
+		return "", ErrSourceRetired
+	}
 	identity := ID(session, request, path)
 	s.mu.Lock()
+	if !current() {
+		s.mu.Unlock()
+		return "", ErrSourceRetired
+	}
 	if e := s.open(); e != nil {
 		s.mu.Unlock()
 		return "", e
@@ -519,12 +542,15 @@ func (s *Store) Capture(session, request, path string) (string, error) {
 	if e != nil {
 		return "", e
 	}
-	hash, e = s.Put(b)
+	hash, e = s.PutGuarded(b, current)
 	if e != nil {
 		return "", e
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if !current() {
+		return "", ErrSourceRetired
+	}
 	_, e = s.db.Exec("INSERT OR IGNORE INTO captures VALUES(?,?)", identity, hash)
 	if e != nil {
 		return "", e

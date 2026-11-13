@@ -78,7 +78,14 @@ func (s *Store) VerifiedDerivative(hash, variant string) ([]byte, string, bool, 
 	}
 	return b, "image/jpeg", true, nil
 }
-func (s *Store) Derivative(hash string, b []byte, variant string) ([]byte, error) {
+func (s *Store) Derivative(hash string, b []byte, variant string, guards ...func() bool) ([]byte, error) {
+	current := func() bool { return true }
+	if len(guards) > 0 {
+		current = guards[0]
+	}
+	if !current() {
+		return nil, ErrSourceRetired
+	}
 	if IDBytes(b) != hash || (variant != "thumbnail" && variant != "preview") {
 		return nil, errors.New("invalid derivative source")
 	}
@@ -92,7 +99,7 @@ func (s *Store) Derivative(hash string, b []byte, variant string) ([]byte, error
 	if e != nil {
 		return nil, e
 	}
-	release, e := acquireImageDecode(b, w, h, false, true)
+	release, e := acquireImageDecode(b, w, h, false, true, current)
 	if e != nil {
 		return nil, e
 	}
@@ -128,9 +135,15 @@ func (s *Store) Derivative(hash string, b []byte, variant string) ([]byte, error
 	if out.Len() > limit {
 		return nil, errors.New("derivative exceeds budget")
 	}
+	if !current() {
+		return nil, ErrSourceRetired
+	}
 	data := out.Bytes()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if !current() {
+		return nil, ErrSourceRetired
+	}
 	if e = s.open(); e != nil {
 		return nil, e
 	}

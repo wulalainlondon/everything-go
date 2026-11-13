@@ -6,6 +6,9 @@ import (
 	"time"
 )
 
+var ErrResourceBusy = errors.New("gallery resource busy")
+var ErrSourceRetired = errors.New("gallery source retired")
+
 // One process-wide capture/derivative decoder. Encoded inputs remain bounded by
 // the caller scan/IO limits; queued jobs allocate no additional decode buffers.
 var imageDecodes = struct {
@@ -15,7 +18,14 @@ var imageDecodes = struct {
 	changed chan struct{}
 }{changed: make(chan struct{})}
 
-func acquireImageDecode(b []byte, w, h int, animated, derivative bool) (func(), error) {
+func acquireImageDecode(b []byte, w, h int, animated, derivative bool, guards ...func() bool) (func(), error) {
+	current := func() bool { return true }
+	if len(guards) > 0 {
+		current = guards[0]
+	}
+	if !current() {
+		return nil, ErrSourceRetired
+	}
 	pixels := int64(w) * int64(h)
 	if w <= 0 || h <= 0 || pixels > 64000000 {
 		return nil, errors.New("image dimensions unavailable")
@@ -34,25 +44,33 @@ func acquireImageDecode(b []byte, w, h int, animated, derivative bool) (func(), 
 		cost += 4000000*8 + (2<<20)*4
 	}
 	if pixels > 64000000 || cost > 192<<20 {
-		return nil, errors.New("image processing budget pending qualification")
+		return nil, ErrResourceBusy
 	}
 	imageDecodes.Lock()
 	if imageDecodes.waiting >= 16 {
 		imageDecodes.Unlock()
-		return nil, errors.New("image decode queue full")
+		return nil, ErrResourceBusy
 	}
 	imageDecodes.waiting++
 	imageDecodes.Unlock()
 	timer := time.NewTimer(3 * time.Second)
 	defer timer.Stop()
+	poll := time.NewTicker(20 * time.Millisecond)
+	defer poll.Stop()
 	for {
+		if !current() {
+			imageDecodes.Lock()
+			imageDecodes.waiting--
+			imageDecodes.Unlock()
+			return nil, ErrSourceRetired
+		}
 		imageDecodes.Lock()
 		if !imageDecodes.active {
 			imageDecodes.waiting--
 			imageDecodes.active = true
 			imageDecodes.Unlock()
 			var once sync.Once
-			return func() {
+			release := func() {
 				once.Do(func() {
 					imageDecodes.Lock()
 					imageDecodes.active = false
@@ -60,17 +78,23 @@ func acquireImageDecode(b []byte, w, h int, animated, derivative bool) (func(), 
 					imageDecodes.changed = make(chan struct{})
 					imageDecodes.Unlock()
 				})
-			}, nil
+			}
+			if !current() {
+				release()
+				return nil, ErrSourceRetired
+			}
+			return release, nil
 		}
 		changed := imageDecodes.changed
 		imageDecodes.Unlock()
 		select {
 		case <-changed:
+		case <-poll.C:
 		case <-timer.C:
 			imageDecodes.Lock()
 			imageDecodes.waiting--
 			imageDecodes.Unlock()
-			return nil, errors.New("image decode busy")
+			return nil, ErrResourceBusy
 		}
 	}
 }

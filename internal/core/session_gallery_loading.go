@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"sync"
 	"time"
 
 	"everything-go/internal/session"
@@ -15,10 +16,11 @@ import (
 // Job lifetime is independent of the durable catalog epoch. Ending an HTTP
 // interest cancels only its worker, never a lawful committed image snapshot.
 type galleryScanJob struct {
-	done    chan struct{}
-	cancel  context.CancelFunc
-	readers map[*struct{ identity byte }]func() bool
-	err     error
+	done      chan struct{}
+	cancel    context.CancelFunc
+	readers   map[*struct{ identity byte }]func() bool
+	err       error
+	observers sync.Map
 }
 
 func (h *Hub) joinGalleryAdvance(ctx context.Context, s *session.Session, b galleryBinding, current func() bool) error {
@@ -45,16 +47,25 @@ func (h *Hub) joinGalleryAdvance(ctx context.Context, s *session.Session, b gall
 		job = &galleryScanJob{done: make(chan struct{}), cancel: cancel, readers: map[*struct{ identity byte }]func() bool{}}
 		g.jobs[key] = job
 		go func(job *galleryScanJob) {
+			legalNow := func() bool {
+				if worker.Err() != nil {
+					return false
+				}
+				valid := false
+				job.observers.Range(func(_, check any) bool {
+					if check.(func() bool)() {
+						valid = true
+						return false
+					}
+					return true
+				})
+				return valid
+			}
 			legalLocked := func() bool {
 				if worker.Err() != nil || g.jobs[key] != job {
 					return false
 				}
-				for _, valid := range job.readers {
-					if valid() {
-						return true
-					}
-				}
-				return false
+				return legalNow()
 			}
 			legal := func() bool { g.jobsMu.Lock(); defer g.jobsMu.Unlock(); return legalLocked() }
 			var err error
@@ -65,13 +76,13 @@ func (h *Hub) joinGalleryAdvance(ctx context.Context, s *session.Session, b gall
 				} else {
 					c := checkpoint
 					if err == nil {
-						_, err = h.advanceGalleryCommit(s, b, c, legal, func(next sessionmedia.Checkpoint, records []sessionmedia.Record) error {
+						_, err = h.advanceGalleryCommit(s, b, c, legalNow, func(next sessionmedia.Checkpoint, records []sessionmedia.Record) error {
 							g.jobsMu.Lock()
 							defer g.jobsMu.Unlock()
 							if !legalLocked() {
 								return errors.New("gallery scan retired")
 							}
-							return g.store.CommitCAS(s.ID, c, next, records)
+							return g.store.CommitCASGuarded(s.ID, c, next, records, legalNow)
 						})
 					}
 				}
@@ -90,11 +101,13 @@ func (h *Hub) joinGalleryAdvance(ctx context.Context, s *session.Session, b gall
 		}(job)
 	}
 	job.readers[reader] = current
+	job.observers.Store(reader, current)
 	g.subscribers++
 	g.jobsMu.Unlock()
 	defer func() {
 		g.jobsMu.Lock()
 		delete(job.readers, reader)
+		job.observers.Delete(reader)
 		g.subscribers--
 		if len(job.readers) == 0 {
 			job.cancel()

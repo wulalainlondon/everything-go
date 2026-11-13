@@ -284,7 +284,7 @@ func (h *Hub) serveSessionGallery(w http.ResponseWriter, r *http.Request, operat
 		return
 	}
 	if operation == "thumbnail" || operation == "preview" {
-		b, e = gallery.store.Derivative(sessionmedia.IDBytes(b), b, operation)
+		b, e = gallery.store.Derivative(sessionmedia.IDBytes(b), b, operation, current)
 		mime = "image/jpeg"
 		if e != nil {
 			http.Error(w, "thumbnail unavailable", 415)
@@ -353,7 +353,11 @@ func (h *Hub) advanceGalleryCommit(s *session.Session, b galleryBinding, c sessi
 		if !current() {
 			return c, errors.New("gallery source changed")
 		}
-		for _, candidate := range h.galleryRecords(s, b.threads, row) {
+		candidates, err := h.galleryRecordsGuarded(s, b.threads, row, current)
+		if err != nil {
+			return c, err
+		}
+		for _, candidate := range candidates {
 			replaced := false
 			for i, existing := range records {
 				if existing.Entry.ID == candidate.Entry.ID {
@@ -450,20 +454,27 @@ func stringsOf(v any) []string {
 	return out
 }
 func (h *Hub) galleryRecords(s *session.Session, threads []string, row map[string]any) []sessionmedia.Record {
+	records, _ := h.galleryRecordsGuarded(s, threads, row, func() bool { return true })
+	return records
+}
+func (h *Hub) galleryRecordsGuarded(s *session.Session, threads []string, row map[string]any, current func() bool) ([]sessionmedia.Record, error) {
+	if !current() {
+		return nil, sessionmedia.ErrSourceRetired
+	}
 	message := str(row["source_message_id"])
 	thread := str(row["source_session_id"])
 	at := historySourceThread(message, threads)
 	if at < 0 || threads[at] != thread {
-		return nil
+		return nil, nil
 	}
 	line, e := strconv.Atoi(message[strings.LastIndex(message, ":")+1:])
 	if e != nil || line < 1 {
-		return nil
+		return nil, nil
 	}
 	role := str(row["role"])
 	request := str(row["request_id"])
 	if role != "user" && role != "assistant" {
-		return nil
+		return nil, nil
 	}
 	timestamp := int64(0)
 	switch t := row["timestamp"].(type) {
@@ -480,6 +491,9 @@ func (h *Hub) galleryRecords(s *session.Session, threads []string, row map[strin
 		return sessionmedia.Entry{ID: sessionmedia.ID(s.ID, message, strconv.Itoa(n), provenance), Message: message, Thread: thread, Request: request, Author: role, Provenance: provenance, Timestamp: timestamp, Ordinal: n, Sort: fmt.Sprintf("%08d:%020d:%08d", at, line, n), Availability: "unknown"}
 	}
 	populate := func(entry *sessionmedia.Entry, hash string) {
+		if !current() {
+			return
+		}
 		entry.SHA256 = hash
 		mime, w, height, size, e := store.VerifyOriginal(hash)
 		if e != nil {
@@ -494,6 +508,9 @@ func (h *Hub) galleryRecords(s *session.Session, threads []string, row map[strin
 	}
 	if role == "user" {
 		for n, img := range maps(row["images"]) {
+			if !current() {
+				return nil, sessionmedia.ErrSourceRetired
+			}
 			entry := makeEntry(n, "uploaded")
 			source := sessionmedia.Source{}
 			if id := str(img["attachment_id"]); id != "" {
@@ -512,26 +529,37 @@ func (h *Hub) galleryRecords(s *session.Session, threads []string, row map[strin
 				entry.VersionKnown = true
 			} else if data := str(img["data"]); len(data) > 0 && len(data) <= (sessionmedia.MaxImageBytes+2)/3*4 {
 				if raw, e := base64.StdEncoding.DecodeString(data); e == nil {
-					if hash, e := store.Put(raw); e == nil {
+					if hash, e := store.PutGuarded(raw, current); e == nil {
 						source.Hash = hash
 						populate(&entry, hash)
 						entry.VersionKnown = true
+					} else if galleryResourceError(e) {
+						return nil, e
 					}
 				}
 			}
 			out = append(out, sessionmedia.Record{Entry: entry, Source: source})
 		}
-		return out
+		if !current() {
+			return nil, sessionmedia.ErrSourceRetired
+		}
+		return out, nil
 	}
 	paths := stringsOf(row["generated_image_paths"])
 	for n, path := range paths {
+		if !current() {
+			return nil, sessionmedia.ErrSourceRetired
+		}
 		if request == "" || filepath.Clean(path) != path || filepath.Base(filepath.Dir(path)) != thread || filepath.Base(filepath.Dir(filepath.Dir(path))) != "generated_images" || filepath.Base(filepath.Dir(filepath.Dir(filepath.Dir(path)))) != ".codex" {
 			continue
 		}
 		entry := makeEntry(n, "generated")
 		entry.ID = sessionmedia.ID(s.ID, message, strconv.Itoa(n), "generated")
 		source := sessionmedia.Source{Path: path}
-		hash, e := store.Capture(s.ID, request, path)
+		hash, e := store.CaptureGuarded(s.ID, request, path, current)
+		if galleryResourceError(e) {
+			return nil, e
+		}
 		if e == nil {
 			source.Hash = hash
 			populate(&entry, hash)
@@ -542,6 +570,9 @@ func (h *Hub) galleryRecords(s *session.Session, threads []string, row map[strin
 	}
 	if request != "" && row["history_read_result_verified"] == true {
 		for n, record := range h.attachments.ForRequest(s.ID, request) {
+			if !current() {
+				return nil, sessionmedia.ErrSourceRetired
+			}
 			id := sessionmedia.ID(s.ID, message, strconv.Itoa(1000+n), "attached")
 			found := false
 			for _, r := range out {
@@ -553,10 +584,13 @@ func (h *Hub) galleryRecords(s *session.Session, threads []string, row map[strin
 			entry := makeEntry(1000+n, "attached")
 			entry.ID = id
 			source := sessionmedia.Source{Path: record.Path}
-			if hash, e := store.Capture(s.ID, request, record.Path); e == nil {
+			if hash, e := store.CaptureGuarded(s.ID, request, record.Path, current); e == nil {
 				source.Hash = hash
 				populate(&entry, hash)
 			} else {
+				if galleryResourceError(e) {
+					return nil, e
+				}
 				entry.Availability = "missing"
 			}
 			out = append(out, sessionmedia.Record{Entry: entry, Source: source})
@@ -569,6 +603,9 @@ func (h *Hub) galleryRecords(s *session.Session, threads []string, row map[strin
 		represented[prior.Source.Path] = true
 	}
 	for n, path := range galleryMarkdownPaths(str(row["content"]), str(row["source_cwd"])) {
+		if !current() {
+			return nil, sessionmedia.ErrSourceRetired
+		}
 		if filepath.IsAbs(path) && h.TypedMediaPathPrivate(path) {
 			continue
 		}
@@ -579,16 +616,22 @@ func (h *Hub) galleryRecords(s *session.Session, threads []string, row map[strin
 		source := sessionmedia.Source{Path: path}
 		if !filepath.IsAbs(path) {
 			entry.Availability = "unknown"
-		} else if hash, e := store.Capture(s.ID, message, path); e == nil {
+		} else if hash, e := store.CaptureGuarded(s.ID, message, path, current); e == nil {
 			source.Hash = hash
 			populate(&entry, hash)
 		} else {
+			if galleryResourceError(e) {
+				return nil, e
+			}
 			entry.Availability = "missing"
 		}
 		out = append(out, sessionmedia.Record{Entry: entry, Source: source})
 	}
 
-	return out
+	if !current() {
+		return nil, sessionmedia.ErrSourceRetired
+	}
+	return out, nil
 }
 
 // Only actual Markdown image nodes grant a local attachment relation. Code,
@@ -638,4 +681,8 @@ func galleryMarkdownPaths(content, cwd string) []string {
 		}
 	}
 	return out
+}
+
+func galleryResourceError(e error) bool {
+	return errors.Is(e, sessionmedia.ErrResourceBusy) || errors.Is(e, sessionmedia.ErrSourceRetired)
 }
