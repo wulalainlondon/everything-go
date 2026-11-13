@@ -2321,6 +2321,9 @@ func (c *Codex) Send(ctx context.Context, s *session.Session, reqID, content str
 	if asyncErr != nil {
 		return asyncErr
 	}
+	if err := c.validateAudioInput(ctx, s, files); err != nil {
+		return err
+	}
 	if err := validateCodexInlineFiles(files); err != nil {
 		return err
 	}
@@ -2487,6 +2490,9 @@ func (c *Codex) Steer(ctx context.Context, s *session.Session, clientUserMessage
 	}
 	if _, err := c.validateAsyncInput(ctx, s, clientUserMessageID, content); err != nil {
 		return backend.SteerResult{}, fmt.Errorf("%w: %v", backend.ErrSteerRejected, err)
+	}
+	if err := c.validateAudioInput(ctx, s, files); err != nil {
+		return backend.SteerResult{}, err
 	}
 	if err := validateCodexInlineFiles(files); err != nil {
 		return backend.SteerResult{}, fmt.Errorf("%w: %v", backend.ErrSteerRejected, err)
@@ -4170,6 +4176,12 @@ func (c *Codex) PendingInteractions(sessionID string) []backend.UserInputPayload
 
 func validateCodexInlineFiles(files []backend.FileAttachment) error {
 	for _, file := range files {
+		if backend.IsAudioType(file.MediaType) {
+			if file.VerifiedAudioPath == "" || file.VerifiedAudioPath != file.RemotePath || file.Content != "" {
+				return errors.New("audio attachments require verified Bridge admission")
+			}
+			continue
+		}
 		if file.MediaType == "application/pdf" || file.RemotePath != "" || file.AttachmentID != "" {
 			return errors.New("binary attachments must be materialized and validated by Bridge admission before Codex execution")
 		}
@@ -4188,6 +4200,9 @@ func (c *Codex) codexInput(s *session.Session, reqID, imageOwnerID, content stri
 
 	userText := content
 	for _, f := range files {
+		if backend.IsAudioType(f.MediaType) {
+			continue
+		}
 		name := f.Name
 		if name == "" {
 			name = "file"
@@ -4201,6 +4216,18 @@ func (c *Codex) codexInput(s *session.Session, reqID, imageOwnerID, content stri
 		input = append(input, map[string]any{"type": "text", "text": userText, "text_elements": []any{}})
 	}
 	staged := []string{}
+	for _, f := range files {
+		if !backend.IsAudioType(f.MediaType) {
+			continue
+		}
+		item, err := c.prepareCodexAudioInput(s, reqID, imageOwnerID, f, st)
+		if err != nil {
+			c.cleanupTempImagePaths(st, imageOwnerID, staged)
+			return nil, err
+		}
+		staged = append(staged, item["path"].(string))
+		input = append(input, item)
+	}
 	for _, img := range images {
 		item, err := c.prepareCodexImageInput(s, reqID, imageOwnerID, img, st)
 		if err != nil {

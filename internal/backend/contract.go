@@ -103,13 +103,21 @@ type ImageAttachment struct {
 // FileAttachment is a file attached to a user message. Content is the
 // adapter-normalized payload used by the backend implementation.
 type FileAttachment struct {
-	SHA256       string `json:",omitempty"`
-	AttachmentID string
-	Name         string
-	Content      string
-	MediaType    string
-	RemotePath   string
-	SizeBytes    int64
+	// Set only by core after validating the owned upload manifest and bytes.
+	// Never deserialize this trust marker from a client or durable queue payload.
+	VerifiedAudioPath string `json:"-"`
+	SHA256            string `json:",omitempty"`
+	AttachmentID      string
+	Name              string
+	Content           string
+	MediaType         string
+	RemotePath        string
+	SizeBytes         int64
+}
+
+// AudioInputSupport is separate from live realtime voice support.
+type AudioInputSupport interface {
+	SupportsAudioInput(context.Context, *session.Session) bool
 }
 
 // HistoryProvider is the optional backend capability for loading persisted

@@ -69,7 +69,7 @@ func (c *Codex) LoadHistory(resumeID string, opts history.Opts) (*history.Result
 	if fi, err := os.Stat(path); err == nil && !fi.IsDir() {
 		key := history.FileKey{Path: path, MtimeNS: fi.ModTime().UnixNano(), Size: fi.Size()}
 		// Reparse older tails whose typed tool-output parts were saved empty.
-		cacheName := "codex:turns-v8-images-cwd:" + resumeID
+		cacheName := "codex:turns-v9-audio:" + resumeID
 		if messages, ok := history.DefaultCache().Load(cacheName, key); ok {
 			if !opts.IncludeThinking {
 				messages = history.StripThinkingBlocks(messages)
@@ -457,7 +457,7 @@ func parseCodexHistoryWindow(lines []history.TailLine, resumeID string, truncate
 			text, images = codexHistoryInputImages(payload.Content)
 		}
 		text = stripCodexBridgeHandoff(text)
-		if (text == "" && len(images) == 0) || (role == "user" && isCodexBootstrapText(text)) {
+		if (text == "" && len(images) == 0 && !(role == "user" && codexHistoryHasAudio(payload.Content))) || (role == "user" && isCodexBootstrapText(text)) {
 			continue
 		}
 		ts := parseCodexISOms(rc.row.Timestamp)

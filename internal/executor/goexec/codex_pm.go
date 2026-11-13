@@ -91,10 +91,14 @@ func (c *Codex) applyPMThreadPolicy(s *session.Session, params map[string]any) e
 		if strings.HasPrefix(s.ID, "pm_") {
 			return errors.New("pm_provider_missing")
 		}
+		c.applyAnimationThreadConfig(params)
 		return nil
 	}
 	p, err := c.pmProvider.PMConfiguration(s.ID)
 	if err != nil || p == nil {
+		if err == nil {
+			c.applyAnimationThreadConfig(params)
+		}
 		return err
 	}
 	if err := os.MkdirAll(p.RuntimeDir, 0700); err != nil {

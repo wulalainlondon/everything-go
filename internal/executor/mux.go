@@ -67,6 +67,11 @@ func (m *Mux) pick(s *session.Session) Executor {
 	return m.def
 }
 
+func (m *Mux) SupportsAudioInput(ctx context.Context, s *session.Session) bool {
+	p, ok := m.pick(s).(backend.AudioInputSupport)
+	return ok && p.SupportsAudioInput(ctx, s)
+}
+
 func (m *Mux) Send(ctx context.Context, s *session.Session, reqID, content string, images []backend.ImageAttachment, files []backend.FileAttachment) error {
 	if m.admission != nil {
 		updated, release, err := m.admission.AdmitTurn(s, reqID, content)

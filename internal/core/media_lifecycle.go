@@ -295,6 +295,8 @@ func (h *Hub) handleMediaBatch(c *Client, cmd clientproto.Command) {
 		available := h.media != nil && h.media.err == nil && h.ordinaryInputWritePolicy(s) == nil
 		event["state"] = "capabilities"
 		event["available"] = available
+		event["audio_input"] = available && h.supportsAudioInput(s)
+		event["audio_max_bytes"] = backend.MediaAudioMaxBytes
 		event["policy"] = policy
 		event["policy_hash"] = mediaHash(policy)
 		event["task_api_schema_hash"] = contract.MediaRefsHash()
@@ -361,6 +363,12 @@ func (h *Hub) handleMediaBatch(c *Client, cmd clientproto.Command) {
 		if e = h.mediaTarget(cmd.SessionID, thread, *cmd.ExpectedConfigRevision); e != nil {
 			fail("source_changed")
 			return
+		}
+		for _, item := range cmd.MediaItems {
+			if backend.IsAudioType(item.MediaType) && !h.supportsAudioInput(s) {
+				fail("audio_input_unavailable")
+				return
+			}
 		}
 		b := &mediaBatch{HumanStage: stage, ID: cmd.MediaBatchID, Revision: cmd.MediaBatchRevision, Session: s.ID, Thread: thread, Config: *cmd.ExpectedConfigRevision, SourceRevision: s.SettingsSnapshot().SourceRevision, RoleEpoch: h.SessionRoleEpoch(s), Device: device, Generation: caller.NamespaceGeneration, Content: cmd.Content, Items: cmd.MediaItems, Objects: map[string]string{}, State: "prepared", Updated: time.Now().UnixMilli()}
 		frozen := *b
@@ -536,6 +544,9 @@ func validMediaDescriptor(i protocol.MediaBatchItem) bool {
 	case "video":
 		return i.SizeBytes <= mediaVideoMaxBytes && strings.HasPrefix(i.MediaType, "video/") && isVideoExtension(filepath.Ext(i.Name))
 	case "file":
+		if backend.IsAudioType(i.MediaType) {
+			return i.SizeBytes <= backend.MediaAudioMaxBytes && backend.AudioExtension(i.MediaType) != ""
+		}
 		return i.SizeBytes <= maxFileUploadBytes
 	default:
 		return false

@@ -781,6 +781,9 @@ func (h *Hub) resolveUploadedVideos(sessionID, content string, files []backend.F
 			file.RemotePath = manifest.Path
 		}
 		if file.RemotePath == "" {
+			if backend.IsAudioType(file.MediaType) {
+				return content, nil, errors.New("audio requires an uploaded verified attachment")
+			}
 			if s, ok := h.registry.Get(sessionID); ok && s.Backend() == backend.Codex && file.MediaType == "application/pdf" {
 				manifest, err := h.materializeInlinePDF(sessionID, file)
 				if err != nil {
@@ -814,6 +817,22 @@ func (h *Hub) resolveUploadedVideos(sessionID, content string, files []backend.F
 		}
 		if err := verifyStoredAttachment(root, candidate, manifest.SizeBytes, manifest.SHA256); err != nil {
 			return content, nil, err
+		}
+		if backend.IsAudioType(manifest.MediaType) {
+			s, ok := h.registry.Get(sessionID)
+			if !ok || !h.supportsAudioInput(s) {
+				return content, nil, errors.New("目前模型或執行端不支援錄音附件，原附件保留")
+			}
+			if manifest.Scope == nil || manifest.SizeBytes > backend.MediaAudioMaxBytes || manifest.DurationMS <= 0 || manifest.DurationMS > 600000 || backend.AudioExtension(manifest.MediaType) == "" || file.MediaType != manifest.MediaType {
+				return content, nil, errors.New("invalid verified recording manifest")
+			}
+			file.VerifiedAudioPath = candidate
+			file.RemotePath = candidate
+			file.SHA256 = manifest.SHA256
+			file.SizeBytes = manifest.SizeBytes
+			file.Content = ""
+			inline = append(inline, file)
+			continue
 		}
 		videos = append(videos, manifest)
 	}

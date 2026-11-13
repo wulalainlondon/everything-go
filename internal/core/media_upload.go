@@ -204,7 +204,7 @@ func validateMediaPrefix(up *activeAttachmentUpload, prefix []byte, final bool) 
 	if up.kind == "file" && mediaVideoHint(up.kind, up.originalName, up.mediaType) && kind != "video" {
 		return errors.New("Video metadata contradicts file container")
 	}
-	if up.kind == "file" && kind == "video" && !mediaVideoHint(up.kind, up.originalName, up.mediaType) {
+	if up.kind == "file" && kind == "video" && !backend.IsAudioType(up.mediaType) && !mediaVideoHint(up.kind, up.originalName, up.mediaType) {
 		return errors.New("Video container contradicts file declaration")
 	}
 	return nil
@@ -287,6 +287,16 @@ func (u *attachmentUploads) scopeEvent(v map[string]any, up *activeAttachmentUpl
 	return v
 }
 func (u *attachmentUploads) finishTyped(up *activeAttachmentUpload, m *uploadedVideoManifest) error {
+	if backend.IsAudioType(up.mediaType) {
+		if up.Scope == nil || up.expected > backend.MediaAudioMaxBytes || backend.AudioExtension(up.mediaType) == "" {
+			return errors.New("recording requires typed media admission and bounded audio")
+		}
+		duration, err := probeUploadedAudio(up.finalPath, up.mediaType)
+		if err != nil {
+			return err
+		}
+		m.DurationMS = duration
+	}
 	if up.Scope == nil {
 		return nil
 	}
