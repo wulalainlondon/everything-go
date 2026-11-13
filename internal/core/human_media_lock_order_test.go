@@ -6,6 +6,7 @@ import (
 	"everything-go/internal/session"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -38,10 +39,14 @@ func TestHumanMediaContinuationNeverHoldsSourceWhileWaitingForOriginalQueueWrite
 	// before testing the reverse lock ordering. No product test hook is installed.
 	deadline := time.Now().Add(time.Second)
 	waiting := false
+	truncated := false
 	for time.Now().Before(deadline) {
-		stack := make([]byte, 256*1024)
-		n := runtime.Stack(stack, true)
-		if strings.Contains(string(stack[:n]), "mediaContinuationOwned") {
+		stack, complete := humanMediaCompleteStackSnapshot()
+		if !complete {
+			truncated = true
+			break
+		}
+		if strings.Contains(string(stack), "mediaContinuationOwned") {
 			waiting = true
 			break
 		}
@@ -50,6 +55,9 @@ func TestHumanMediaContinuationNeverHoldsSourceWhileWaitingForOriginalQueueWrite
 	if !waiting {
 		close(release)
 		<-writerDone
+		if truncated {
+			t.Fatal("complete actor stack observation exceeded bounded 16 MiB capture")
+		}
 		t.Fatal("actor never reached original queue ownership read")
 	}
 	// The writer's final source CAS must remain possible even while the actor is
@@ -83,4 +91,32 @@ func TestHumanMediaContinuationNeverHoldsSourceWhileWaitingForOriginalQueueWrite
 	if blocked {
 		t.Fatal("media actor held Session.mu while borrowing the original queue connection")
 	}
+}
+
+// A full-package run retains other fixture goroutines. A truncated all-stack
+// snapshot cannot prove that this actor has not reached its ownership read.
+func humanMediaCompleteStackSnapshot() ([]byte, bool) {
+	for size := 256 * 1024; size <= 16*1024*1024; size *= 2 {
+		stack := make([]byte, size)
+		n := runtime.Stack(stack, true)
+		if n < len(stack) {
+			return stack[:n], true
+		}
+	}
+	return nil, false
+}
+
+func TestHumanMediaContinuationOriginalQueueOwnershipWithStackPressure(t *testing.T) {
+	const count = 1500
+	release := make(chan struct{})
+	var ready, finished sync.WaitGroup
+	ready.Add(count)
+	finished.Add(count)
+	for i := 0; i < count; i++ {
+		go func() { defer finished.Done(); ready.Done(); <-release }()
+	}
+	ready.Wait()
+	t.Cleanup(func() { close(release); finished.Wait() })
+	// Run the original actor/one-second/lock-order/recovery assertions unchanged.
+	TestHumanMediaContinuationNeverHoldsSourceWhileWaitingForOriginalQueueWriter(t)
 }
